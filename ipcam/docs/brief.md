@@ -16,7 +16,7 @@ Confirmat de proprietar pe 2026-10-17.
 1. **Camere:** cele standard **RTSP/ONVIF** (Hikvision, Dahua, Reolink, Uniview, Tapo cu RTSP activat etc.). Camerele „doar cloud” (Xiaomi, Ring, Arlo, Eufy etc.) nu intră în MVP.
 2. **Control în MVP:** PTZ (mișcare, zoom), presetări, pornire/oprire înregistrare. Setările avansate de imagine vin mai târziu.
 3. **Înregistrare:** continuă și la mișcare (din evenimentele camerei), în bucăți de câteva minute, cu retenție configurabilă. Detecția AI de persoane și mașini vine mai târziu.
-4. **Stocare în MVP:** local (disk sau NAS), Google Drive, OneDrive. Dropbox, S3 și alții vin după. Dacă internetul cade, hub-ul păstrează fișierele local și le urcă la revenire.
+4. **Stocare în MVP:** local (disc sau NAS prin SMB), Google Drive, OneDrive (personal și pentru firme), S3-compatibil (AWS, Backblaze B2, Wasabi, Cloudflare R2, servere proprii), WebDAV/Nextcloud și SFTP. Dropbox, Box, pCloud și alții vin după. Dacă internetul cade, hub-ul păstrează fișierele local și le urcă la revenire. (Lista a fost extinsă de proprietar mai târziu în aceeași conversație.)
 5. **Acces de oriunde**, pe o conexiune criptată. Când clientul e în aceeași rețea cu hub-ul, conexiunea merge direct.
 6. **Hub-ul rulează în MVP pe:** Windows și Docker/Linux (NAS, Raspberry Pi). Hub pe Android (telefon vechi, TV box) vine mai târziu.
 7. **Piața:** România și UE la început, cu interfață în română și engleză și conformitate GDPR.
