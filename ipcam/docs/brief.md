@@ -22,6 +22,16 @@ Confirmat de proprietar pe 2026-10-17.
 7. **Piața:** România și UE la început, cu interfață în română și engleză și conformitate GDPR.
 8. **În MVP:** un singur proprietar pe hub. Partajarea cu familia sau angajații și notificările push la mișcare vin în versiunea următoare.
 
+## Decizii luate în design (2026-10-17)
+
+- **Arhitectura:** hub în Go, lângă camere; cloud subțire în Go + PostgreSQL, găzduit în UE; aplicațiile client într-un singur cod TypeScript (web, plus Capacitor pentru Android și iOS și Tauri pentru Windows). Video-ul nu trece prin serverele proprietarului.
+- **Stocare configurabilă până la cel mai mic detaliu, inclusiv hibridă.** Utilizatorul adaugă oricâte destinații și definește reguli: ce camere, ce conținut (24/7, evenimente, miniaturi, exporturi), ce calitate, în ce program și unde merge (una sau mai multe destinații). Fiecare destinație are retenția ei și ce se întâmplă când se umple. Utilizatorul poate limita banda și alege ferestrele orare de upload. Pentru începători există șabloane.
+- **Criptarea o alege utilizatorul.** Aplicația întreabă explicit când adaugă o destinație. Alegerea se poate face și pe regulă: per cameră, tip de conținut, tip de eveniment sau program. Dacă două reguli se contrazic, criptarea câștigă. Funcționează și pe discul local, iar fiecare înregistrare criptată are un lacăt în aplicație.
+- **Patru căi de recuperare a cheii:** hub-ul, dispozitivele logate, backup în cont criptat cu parola și cheia de recuperare.
+- **Redare fără hub:** dacă hub-ul e furat, înregistrările se pot reda direct din cloud.
+- **Detectorul de camere** e primul lucru construit, în Faza 0. Proprietarul are camere IP de diferite modele pentru teste.
+- **Google Drive pentru teste:** proprietarul și-a oferit Drive-ul personal. Pentru testele automate recomandăm conturi de test separate.
+
 ## Criterii de succes
 
 - Un utilizator non-tehnic instalează hub-ul și își vede camerele live în **mai puțin de 10 minute**.
@@ -30,6 +40,6 @@ Confirmat de proprietar pe 2026-10-17.
 
 ## Încă deschise
 
-- **Numele aplicației:** în verificare (conflicte de nume, mărci, domenii).
-- **Arhitectura și stack-ul:** urmează propunerea cu 2-3 variante, pe baza cercetării tehnice.
+- **Numele aplicației:** îl alege proprietarul. Am verificat și respins 32 de variante.
 - **Monetizarea:** după MVP.
+- **Mărcile camerelor proprietarului:** le va afla detectorul.
