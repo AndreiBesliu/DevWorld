@@ -8,10 +8,15 @@
 # is reliable, which one start per job cannot: every start must give its result,
 # and the script goes on after a start that fails, to count how many do.
 #
-# One more start, the probe, changes the system's font scale 5 s after the
-# launch. The Activity must not be created again for that (nor for the other
-# changes an emulator or a phone makes at run time, such as the SIM's mcc and
-# mnc): a new Activity gets no launch extras, and the scenario would be lost.
+# Two more starts check what must not end or repeat a run:
+# - the probe changes the system's font scale 5 s after the launch. The Activity
+#   must not be created again for that (nor for the other changes an emulator or
+#   a phone makes at run time, such as the SIM's mcc and mnc): a new Activity gets
+#   no launch extras, and the scenario would be lost;
+# - the process-death start sends the finished app to the background, kills its
+#   process and starts it again from the launcher Intent. The system restores the
+#   Activity from the launch Intent it kept, extras included, and the scenario
+#   must not run again.
 #
 # On failure it prints the cause as check annotations, which can be read where
 # the job log cannot.
@@ -91,15 +96,12 @@ echo "spikehub reachable check took $((SECONDS - booted)) s" | annotate notice "
 
 adb install -r "${apk}"
 
-failures=0
-for ((start = 1; start <= starts + 1; start++)); do
-  probe=false
-  label="start ${start} of ${starts}"
-  if ((start > starts)); then
-    probe=true
-    label="probe (font scale change)"
-  fi
-  # A cold start: the process is gone, so the app has nothing but its launch extras.
+# Starts the app cold with the launch extras (the process is gone, so the app has
+# nothing but them) and waits for the S1 result. $1: the label of the start,
+# $2: "probe" to change the font scale 5 s after the launch. Returns 0 with a
+# notice when the result holds 20 samples, else 1 with an error and the diagnosis.
+cold_start() {
+  local label="$1" probe="${2:-}" launch stored="" problem="" deadline file samples
   adb shell am force-stop "${app}"
   adb logcat -b all -c
   # Only a result stored from now on belongs to this start, not a late one of an earlier start.
@@ -107,13 +109,11 @@ for ((start = 1; start <= starts + 1; start++)); do
   launch="$(adb shell am start -W -n "${app}/.MainActivity" --es autorun S1 --es hub http://10.0.2.2:7080 | tr -d '\r')"
   launch="${launch//$'\n'/ | }"
   echo "${label}: ${launch}"
-  if [[ "${probe}" == true ]]; then
+  if [[ "${probe}" == probe ]]; then
     sleep 5
     adb shell settings put system font_scale 1.3
   fi
 
-  stored=""
-  problem=""
   deadline=$((SECONDS + run_timeout))
   while [[ -z "${stored}${problem}" ]] && ((SECONDS < deadline)); do
     for file in "${results}"/*.json; do
@@ -130,27 +130,73 @@ for ((start = 1; start <= starts + 1; start++)); do
     done
     [[ -n "${stored}${problem}" ]] || sleep 3
   done
-
-  if [[ -z "${stored}" ]]; then
-    failures=$((failures + 1))
-    echo "${problem:-no S1 result within ${run_timeout} s}; ${launch}" | annotate error "emulator S1 ${label}"
-    diagnose
-  else
-    {
-      # Nearest rank: p50 is the 10th and p90 the 18th of the 20 sorted samples.
-      jq -r '(.samples.firstFrameMs | sort | map(round)) as $ms
-        | "S1 stored with 20 samples: first frame p50 \($ms[9]) ms, p90 \($ms[17]) ms, max \($ms[19]) ms;"
-          + " \(.device.model) \(.device.os) \(.device.webview); notes: \(.notes | join("; "))"' "${stored}"
-      echo "launch: ${launch}"
-      app_log 12
-    } | annotate notice "emulator S1 ${label}"
-  fi
-  if [[ "${probe}" == true ]]; then
+  if [[ "${probe}" == probe ]]; then
     adb shell settings put system font_scale 1.0
   fi
+
+  if [[ -z "${stored}" ]]; then
+    echo "${problem:-no S1 result within ${run_timeout} s}; ${launch}" | annotate error "emulator S1 ${label}"
+    diagnose
+    return 1
+  fi
+  {
+    # Nearest rank: p50 is the 10th and p90 the 18th of the 20 sorted samples.
+    jq -r '(.samples.firstFrameMs | sort | map(round)) as $ms
+      | "S1 stored with 20 samples: first frame p50 \($ms[9]) ms, p90 \($ms[17]) ms, max \($ms[19]) ms;"
+        + " \(.device.model) \(.device.os) \(.device.webview); notes: \(.notes | join("; "))"' "${stored}"
+    echo "launch: ${launch}"
+    app_log 12
+  } | annotate notice "emulator S1 ${label}"
+}
+
+# After a start with its result: the app goes to the background (its Activity
+# stops and saves its state), the system kills its process, and the launcher
+# Intent starts it again. Returns 0 when the app is back in a new process and
+# did not load the page with the launch extras again, else 1 with the diagnosis.
+survives_process_death() {
+  local label="process death" before after log
+  before="$(adb shell pidof "${app}" | tr -d '\r')"
+  adb shell input keyevent KEYCODE_HOME
+  sleep 3
+  adb shell am kill "${app}"
+  sleep 2
+  after="$(adb shell pidof "${app}" | tr -d '\r')"
+  if [[ -n "${after}" ]]; then
+    echo "the process ${after} of the app is still alive after am kill" | annotate error "emulator S1 ${label}"
+    return 1
+  fi
+  adb logcat -b all -c
+  adb shell am start -W -n "${app}/.MainActivity" >/dev/null
+  deadline=$((SECONDS + 30))
+  until [[ "$(app_log 60)" == *'page loaded'* ]] || ((SECONDS >= deadline)); do sleep 2; done
+  after="$(adb shell pidof "${app}" | tr -d '\r')"
+  log="$(app_log 14)"
+  if [[ -z "${after}" || "${after}" == "${before}" ]]; then
+    echo "the app did not start again in a new process (pid ${before} before, ${after:-none} after)" | annotate error "emulator S1 ${label}"
+  elif grep -q 'loadUrl:' <<<"${log}"; then
+    echo "the restored Activity ran the launch extras again:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
+  elif ! grep -q 'page loaded' <<<"${log}"; then
+    echo "the restored app loaded no page within 30 s:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
+  else
+    echo "new process ${after} after ${before}; no autorun again:"$'\n'"${log}" | annotate notice "emulator S1 ${label}"
+    return 0
+  fi
+  diagnose
+  return 1
+}
+
+failures=0
+for ((start = 1; start <= starts; start++)); do
+  cold_start "start ${start} of ${starts}" || failures=$((failures + 1))
 done
+cold_start "probe (font scale change)" probe || failures=$((failures + 1))
+if cold_start "start before process death"; then
+  survives_process_death || failures=$((failures + 1))
+else
+  failures=$((failures + 1))
+fi
 
 if ((failures > 0)); then
-  echo "${failures} of $((starts + 1)) starts gave no S1 result" | annotate error "emulator S1"
+  echo "${failures} of $((starts + 3)) checks failed" | annotate error "emulator S1"
   exit 1
 fi
