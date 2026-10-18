@@ -27,6 +27,30 @@ function toNativeMetrics({ thermal, ...rest }: AndroidMetrics): NativeMetrics {
   return isThermal(thermal) ? { thermal, ...rest } : rest;
 }
 
+/**
+ * `onPip` for `window.spikeNative`: one native listener, registered by the
+ * first call, serves every callback. The SpikeNative contract has no
+ * unsubscribe, so a listener per call would pile up. A registration that
+ * fails (the bridge is not ready) is left for the next call to try again;
+ * without PiP events S6 only measures its whole 5 min.
+ */
+function pipFanOut(pip: Pick<PipPlugin, 'addListener'>): (cb: (on: boolean) => void) => void {
+  const callbacks: ((on: boolean) => void)[] = [];
+  let registered = false;
+  return (cb) => {
+    callbacks.push(cb);
+    if (registered) return;
+    registered = true;
+    pip
+      .addListener('pipChanged', ({ on }) => {
+        for (const callback of callbacks) callback(on);
+      })
+      .catch(() => {
+        registered = false;
+      });
+  };
+}
+
 /** Installs `window.spikeNative` when the page runs in the Android shell. */
 export function installAndroidNative(
   { platform, plugins: { pip, metrics }, target }: InstallDeps = {
@@ -39,11 +63,7 @@ export function installAndroidNative(
   target.spikeNative = {
     metrics: async () => toNativeMetrics(await metrics.read()),
     enterPip: () => pip.enter(),
-    onPip: (cb) => {
-      void pip.addListener('pipChanged', ({ on }) => {
-        cb(on);
-      });
-    },
+    onPip: pipFanOut(pip),
     keepAwake: (on) => metrics.keepAwake({ on }),
   };
 }
