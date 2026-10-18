@@ -86,15 +86,19 @@ type catalog struct {
 // newCatalog starts the simulated cameras: sims of them with a sub and a main
 // stream, then the two cameras of the codec matrix. The matrix cameras play
 // their own file as main and the standard sub stream as sub, so that the
-// fallback to sub (G9) stays on the same camera.
-func newCatalog(m *media, sims int, clock source.Clock) *catalog {
+// fallback to sub (G9) stays on the same camera. sims is 0 to maxSims: the
+// numbers above it belong to the codec matrix and the real cameras.
+func newCatalog(m *media, sims int, clock source.Clock) (*catalog, error) {
+	if sims < 0 || sims > maxSims {
+		return nil, fmt.Errorf("%d simulated cameras; the hub serves 0 to %d", sims, maxSims)
+	}
 	c := &catalog{sources: map[string]source.Source{}}
 	for n := 1; n <= sims; n++ {
-		c.addSimCamera(fmt.Sprintf("sim-%02d", n), uint8(n), []string{"sub", "main"}, m.sub, m.main, false, clock) //nolint:gosec // sims is at most maxSims
+		c.addSimCamera(fmt.Sprintf("sim-%02d", n), uint8(n), []string{"sub", "main"}, m.sub, m.main, false, clock) //nolint:gosec // n is 1 to maxSims, checked above
 	}
 	c.addSimCamera("mx-h265", cameraMatrixH265, []string{"main", "sub"}, m.sub, m.h265, false, clock)
 	c.addSimCamera("mx-high51", cameraMatrixHigh51, []string{"main", "sub"}, m.sub, m.high51, true, clock)
-	return c
+	return c, nil
 }
 
 // addSimCamera starts the sub and main simulators of one camera and lists it

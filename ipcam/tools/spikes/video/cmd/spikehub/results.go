@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,9 +73,12 @@ func scenarioName(raw json.RawMessage) string {
 // handleResults stores a result as results/<device>-<yyyymmdd-hhmmss>-<scenario>.json,
 // with the time in UTC. The body is a JSON object of at most 2 MiB. The hub adds
 // the field "mdnsUnavailable", whether it could not resolve the .local candidates
-// of browsers, to every file, over any value that the client sent; it leaves
-// the rest as it came. Nothing in a file comes from the hub's cameras, so the URL
-// of a real camera cannot be in it (PH0-22).
+// of browsers, to every file, over any value that the client sent. The object
+// is stored re-encoded, on one line with its keys sorted and no white space
+// between tokens. The values keep their meaning and their numbers keep their
+// digits; strings are not HTML-escaped, so <, > and & stay as they came. Nothing
+// in a file comes from the hub's cameras, so the URL of a real camera cannot be
+// in it (PH0-22).
 //
 // A second result of one device and scenario in the same second gets the
 // suffix -2, -3 and so on: a run is never lost to an overwrite.
@@ -95,14 +99,16 @@ func (h *hub) handleResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fields["mdnsUnavailable"] = json.RawMessage(fmt.Sprint(h.mdnsUnavailable))
-	out, err := json.Marshal(fields)
-	if err != nil {
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(fields); err != nil { // Encode ends the line
 		http.Error(w, "the result cannot be encoded", http.StatusInternalServerError)
 		return
 	}
 
 	stem := fmt.Sprintf("%s-%s-%s", deviceName(fields["device"]), h.now().UTC().Format("20060102-150405"), scenarioName(fields["scenario"]))
-	name, err := h.writeResult(stem, append(out, '\n'))
+	name, err := h.writeResult(stem, out.Bytes())
 	if err != nil {
 		h.log.Error("cannot store a result", "err", err)
 		http.Error(w, "the result cannot be stored", http.StatusInternalServerError)

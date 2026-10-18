@@ -98,7 +98,7 @@ type env struct {
 	// a phone needs.
 	listen func(port int) (net.Listener, error)
 	// lan lists the private addresses for the banner.
-	lan func() []lanAddr
+	lan func() ([]lanAddr, error)
 	// newAPI is session.NewAPI.
 	newAPI func(mdns bool) (*webrtc.API, bool, error)
 	// clock paces the simulated cameras; the default is the system clock.
@@ -169,7 +169,10 @@ func run(ctx context.Context, args []string, e env) error {
 	if err != nil {
 		return fmt.Errorf("pornirea WebRTC: %w", err)
 	}
-	cat := newCatalog(m, cfg.sims, e.clock)
+	cat, err := newCatalog(m, cfg.sims, e.clock)
+	if err != nil {
+		return err
+	}
 	if cfg.real {
 		ask := e.askSecret
 		if ask == nil {
@@ -203,8 +206,9 @@ func run(ctx context.Context, args []string, e env) error {
 		return fmt.Errorf("nu pot folosi portul %d (îl folosește alt program?): %w", cfg.port, err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
+	lan, lanErr := e.lan()
 	writeBanner(e.stdout, bannerInfo{
-		port: port, lan: e.lan(), sims: cfg.sims, real: cat.real, resultsDir: cfg.results, mdnsUnavailable: mdnsUnavailable,
+		port: port, lan: lan, lanErr: lanErr, sims: cfg.sims, real: cat.real, resultsDir: cfg.results, mdnsUnavailable: mdnsUnavailable,
 	})
 	log.Info("spikehub listens", "port", port, "sims", cfg.sims, "real", cat.real, "mdnsUnavailable", mdnsUnavailable)
 	for i := 1; i <= cat.real; i++ {

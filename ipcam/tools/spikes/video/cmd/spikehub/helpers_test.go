@@ -245,9 +245,13 @@ func newTestHub(t *testing.T, sims int, tweak ...func(*hubConfig)) *testHub {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cat, err := newCatalog(m, sims, newFakeClock())
+	if err != nil {
+		t.Fatal(err)
+	}
 	logs := &syncBuffer{}
 	cfg := hubConfig{
-		cat:        newCatalog(m, sims, newFakeClock()),
+		cat:        cat,
 		api:        testAPI(t),
 		hlsDir:     filepath.Join(dir, "hls"),
 		resultsDir: filepath.Join(t.TempDir(), "results"),

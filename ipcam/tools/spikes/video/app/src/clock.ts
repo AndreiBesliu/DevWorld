@@ -36,6 +36,7 @@ const MAX_RELIABLE_OFFSET_STEP_MS = 20;
 export class ClockSync {
   private readonly ping: () => Promise<PingSample>;
   private lastOffsetMs: number | undefined;
+  private running: Promise<ClockEstimate> | undefined;
 
   constructor(ping: () => Promise<PingSample>) {
     this.ping = ping;
@@ -44,9 +45,17 @@ export class ClockSync {
   /**
    * Rejects when not one ping was answered. Pings that fail (a timeout, say)
    * are skipped. They run one after the other, so that they do not queue behind
-   * each other on the channel.
+   * each other on the channel. A call while an estimate runs gets that
+   * estimate: two would interleave their pings.
    */
-  async estimate(): Promise<ClockEstimate> {
+  estimate(): Promise<ClockEstimate> {
+    this.running ??= this.measure().finally(() => {
+      this.running = undefined;
+    });
+    return this.running;
+  }
+
+  private async measure(): Promise<ClockEstimate> {
     let best: { offsetMs: number; rttMs: number } | undefined;
     for (let i = 0; i < PINGS; i += 1) {
       let sample: PingSample;

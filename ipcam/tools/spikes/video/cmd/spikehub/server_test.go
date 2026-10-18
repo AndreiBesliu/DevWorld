@@ -293,6 +293,45 @@ func TestCORS_AllowsOnlyListedOrigins(t *testing.T) {
 	}
 }
 
+// R29: the shells call the hub on its LAN address from http://localhost and
+// tauri.localhost, which Chromium-based WebViews may gate behind a Private (Local)
+// Network Access preflight. A listed origin gets the permission, others do not.
+func TestCORS_PrivateNetworkPreflight(t *testing.T) {
+	hub := newTestHub(t, 1)
+	preflight := func(origin string, private bool) *http.Response {
+		header := http.Header{
+			"Origin":                         {origin},
+			"Access-Control-Request-Method":  {"POST"},
+			"Access-Control-Request-Headers": {"content-type"},
+		}
+		if private {
+			header.Set("Access-Control-Request-Private-Network", "true")
+		}
+		resp, _ := hub.do(t, http.MethodOptions, "/spike/v1/results", nil, header)
+		return resp
+	}
+
+	for _, origin := range allowedOrigins {
+		resp := preflight(origin, true)
+		if resp.StatusCode != http.StatusNoContent || resp.Header.Get("Access-Control-Allow-Origin") != origin {
+			t.Errorf("private network preflight from %s: status %d, headers %v", origin, resp.StatusCode, resp.Header)
+		}
+		if got := resp.Header.Get("Access-Control-Allow-Private-Network"); got != "true" {
+			t.Errorf("private network preflight from %s: Access-Control-Allow-Private-Network = %q, want true", origin, got)
+		}
+		// A preflight that does not ask for it gets no permission it did not ask for.
+		if got := preflight(origin, false).Header.Get("Access-Control-Allow-Private-Network"); got != "" {
+			t.Errorf("plain preflight from %s: Access-Control-Allow-Private-Network = %q, want none", origin, got)
+		}
+	}
+
+	resp := preflight("http://evil.example", true)
+	if got := resp.Header.Get("Access-Control-Allow-Private-Network"); got != "" || resp.StatusCode < 400 {
+		t.Errorf("private network preflight from http://evil.example: status %d, Access-Control-Allow-Private-Network %q, want a refusal",
+			resp.StatusCode, got)
+	}
+}
+
 // A page of another origin cannot write a results file or open a session with a
 // request that a browser sends without a preflight.
 func TestCORS_RefusesAPostFromAnotherOrigin(t *testing.T) {

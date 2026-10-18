@@ -34,7 +34,30 @@ func newTestCatalog(t *testing.T, sims int) (*catalog, *fakeClock) {
 		t.Fatal(err)
 	}
 	clock := newFakeClock()
-	return newCatalog(m, sims, clock), clock
+	cat, err := newCatalog(m, sims, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cat, clock
+}
+
+// The camera numbers 17 and 18 belong to the codec matrix, and a camera number
+// is one byte: the bound holds in newCatalog, whatever its caller checked.
+func TestNewCatalog_RejectsMoreThan16Sims(t *testing.T) {
+	m, err := loadMedia(writeMedia(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sims := range []int{17, 255, 256, -1} {
+		if cat, err := newCatalog(m, sims, newFakeClock()); err == nil || cat != nil {
+			t.Errorf("newCatalog(%d sims) = %v, %v; want an error", sims, cat, err)
+		}
+	}
+	for _, sims := range []int{0, 16} {
+		if _, err := newCatalog(m, sims, newFakeClock()); err != nil {
+			t.Errorf("newCatalog(%d sims): %v", sims, err)
+		}
+	}
 }
 
 func TestCatalog_KeysSourcesByCameraAndProfile(t *testing.T) {
@@ -217,7 +240,10 @@ func TestMedia_MatchesTheManifest(t *testing.T) {
 		}
 	}
 
-	cat := newCatalog(m, 16, newFakeClock())
+	cat, err := newCatalog(m, 16, newFakeClock())
+	if err != nil {
+		t.Fatal(err)
+	}
 	for key, want := range map[string]struct {
 		codec   source.Codec
 		profile string

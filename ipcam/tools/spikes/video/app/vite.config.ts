@@ -8,5 +8,8 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // One bundle of about 650 kB (hls.js is most of it), loaded once over the
+    // LAN or from the shell's own files: splitting it would gain nothing.
+    chunkSizeWarningLimit: 1024,
   },
 });

@@ -12,5 +12,5 @@
   },
   "include": ["src"],
   // The tests and their doubles import vitest, which pulls in Node's types.
-  "exclude": ["src/**/*.test.ts", "src/fakes.ts"]
+  "exclude": ["src/**/*.test.ts", "src/**/fakes.ts"]
 }

@@ -79,10 +79,15 @@ func (h *hub) Handler() http.Handler {
 }
 
 // withCORS lets the listed origins call the hub from their pages, and no other
-// (the browser enforces the answer to the preflight). A POST from another
-// origin is refused as well: a page of another origin can send a POST that
-// needs no preflight, and it must not write a results file or open a session.
-// The app that the hub serves itself is not another origin.
+// (the browser enforces the answer to the preflight). A preflight that asks for
+// private network access (Chromium's Private/Local Network Access, which may
+// gate the shells' calls to the hub's LAN address) gets it for a listed origin
+// (R29). A POST from another origin is refused as well: a page of another site
+// can send a POST that needs no preflight, such as a form, and it must not write
+// a results file or open a session. The app that the hub serves itself is not
+// another origin. The rule compares Origin with the Host header, both of which
+// a DNS-rebinding page controls, so it is no defence against DNS rebinding; on
+// a LAN spike that serves no secrets, that is accepted.
 func (h *hub) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Vary", "Origin")
@@ -96,6 +101,9 @@ func (h *hub) withCORS(next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
 				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range")
 				w.Header().Set("Access-Control-Max-Age", "600")
+				if r.Header.Get("Access-Control-Request-Private-Network") == "true" {
+					w.Header().Set("Access-Control-Allow-Private-Network", "true")
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}

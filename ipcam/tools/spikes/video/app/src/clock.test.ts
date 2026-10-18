@@ -68,6 +68,35 @@ describe('ClockSync', () => {
     expect(Math.abs(mean - TRUE_OFFSET_MS)).toBeGreaterThan(1);
   });
 
+  it('clockSync_estimateWhileOneRuns_returnsTheSamePromise', async () => {
+    // A re-estimate every 30 s may start while a slow one still runs (20 pings
+    // that time out take 40 s): the two must not interleave their pings.
+    const answers: ((sample: PingSample) => void)[] = [];
+    const clock = new ClockSync(
+      () =>
+        new Promise<PingSample>((resolve) => {
+          answers.push(resolve);
+        }),
+    );
+
+    const first = clock.estimate();
+    const second = clock.estimate();
+
+    expect(second).toBe(first);
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve();
+      expect(answers).toHaveLength(i + 1); // one ping at a time, never two
+      answers[i]?.(pingSample(1000 * (i + 1), 5, 5));
+    }
+    await expect(first).resolves.toMatchObject({ offsetMs: TRUE_OFFSET_MS });
+
+    // Once it has settled, the next call is a new estimate with its own pings.
+    const third = clock.estimate();
+    expect(third).not.toBe(first);
+    await Promise.resolve();
+    expect(answers).toHaveLength(21);
+  });
+
   it('clockOffset_asksForTwentyPings', async () => {
     let calls = 0;
     const clock = new ClockSync(() => {

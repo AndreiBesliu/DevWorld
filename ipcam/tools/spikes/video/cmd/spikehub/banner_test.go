@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -84,6 +85,23 @@ func TestBanner_WithoutAPrivateNetworkSaysSo(t *testing.T) {
 	}
 }
 
+// When the interfaces cannot be listed, the banner says so with the error,
+// instead of blaming a network that may well be there.
+func TestBanner_ReportsAnInterfaceListingError(t *testing.T) {
+	var out bytes.Buffer
+	writeBanner(&out, bannerInfo{port: 7080, lanErr: errors.New("route ip+net: netlinkrib: permission denied")})
+
+	text := out.String()
+	for _, want := range []string{"interfețele de rețea", "route ip+net: netlinkrib: permission denied", "Rețele private"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("banner lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Nu am găsit nicio rețea privată") {
+		t.Errorf("banner says that no private network was found, but the listing failed:\n%s", text)
+	}
+}
+
 func TestBanner_CountsRealCameras(t *testing.T) {
 	var out bytes.Buffer
 	writeBanner(&out, bannerInfo{port: 7080, sims: 4, real: 2})
@@ -115,7 +133,11 @@ func TestIsPrivateIPv4(t *testing.T) {
 func TestLANAddrs_AreAllPrivateIPv4(t *testing.T) {
 	// The host that runs the test may have no private network, so this checks only
 	// what the function returns.
-	for _, a := range lanAddrs() {
+	addrs, err := lanAddrs()
+	if err != nil {
+		t.Skipf("the interfaces of this host cannot be listed: %v", err)
+	}
+	for _, a := range addrs {
 		if !isPrivateIPv4(a.IP) || a.Name == "" {
 			t.Errorf("lanAddrs returned %+v", a)
 		}

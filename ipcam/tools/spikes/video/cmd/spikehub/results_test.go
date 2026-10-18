@@ -121,10 +121,35 @@ func TestResults_ReportsWhetherMDNSWasUnavailable(t *testing.T) {
 		if string(got["mdnsUnavailable"]) != want {
 			t.Errorf("mdnsUnavailable = %s, want %s (the hub's, not the client's)", got["mdnsUnavailable"], want)
 		}
-		// What the client sent is kept as it was sent.
+		// The values the client sent are kept as they were sent.
 		if string(got["samples"]) != `{"a":[1.50,2e3]}` || string(got["n"]) != "12345678901234567890" || string(got["device"]) != `"x"` {
 			t.Errorf("the other fields changed: %s", data)
 		}
+	}
+}
+
+// The stored file is the object as the client sent it, re-encoded: the keys
+// sorted and the white space between tokens dropped, the values unchanged. A
+// user agent string with < > & stays readable instead of turning into \u003c.
+func TestResults_StoresTheValuesUnchanged(t *testing.T) {
+	hub := newTestHub(t, 1)
+	const body = `{"scenario":"S1",  "device":{"platform":"chrome","ua":"Mozilla <x> & co"},` +
+		`"notes":["a < b", "tab\\tescape"], "samples":{"firstFrameMs":[310.25, 1e3]}}`
+	if resp, b := hub.postResults(t, body); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status %d: %s", resp.StatusCode, b)
+	}
+	files := resultFiles(t, hub.resultsDir)
+	if len(files) != 1 {
+		t.Fatalf("results folder holds %v", files)
+	}
+	data, err := os.ReadFile(filepath.Join(hub.resultsDir, files[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"device":{"platform":"chrome","ua":"Mozilla <x> & co"},"mdnsUnavailable":false,` +
+		`"notes":["a < b","tab\\tescape"],"samples":{"firstFrameMs":[310.25,1e3]},"scenario":"S1"}` + "\n"
+	if string(data) != want {
+		t.Errorf("stored\n%s\nwant\n%s", data, want)
 	}
 }
 

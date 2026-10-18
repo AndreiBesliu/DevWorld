@@ -24,12 +24,12 @@ func isPrivateIPv4(ip net.IP) bool {
 }
 
 // lanAddrs returns the private IPv4 addresses of the running network
-// interfaces of this PC, by interface name and address. It returns none when
-// the interfaces cannot be listed.
-func lanAddrs() []lanAddr {
+// interfaces of this PC, by interface name and address, or the error of the
+// listing. An interface whose addresses cannot be read is skipped.
+func lanAddrs() ([]lanAddr, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var out []lanAddr
 	for _, iface := range ifaces {
@@ -52,13 +52,15 @@ func lanAddrs() []lanAddr {
 		}
 		return strings.Compare(a.IP.String(), b.IP.String())
 	})
-	return out
+	return out, nil
 }
 
 // bannerInfo is what the start banner reports.
 type bannerInfo struct {
 	port int
 	lan  []lanAddr
+	// lanErr is why the interfaces could not be listed; lan is empty then.
+	lanErr error
 	// sims is the number of simulated cameras, real the number of real ones
 	// (real-1 to real-N).
 	sims, real      int
@@ -75,10 +77,15 @@ func writeBanner(w io.Writer, b bannerInfo) {
 	p("")
 	p("spikehub: serverul de test video pentru telefon și PC (Faza 0 b)")
 	p("")
-	if len(b.lan) == 0 {
+	switch {
+	case b.lanErr != nil:
+		p("Nu pot citi interfețele de rețea ale acestui calculator: %v", b.lanErr)
+		p("Aflați adresa lui în rețeaua locală din setările de rețea (de exemplu cu ipconfig)")
+		p("și introduceți pe telefon http://<adresa>:%d.", b.port)
+	case len(b.lan) == 0:
 		p("Nu am găsit nicio rețea privată activă pe acest calculator.")
 		p("Conectați-l la Wi-Fi sau la cablu și porniți din nou spikehub.")
-	} else {
+	default:
 		p("Adresele acestui calculator în rețeaua locală:")
 		for _, a := range b.lan {
 			p("  http://%s:%d   (%s)", a.IP, b.port, a.Name)

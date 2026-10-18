@@ -76,6 +76,8 @@ type harnessOptions struct {
 	args      []string
 	askSecret func(string) (string, error)
 	newAPI    func(bool) (*webrtc.API, bool, error)
+	// lan lists the addresses for the banner; nil gives one Wi-Fi address.
+	lan func() ([]lanAddr, error)
 }
 
 // startHub runs the hub until the test ends or stop is called. It returns once
@@ -101,13 +103,17 @@ func startHub(t *testing.T, opts harnessOptions) *harness {
 		}
 	})
 	listening := make(chan string, 1)
+	lan := opts.lan
+	if lan == nil {
+		lan = func() ([]lanAddr, error) { return []lanAddr{{Name: "Wi-Fi", IP: net.IPv4(192, 168, 1, 12)}}, nil }
+	}
 	e := env{
 		stdout:    h.stdout,
 		stderr:    h.stderr,
 		askSecret: opts.askSecret,
 		newAPI:    opts.newAPI,
 		clock:     newFakeClock(), // the simulators do not run on their own
-		lan:       func() []lanAddr { return []lanAddr{{Name: "Wi-Fi", IP: net.IPv4(192, 168, 1, 12)}} },
+		lan:       lan,
 		listen: func(int) (net.Listener, error) {
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
 			if err == nil {
@@ -186,6 +192,16 @@ func TestRun_ServesAndStopsWhenCancelled(t *testing.T) {
 	}
 	if _, err := postJSON(t, h.url+"/spike/v1/results", `{}`); err == nil {
 		t.Error("the hub still serves after it stopped")
+	}
+}
+
+func TestRun_PrintsAnInterfaceListingErrorInTheBanner(t *testing.T) {
+	h := startHub(t, harnessOptions{lan: func() ([]lanAddr, error) {
+		return nil, errors.New("route ip+net: netlinkrib: permission denied")
+	}})
+
+	if banner := h.stdout.String(); !strings.Contains(banner, "route ip+net: netlinkrib: permission denied") {
+		t.Errorf("banner does not show the error of the interface listing:\n%s", banner)
 	}
 }
 

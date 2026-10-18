@@ -4,6 +4,90 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ipcam video spike</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 12px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      h1 {
+        font-size: 1.2rem;
+      }
+      label {
+        display: block;
+      }
+      input {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        font-size: 1rem;
+        padding: 6px;
+        margin: 4px 0 8px;
+      }
+      button {
+        font-size: 1rem;
+        padding: 6px 12px;
+      }
+      .connection.failed {
+        border-left: 4px solid #c62828;
+        padding-left: 8px;
+      }
+      .scenario {
+        display: grid;
+        grid-template-columns: 4em 1fr auto;
+        gap: 4px 8px;
+        align-items: center;
+        padding: 6px 0;
+        border-bottom: 1px solid #8884;
+      }
+      .scenario .status {
+        grid-column: 2;
+        font-size: 0.9rem;
+        opacity: 0.8;
+      }
+      .scenario button {
+        grid-column: 3;
+        grid-row: 1 / span 2;
+      }
+      .scenario.failed .status {
+        color: #c62828;
+      }
+      .stage .grid {
+        display: grid;
+        grid-template-columns: repeat(var(--columns, 1), 1fr);
+        gap: 2px;
+      }
+      .stage video {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        background: #000;
+        display: block;
+      }
+      .stage .full {
+        position: fixed;
+        inset: 0;
+        background: #000;
+        display: flex;
+        align-items: center;
+      }
+      .stage [hidden] {
+        display: none;
+      }
+      .stage .message {
+        font-weight: bold;
+        padding: 8px;
+        border: 2px solid currentColor;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>

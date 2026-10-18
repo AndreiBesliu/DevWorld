@@ -3,8 +3,17 @@
 // package doc of tools/spikes/video/session (session.go), which is the source of
 // truth for them.
 import type { PingSample } from './clock';
+import { ConnectError, requestHub } from './hubhttp';
+
+export { ConnectError, type ConnectFailure } from './hubhttp';
 
 export type Profile = 'sub' | 'main';
+
+/** The candidate types of an ICE pair, `host`, `srflx`, `prflx` or `relay`. */
+export interface Pair {
+  local: string;
+  remote: string;
+}
 
 export interface BindResult {
   epoch: number;
@@ -34,11 +43,12 @@ export interface SpikeSession {
   readonly pc: RTCPeerConnection;
   /**
    * Binds the camera `cam` (a hub camera id such as `sim-04`) to a slot. Resolves
-   * at the hub's `bound`; rejects with a `BindError` carrying the hub's code.
-   * Rejects with `SESSION_CLOSED` when the session ends first.
+   * at the hub's `bound`; rejects with a `BindError` carrying the hub's code, or
+   * `TIMEOUT` when neither `bound` nor `error` came within 5 s (a late answer is
+   * ignored). Rejects with `SESSION_CLOSED` when the session ends first.
    */
   bind(slot: number, cam: string, profile: Profile): Promise<BindResult>;
-  /** The hub does not answer an unbind. */
+  /** The hub does not answer an unbind. Does nothing once the channel is closing or closed, so it is safe in teardown. */
   unbind(slot: number): void;
   /** The track that a slot receives. Throws a RangeError for a slot that does not exist. */
   track(slot: number): MediaStreamTrack;
@@ -51,15 +61,23 @@ export interface SpikeSession {
   onSent(cb: (cam: number, profile: Profile, recs: [number, number, number][]) => void): () => void;
   /** The hub's pacing jitter in ms, one report per 10 s while a camera is bound (R28). Returns the function that stops the callback. */
   onJitter(cb: (ms: number) => void): () => void;
-  /** The candidate types of the selected ICE pair, never addresses. Resolves at the first `pair` message, then with the latest one. */
-  pair(): Promise<{ local: string; remote: string }>;
+  /**
+   * The candidate types of the selected ICE pair, never addresses. Resolves at
+   * the first `pair` message, then with the latest one; `n/a` when none came
+   * within 10 s.
+   */
+  pair(): Promise<Pair | 'n/a'>;
   /** One clock ping, for `ClockSync`. Rejects after 2 s without an answer. Pings must not overlap. */
   ping(): Promise<PingSample>;
   /** Idempotent. Rejects whatever is pending with `SESSION_CLOSED`. */
   close(): void;
 }
 
-/** The hub refused a bind. `code` is its error code, `CODEC_UNSUPPORTED`, `UNKNOWN_CAMERA` or `BAD_SLOT`; the message is the code. */
+/**
+ * The hub refused a bind. `code` is its error code, `CODEC_UNSUPPORTED`,
+ * `UNKNOWN_CAMERA` or `BAD_SLOT`, or `TIMEOUT` when the hub did not answer in
+ * time; the message is the code.
+ */
 export class BindError extends Error {
   readonly code: string;
 
@@ -70,31 +88,13 @@ export class BindError extends Error {
   }
 }
 
-/**
- * - `timeout`: no answer in time, the typical sign of AP isolation or a firewall that drops the traffic.
- * - `refused`: the connection failed at once, the typical sign of a wrong address or a hub that is not running.
- * - `rejected`: the hub answered with an HTTP error.
- */
-export type ConnectFailure = 'timeout' | 'refused' | 'rejected';
-
-/** `openSession` could not reach the hub. `url` is the hub address that was tried. */
-export class ConnectError extends Error {
-  readonly kind: ConnectFailure;
-  readonly url: string;
-
-  constructor(kind: ConnectFailure, url: string, detail: string) {
-    super(`${kind}: ${detail} (${url})`);
-    this.name = 'ConnectError';
-    this.kind = kind;
-    this.url = url;
-  }
-}
-
 /** How long the offer waits for ICE gathering, which on a LAN without STUN servers only lists the host's own addresses. */
 const GATHER_TIMEOUT_MS = 3000;
 const OFFER_TIMEOUT_MS = 10_000;
 const RPC_OPEN_TIMEOUT_MS = 10_000;
 const PING_TIMEOUT_MS = 2000;
+const BIND_TIMEOUT_MS = 5000;
+const PAIR_TIMEOUT_MS = 10_000;
 const SESSION_CLOSED = 'SESSION_CLOSED';
 
 /** Unix milliseconds on the performance clock: monotonic, and the scale `ClockSync` and `glassToGlassMs` use. */
@@ -172,8 +172,6 @@ interface PendingPing extends Pending<number> {
   timer: ReturnType<typeof setTimeout>;
 }
 
-type Pair = { local: string; remote: string };
-
 class HubSession implements SpikeSession {
   readonly slots: number;
   readonly pc: RTCPeerConnection;
@@ -207,10 +205,24 @@ class HubSession implements SpikeSession {
     const requestedPerfMs = performance.now();
     const epoch = this.nextEpoch++;
     return new Promise<BindResult>((resolve, reject) => {
-      this.binds.set(epoch, { resolve: (bound) => resolve({ ...bound, requestedPerfMs }), reject });
+      const timer = setTimeout(() => {
+        this.binds.delete(epoch);
+        reject(new BindError('TIMEOUT'));
+      }, BIND_TIMEOUT_MS);
+      this.binds.set(epoch, {
+        resolve: (bound) => {
+          clearTimeout(timer);
+          resolve({ ...bound, requestedPerfMs });
+        },
+        reject: (reason) => {
+          clearTimeout(timer);
+          reject(reason);
+        },
+      });
       try {
         this.send({ t: 'bind', slot, cam, profile, epoch });
       } catch (error) {
+        clearTimeout(timer);
         this.binds.delete(epoch);
         reject(error as Error);
       }
@@ -218,7 +230,7 @@ class HubSession implements SpikeSession {
   }
 
   unbind(slot: number): void {
-    if (this.closed) return;
+    if (this.closed || this.rpc.readyState !== 'open') return;
     this.send({ t: 'unbind', slot });
   }
 
@@ -242,11 +254,25 @@ class HubSession implements SpikeSession {
     };
   }
 
-  pair(): Promise<Pair> {
+  pair(): Promise<Pair | 'n/a'> {
     if (this.latestPair) return Promise.resolve(this.latestPair);
     if (this.closed) return Promise.reject(new Error(SESSION_CLOSED));
-    return new Promise<Pair>((resolve, reject) => {
-      this.pairWaiters.push({ resolve, reject });
+    return new Promise<Pair | 'n/a'>((resolve, reject) => {
+      const waiter: Pending<Pair> = {
+        resolve: (pair) => {
+          clearTimeout(timer);
+          resolve(pair);
+        },
+        reject: (reason) => {
+          clearTimeout(timer);
+          reject(reason);
+        },
+      };
+      const timer = setTimeout(() => {
+        this.pairWaiters.splice(this.pairWaiters.indexOf(waiter), 1);
+        resolve('n/a');
+      }, PAIR_TIMEOUT_MS);
+      this.pairWaiters.push(waiter);
     });
   }
 
@@ -353,37 +379,26 @@ function iceGathered(pc: RTCPeerConnection): Promise<void> {
 // hub over plain HTTP on the LAN, port 7080, so that a phone can reach it without
 // a certificate. Production signalling does not. The body is text/plain, which
 // needs no CORS preflight from the shells' origins.
-async function postOffer(hubUrl: string, sdp: string): Promise<string> {
-  const controller = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, OFFER_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${hubUrl}/spike/v1/offer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: sdp,
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const reason = (await response.text()).trim().slice(0, 200);
-      throw new ConnectError('rejected', hubUrl, `the hub answered ${response.status}${reason ? `: ${reason}` : ''}`);
-    }
-    return await response.text();
-  } catch (error) {
-    if (error instanceof ConnectError) throw error;
-    if (timedOut) throw new ConnectError('timeout', hubUrl, `no answer within ${OFFER_TIMEOUT_MS / 1000} s`);
-    throw new ConnectError('refused', hubUrl, error instanceof Error ? error.message : String(error));
-  } finally {
-    clearTimeout(timer);
-  }
+function postOffer(hubUrl: string, sdp: string): Promise<string> {
+  return requestHub(
+    hubUrl,
+    '/spike/v1/offer',
+    { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: sdp },
+    (response) => response.text(),
+    OFFER_TIMEOUT_MS,
+  );
 }
 
-/** Resolves when the channel is open. Rejects with a ConnectError when it closes first or stays closed for RPC_OPEN_TIMEOUT_MS. */
+/**
+ * Resolves when the channel is open. Rejects with a ConnectError when it closes
+ * first, or has closed already (its close event fired during the offer), or
+ * stays closed for RPC_OPEN_TIMEOUT_MS.
+ */
 function rpcOpen(rpc: RTCDataChannel, hubUrl: string): Promise<void> {
   if (rpc.readyState === 'open') return Promise.resolve();
+  if (rpc.readyState === 'closing' || rpc.readyState === 'closed') {
+    return Promise.reject(new ConnectError('refused', hubUrl, 'the rpc channel closed before it opened'));
+  }
   return new Promise<void>((resolve, reject) => {
     const settle = (): void => {
       clearTimeout(timer);

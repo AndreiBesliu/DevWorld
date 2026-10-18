@@ -170,6 +170,29 @@ describe('openSession failures', () => {
   });
 });
 
+describe('openSession, channel closed during the offer', () => {
+  it('openSession_channelClosedDuringTheOffer_reportsRefusedAtOnce', async () => {
+    // The channel gave up (the hub refused the association) while the offer was
+    // still in flight: its close event has already fired, so waiting for it again
+    // would end in a 10 s "timeout" that blames the network.
+    vi.useFakeTimers();
+    const instances = stubPeerConnection({ opensChannel: false });
+    stubFetch(() => {
+      pcOf(instances).rpc.close();
+      return answer();
+    });
+
+    const outcome = openSession(HUB, 4).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(await Promise.race([outcome, Promise.resolve('pending')])).toMatchObject({
+      name: 'ConnectError',
+      kind: 'refused',
+      url: HUB,
+    });
+  });
+});
+
 describe('bind', () => {
   it('bind_sendsBindAndResolvesOnBound', async () => {
     const { session, rpc } = await open();
@@ -268,6 +291,50 @@ describe('bind', () => {
     await expect(retry).resolves.toMatchObject({ codec: 'H264' });
   });
 
+  it('bind_noAnswerWithin5s_rejectsWithTimeout', async () => {
+    // A bind sent during a Wi-Fi drop must not hang until SCTP gives up.
+    vi.useFakeTimers();
+    const { session, rpc } = await open();
+
+    const outcome = session.bind(0, 'sim-01', 'sub').catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(await Promise.race([outcome, Promise.resolve('pending')])).toBe('pending');
+    await vi.advanceTimersByTimeAsync(1);
+
+    const failure = await outcome;
+    expect(failure).toBeInstanceOf(BindError);
+    expect(failure).toMatchObject({ code: 'TIMEOUT' });
+    // A late answer is ignored, and the next bind works.
+    rpc.receive({ t: 'bound', slot: 0, epoch: Number(rpc.sent[0]?.epoch), codec: 'H264', profile: '4d401f' });
+    const next = session.bind(0, 'sim-01', 'sub');
+    rpc.receive({ t: 'bound', slot: 0, epoch: Number(rpc.sent[1]?.epoch), codec: 'H264', profile: '4d401f' });
+    await expect(next).resolves.toMatchObject({ codec: 'H264' });
+  });
+
+  it('bind_answeredInTime_leavesNoTimerBehind', async () => {
+    vi.useFakeTimers();
+    const { session, rpc } = await open();
+
+    const pending = session.bind(0, 'sim-01', 'sub');
+    rpc.receive({ t: 'bound', slot: 0, epoch: Number(rpc.sent[0]?.epoch), codec: 'H264', profile: '4d401f' });
+    await pending;
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('unbind_closingChannel_isANoOp', async () => {
+    // Teardown in a scenario's finally block runs while the channel may be closing.
+    const { session, rpc } = await open();
+    for (const state of ['closing', 'closed'] as const) {
+      rpc.readyState = state;
+
+      expect(() => {
+        session.unbind(0);
+      }).not.toThrow();
+    }
+    expect(rpc.sent).toEqual([]);
+  });
+
   it('unbind_sendsUnbindAndDoesNotWait', async () => {
     const { session, rpc } = await open();
 
@@ -335,6 +402,22 @@ describe('messages from the hub', () => {
     rpc.receive({ t: 'pair', local: 'host', remote: 'prflx' });
     rpc.receive({ t: 'pair', local: 'host', remote: 'host' }); // ICE selected another pair
 
+    await expect(session.pair()).resolves.toEqual({ local: 'host', remote: 'host' });
+  });
+
+  it('pair_noPairWithin10s_resolvesNa', async () => {
+    // A hub whose ICE never reports a selected pair must not hang S10.
+    vi.useFakeTimers();
+    const { session, rpc } = await open();
+
+    const pending = session.pair();
+    await vi.advanceTimersByTimeAsync(9999);
+    expect(await Promise.race([pending, Promise.resolve('pending')])).toBe('pending');
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(pending).resolves.toBe('n/a');
+    // A pair that comes later is still reported to the next caller.
+    rpc.receive({ t: 'pair', local: 'host', remote: 'host' });
     await expect(session.pair()).resolves.toEqual({ local: 'host', remote: 'host' });
   });
 
