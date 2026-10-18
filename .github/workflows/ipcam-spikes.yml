@@ -103,13 +103,13 @@ jobs:
           MEDIAGEN_DIR: ${{ runner.temp }}/spike-video-media
           MEDIAGEN_REQUIRE_FFMPEG: '1'
         run: go test -count=1 -v -run TestMediagen ./tools/spikes/video/cmd/mediagen/...
-      - name: Test the hub sources on the media
+      - name: Test the hub on the media
         # The go job has no ffmpeg, so the tests that read the media skip there. Here a
         # missing media file fails instead of skipping (SPIKE_REQUIRE_MEDIA).
         env:
           MEDIAGEN_DIR: ${{ runner.temp }}/spike-video-media
           SPIKE_REQUIRE_MEDIA: '1'
-        run: go test -count=1 -race ./tools/spikes/video/source/...
+        run: go test -count=1 -race ./tools/spikes/video/source/... ./tools/spikes/video/cmd/spikehub/...
       - name: Upload media
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

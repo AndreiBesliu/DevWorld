@@ -10,6 +10,7 @@ require (
 	github.com/pion/rtp v1.10.5
 	github.com/pion/webrtc/v4 v4.2.22
 	golang.org/x/net v0.59.0
+	golang.org/x/term v0.46.0
 )
 
 require (
