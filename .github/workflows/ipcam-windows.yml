@@ -53,7 +53,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends ffmpeg
       - name: Generate media
-        run: go run ./tools/spikes/video/cmd/mediagen -out "${RUNNER_TEMP}/spike-video-media"
+        # Its few lines of output go into an annotation on a failure.
+        run: |
+          out="$(go run ./tools/spikes/video/cmd/mediagen -out "${RUNNER_TEMP}/spike-video-media" 2>&1)" || {
+            out="${out//%/%25}"
+            echo "::error title=mediagen::${out//$'\n'/%0A}"
+            exit 1
+          }
+          echo "${out}"
       - name: Upload media
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -101,19 +108,42 @@ jobs:
           workspaces: ipcam/apps/desktop/src-tauri -> target
       - name: Licenses (R35)
         run: |
-          archive="${RUNNER_TEMP}/cargo-deny.tar.gz"
-          curl -fsSL -o "${archive}" \
-            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          echo "${CARGO_DENY_SHA256}  ${archive}" | sha256sum --check --strict
-          tar -xzf "${archive}" -C "${RUNNER_TEMP}" --strip-components=1
-          "${RUNNER_TEMP}/cargo-deny" --manifest-path apps/desktop/src-tauri/Cargo.toml --locked check licenses
+          {
+            archive="${RUNNER_TEMP}/cargo-deny.tar.gz"
+            curl -fsSL -o "${archive}" \
+              "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+            echo "${CARGO_DENY_SHA256}  ${archive}" | sha256sum --check --strict
+            tar -xzf "${archive}" -C "${RUNNER_TEMP}" --strip-components=1
+            "${RUNNER_TEMP}/cargo-deny" --color never --manifest-path apps/desktop/src-tauri/Cargo.toml --locked check licenses
+          } 2>&1 | tee -a "${RUNNER_TEMP}/checks.log"
       - name: Format and Clippy
         working-directory: ipcam/apps/desktop/src-tauri
-        # With the spike-metrics feature (the spike build) and without it.
+        # With the spike-metrics feature (the spike build) and without it; each
+        # check runs even when one before it failed. Clippy only type-checks,
+        # but tauri::generate_context! reads the frontendDist folder, which the
+        # windows job fills with the spike app's build: an empty one stands in.
         run: |
-          cargo fmt --check
-          cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets --features spike-metrics -- -D warnings
-          cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+          mkdir -p ../../../tools/spikes/video/app/dist
+          log="${RUNNER_TEMP}/checks.log"
+          status=0
+          cargo fmt --check -- --color never 2>&1 | tee -a "${log}" || status=1
+          cargo clippy --color never --locked --target x86_64-pc-windows-msvc --all-targets --features spike-metrics -- -D warnings 2>&1 \
+            | tee -a "${log}" || status=1
+          cargo clippy --color never --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings 2>&1 \
+            | tee -a "${log}" || status=1
+          exit "${status}"
+      - name: Show check failures as annotations
+        # Job logs cannot be read from everywhere; check-run annotations can
+        # (gh api repos/<owner>/<repo>/check-runs/<job id>/annotations).
+        if: failure()
+        run: |
+          log="${RUNNER_TEMP}/checks.log"
+          [[ -f "${log}" ]] || exit 0
+          # Clippy's and cargo-deny's errors and rustfmt's diffs, else the end of the log.
+          lines="$({ grep -E -A12 '^error' "${log}" || true; grep -E -A10 '^Diff in ' "${log}" || true; })"
+          [[ -n "${lines}" ]] || lines="$(tail -n 30 "${log}")"
+          printf '%s\n' "${lines}" | head -150 | sed -e 's/%/%25/g' \
+            | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "::error title=checks::") $0 } END { if (NR) print "\n" }'
 
   windows:
     # WIN-2: the spike shell on Windows and WebView2, unsigned (code signing is
@@ -180,7 +210,12 @@ jobs:
             | tr -d '\r' | head -150 | sed -e 's/%/%25/g' \
             | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "::error title=build::") $0 } END { if (NR) print "\n" }'
       - name: Build spikehub
-        run: go build -o "${RUNNER_TEMP}/spikehub.exe" ./tools/spikes/video/cmd/spikehub
+        run: |
+          out="$(go build -o "${RUNNER_TEMP}/spikehub.exe" ./tools/spikes/video/cmd/spikehub 2>&1)" || {
+            out="${out//%/%25}"
+            echo "::error title=spikehub build::${out//$'\n'/%0A}"
+            exit 1
+          }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: spike-video-media
