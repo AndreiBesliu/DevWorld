@@ -30,10 +30,13 @@ const (
 var errNoSendableCodec = errors.New("the offer has no H.264 in packetization mode 1 and no H.265")
 
 // binding asks a slot to carry a source, or to carry nothing when src is nil.
+// fallback is the offered profile-level-id that a substream goes out in when
+// the offer lacks its own profile (R23).
 type binding struct {
-	src   source.Source
-	codec webrtc.RTPCodecParameters
-	epoch int64
+	src      source.Source
+	codec    webrtc.RTPCodecParameters
+	fallback string
+	epoch    int64
 }
 
 // slot is one recvonly video m-line of the client's offer. It writes the
@@ -168,7 +171,7 @@ func (sl *slot) apply(b binding, cur feed) feed {
 		return feed{}
 	}
 	cached, live, cancel := b.src.Subscribe()
-	sl.notify(boundMsg{T: "bound", Slot: sl.index, Epoch: b.epoch, Codec: string(b.src.Codec()), Profile: b.src.Profile()})
+	sl.notify(boundMsg{T: "bound", Slot: sl.index, Epoch: b.epoch, Codec: string(b.src.Codec()), Profile: b.src.Profile(), Fallback: b.fallback})
 	for i, au := range cached {
 		step := burstStep
 		if i == len(cached)-1 {

@@ -44,13 +44,16 @@ func parseRequest(data []byte) (request, error) {
 }
 
 // boundMsg says that a slot now carries the camera of the bind with this
-// epoch: the next access unit on the slot is that camera's IDR.
+// epoch: the next access unit on the slot is that camera's IDR. Profile is the
+// stream's codec profile. Fallback, set only when a substream goes out in
+// another offered H.264 profile than its own (R23), is that profile-level-id.
 type boundMsg struct {
-	T       string `json:"t"`
-	Slot    int    `json:"slot"`
-	Epoch   int64  `json:"epoch"`
-	Codec   string `json:"codec"`
-	Profile string `json:"profile"`
+	T        string `json:"t"`
+	Slot     int    `json:"slot"`
+	Epoch    int64  `json:"epoch"`
+	Codec    string `json:"codec"`
+	Profile  string `json:"profile"`
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // errorMsg says that a bind failed; the slot keeps what it carried.

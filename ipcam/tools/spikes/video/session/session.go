@@ -25,6 +25,18 @@
 // source's codec and codec profile, and its epoch is the bind's. "sent" comes
 // every 500 ms for each bound simulator, "jitter" every 10 s while anything is
 // bound, and "pair" whenever ICE selects a pair.
+//
+// H.264 goes out in the offered profile-level-id whose profile_idc is the
+// stream's, at the highest offered level (R20). When the offer has none, a
+// "main" bind fails with CODEC_UNSUPPORTED, as does an H.265 stream that the
+// offer lacks (APP-05: the client falls back to "sub"). A "sub" bind instead
+// goes out in the closest offered H.264 profile (R23, spec §6.3 step 7): on
+// the ladder Baseline, Main, High, High 10, High 4:2:2, High 4:4:4, the
+// nearest richer one, whose decoder decodes the stream, else the nearest
+// poorer one, at its highest offered level. Then "bound" names that
+// profile-level-id in "fallback", which is absent otherwise:
+//
+//	{"t":"bound","slot":0,"epoch":8,"codec":"H264","profile":"4d401f","fallback":"42e01f"}
 package session
 
 import (
@@ -345,7 +357,7 @@ func (s *Session) bind(req request) {
 		fail(codeUnknownCamera)
 		return
 	}
-	codec, ok := chooseCodec(src, s.slots[req.Slot].offered)
+	codec, fallback, ok := chooseCodec(src, req.Profile == "sub", s.slots[req.Slot].offered)
 	if !ok {
 		fail(codeCodecUnsupported)
 		return
@@ -355,7 +367,7 @@ func (s *Session) bind(req request) {
 		s.release(old)
 	}
 	s.slotSource[req.Slot] = src
-	s.submit(req.Slot, binding{src: src, codec: codec, epoch: req.Epoch})
+	s.submit(req.Slot, binding{src: src, codec: codec, fallback: fallback, epoch: req.Epoch})
 }
 
 // unbind empties a slot.

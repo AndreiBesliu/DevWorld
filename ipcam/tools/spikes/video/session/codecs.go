@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
@@ -79,40 +80,79 @@ func profileLevelID(s string) (profileIDC, levelIDC byte, ok bool) {
 	return b[0], b[2], true
 }
 
+// h264Ladder lists the profile_idc of the H.264 profiles that WebRTC clients
+// offer, from the poorest to the richest: Baseline, Main, High, High 10,
+// High 4:2:2 and High 4:4:4 Predictive. A decoder of one of them decodes what
+// cameras send in the ones before it.
+var h264Ladder = []byte{0x42, 0x4d, 0x64, 0x6e, 0x7a, 0xf4}
+
 // chooseCodec picks, from the codecs that an answer lists for a slot, the one
-// that carries src (R20). For H.264 it is an entry in packetization mode 1
-// whose profile_idc equals the source's, with the highest level and the first
-// of equals; the level itself is not enforced. For H.265 it is the first H.265
+// that carries src. For H.264 it is an entry in packetization mode 1 whose
+// profile_idc equals the source's (R20), with the highest level and the first
+// of equals; the level itself is not enforced. When no entry has that
+// profile_idc and sub is set (a bind of a substream, R23, spec §6.3 step 7),
+// it is the entry of the closest offered profile, picked the same way, and
+// fallback is that entry's profile-level-id. For H.265 it is the first H.265
 // entry. ok is false when nothing fits, including an H.264 source whose
 // profile is not known yet.
-func chooseCodec(src source.Source, offered []webrtc.RTPCodecParameters) (webrtc.RTPCodecParameters, bool) {
+func chooseCodec(src source.Source, sub bool, offered []webrtc.RTPCodecParameters) (codec webrtc.RTPCodecParameters, fallback string, ok bool) {
 	switch src.Codec() {
 	case source.CodecH265:
 		for _, c := range offered {
 			if isH265(c) {
-				return c, true
+				return c, "", true
 			}
 		}
 	case source.CodecH264:
-		want, _, ok := profileLevelID(src.Profile())
-		if !ok {
-			return webrtc.RTPCodecParameters{}, false
+		want, _, known := profileLevelID(src.Profile())
+		if !known {
+			break
 		}
-		best, bestLevel := -1, -1
-		for i, c := range offered {
-			if !isH264(c) || !sendable(c) {
-				continue
-			}
-			idc, level, ok := profileLevelID(fmtpValue(c.SDPFmtpLine, "profile-level-id"))
-			if ok && idc == want && int(level) > bestLevel {
-				best, bestLevel = i, int(level)
-			}
+		if i := bestH264(offered, want); i >= 0 {
+			return offered[i], "", true
 		}
-		if best >= 0 {
-			return offered[best], true
+		if !sub {
+			break
+		}
+		for _, idc := range closestProfiles(want) {
+			if i := bestH264(offered, idc); i >= 0 {
+				return offered[i], strings.ToLower(fmtpValue(offered[i].SDPFmtpLine, "profile-level-id")), true
+			}
 		}
 	}
-	return webrtc.RTPCodecParameters{}, false
+	return webrtc.RTPCodecParameters{}, "", false
+}
+
+// bestH264 returns the index of the entry in packetization mode 1 with the
+// given profile_idc and the highest level, the first of equals, or -1.
+func bestH264(offered []webrtc.RTPCodecParameters, profileIDC byte) int {
+	best, bestLevel := -1, -1
+	for i, c := range offered {
+		if !isH264(c) || !sendable(c) {
+			continue
+		}
+		idc, level, ok := profileLevelID(fmtpValue(c.SDPFmtpLine, "profile-level-id"))
+		if ok && idc == profileIDC && int(level) > bestLevel {
+			best, bestLevel = i, int(level)
+		}
+	}
+	return best
+}
+
+// closestProfiles returns the profiles of h264Ladder other than profileIDC,
+// closest first: the richer ones, whose decoders decode the stream, from the
+// nearest up, then the poorer ones from the nearest down. It is empty for a
+// profile outside the ladder.
+func closestProfiles(profileIDC byte) []byte {
+	i := slices.Index(h264Ladder, profileIDC)
+	if i < 0 {
+		return nil
+	}
+	closest := slices.Clone(h264Ladder[i+1:])
+	for j := i - 1; j >= 0; j-- {
+		closest = append(closest, h264Ladder[j])
+	}
+	return closest
 }
 
 // payloaderFor returns the RTP payloader of a codec the hub sends.
