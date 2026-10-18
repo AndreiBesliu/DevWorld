@@ -1,6 +1,7 @@
 // A ready-made player on test doubles, shared by the player tests. Not exported from index.ts.
 import { vi } from 'vitest';
 import { FakeClock, FakeHls, FakeLink, fakeVideo, type FakeVideo, type QualityCounter } from './fakes';
+import type { HlsLike } from './hls';
 import { createPlayer, type Player, type PlayerSource } from './index';
 
 export const LIVE: PlayerSource = { kind: 'live', cameraId: 'sim-01', profile: 'sub' };
@@ -32,6 +33,8 @@ export interface SetupOptions {
   hls?: FakeHls;
   /** Every `hlsFactory()` call returns a new instance, collected in `instances`. */
   freshHls?: boolean;
+  /** Replaces the fake: every `hlsFactory()` call returns what this returns (`hls` and `instances` stay unused). */
+  makeHls?: () => HlsLike;
 }
 
 export function setup(options: SetupOptions = {}) {
@@ -40,7 +43,8 @@ export function setup(options: SetupOptions = {}) {
   const link = new FakeLink();
   const hls = options.hls ?? new FakeHls();
   const instances: FakeHls[] = [];
-  const hlsFactory = vi.fn(() => {
+  const hlsFactory = vi.fn((): HlsLike => {
+    if (options.makeHls) return options.makeHls();
     if (!options.freshHls) return hls;
     const fresh = new FakeHls();
     instances.push(fresh);

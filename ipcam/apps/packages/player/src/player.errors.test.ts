@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stubMediaStream } from './fakes';
-import { frames, LIVE, RECORDING, setup, stubAsyncThrows } from './harness';
+import type { HlsLike } from './hls';
+import { frames, LIVE, PLAYLIST, RECORDING, setup, stubAsyncThrows } from './harness';
 
 beforeEach(() => {
   stubMediaStream();
@@ -24,6 +25,18 @@ async function unhandledRejectionsDuring(body: () => Promise<void>): Promise<unk
     process.off('unhandledRejection', onRejection);
   }
   return seen;
+}
+
+/**
+ * An hls.js stand-in that cannot report errors: no `on`. `HlsLike` says `on` is
+ * optional, so this literal must compile without a cast.
+ */
+function hlsWithoutOn() {
+  const attachMedia = vi.fn<HlsLike['attachMedia']>();
+  const loadSource = vi.fn<HlsLike['loadSource']>();
+  const destroy = vi.fn<HlsLike['destroy']>();
+  const hls: HlsLike = { media: null, levels: [], currentLevel: -1, attachMedia, loadSource, destroy };
+  return { hls, attachMedia, loadSource, destroy };
 }
 
 describe('the cause of a failed start', () => {
@@ -93,6 +106,38 @@ describe('the cause of a failed start', () => {
     clock.advance(4000);
 
     expect(emitted('error')).toStrictEqual([{ reason: 'NO_FIRST_FRAME' }]);
+  });
+
+  it('recording_hlsInstanceWithoutOn_stillPlaysAndAnnouncesHls', async () => {
+    const bare = hlsWithoutOn();
+    const { player, video, emitted } = setup({ makeHls: () => bare.hls });
+
+    await player.play(RECORDING);
+
+    expect(bare.attachMedia).toHaveBeenCalledWith(video.element);
+    expect(bare.loadSource).toHaveBeenCalledWith(PLAYLIST);
+    expect(emitted('transport-changed')).toEqual([{ transport: 'hls' }]);
+    player.stop();
+    expect(bare.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('recording_hlsInstanceWithoutOn_noFirstFrameCarriesNoHlsCause', async () => {
+    const { player, clock, emitted } = setup({ makeHls: () => hlsWithoutOn().hls });
+    await player.play(RECORDING);
+
+    clock.advance(4000);
+
+    expect(emitted('error')).toStrictEqual([{ reason: 'NO_FIRST_FRAME' }]);
+  });
+
+  it('recording_hlsInstanceWithoutOn_aRefusedPlayStillCarriesItsName', async () => {
+    const { player, video, clock, emitted } = setup({ makeHls: () => hlsWithoutOn().hls });
+    video.playResult = () => Promise.reject(new DOMException('autoplay is blocked', 'NotAllowedError'));
+    await player.play(RECORDING);
+
+    clock.advance(4000);
+
+    expect(emitted('error')).toStrictEqual([{ reason: 'NO_FIRST_FRAME', cause: 'NotAllowedError' }]);
   });
 
   it('cause_isTheLastRecordedReason', async () => {

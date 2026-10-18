@@ -11,8 +11,12 @@ export interface HlsLike {
   readonly media: HTMLMediaElement | null;
   readonly levels: readonly { readonly videoCodec?: string | undefined }[];
   readonly currentLevel: number;
-  /** Subscribes to hls.js errors. `destroy()` drops the subscription. */
-  on(event: Events.ERROR, listener: (event: Events.ERROR, data: HlsErrorData) => void): void;
+  /**
+   * Subscribes to hls.js errors; `destroy()` drops the subscription. Optional so
+   * that an instance written before the player recorded causes still satisfies
+   * the type: without it the player records no `hls:<details>` cause.
+   */
+  on?(event: Events.ERROR, listener: (event: Events.ERROR, data: HlsErrorData) => void): void;
   attachMedia(media: HTMLMediaElement): void;
   loadSource(url: string): void;
   destroy(): void;
@@ -23,7 +27,8 @@ export const defaultHlsFactory = (): HlsLike => new Hls({ lowLatencyMode: false 
 /**
  * Plays the playlist at `url` in the element. `hls.destroy()` undoes it.
  * `onFatalError` gets the `details` of every fatal hls.js error (a playlist 404,
- * a fatal media error); hls.js's non-fatal errors are recoveries under way.
+ * a fatal media error); hls.js's non-fatal errors are recoveries under way. An
+ * instance without `on` is played all the same, it just reports no errors.
  */
 export function startHls(
   hls: HlsLike,
@@ -31,7 +36,7 @@ export function startHls(
   url: string,
   onFatalError: (details: string) => void,
 ): void {
-  hls.on(Events.ERROR, (_event, data) => {
+  hls.on?.(Events.ERROR, (_event, data) => {
     if (data.fatal) onFatalError(data.details);
   });
   hls.attachMedia(video);
