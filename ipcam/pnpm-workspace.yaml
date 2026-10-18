@@ -1,0 +1,8 @@
+packages:
+  - apps/packages/*
+  - apps/mobile
+  - apps/desktop
+  - tools/spikes/video/app
+
+# Refuse versions published less than 7 days ago (minutes; spec section 11.10).
+minimumReleaseAge: 10080
