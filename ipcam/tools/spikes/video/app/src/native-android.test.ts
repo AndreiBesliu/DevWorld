@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { installAndroidNative, type AndroidPlugins } from './native-android';
 import type { SpikeNative } from './native';
 import { unhandledRejections } from './scenarios/fakes';
@@ -48,6 +48,10 @@ const A24 = {
   webview: 'com.google.android.webview 141.0.7390.122',
 };
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('installAndroidNative', () => {
   it('nativeAndroid_installsSpikeNative', async () => {
     const { plugins, emitPip, pipSubscriptions } = fakePlugins(A24);
@@ -92,6 +96,7 @@ describe('installAndroidNative', () => {
   });
 
   it('nativeAndroid_pipListenerRejected_isNoUnhandledRejection', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { plugins } = fakePlugins(A24, { rejectPipListener: 1 });
     const target: { spikeNative?: SpikeNative } = {};
     installAndroidNative({ platform: 'android', plugins, target });
@@ -102,9 +107,12 @@ describe('installAndroidNative', () => {
     });
 
     expect(unhandled).toEqual([]);
+    // The failure is not silent: S6 would otherwise measure its 5 min without PiP events.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('PiP listener'), expect.objectContaining({ message: 'the bridge is gone' }));
   });
 
   it('nativeAndroid_pipListenerRejected_theNextOnPipRegistersAgain', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { plugins, emitPip, pipSubscriptions } = fakePlugins(A24, { rejectPipListener: 1 });
     const target: { spikeNative?: SpikeNative } = {};
     installAndroidNative({ platform: 'android', plugins, target });

@@ -31,8 +31,8 @@ function toNativeMetrics({ thermal, ...rest }: AndroidMetrics): NativeMetrics {
  * `onPip` for `window.spikeNative`: one native listener, registered by the
  * first call, serves every callback. The SpikeNative contract has no
  * unsubscribe, so a listener per call would pile up. A registration that
- * fails (the bridge is not ready) is left for the next call to try again;
- * without PiP events S6 only measures its whole 5 min.
+ * fails (the bridge is not ready) is logged and left for the next call to
+ * try again; without PiP events S6 only measures its whole 5 min.
  */
 function pipFanOut(pip: Pick<PipPlugin, 'addListener'>): (cb: (on: boolean) => void) => void {
   const callbacks: ((on: boolean) => void)[] = [];
@@ -45,8 +45,9 @@ function pipFanOut(pip: Pick<PipPlugin, 'addListener'>): (cb: (on: boolean) => v
       .addListener('pipChanged', ({ on }) => {
         for (const callback of callbacks) callback(on);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         registered = false;
+        console.warn('the PiP listener could not be registered; S6 will not see PiP changes', error);
       });
   };
 }
