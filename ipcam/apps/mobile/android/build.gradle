@@ -21,3 +21,13 @@ allprojects {
         mavenCentral()
     }
 }
+
+// CI reads failing tests from the log (ipcam-mobile.yml): print their whole stack trace.
+subprojects {
+    tasks.withType(Test).configureEach {
+        testLogging {
+            events "failed"
+            exceptionFormat "full"
+        }
+    }
+}

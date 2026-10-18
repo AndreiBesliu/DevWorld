@@ -84,8 +84,8 @@ jobs:
         run: |
           log="${RUNNER_TEMP}/gradle.log"
           [[ -f "${log}" ]] || exit 0
-          { grep -E -A12 '^\* What went wrong:' "${log}" || true; grep -E -A3 '^e: | FAILED$' "${log}" || true; } \
-            | head -80 | sed -e 's/%/%25/g' \
+          { grep -E -A12 '^\* What went wrong:' "${log}" || true; grep -E -A30 '^e: | FAILED$' "${log}" || true; } \
+            | head -150 | sed -e 's/%/%25/g' \
             | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "::error title=gradle::") $0 } END { if (NR) print "\n" }'
       - name: Native line count (MV14)
         # MV14 counts the production plugins only: the spike metrics plugin is
