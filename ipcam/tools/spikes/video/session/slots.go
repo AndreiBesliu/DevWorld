@@ -37,6 +37,10 @@ type binding struct {
 	codec    webrtc.RTPCodecParameters
 	fallback string
 	epoch    int64
+	// applied, when set, receives the outcome once the slot has handled the
+	// request: nil when the slot carries src, or the error that left it as it
+	// was. It has room for the one result, so the slot never waits for it.
+	applied chan error
 }
 
 // slot is one recvonly video m-line of the client's offer. It writes the
@@ -50,6 +54,9 @@ type slot struct {
 	reqs    chan binding
 	notify  func(any)
 	log     *slog.Logger
+	// replaceTrack switches the sender to another track: RTPSender.ReplaceTrack,
+	// except in tests that make it fail.
+	replaceTrack func(*webrtc.RTPSender, webrtc.TrackLocal) error
 
 	// Owned by the writer goroutine once it runs.
 	track     *webrtc.TrackLocalStaticSample
@@ -61,8 +68,10 @@ type slot struct {
 
 // newSlot creates a slot and its first track, created at answer time in the
 // first codec of the answer that the hub can send.
-func newSlot(index int, offered []webrtc.RTPCodecParameters, notify func(any), log *slog.Logger) (*slot, error) {
-	sl := &slot{index: index, offered: offered, reqs: make(chan binding, requestQueue), notify: notify, log: log}
+func newSlot(index int, offered []webrtc.RTPCodecParameters, notify func(any), log *slog.Logger,
+	replaceTrack func(*webrtc.RTPSender, webrtc.TrackLocal) error,
+) (*slot, error) {
+	sl := &slot{index: index, offered: offered, reqs: make(chan binding, requestQueue), notify: notify, log: log, replaceTrack: replaceTrack}
 	var b [6]byte
 	_, _ = rand.Read(b[:]) // crypto/rand.Read never returns an error
 	sl.seq, sl.ts = binary.BigEndian.Uint16(b[:2]), binary.BigEndian.Uint32(b[2:])
@@ -125,7 +134,7 @@ func (sl *slot) run(done <-chan struct{}) {
 		case <-done:
 			return
 		case b := <-sl.reqs:
-			cur = sl.apply(b, cur)
+			cur = sl.handle(b, cur)
 			continue
 		default:
 		}
@@ -133,7 +142,7 @@ func (sl *slot) run(done <-chan struct{}) {
 		case <-done:
 			return
 		case b := <-sl.reqs:
-			cur = sl.apply(b, cur)
+			cur = sl.handle(b, cur)
 		case au, ok := <-cur.live:
 			if !ok {
 				cur = feed{} // the source ended
@@ -157,19 +166,31 @@ func (f feed) stop() {
 	}
 }
 
-// apply stops the current feed and starts the one b asks for: it switches the
-// track to b's codec, announces the binding and writes the source's cached
-// GOP, which starts at its last IDR.
-func (sl *slot) apply(b binding, cur feed) feed {
-	cur.stop()
+// handle applies a request and reports its outcome to whoever waits for it.
+func (sl *slot) handle(b binding, cur feed) feed {
+	next, err := sl.apply(b, cur)
+	if b.applied != nil {
+		b.applied <- err
+	}
+	return next
+}
+
+// apply switches the slot to the feed b asks for: it switches the track to b's
+// codec, stops the current feed, announces the binding and writes the source's
+// cached GOP, which starts at its last IDR. The codec comes first, because it
+// is the step that can fail: then the slot is left as it was, still writing the
+// current feed, and the client gets an error for the epoch of the bind.
+func (sl *slot) apply(b binding, cur feed) (feed, error) {
 	if b.src == nil {
-		return feed{}
+		cur.stop()
+		return feed{}, nil
 	}
 	if err := sl.useCodec(b.codec); err != nil {
 		sl.log.Error("cannot switch the codec of a slot", "slot", sl.index, "codec", b.codec.MimeType, "err", err)
 		sl.notify(errorMsg{T: "error", Slot: sl.index, Epoch: b.epoch, Code: codeCodecUnsupported})
-		return feed{}
+		return cur, err
 	}
+	cur.stop()
 	cached, live, cancel := b.src.Subscribe()
 	sl.notify(boundMsg{T: "bound", Slot: sl.index, Epoch: b.epoch, Codec: string(b.src.Codec()), Profile: b.src.Profile(), Fallback: b.fallback})
 	for i, au := range cached {
@@ -179,7 +200,7 @@ func (sl *slot) apply(b binding, cur feed) feed {
 		}
 		sl.write(au, step)
 	}
-	return feed{src: b.src, live: live, cancel: cancel}
+	return feed{src: b.src, live: live, cancel: cancel}, nil
 }
 
 // useCodec makes the slot send in codec c. A new codec needs a new track,
@@ -192,7 +213,7 @@ func (sl *slot) useCodec(c webrtc.RTPCodecParameters) error {
 	if err != nil {
 		return err
 	}
-	if err := sl.sender.ReplaceTrack(track); err != nil {
+	if err := sl.replaceTrack(sl.sender, track); err != nil {
 		return fmt.Errorf("replace track: %w", err)
 	}
 	sl.track, sl.codec, sl.remainder = track, c, 0

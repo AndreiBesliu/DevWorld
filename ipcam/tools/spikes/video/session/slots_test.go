@@ -1,8 +1,10 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -174,4 +176,103 @@ func TestUnbind_StopsTheSlot(t *testing.T) {
 		t.Errorf("slot 0 received %s, want %s", frames(got), want)
 	}
 	checkContinuous(t, got)
+}
+
+// failingReplaceTrack returns session options in which the slots' ReplaceTrack
+// fails while fail is set.
+func failingReplaceTrack(clock source.Clock, fail *atomic.Bool) options {
+	opts := testOptions(clock, nil)
+	opts.replaceTrack = func(sender *webrtc.RTPSender, track webrtc.TrackLocal) error {
+		if fail.Load() {
+			return errors.New("injected ReplaceTrack failure")
+		}
+		return sender.ReplaceTrack(track)
+	}
+	return opts
+}
+
+func TestBind_FailedCodecSwitchLeavesTheSlotAsItWas(t *testing.T) {
+	// Both are Baseline-or-Main H.264 that chromeLike offers: the first stream
+	// goes out in the codec the slot starts with, the second needs a new track.
+	old := newTestSim(t, "sim-01", 1, "sub", h264AUs("42c01e", 1, 48, 12), 12)
+	next := newTestSim(t, "sim-02", 2, "sub", h264AUs("4d401f", 2, 48, 12), 12)
+	old.emit(t, 1)
+	next.emit(t, 1)
+	var fail atomic.Bool
+	clock := newFakeClock()
+	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	s := connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": old, "sim-02/sub": next}, failingReplaceTrack(clock, &fail))
+
+	c.bind(t, 0, "sim-01", "sub", 1)
+	c.next(t, "bound")
+	got := []rxAU{c.au(t, 0)}
+
+	fail.Store(true)
+	c.bind(t, 0, "sim-02", "sub", 2)
+	if m := c.next(t, "error"); m.raw != `{"t":"error","slot":0,"epoch":2,"code":"CODEC_UNSUPPORTED"}` {
+		t.Errorf("error = %s, want CODEC_UNSUPPORTED for epoch 2", m.raw)
+	}
+
+	// The slot still carries the old camera, and only it.
+	old.emit(t, 2)
+	got = append(got, c.au(t, 0), c.au(t, 0))
+	next.emit(t, 2)
+	c.quiet(t, 0, 100*time.Millisecond)
+	if want := "1/0* 1/1 1/2"; frames(got) != want {
+		t.Errorf("slot 0 received %s, want %s", frames(got), want)
+	}
+	checkContinuous(t, got)
+
+	waitPending(t, s, old, 2)
+	if fanout.has(next, s) {
+		t.Error("the session reports the source that the slot does not carry")
+	}
+	clock.advance(t, 500*time.Millisecond)
+	if m := c.next(t, "sent"); m.Cam != 1 {
+		t.Errorf("sent = %s, want only the old camera", m.raw)
+	}
+	s.sentMu.Lock()
+	bound := len(s.bound)
+	s.sentMu.Unlock()
+	if bound != 1 {
+		t.Errorf("the session has %d sources bound, want 1", bound)
+	}
+
+	// The slot is not stuck: the same bind works once the switch does.
+	fail.Store(false)
+	c.bind(t, 0, "sim-02", "sub", 3)
+	if m := c.next(t, "bound"); m.Epoch != 3 {
+		t.Fatalf("bound = %s, want epoch 3", m.raw)
+	}
+	if au := c.au(t, 0); !au.idr || au.camera != 2 {
+		t.Errorf("first access unit after the switch = %v, want the IDR of camera 2", au)
+	}
+	waitUntil(t, "the session has released the old source", func() bool { return !fanout.has(old, s) })
+}
+
+func TestBind_FailedCodecSwitchOnAnEmptySlotBindsNothing(t *testing.T) {
+	sim := newTestSim(t, "sim-02", 2, "sub", h264AUs("4d401f", 2, 48, 12), 12)
+	sim.emit(t, 1)
+	var fail atomic.Bool
+	fail.Store(true)
+	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	s := connect(t, testAPI(t), c, map[string]source.Source{"sim-02/sub": sim}, failingReplaceTrack(newFakeClock(), &fail))
+
+	c.bind(t, 0, "sim-02", "sub", 1)
+	if m := c.next(t, "error"); m.Epoch != 1 || m.Code != "CODEC_UNSUPPORTED" {
+		t.Errorf("error = %s, want CODEC_UNSUPPORTED for epoch 1", m.raw)
+	}
+	c.quiet(t, 0, 100*time.Millisecond)
+	if fanout.has(sim, s) {
+		t.Error("the session reports a source that no slot carries")
+	}
+
+	fail.Store(false)
+	c.bind(t, 0, "sim-02", "sub", 2)
+	if m := c.next(t, "bound"); m.Epoch != 2 {
+		t.Fatalf("bound = %s, want epoch 2", m.raw)
+	}
+	if au := c.au(t, 0); !au.idr || au.camera != 2 {
+		t.Errorf("first access unit = %v, want the IDR of camera 2", au)
+	}
 }

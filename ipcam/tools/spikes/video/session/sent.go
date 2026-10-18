@@ -34,8 +34,11 @@ type sentFanout struct {
 }
 
 // subscribe delivers the sent records of src to sink from now on. The first
-// subscription to a source starts the goroutine that reads its sent log. A
-// source without a sent log is ignored.
+// subscription to a source starts the goroutine that reads its sent log, after
+// it has discarded the records that the source logged before: they belong to
+// frames that were sent, and cached, before any viewer bound the source, so a
+// latency measured on them would include the age of the cache (R26). A source
+// without a sent log is ignored.
 func (f *sentFanout) subscribe(src source.Source, sink sentSink) {
 	log := src.SentLog()
 	if log == nil {
@@ -47,9 +50,25 @@ func (f *sentFanout) subscribe(src source.Source, sink sentSink) {
 	if !reading {
 		sinks = map[sentSink]struct{}{}
 		f.sinks[src] = sinks
+		discardBacklog(log)
 		go f.forward(src, log)
 	}
 	sinks[sink] = struct{}{}
+}
+
+// discardBacklog drops the records that are buffered in log, without waiting
+// for more.
+func discardBacklog(log <-chan source.SentRecord) {
+	for {
+		select {
+		case _, ok := <-log:
+			if !ok {
+				return
+			}
+		default:
+			return
+		}
+	}
 }
 
 // unsubscribe stops the delivery of the sent records of src to sink.

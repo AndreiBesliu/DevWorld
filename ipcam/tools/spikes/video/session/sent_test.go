@@ -31,9 +31,20 @@ func waitPending(t *testing.T, s *Session, src source.Source, n int) {
 	})
 }
 
+// pendingRecords returns the sent records of src that the session has not
+// reported yet.
+func pendingRecords(s *Session, src source.Source) [][3]float64 {
+	s.sentMu.Lock()
+	defer s.sentMu.Unlock()
+	if b := s.bound[src]; b != nil {
+		return slices.Clone(b.recs)
+	}
+	return nil
+}
+
 func TestSentLog_BatchesEvery500ms(t *testing.T) {
 	sim := newTestSim(t, "sim-04", 4, "sub", h264AUs("4d401f", 4, 48, 12), 12)
-	sim.emit(t, 1)
+	sim.emit(t, 1) // frame 0 goes before the bind, and no sent message reports it
 	clock := newFakeClock()
 	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
 	s := connect(t, testAPI(t), c, map[string]source.Source{"sim-04/sub": sim}, testOptions(clock, nil))
@@ -41,14 +52,14 @@ func TestSentLog_BatchesEvery500ms(t *testing.T) {
 	c.next(t, "bound")
 
 	sim.emit(t, 2)
-	waitPending(t, s, sim, 3)
+	waitPending(t, s, sim, 2)
 	clock.advance(t, 500*time.Millisecond)
 	m := c.next(t, "sent")
-	want := [][3]float64{{0, 0, sim.sentAt(1)}, {1, 0, sim.sentAt(2)}, {2, 0, sim.sentAt(3)}}
+	want := [][3]float64{{1, 0, sim.sentAt(2)}, {2, 0, sim.sentAt(3)}}
 	if m.Cam != 4 || m.P != "sub" || !slices.Equal(m.R, want) {
 		t.Errorf("sent = %s, want cam 4, p sub, r %v", m.raw, want)
 	}
-	if !strings.HasPrefix(m.raw, `{"t":"sent","cam":4,"p":"sub","r":[[0,0,`) {
+	if !strings.HasPrefix(m.raw, `{"t":"sent","cam":4,"p":"sub","r":[[1,0,`) {
 		t.Errorf("sent = %s, want the fields in the order t, cam, p, r", m.raw)
 	}
 
@@ -59,6 +70,41 @@ func TestSentLog_BatchesEvery500ms(t *testing.T) {
 	want = [][3]float64{{3, 0, sim.sentAt(4)}, {4, 0, sim.sentAt(5)}}
 	if !slices.Equal(m.R, want) {
 		t.Errorf("second sent = %s, want r %v", m.raw, want)
+	}
+}
+
+// A simulator logs the frames it sends from the start, but the sent message of
+// a session reports the frames since its source was bound: a cached frame that a
+// bind sends carries its original emit time, so its latency would include the
+// age of the cache (R26).
+func TestSentLog_ReportsNoRecordFromBeforeTheFirstBind(t *testing.T) {
+	sim := newTestSim(t, "sim-04", 4, "sub", h264AUs("4d401f", 4, 48, 12), 12)
+	sim.emit(t, 3) // frames 0 to 2, before any session binds the simulator
+	waitUntil(t, "the simulator logged its frames", func() bool { return len(sim.SentLog()) == 3 })
+	clock := newFakeClock()
+	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	s := connect(t, testAPI(t), c, map[string]source.Source{"sim-04/sub": sim}, testOptions(clock, nil))
+	c.bind(t, 0, "sim-04", "sub", 1)
+	c.next(t, "bound")
+	if got := c.au(t, 0); got.frame != 0 {
+		t.Fatalf("the bind started at frame %d, want the cached keyframe 0", got.frame)
+	}
+
+	sim.emit(t, 1) // frame 3
+	waitUntil(t, "the session holds the record of frame 3", func() bool {
+		recs := pendingRecords(s, sim)
+		return len(recs) > 0 && recs[len(recs)-1][0] == 3
+	})
+	clock.advance(t, 500*time.Millisecond)
+	m := c.next(t, "sent")
+	bindAt := sim.sentAt(3) // the hub time of the last frame sent before the bind
+	for _, r := range m.R {
+		if r[2] <= bindAt {
+			t.Errorf("sent holds the record %v from before the bind: %s", r, m.raw)
+		}
+	}
+	if want := [][3]float64{{3, 0, sim.sentAt(4)}}; !slices.Equal(m.R, want) {
+		t.Errorf("sent = %s, want r %v", m.raw, want)
 	}
 }
 

@@ -26,7 +26,7 @@ func h264Codec(pt webrtc.PayloadType, fmtp string) webrtc.RTPCodecParameters {
 	}
 }
 
-func TestChooseCodec_MatchesProfileIDCAndPrefersTheHighestLevel(t *testing.T) {
+func TestChooseCodec_MatchesProfileIDCAndTakesTheFirstEntry(t *testing.T) {
 	offered := []webrtc.RTPCodecParameters{
 		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}, PayloadType: 96},
 		h264Codec(98, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"),
@@ -45,10 +45,10 @@ func TestChooseCodec_MatchesProfileIDCAndPrefersTheHighestLevel(t *testing.T) {
 	}{
 		// sub (Main 3.1): only 4d001f has profile_idc 0x4d in packetization mode 1.
 		{"sub", profiledSource{codec: source.CodecH264, profile: "4d401f"}, 102, true},
-		// main (Main 4.0): the level is not enforced.
+		// main (Main 4.0): the level is not enforced, and the packetization-mode 0 entry does not count.
 		{"main", profiledSource{codec: source.CodecH264, profile: "4d4028"}, 102, true},
-		// main-high51: the High entry with the highest level, the first of equals.
-		{"high", profiledSource{codec: source.CodecH264, profile: "640033"}, 106, true},
+		// main-high51: the first High entry, as Pion binds it, not the one with the highest level.
+		{"high", profiledSource{codec: source.CodecH264, profile: "640033"}, 104, true},
 		{"baseline", profiledSource{codec: source.CodecH264, profile: "42c01e"}, 98, true},
 		{"h265", profiledSource{codec: source.CodecH265, profile: "017b"}, 110, true},
 		{"high 4:4:4 not offered", profiledSource{codec: source.CodecH264, profile: "f40028"}, 0, false},
@@ -90,8 +90,10 @@ func TestChooseCodec_SubFallsBackToTheClosestOfferedProfile(t *testing.T) {
 		{"main on Baseline", mainSrc, firefox, 126, "42e01f"},
 		// Safari: a Constrained High decoder decodes Main without B-frames.
 		{"main on Constrained High", mainSrc, []webrtc.RTPCodecParameters{pm1(96, "42e01f"), pm1(98, "640c1f")}, 98, "640c1f"},
-		// The highest level of the closest profile; the fallback is lowercase.
-		{"highest level", mainSrc, []webrtc.RTPCodecParameters{pm1(96, "42e01f"), pm1(98, "42E034"), pm1(100, "42e028")}, 98, "42e034"},
+		// The first entry of the closest profile, whatever its level, as Pion binds it.
+		{"first of the closest profile", mainSrc, []webrtc.RTPCodecParameters{pm1(96, "42e01f"), pm1(98, "42E034"), pm1(100, "42e028")}, 96, "42e01f"},
+		// The fallback is lowercase.
+		{"fallback is lowercase", mainSrc, []webrtc.RTPCodecParameters{pm1(96, "42E01F")}, 96, "42e01f"},
 		// The next richer profile goes before a poorer one...
 		{"high on High 4:4:4", highSrc, []webrtc.RTPCodecParameters{pm1(96, "4d001f"), pm1(98, "f4001f")}, 98, "f4001f"},
 		{"main on High", mainSrc, []webrtc.RTPCodecParameters{pm1(96, "f4001f"), pm1(98, "64001f"), pm1(100, "42e01f")}, 98, "64001f"},
@@ -203,5 +205,22 @@ func TestBind_SubFallsBackToTheClosestOfferedProfile(t *testing.T) {
 	}
 	if fmtpValue(fmtp, "profile-level-id") != "42e01f" || fmtpValue(fmtp, "packetization-mode") != "1" {
 		t.Errorf("the substream came in payload type %d (%q), want the offered 42e01f in packetization mode 1", au.pt, fmtp)
+	}
+}
+
+// Pion binds the first offered entry with the track's profile_idc, constraint
+// byte and packetization mode, and ignores the level. "bound" must name the
+// profile that the wire carries.
+func TestBind_SubFallbackNamesTheProfileOfTheWire(t *testing.T) {
+	sim := newTestSim(t, "sim-01", 1, "sub", h264AUs("4d401f", 1, 24, 12), 12)
+	sim.emit(t, 1)
+	c := newClient(t, clientConfig{slots: 1, offer: codecOffer{h264: []string{"42e01f", "42e034"}}})
+	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": sim}, testOptions(source.SystemClock{}, nil))
+
+	c.bind(t, 0, "sim-01", "sub", 1)
+	m := c.next(t, "bound")
+	au := c.au(t, 0)
+	if wire := c.wireProfile(0, au); m.Fallback != "42e01f" || wire != "42e01f" {
+		t.Errorf("bound = %s, wire profile %q; want both to be the first offered 42e01f", m.raw, wire)
 	}
 }

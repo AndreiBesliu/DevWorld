@@ -23,20 +23,26 @@
 // Slots are numbered from 0 in the order of the offer's recvonly video
 // m-lines. A bind names the source "<cam>/<profile>" (R2); "bound" carries the
 // source's codec and codec profile, and its epoch is the bind's. "sent" comes
-// every 500 ms for each bound simulator, "jitter" every 10 s while anything is
-// bound, and "pair" whenever ICE selects a pair.
+// every 500 ms for each bound simulator and lists the frames it sent since its
+// source was bound, not the ones it sent before (R26). "jitter" comes every
+// 10 s while anything is bound, and "pair" whenever ICE selects a pair.
 //
-// H.264 goes out in the offered profile-level-id whose profile_idc is the
-// stream's, at the highest offered level (R20). When the offer has none, a
-// "main" bind fails with CODEC_UNSUPPORTED, as does an H.265 stream that the
-// offer lacks (APP-05: the client falls back to "sub"). A "sub" bind instead
-// goes out in the closest offered H.264 profile (R23, spec §6.3 step 7): on
-// the ladder Baseline, Main, High, High 10, High 4:2:2, High 4:4:4, the
-// nearest richer one, whose decoder decodes the stream, else the nearest
-// poorer one, at its highest offered level. Then "bound" names that
-// profile-level-id in "fallback", which is absent otherwise:
+// H.264 goes out in the first offered profile-level-id, in offer order, whose
+// profile_idc is the stream's (R20). The level is not enforced, and the first
+// entry is the one that Pion binds, so "bound" names what the client receives.
+// When the offer has none, a "main" bind fails with CODEC_UNSUPPORTED, as does
+// an H.265 stream that the offer lacks (APP-05: the client falls back to
+// "sub"). A "sub" bind instead goes out in the closest offered H.264 profile
+// (R23, spec §6.3 step 7): on the ladder Baseline, Main, High, High 10, High
+// 4:2:2, High 4:4:4, the nearest richer one, whose decoder decodes the stream,
+// else the nearest poorer one, in its first offered entry. Then "bound" names
+// that profile-level-id in "fallback", which is absent otherwise:
 //
 //	{"t":"bound","slot":0,"epoch":8,"codec":"H264","profile":"4d401f","fallback":"42e01f"}
+//
+// A bind that cannot switch the slot to the codec fails with CODEC_UNSUPPORTED,
+// whatever the reason; like any failed bind it leaves the slot carrying what it
+// carried, and the session reporting only that.
 package session
 
 import (
@@ -112,6 +118,8 @@ type Session struct {
 	slots   []*slot
 	clock   source.Clock
 	log     *slog.Logger
+	// replaceTrack is what a slot calls to switch its sender to another track.
+	replaceTrack func(*webrtc.RTPSender, webrtc.TrackLocal) error
 
 	sendMu   sync.Mutex
 	rpc      *webrtc.DataChannel // the rpc channel, once the viewer opened it
@@ -119,7 +127,7 @@ type Session struct {
 	pairSent bool
 
 	rpcMu      sync.Mutex
-	slotSource []source.Source // per slot, the source of the last accepted bind
+	slotSource []source.Source // per slot, the source it carries, once its bind has succeeded
 
 	sentMu sync.Mutex
 	bound  map[source.Source]*boundSource
@@ -135,6 +143,8 @@ type Session struct {
 type options struct {
 	clock source.Clock
 	log   *slog.Logger
+	// replaceTrack replaces RTPSender.ReplaceTrack, which a test makes fail.
+	replaceTrack func(*webrtc.RTPSender, webrtc.TrackLocal) error
 }
 
 // Answer answers a viewer's offer with a new session. Every recvonly video
@@ -151,12 +161,16 @@ func answer(api *webrtc.API, offerSDP string, sources map[string]source.Source, 
 		return nil, "", fmt.Errorf("create peer connection: %w", err)
 	}
 	s := &Session{
-		pc:      pc,
-		sources: sources,
-		clock:   opts.clock,
-		log:     opts.log,
-		bound:   map[source.Source]*boundSource{},
-		done:    make(chan struct{}),
+		pc:           pc,
+		sources:      sources,
+		clock:        opts.clock,
+		log:          opts.log,
+		replaceTrack: opts.replaceTrack,
+		bound:        map[source.Source]*boundSource{},
+		done:         make(chan struct{}),
+	}
+	if s.replaceTrack == nil {
+		s.replaceTrack = (*webrtc.RTPSender).ReplaceTrack
 	}
 	answerSDP, err := s.negotiate(offerSDP)
 	if err != nil {
@@ -185,7 +199,7 @@ func (s *Session) negotiate(offerSDP string) (string, error) {
 		if tr.Kind() != webrtc.RTPCodecTypeVideo || tr.Direction() != webrtc.RTPTransceiverDirectionSendonly {
 			continue
 		}
-		sl, err := newSlot(len(s.slots), tr.Receiver().GetParameters().Codecs, s.notify, s.log)
+		sl, err := newSlot(len(s.slots), tr.Receiver().GetParameters().Codecs, s.notify, s.log, s.replaceTrack)
 		if err != nil {
 			return "", err
 		}
@@ -343,7 +357,8 @@ func (s *Session) onMessage(m webrtc.DataChannelMessage) {
 }
 
 // bind checks a bind and hands it to the slot, which sends "bound" when it
-// switches. A failed bind leaves the slot as it was.
+// switches, and waits for the slot's verdict. A failed bind leaves the slot, and
+// the session's account of what the slot carries, as it was.
 func (s *Session) bind(req request) {
 	fail := func(code string) {
 		s.notify(errorMsg{T: "error", Slot: req.Slot, Epoch: req.Epoch, Code: code})
@@ -362,12 +377,17 @@ func (s *Session) bind(req request) {
 		fail(codeCodecUnsupported)
 		return
 	}
+	// The source is retained before the slot announces it, so that the sent
+	// records of the frames it writes are not missed.
 	s.retain(src, req.Profile)
+	if !s.switchSlot(req.Slot, binding{src: src, codec: codec, fallback: fallback, epoch: req.Epoch}) {
+		s.release(src) // the slot has sent the error, or the session closes
+		return
+	}
 	if old := s.slotSource[req.Slot]; old != nil {
 		s.release(old)
 	}
 	s.slotSource[req.Slot] = src
-	s.submit(req.Slot, binding{src: src, codec: codec, fallback: fallback, epoch: req.Epoch})
 }
 
 // unbind empties a slot.
@@ -383,10 +403,28 @@ func (s *Session) unbind(req request) {
 	s.submit(req.Slot, binding{})
 }
 
-// submit queues a request for a slot's writer.
-func (s *Session) submit(slot int, b binding) {
+// submit queues a request for a slot's writer and reports whether it was
+// queued: it is not when the session closes first.
+func (s *Session) submit(slot int, b binding) bool {
 	select {
 	case s.slots[slot].reqs <- b:
+		return true
 	case <-s.done:
+		return false
+	}
+}
+
+// switchSlot queues a request for a slot's writer and waits until the slot has
+// handled it. It reports whether the slot carries the source now.
+func (s *Session) switchSlot(slot int, b binding) bool {
+	b.applied = make(chan error, 1)
+	if !s.submit(slot, b) {
+		return false
+	}
+	select {
+	case err := <-b.applied:
+		return err == nil
+	case <-s.done:
+		return false
 	}
 }

@@ -87,14 +87,19 @@ func profileLevelID(s string) (profileIDC, levelIDC byte, ok bool) {
 var h264Ladder = []byte{0x42, 0x4d, 0x64, 0x6e, 0x7a, 0xf4}
 
 // chooseCodec picks, from the codecs that an answer lists for a slot, the one
-// that carries src. For H.264 it is an entry in packetization mode 1 whose
-// profile_idc equals the source's (R20), with the highest level and the first
-// of equals; the level itself is not enforced. When no entry has that
-// profile_idc and sub is set (a bind of a substream, R23, spec §6.3 step 7),
-// it is the entry of the closest offered profile, picked the same way, and
-// fallback is that entry's profile-level-id. For H.265 it is the first H.265
-// entry. ok is false when nothing fits, including an H.264 source whose
-// profile is not known yet.
+// that carries src. For H.264 it is the first entry, in offer order, in
+// packetization mode 1 whose profile_idc equals the source's (R20); the level is
+// not enforced. When no entry has that profile_idc and sub is set (a bind of a
+// substream, R23, spec §6.3 step 7), it is the first entry of the closest
+// offered profile, and fallback is that entry's profile-level-id. For H.265 it
+// is the first H.265 entry. ok is false when nothing fits, including an H.264
+// source whose profile is not known yet.
+//
+// The first entry, not the one with the highest level, because that is the one
+// that goes on the wire: Pion binds a track to the first offered entry whose
+// profile_idc, constraint byte and packetization mode equal the track's, and
+// ignores the level. Another choice would make the payload type, and the
+// fallback that "bound" reports, differ from what the client receives.
 func chooseCodec(src source.Source, sub bool, offered []webrtc.RTPCodecParameters) (codec webrtc.RTPCodecParameters, fallback string, ok bool) {
 	switch src.Codec() {
 	case source.CodecH265:
@@ -108,14 +113,14 @@ func chooseCodec(src source.Source, sub bool, offered []webrtc.RTPCodecParameter
 		if !known {
 			break
 		}
-		if i := bestH264(offered, want); i >= 0 {
+		if i := firstH264(offered, want); i >= 0 {
 			return offered[i], "", true
 		}
 		if !sub {
 			break
 		}
 		for _, idc := range closestProfiles(want) {
-			if i := bestH264(offered, idc); i >= 0 {
+			if i := firstH264(offered, idc); i >= 0 {
 				return offered[i], strings.ToLower(fmtpValue(offered[i].SDPFmtpLine, "profile-level-id")), true
 			}
 		}
@@ -123,20 +128,18 @@ func chooseCodec(src source.Source, sub bool, offered []webrtc.RTPCodecParameter
 	return webrtc.RTPCodecParameters{}, "", false
 }
 
-// bestH264 returns the index of the entry in packetization mode 1 with the
-// given profile_idc and the highest level, the first of equals, or -1.
-func bestH264(offered []webrtc.RTPCodecParameters, profileIDC byte) int {
-	best, bestLevel := -1, -1
+// firstH264 returns the index of the first entry in packetization mode 1 with
+// the given profile_idc, or -1.
+func firstH264(offered []webrtc.RTPCodecParameters, profileIDC byte) int {
 	for i, c := range offered {
 		if !isH264(c) || !sendable(c) {
 			continue
 		}
-		idc, level, ok := profileLevelID(fmtpValue(c.SDPFmtpLine, "profile-level-id"))
-		if ok && idc == profileIDC && int(level) > bestLevel {
-			best, bestLevel = i, int(level)
+		if idc, _, ok := profileLevelID(fmtpValue(c.SDPFmtpLine, "profile-level-id")); ok && idc == profileIDC {
+			return i
 		}
 	}
-	return best
+	return -1
 }
 
 // closestProfiles returns the profiles of h264Ladder other than profileIDC,

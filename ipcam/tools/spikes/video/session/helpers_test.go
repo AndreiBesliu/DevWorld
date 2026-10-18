@@ -268,20 +268,22 @@ func parseAU(mime string, annexB []byte) (rxAU, error) {
 // rxMsg is a message the test client received on the rpc channel.
 type rxMsg struct {
 	raw     string
-	T       string       `json:"t"`
-	Slot    int          `json:"slot"`
-	Epoch   int64        `json:"epoch"`
-	Codec   string       `json:"codec"`
-	Profile string       `json:"profile"`
-	Code    string       `json:"code"`
-	C0      float64      `json:"c0"`
-	H       float64      `json:"h"`
-	Cam     int          `json:"cam"`
-	P       string       `json:"p"`
-	R       [][3]float64 `json:"r"`
-	Local   string       `json:"local"`
-	Remote  string       `json:"remote"`
-	MS      float64      `json:"ms"`
+	T       string `json:"t"`
+	Slot    int    `json:"slot"`
+	Epoch   int64  `json:"epoch"`
+	Codec   string `json:"codec"`
+	Profile string `json:"profile"`
+	// Fallback is the profile-level-id of a substream that goes out in another profile than its own.
+	Fallback string       `json:"fallback"`
+	Code     string       `json:"code"`
+	C0       float64      `json:"c0"`
+	H        float64      `json:"h"`
+	Cam      int          `json:"cam"`
+	P        string       `json:"p"`
+	R        [][3]float64 `json:"r"`
+	Local    string       `json:"local"`
+	Remote   string       `json:"remote"`
+	MS       float64      `json:"ms"`
 }
 
 // codecOffer says what the test client offers: the H.264 profile-level-ids
@@ -475,6 +477,17 @@ func (c *testClient) next(t *testing.T, typ string) rxMsg {
 			t.Fatalf("no %q message within 10 s", typ)
 		}
 	}
+}
+
+// wireProfile returns the profile-level-id of the payload type that carried an
+// access unit to slot, as the client negotiated it.
+func (c *testClient) wireProfile(slot int, au rxAU) string {
+	for _, codec := range c.pc.GetTransceivers()[slot].Receiver().GetParameters().Codecs {
+		if uint8(codec.PayloadType) == au.pt {
+			return fmtpValue(codec.SDPFmtpLine, "profile-level-id")
+		}
+	}
+	return ""
 }
 
 // au returns the next access unit that slot received.
