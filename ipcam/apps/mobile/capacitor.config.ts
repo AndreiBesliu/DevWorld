@@ -5,7 +5,8 @@ import type { CapacitorConfig } from '@capacitor/cli';
 const config: CapacitorConfig = {
   // Temporary id of the Phase 0 test APK, never published (OPN-01).
   appId: 'ro.ipcam.spike',
-  appName: 'ipcam spike',
+  // The launcher label, Romanian like the app's start page (Proba video ipcam).
+  appName: 'Proba ipcam',
   webDir: '../../tools/spikes/video/app/dist',
   server: {
     // SPIKE-ONLY (plan 2026-10-18-phase0b-video-spike, Task 10): the page's
