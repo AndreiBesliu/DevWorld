@@ -1,15 +1,39 @@
 @ipcam/player: third-party notices
 
 video-rtc.js (go2rtc project, MIT license)
-  No code from video-rtc.js is included in this package. Spec section 6.2 plans
-  for the player to be adapted from it, but the WebRTC and HLS paths written so
-  far (src/webrtc.ts, src/hls.ts, src/player.ts) are original: they are built
-  from the web platform APIs and the spec, and nothing was copied, translated or
-  closely paraphrased from video-rtc.js.
+  https://github.com/AlexxIT/go2rtc (file www/video-rtc.js)
 
-  If code from video-rtc.js is adapted later (the MSE transport is the likely
-  place), the same change must add its copyright notice and the full MIT license
-  text to this file, and name the file or function that was adapted.
+  Spec section 6.2 has this player adapted from video-rtc.js, so its licence
+  notice is carried here. State of the code today: the WebRTC and HLS paths
+  (src/webrtc.ts, src/hls.ts, src/player.ts) are written from the web platform
+  APIs and the spec, and nothing in them was copied, translated or closely
+  paraphrased from video-rtc.js. It is a design reference so far. The MSE
+  transport, which is not implemented yet, is the planned place for adapted code.
+
+  The licence below applies to everything that is adapted from video-rtc.js. The
+  change that adapts code must also name the file or function it came from.
+
+  MIT License
+
+  Copyright (c) 2022 Alexey Khit
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 
 hls.js (Apache License 2.0)
   Copyright (c) 2017 Dailymotion (http://www.dailymotion.com)
