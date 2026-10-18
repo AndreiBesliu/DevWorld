@@ -12,6 +12,13 @@ import tseslint from 'typescript-eslint';
 const PLAYER_IMPORT_MESSAGE =
   '@ipcam/player must not import React, Capacitor or Tauri (APP-22). Inject platform behaviour through its options instead.';
 
+// The module specifiers that no-restricted-imports bans for the player, as one
+// regular expression for the selectors below. no-restricted-imports only sees
+// import/export declarations, so dynamic import('react') and the type-position
+// import('react').FC (a TSImportType) need selectors. Both ImportExpression and
+// TSImportType (typescript-eslint 8.71) keep the specifier in `source`.
+const PLAYER_FORBIDDEN_SPECIFIER = String.raw`^(react|react-dom)(\/|$)|^(@capacitor|@tauri-apps)\/`;
+
 export default defineConfig(
   globalIgnores(['**/dist/**', '**/coverage/**']),
   js.configs.recommended,
@@ -39,14 +46,14 @@ export default defineConfig(
           ],
         },
       ],
-      // no-restricted-imports does not see dynamic import(), so cover it here.
+      // A later config entry for these files that sets no-restricted-syntax
+      // replaces this one, so add any further selectors here.
       'no-restricted-syntax': [
         'error',
-        {
-          selector:
-            'ImportExpression[source.value=/^(react|react-dom)(\\/|$)|^(@capacitor|@tauri-apps)\\//]',
+        ...['ImportExpression', 'TSImportType'].map((node) => ({
+          selector: `${node}[source.value=/${PLAYER_FORBIDDEN_SPECIFIER}/]`,
           message: PLAYER_IMPORT_MESSAGE,
-        },
+        })),
       ],
     },
   },

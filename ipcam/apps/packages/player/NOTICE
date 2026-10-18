@@ -1,0 +1,21 @@
+@ipcam/player: third-party notices
+
+video-rtc.js (go2rtc project, MIT license)
+  No code from video-rtc.js is included in this package. Spec section 6.2 plans
+  for the player to be adapted from it, but the WebRTC and HLS paths written so
+  far (src/webrtc.ts, src/hls.ts, src/player.ts) are original: they are built
+  from the web platform APIs and the spec, and nothing was copied, translated or
+  closely paraphrased from video-rtc.js.
+
+  If code from video-rtc.js is adapted later (the MSE transport is the likely
+  place), the same change must add its copyright notice and the full MIT license
+  text to this file, and name the file or function that was adapted.
+
+hls.js (Apache License 2.0)
+  Copyright (c) 2017 Dailymotion (http://www.dailymotion.com)
+  https://github.com/video-dev/hls.js
+
+  A runtime dependency of this package (package.json), installed from the npm
+  registry and not copied into this repository. An application bundle that
+  contains hls.js must carry its license text (Apache-2.0, plus the Brightcove
+  notice in hls.js's own LICENSE file), which ships with the npm package.
