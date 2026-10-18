@@ -10,9 +10,11 @@
 # apps/mobile/plugins/pip/android/src/main. Its Kotlin, Java, Swift and Rust
 # files count; a line counts unless it is blank or holds only comments: code
 # before a // or a /*, or after a */, makes it a code line. Block comments do
-# not nest, and a "..." string or a multi-line """ ... """ string may hold
-# comment markers. A ' character literal that holds a quote ('"') is not
-# read, so a line with one may be counted too high (never too low).
+# not nest. Strings may hold comment markers: "..." strings, which in Rust may
+# span lines, multi-line """ ... """ strings and Rust raw strings (r"...",
+# r#"..."#), and a '"' character literal opens no string. Swift's #"..."#
+# strings and quotes nested in a string template are not read: a comment
+# marker in one of them can miscount its line.
 # Prints "<folder>: <n> lines (budget <budget>)" per folder. The budget is a
 # decimal number, also with leading zeros. Exits 1 when a folder has more
 # lines than the budget, 2 on a usage error.
@@ -34,15 +36,20 @@ budget=$((10#${budget})) # (( )) would read 0400 as octal
 # shellcheck disable=SC2016 # awk, not the shell, reads the $ fields
 code_lines='
   # Whether the line holds anything but whitespace and comments. in_block
-  # carries a /* ... */ across lines, in_raw a """ ... """ string.
-  function has_code(line,    i, n, c, pair, triple, code) {
+  # carries a /* ... */ across lines, raw_end the end of a raw string (""" or,
+  # in Rust, a quote and the hashes of its r#") and in_str a Rust "..."
+  # string. rust is set for a .rs file.
+  function has_code(line,    i, n, c, pair, code) {
     n = length(line)
     for (i = 1; i <= n; ) {
       c = substr(line, i, 1)
       pair = substr(line, i, 2)
-      triple = substr(line, i, 3)
-      if (in_raw) {
-        if (triple == "\"\"\"") { in_raw = 0; i += 3 } else i++
+      if (raw_end != "") {
+        if (substr(line, i, length(raw_end)) == raw_end) { i += length(raw_end); raw_end = "" } else i++
+        if (c != " " && c != "\t" && c != "\r") code = 1
+      } else if (in_str) {
+        if (c == "\\") i += 2
+        else { if (c == "\"") in_str = 0; i++ }
         if (c != " " && c != "\t" && c != "\r") code = 1
       } else if (in_block) {
         if (pair == "*/") { in_block = 0; i += 2 } else i++
@@ -51,25 +58,36 @@ code_lines='
       } else if (pair == "/*") {
         in_block = 1
         i += 2
-      } else if (triple == "\"\"\"") {
-        in_raw = 1
+      } else if (substr(line, i, 3) == "\"\"\"") {
+        raw_end = "\"\"\""
         code = 1
         i += 3
-      } else if (c == "\"") {
+      } else if (rust && match(substr(line, i), /^r#*"/)) {
+        raw_end = "\"" substr(line, i + 1, RLENGTH - 2)
         code = 1
-        for (i++; i <= n && substr(line, i, 1) != "\""; i++) if (substr(line, i, 1) == "\\") i++
+        i += RLENGTH
+      } else if (substr(line, i, 3) == "\047\"\047") {
+        code = 1
+        i += 3
+      } else if (substr(line, i, 4) == "\047\\\"\047") {
+        code = 1
+        i += 4
+      } else if (c == "\"") {
+        in_str = 1
+        code = 1
         i++
       } else {
         if (c != " " && c != "\t" && c != "\r") code = 1
         i++
       }
     }
+    # Only a Rust "..." string goes on to the next line.
+    if (!rust) in_str = 0
     return code
   }
-  FNR == 1 { in_block = 0; in_raw = 0 }
+  FNR == 1 { in_block = 0; raw_end = ""; in_str = 0; rust = FILENAME ~ /\.rs$/ }
   has_code($0) { n++ }
-  END { print n + 0 }
-'
+  END { print n + 0 }'
 
 status=0
 for folder in "$@"; do

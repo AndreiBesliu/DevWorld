@@ -151,6 +151,49 @@ describe('count-native-lines.sh', () => {
     expect(run.stdout).toContain(`${plugin}: 8 lines (budget 400)`);
   });
 
+  it('countNativeLines_rustStringOverSeveralLines_isCodeAndItsCommentMarkersAreText', () => {
+    // A Rust "..." string may span lines (Task 10b review, m1); a /* inside it opens no comment.
+    const source = ['let s = "line one', '  /* inside a string', '  still";', 'let t = 1;', 'let u = 2;'].join('\n');
+    const plugin = fixture({ 'a.rs': source, 'B.kt': 'val k = "kotlin strings end at the line end\n/* c */\nval l = 1' });
+
+    const run = count('400', plugin);
+
+    // The string takes 3 lines, then t and u; k and l in the Kotlin file.
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`${plugin}: 7 lines (budget 400)`);
+  });
+
+  it('countNativeLines_rustRawString_isCodeAndItsQuotesAndCommentMarkersAreText', () => {
+    const source = [
+      'let js = r#"',
+      '  const q = "a"; /* not a comment',
+      '"#;',
+      'let b = r"\\"; /* a comment */', // r"\" holds one backslash, which escapes nothing
+      'let c = br"x"; // trailing',
+      'let d = 1;',
+    ].join('\n');
+    const plugin = fixture({ 'a.rs': source });
+
+    const run = count('400', plugin);
+
+    // The raw string takes 3 lines, then b, c and d.
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`${plugin}: 6 lines (budget 400)`);
+  });
+
+  it('countNativeLines_quoteCharLiteral_opensNoString', () => {
+    // A '"' character literal is no string (Task 10b review, m1); Rust lifetimes are no literals.
+    const kt = ["val q = '\"'; val s = \"\"\"", '  text /* inside', '  more', '"""', 'val t = 1'].join('\n');
+    const rs = ["let q = '\"';", "let e = '\\\"'; /* c */", "fn f<'a>(s: &'a str) {}", '/* c */', 'let x = 1;'].join('\n');
+    const plugin = fixture({ 'A.kt': kt, 'a.rs': rs });
+
+    const run = count('400', plugin);
+
+    // The Kotlin raw string takes 4 lines, then t; q, e, f and x in the Rust file.
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`${plugin}: 9 lines (budget 400)`);
+  });
+
   it('countNativeLines_budgetWithALeadingZero_isDecimal', () => {
     // Bash reads 0400 as octal 256 in arithmetic, and 08 not at all.
     const plugin = fixture({ 'A.kt': kotlin(300) });
