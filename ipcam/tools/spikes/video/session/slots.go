@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
@@ -18,16 +19,18 @@ const (
 	// burstStep is the RTP timestamp step between the cached frames that a
 	// bind sends at once. Compressed timestamps let the decoder catch up with
 	// the current frame without adding the age of the GOP to the latency
-	// (spec §6.3 step 6, HUB-06).
+	// (spec §6.3 step 6, HUB-06). It is also the least step from the last
+	// frame sent to a frame that the slot stamps at the hub clock (useTrack).
 	burstStep = time.Millisecond
 	// fallbackFrameInterval is the frame period of a source that does not
 	// know its frame rate yet: an RTSP source before its second frame.
 	fallbackFrameInterval = 50 * time.Millisecond
 	// requestQueue is how many bind and unbind requests may wait for a slot.
 	requestQueue = 16
-	// maxClockSkip bounds how far a bind skips a slot's timestamps forward. A
-	// skip of half the 32-bit range (6.6 h at 90 kHz) or more would read as a
-	// step backward.
+	// maxClockSkip bounds how far the slot skips its timestamps forward at
+	// once, past the timestamp that the old track would have used. A step of
+	// half the 32-bit range (6.6 h at 90 kHz) or more would read as a step
+	// backward.
 	maxClockSkip = time.Hour
 )
 
@@ -50,9 +53,9 @@ type binding struct {
 // slot is one recvonly video m-line of the client's offer. It writes the
 // camera bound to it, first the cached GOP and then the live frames, into
 // one RTP stream: a rebind or a change of codec keeps the SSRC and continues
-// the sequence numbers and timestamps (spec §6.3 step 6). The timestamps do
-// not lag the hub clock: a bind skips them forward over the time the slot was
-// empty (see the package doc).
+// the sequence numbers and timestamps (spec §6.3 step 6). The timestamps keep
+// to the hub clock: the slot stamps a bind's first frame, and its first live
+// frame, at the hub clock (see the package doc and useTrack).
 type slot struct {
 	index   int
 	offered []webrtc.RTPCodecParameters // the codecs the answer lists for the slot
@@ -72,9 +75,13 @@ type slot struct {
 	ts        uint32  // the timestamp of the next sample
 	remainder float64 // the fraction of a tick that the next sample inherits
 	// due is the hub time that ts stands for: the RTP clock started at the hub
-	// time of the first sample and advances by the step of each sample. Zero
-	// until the slot has written a sample.
+	// time of the first sample and advances by the ticks of each sample, and
+	// useTrack moves it with ts. Zero until the slot has written a sample.
 	due time.Time
+	// lastTS is the timestamp of the last sample written and lastAt the hub
+	// time it stands for; lastAt is zero until the slot has written a sample.
+	lastTS uint32
+	lastAt time.Time
 }
 
 // newSlot creates a slot and its first track, created at answer time in the
@@ -160,6 +167,12 @@ func (sl *slot) run(done <-chan struct{}) {
 				cur = feed{} // the source ended
 				continue
 			}
+			if cur.afterBurst {
+				if err := sl.useTrack(sl.codec); err != nil {
+					sl.log.Warn("cannot stamp a live frame at the hub clock; it goes out on the old track", "slot", sl.index, "err", err)
+				}
+				cur.afterBurst = false
+			}
 			sl.write(au, frameInterval(cur.src))
 		}
 	}
@@ -170,6 +183,9 @@ type feed struct {
 	src    source.Source
 	live   <-chan source.AccessUnit
 	cancel func()
+	// afterBurst is set until the first live frame, which goes out at the hub
+	// clock like the first frame of the bind.
+	afterBurst bool
 }
 
 func (f feed) stop() {
@@ -206,27 +222,40 @@ func (sl *slot) apply(b binding, cur feed) (feed, error) {
 	cur.stop()
 	cached, live, cancel := b.src.Subscribe()
 	sl.notify(boundMsg{T: "bound", Slot: sl.index, Epoch: b.epoch, Codec: string(b.src.Codec()), Profile: b.src.Profile(), Fallback: b.fallback})
-	for i, au := range cached {
-		step := burstStep
-		if i == len(cached)-1 {
-			step = frameInterval(b.src)
-		}
-		sl.write(au, step)
+	// The first live frame comes up to a frame period after the burst, not a
+	// frame period after its last frame: run stamps it at the hub clock.
+	for _, au := range cached {
+		sl.write(au, burstStep)
 	}
-	return feed{src: b.src, live: live, cancel: cancel}, nil
+	return feed{src: b.src, live: live, cancel: cancel, afterBurst: true}, nil
 }
 
-// useTrack makes the slot send in codec c, with timestamps that do not lag the
-// hub clock. A new track continues the sequence numbers and timestamps of the
-// old one; the slot needs one for a new codec, and to skip its timestamps
-// forward to the hub clock when they have fallen behind it, as they do while
-// the slot is empty (TrackLocalStaticSample stamps a sample by the durations of
-// the samples before it, and none are written then).
+// useTrack makes the slot send its next frame, the first of a bind or the
+// first live frame after the cached GOP, in codec c, stamped at the hub clock,
+// or burstStep after the last frame sent when that is later, so that
+// timestamps only increase; it skips at most maxClockSkip past the old track's
+// next timestamp.
+//
+// Left to the old track, the timestamps drift from the hub clock at those two
+// frames. TrackLocalStaticSample stamps a sample by the durations of the
+// samples before it, which are guesses: the timestamps stand still while the
+// slot is empty (Task 9b); after a live frame the old track stamps the bind's
+// first frame a frame period later, however little of it has passed; and the
+// first live frame comes any time within a frame period after the burst
+// (Task 9c). A new track continues the sequence numbers and starts at the
+// timestamp the slot chooses; the slot needs one for a new codec too.
 func (sl *slot) useTrack(c webrtc.RTPCodecParameters) error {
 	ts, due := sl.ts, sl.due
-	if now := sl.now(); !due.IsZero() && now.After(due) {
-		ts += uint32(min(now.Sub(due), maxClockSkip).Seconds() * float64(c.ClockRate))
-		due = now
+	if !sl.lastAt.IsZero() {
+		at := sl.now()
+		if floor := sl.lastAt.Add(burstStep); at.Before(floor) {
+			at = floor
+		}
+		if limit := sl.due.Add(maxClockSkip); at.After(limit) {
+			at = limit
+		}
+		ticks := uint32(math.Round(at.Sub(sl.lastAt).Seconds() * float64(c.ClockRate)))
+		ts, due = sl.lastTS+ticks, sl.lastAt.Add(tickDuration(ticks, c.ClockRate))
 	}
 	if c.PayloadType == sl.codec.PayloadType && ts == sl.ts {
 		return nil
@@ -247,16 +276,25 @@ func (sl *slot) write(au source.AccessUnit, step time.Duration) {
 	if sl.due.IsZero() {
 		sl.due = sl.now()
 	}
-	sl.due = sl.due.Add(step)
+	sl.lastTS, sl.lastAt = sl.ts, sl.due
 	if err := sl.track.WriteSample(media.Sample{Data: annexB(au.NALUs), Duration: step}); err != nil {
 		sl.log.Debug("write a frame", "slot", sl.index, "err", err)
 	}
 	// TrackLocalStaticSample turns the step into RTP ticks with this
-	// arithmetic; repeating it gives the timestamp of the next sample.
+	// arithmetic; repeating it gives the timestamp of the next sample. due
+	// follows the ticks, not the step, so that the fractions of a tick that a
+	// new track drops do not set the slot's account of its RTP clock apart from
+	// the clock itself, bind after bind.
 	ticks := step.Seconds()*float64(sl.codec.ClockRate) + sl.remainder
 	whole := uint32(ticks)
 	sl.remainder = ticks - float64(whole)
 	sl.ts += whole
+	sl.due = sl.lastAt.Add(tickDuration(whole, sl.codec.ClockRate))
+}
+
+// tickDuration is the time that ticks of an RTP clock at clockRate span.
+func tickDuration(ticks, clockRate uint32) time.Duration {
+	return time.Duration(ticks) * time.Second / time.Duration(clockRate)
 }
 
 // annexB joins NAL units with 4-byte start codes, the form the payloaders

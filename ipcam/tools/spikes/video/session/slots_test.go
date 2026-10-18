@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -56,8 +57,9 @@ func TestBind_FirstPacketStartsWithIDR(t *testing.T) {
 func TestBind_SendsTheCachedGOPWithCompressedTimestamps(t *testing.T) {
 	sim := newTestSim(t, "sim-01", 1, "sub", h264AUs("4d401f", 1, 48, 12), 12)
 	sim.emit(t, 4)
+	clock := newFakeClock()
 	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
-	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": sim}, testOptions(source.SystemClock{}, nil))
+	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": sim}, testOptions(clock, nil))
 
 	c.bind(t, 0, "sim-01", "sub", 1)
 	c.next(t, "bound")
@@ -65,16 +67,23 @@ func TestBind_SendsTheCachedGOPWithCompressedTimestamps(t *testing.T) {
 	for range 4 {
 		got = append(got, c.au(t, 0))
 	}
-	sim.emit(t, 2)
-	got = append(got, c.au(t, 0), c.au(t, 0))
+	clock.advance(t, 40*time.Millisecond) // the camera's next frame comes 40 ms after the bind
+	sim.emit(t, 1)
+	got = append(got, c.au(t, 0))
+	clock.advance(t, sim.period)
+	sim.emit(t, 1)
+	got = append(got, c.au(t, 0))
 	if want := "1/0* 1/1 1/2 1/3 1/4 1/5"; frames(got) != want {
 		t.Fatalf("slot 0 received %s, want %s", frames(got), want)
 	}
+	checkContinuous(t, got)
 
 	// The cached frames are 1 ms (90 ticks) apart, so that the decoder catches
-	// up without adding their age to the latency; live frames are one frame
-	// period (7500 ticks at 12 fps) apart.
-	checkSteps(t, got, []int64{90, 90, 90, 7500, 7500})
+	// up without adding their age to the latency. The first live frame goes
+	// out at the hub clock, 40 ms after the IDR and so 37 ms after the last
+	// cached frame; live frames are one frame period (7500 ticks at 12 fps)
+	// apart.
+	checkSteps(t, got, []int64{90, 90, 90, 3330, 7500})
 }
 
 func TestRebind_SwitchesOnNextIDR(t *testing.T) {
@@ -107,9 +116,11 @@ func TestRebind_SwitchesOnNextIDR(t *testing.T) {
 		t.Fatalf("slot 0 received %s, want %s", frames(got), want)
 	}
 	checkContinuous(t, got)
-	// Each camera's cached GOP is compressed; the new camera's IDR follows the
-	// old camera's last frame by one frame period.
-	checkSteps(t, got, []int64{90, 7500, 7500, 90, 7500, 7500, 7500})
+	// Each camera's cached GOP is compressed. The hub clock stands still, so
+	// the frames that the slot stamps at the hub clock, the new camera's IDR
+	// and each camera's first live frame, follow the frame before by 1 ms, the
+	// least step; then live frames are one frame period apart.
+	checkSteps(t, got, []int64{90, 90, 90, 90, 90, 7500, 7500})
 	c.quiet(t, 0, 100*time.Millisecond)
 }
 
@@ -131,28 +142,31 @@ func TestRebind_ChangesCodecWithinOneRTPStream(t *testing.T) {
 		t.Errorf("bound for H.265 differs from %s", want)
 	}
 	got = append(got, c.au(t, 0), c.au(t, 0))
-	h265.emit(t, 1)
-	got = append(got, c.au(t, 0))
+	h265.emit(t, 2)
+	got = append(got, c.au(t, 0), c.au(t, 0))
 
 	c.bind(t, 0, "sim-01", "sub", 3)
 	c.next(t, "bound")
 	got = append(got, c.au(t, 0))
-	h264.emit(t, 1)
-	got = append(got, c.au(t, 0))
+	h264.emit(t, 2)
+	got = append(got, c.au(t, 0), c.au(t, 0))
 
-	if want := "1/0* 17/0* 17/1 17/2 1/0* 1/1"; frames(got) != want {
+	if want := "1/0* 17/0* 17/1 17/2 17/3 1/0* 1/1 1/2"; frames(got) != want {
 		t.Fatalf("slot 0 received %s, want %s", frames(got), want)
 	}
-	wantMimes := []string{webrtc.MimeTypeH264, webrtc.MimeTypeH265, webrtc.MimeTypeH265, webrtc.MimeTypeH265, webrtc.MimeTypeH264, webrtc.MimeTypeH264}
+	h264Mime, h265Mime := webrtc.MimeTypeH264, webrtc.MimeTypeH265
+	wantMimes := []string{h264Mime, h265Mime, h265Mime, h265Mime, h265Mime, h264Mime, h264Mime, h264Mime}
 	for i, au := range got {
 		if !strings.EqualFold(au.mime, wantMimes[i]) {
 			t.Errorf("access unit %d (%v) came as %s, want %s", i, au, au.mime, wantMimes[i])
 		}
 	}
 	checkContinuous(t, got)
-	// A new track continues the timestamps: 12 fps H.264 frames are 7500
-	// ticks long, 20 fps H.265 frames 4500, a cached frame 90.
-	checkSteps(t, got, []int64{7500, 90, 4500, 4500, 7500})
+	// A new track continues the timestamps. The hub clock stands still, so
+	// each bind's IDR follows the last frame by 1 ms, as do a cached frame and
+	// the first live frame after the cached ones; then 20 fps H.265 frames are
+	// 4500 ticks long, 12 fps H.264 frames 7500.
+	checkSteps(t, got, []int64{90, 90, 90, 4500, 90, 90, 7500})
 }
 
 func TestUnbind_StopsTheSlot(t *testing.T) {
@@ -212,9 +226,10 @@ func TestRebind_AfterAnIdleSlot_TimestampsFollowTheClock(t *testing.T) {
 	checkContinuous(t, got)
 	// The slot's RTP clock does not stop while the slot is empty: the re-bind's
 	// IDR is stamped 2 s (180000 ticks) after the first bind's, as the hub clock
-	// says, not one frame period after the last frame sent. The cached frames
-	// stay 1 ms apart (R24).
-	checkSteps(t, got, []int64{90, 180000 - 90, 90, 90, 90, 7500})
+	// says, not right after the last frame sent. The cached frames stay 1 ms
+	// apart (R24); the first live frame, stamped at the hub clock, which has
+	// not moved since the bind, follows them by 1 ms.
+	checkSteps(t, got, []int64{90, 180000 - 90, 90, 90, 90, 90})
 }
 
 func TestRebind_AfterHoursIdle_SkipsAnHour(t *testing.T) {
@@ -233,9 +248,123 @@ func TestRebind_AfterHoursIdle_SkipsAnHour(t *testing.T) {
 	c.next(t, "bound")
 	got = append(got, c.au(t, 0))
 
-	// The skip stops at one hour (324000000 ticks), well short of half the
-	// 32-bit timestamp range (6.6 h), which a receiver reads as a step backward.
-	checkSteps(t, got, []int64{90, 7500 + 324000000})
+	// The skip stops one hour (324000000 ticks) past the old track's next
+	// timestamp, 1 ms after the last frame: well short of half the 32-bit
+	// timestamp range (6.6 h), which a receiver reads as a step backward.
+	checkSteps(t, got, []int64{90, 90 + 324000000})
+}
+
+func TestRebind_BackToBack_RTPClockKeepsToTheHubClock(t *testing.T) {
+	const fps = 12
+	period := time.Second / fps // 7500 ticks
+	// Two cameras send a frame each period, sim-02 a third of a period after
+	// sim-01. Each bind plays one GOP (12 live frames, 1 s), so a camera's
+	// cached GOP holds as many frames at each of its binds: 4 and 9.
+	sims := []*testSim{
+		newTestSim(t, "sim-01", 1, "sub", h264AUs("4d401f", 1, 48, fps), fps),
+		newTestSim(t, "sim-02", 2, "sub", h264AUs("4d401f", 2, 48, fps), fps),
+	}
+	cached := []int{4, 9}
+	offsets := []time.Duration{0, period / 3}
+	for i, sim := range sims {
+		sim.emit(t, cached[i])
+	}
+	clock := newFakeClock()
+	start := clock.Now()
+	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": sims[0], "sim-02/sub": sims[1]}, testOptions(clock, nil))
+
+	// nextFrame is the hub time of camera i's first frame after at.
+	nextFrame := func(i int, at time.Time) time.Time {
+		next := start.Add(offsets[i])
+		for !next.After(at) {
+			next = next.Add(period)
+		}
+		return next
+	}
+	// lead is how far, in 90 kHz ticks, the RTP timestamp of an access unit is
+	// ahead of the hub time at which the slot sent it. The slot's RTP clock
+	// starts at the hub time of its first frame, the first bind's IDR.
+	var firstTS uint32
+	lead := func(au rxAU, sentAt time.Time) int64 {
+		return int64(au.ts-firstTS) - int64(math.Round(sentAt.Sub(start).Seconds()*90000))
+	}
+
+	// 30 re-binds without a pause, alternating the cameras: half of them
+	// direct switches (HUB-06), half an unbind and a bind at once (S4 paging).
+	const binds = 30
+	leads := make([]int64, binds)     // the largest lead of each bind's frames
+	liveLeads := make([]int64, binds) // the smallest lead of each bind's live frames
+	var all []rxAU
+	for k := range binds {
+		i := k % 2
+		if k%4 >= 2 {
+			c.send(t, `{"t":"unbind","slot":0}`)
+		}
+		c.bind(t, 0, sims[i].ID(), "sub", k+1)
+		if m := c.next(t, "bound"); m.Epoch != int64(k+1) {
+			t.Fatalf("bound = %s, want epoch %d", m.raw, k+1)
+		}
+		var aus []rxAU
+		var sentAt []time.Time
+		for range cached[i] {
+			aus, sentAt = append(aus, c.au(t, 0)), append(sentAt, clock.Now())
+		}
+		for range fps {
+			clock.advance(t, nextFrame(i, clock.Now()).Sub(clock.Now()))
+			sims[i].emit(t, 1)
+			aus, sentAt = append(aus, c.au(t, 0)), append(sentAt, clock.Now())
+		}
+		if !aus[0].idr {
+			t.Fatalf("bind %d: first access unit %v, want an IDR", k+1, aus[0])
+		}
+		if k == 0 {
+			firstTS = aus[0].ts
+		}
+		leads[k], liveLeads[k] = math.MinInt64, math.MaxInt64
+		for j, au := range aus {
+			if au.camera != i+1 {
+				t.Fatalf("bind %d: access unit %v, want camera %d", k+1, au, i+1)
+			}
+			leads[k] = max(leads[k], lead(au, sentAt[j]))
+			if j >= cached[i] {
+				liveLeads[k] = min(liveLeads[k], lead(au, sentAt[j]))
+			}
+		}
+		all = append(all, aus...)
+	}
+	checkContinuous(t, all)
+
+	// After each bind, the RTP clock is at most one frame period ahead of the
+	// hub clock, the burst and the live frames included, and the lead does not
+	// build up from bind to bind: from the fourth bind on, it is what it was
+	// two binds before, with the same camera, give or take a tick (the first
+	// bind follows no frame, so it is 1 ms less). The live frames go out at the
+	// hub clock, not behind it.
+	wrong := func(k int, what string) {
+		t.Helper()
+		ms := func(ticks []int64) string {
+			out := make([]string, len(ticks))
+			for j, l := range ticks {
+				out[j] = fmt.Sprintf("%.2f", float64(l)/90)
+			}
+			return strings.Join(out, " ")
+		}
+		t.Fatalf("bind %d: %s; RTP lead of each bind (ms): %s; of its live frames, the least (ms): %s", k+1, what, ms(leads), ms(liveLeads))
+	}
+	for k := range leads {
+		if leads[k] > 7500+1 {
+			wrong(k, "the RTP clock is more than one frame period (83.3 ms) ahead of the hub clock")
+		}
+		if liveLeads[k] < -1 {
+			wrong(k, "the live frames lag the hub clock")
+		}
+	}
+	for k, l := range leads[3:] { // two binds before is leads[k+1]
+		if l > leads[k+1]+1 || l < leads[k+1]-1 {
+			wrong(k+3, "the lead differs from two binds before")
+		}
+	}
 }
 
 // failingReplaceTrack returns session options in which the slots' ReplaceTrack

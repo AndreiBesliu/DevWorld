@@ -29,13 +29,20 @@
 //
 // Each slot is one RTP stream for the whole session: a bind keeps its SSRC,
 // continues its sequence numbers and sends whole access units only. Its
-// timestamps follow the hub clock. The cached GOP that a bind sends first is
-// stamped 1 ms apart (R24, spec §6.3 step 6), live frames one frame period
-// apart, and a bind skips the timestamps forward over the time the slot was
-// empty (by at most an hour), so that they never lag the hub clock. Receivers
-// time each frame by its RTP timestamp: when the timestamps stood still while
-// a slot was empty, Chrome 141 held frames for seconds after a few quick
-// re-binds, and showed frames of one bind in the next (Task 9b).
+// timestamps follow the hub clock. A bind stamps its first frame at the hub
+// clock, or 1 ms after the last frame sent when that is later, since
+// timestamps only increase (a skip over an empty slot stops at an hour). The
+// rest of the cached GOP follows 1 ms apart (R24, spec §6.3 step 6), the first
+// live frame is stamped like the bind's first frame, and live frames are one
+// frame period apart. So however many binds come back to back, the slot's RTP
+// clock is ahead of the hub clock by about the burst, a few ms, as long as
+// each bind gets to a live frame; bursts that come quicker than that add up,
+// 1 ms a frame. Receivers time each frame by its RTP timestamp: when the
+// timestamps stood still while a slot was empty, Chrome 141 held frames for
+// seconds after a few quick re-binds, and showed frames of one bind in the
+// next (Task 9b); stamped by the old track instead of the hub clock, each
+// back-to-back re-bind put the timestamps about a frame period further ahead,
+// and Chrome showed a bind's first frame up to a frame period later (Task 9c).
 //
 // "jitter" is the hub's pacing jitter over the interval before the message
 // (R28): the p99 deviation of the frame send interval from the frame period,
