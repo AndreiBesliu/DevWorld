@@ -1,57 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  FakeClock,
-  FakeHls,
-  FakeLink,
-  fakeTrack,
-  fakeVideo,
-  stubMediaStream,
-  type FakeVideo,
-} from './fakes';
-import { createPlayer, PlayerError, type Player, type PlayerSource } from './index';
-
-const LIVE: PlayerSource = { kind: 'live', cameraId: 'sim-01', profile: 'sub' };
-const PLAYLIST = 'http://hub.test/media/hls/index.m3u8';
-const RECORDING: PlayerSource = {
-  kind: 'recording',
-  cameraId: 'sim-01',
-  profile: 'main',
-  from: new Date('2026-10-18T10:00:00Z'),
-  url: PLAYLIST,
-};
-
-/** Collects what a player emits, in order, per event name. */
-function recordEvents(player: Player) {
-  const log: { event: string; data: unknown }[] = [];
-  for (const event of ['first-frame', 'transport-changed', 'error'] as const) {
-    player.on(event, (data) => log.push({ event, data }));
-  }
-  return (event: string): unknown[] => log.filter((entry) => entry.event === event).map((entry) => entry.data);
-}
-
-function setup(options: { rvfc?: boolean; slot?: number; hls?: FakeHls } = {}) {
-  const clock = new FakeClock();
-  const video = fakeVideo(options.rvfc ?? true);
-  const link = new FakeLink();
-  const hls = options.hls ?? new FakeHls();
-  const hlsFactory = vi.fn(() => hls);
-  const player = createPlayer({
-    now: clock.now,
-    setTimer: clock.setTimer,
-    hlsFactory,
-    ...(options.slot === undefined ? {} : { slot: options.slot }),
-  });
-  player.attach(video.element, link);
-  return { clock, video, link, hls, hlsFactory, player, emitted: recordEvents(player) };
-}
-
-/** `count` frames, one every `everyMs`. */
-function frames(clock: FakeClock, video: FakeVideo, count: number, everyMs = 100): void {
-  for (let i = 0; i < count; i += 1) {
-    clock.advance(everyMs);
-    video.renderFrame();
-  }
-}
+import { FakeClock, FakeHls, FakeLink, fakeTrack, fakeVideo, stubMediaStream } from './fakes';
+import { frames, LIVE, PLAYLIST, RECORDING, setup } from './harness';
+import { createPlayer, PlayerError } from './index';
 
 beforeEach(() => {
   stubMediaStream();
@@ -204,6 +154,7 @@ describe('live over WebRTC', () => {
     expect(clock.pending).toBe(0);
     clock.advance(60_000);
     expect(emitted('error')).toEqual([]);
+    expect(emitted('transport-changed')).toEqual([]);
   });
 
   it('play_stoppedWhileTheTrackIsPending_attachesNothing', async () => {
@@ -221,6 +172,7 @@ describe('live over WebRTC', () => {
     expect(clock.pending).toBe(0);
     clock.advance(60_000);
     expect(emitted('error')).toEqual([]);
+    expect(emitted('transport-changed')).toEqual([]);
   });
 
   it('play_again_dropsTheTimersOfThePreviousPlay', async () => {
@@ -253,27 +205,19 @@ describe('live over WebRTC', () => {
     expect(reasons).toEqual([{ reason: 'NO_FIRST_FRAME' }, { reason: 'NO_FIRST_FRAME' }]);
   });
 
-  it('transportChanged_callbackStopsThePlayer_attachesNothing', async () => {
-    const { player, link, video, clock } = setup();
+  it('transportChanged_callbackStopsThePlayer_leavesNothingAttached', async () => {
+    const { player, video, clock, emitted } = setup();
     player.on('transport-changed', () => player.stop());
 
     await player.play(LIVE);
 
-    expect(link.webrtcTrack).not.toHaveBeenCalled();
+    // The announcement comes after the track is attached, so stop() has to undo it.
     expect(video.srcObject).toBeNull();
+    expect(video.playCalls).toBe(0);
+    expect(video.pendingFrameCallbacks).toBe(0);
     expect(clock.pending).toBe(0);
-  });
-
-  it('transportChanged_callbackThrows_rejectsAndDisarmsTheTimers', async () => {
-    const { player, link, clock } = setup();
-    player.on('transport-changed', () => {
-      throw new Error('listener failed');
-    });
-
-    await expect(player.play(LIVE)).rejects.toThrow('listener failed');
-
-    expect(link.webrtcTrack).not.toHaveBeenCalled();
-    expect(clock.pending).toBe(0);
+    clock.advance(60_000);
+    expect(emitted('error')).toEqual([]);
   });
 
   it('attach_whilePlaying_releasesThePreviousVideo', async () => {
@@ -300,6 +244,56 @@ describe('live over WebRTC', () => {
       { transport: 'webrtc' },
       { transport: 'hls' },
       { transport: 'webrtc' },
+    ]);
+  });
+
+  it('transportChanged_trackRequestFails_announcesNothingAndTheRetryDoes', async () => {
+    const { player, link, emitted } = setup();
+    link.webrtcTrack.mockRejectedValueOnce(new Error('slot not bound'));
+
+    await expect(player.play(LIVE)).rejects.toThrow('slot not bound');
+    expect(emitted('transport-changed')).toEqual([]);
+
+    await player.play(LIVE);
+    expect(emitted('transport-changed')).toEqual([{ transport: 'webrtc' }]);
+  });
+
+  it('transportChanged_hlsFactoryThrows_announcesNothingAndTheRetryDoes', async () => {
+    const clock = new FakeClock();
+    let failing = true;
+    const player = createPlayer({
+      now: clock.now,
+      setTimer: clock.setTimer,
+      hlsFactory: () => {
+        if (failing) throw new Error('MSE is unavailable');
+        return new FakeHls();
+      },
+    });
+    player.attach(fakeVideo().element, new FakeLink());
+    const transports: unknown[] = [];
+    player.on('transport-changed', (data) => transports.push(data));
+
+    await expect(player.play(RECORDING)).rejects.toThrow('MSE is unavailable');
+    expect(transports).toEqual([]);
+
+    failing = false;
+    await player.play(RECORDING);
+    expect(transports).toEqual([{ transport: 'hls' }]);
+  });
+
+  it('transportChanged_listenerFindsTheTransportRunning', async () => {
+    const { player, video, link, hls } = setup();
+    const seen: unknown[] = [];
+    player.on('transport-changed', () => {
+      seen.push({ tracks: video.streamTracks, loaded: hls.loadedUrl, playCalls: video.playCalls });
+    });
+
+    await player.play(LIVE);
+    await player.play(RECORDING);
+
+    expect(seen).toEqual([
+      { tracks: [link.track], loaded: undefined, playCalls: 0 }, // the track is attached
+      { tracks: null, loaded: PLAYLIST, playCalls: 1 }, // hls.js is attached and has its source
     ]);
   });
 });
@@ -403,6 +397,45 @@ describe('recordings over HLS', () => {
     expect(emitted('error')).toEqual([]);
   });
 
+  it('recording_secondPlay_destroysThePreviousHlsInstance', async () => {
+    const { player, instances, video } = setup({ freshHls: true });
+
+    await player.play(RECORDING);
+    const [first] = instances;
+    expect(first?.destroyed).toBe(false);
+
+    await player.play(RECORDING);
+    const [, second] = instances;
+
+    expect(instances).toHaveLength(2);
+    expect(first?.destroyed).toBe(true);
+    expect(second?.destroyed).toBe(false);
+    expect(second?.media).toBe(video.element);
+    await player.seek(new Date('2026-10-18T10:00:07Z'));
+    expect(second?.media?.currentTime).toBe(7); // seek goes to the current instance
+  });
+
+  it('recording_stop_destroysTheCurrentHlsInstance', async () => {
+    const { player, instances } = setup({ freshHls: true });
+    await player.play(RECORDING);
+    await player.play(RECORDING);
+    expect(instances.map((instance) => instance.destroyed)).toEqual([true, false]);
+
+    player.stop();
+
+    expect(instances.map((instance) => instance.destroyed)).toEqual([true, true]);
+    expect(instances).toHaveLength(2); // stop() builds nothing new
+  });
+
+  it('recording_thenLive_destroysTheHlsInstance', async () => {
+    const { player, instances } = setup({ freshHls: true });
+    await player.play(RECORDING);
+
+    await player.play(LIVE);
+
+    expect(instances[0]?.destroyed).toBe(true);
+  });
+
   it('play_hlsFactoryThrows_rejectsAndDisarmsTheTimers', async () => {
     const clock = new FakeClock();
     const player = createPlayer({
@@ -424,14 +457,14 @@ describe('stop, events and defaults', () => {
     const { player, video, clock, emitted } = setup();
     await player.play(LIVE);
     expect(clock.pending).toBe(1);
-    expect(video.pendingFrameCallbacks).toBe(1);
+    expect(video.pendingFrameCallbacks).toBe(2); // the frame counting loop and the first-frame watch
 
     player.stop();
 
     expect(video.srcObject).toBeNull();
     expect(clock.pending).toBe(0);
     expect(video.pendingFrameCallbacks).toBe(0);
-    expect(video.cancelledFrameCallbacks).toHaveLength(1);
+    expect(video.cancelledFrameCallbacks).toHaveLength(2);
     clock.advance(60_000);
     video.renderFrame();
     expect(emitted('error')).toEqual([]);

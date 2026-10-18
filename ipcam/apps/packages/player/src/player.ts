@@ -1,6 +1,6 @@
 import { defaultHlsFactory, hlsCodec, startHls, type HlsLike } from './hls';
-import { framesDecoded, watchFirstFrame } from './stats';
-import { defaultSetTimer, startWatchdog, type SetTimer, type Watchdog } from './timers';
+import { countFrames, isPlaybackActive, watchFirstFrame, type FrameCount } from './stats';
+import { defaultSetTimer, startWatchdog, type FailureReason, type SetTimer, type Watchdog } from './timers';
 import { attachTrack } from './webrtc';
 
 export type Transport = 'webrtc' | 'mse' | 'hls' | 'snapshot';
@@ -39,7 +39,19 @@ export interface Player {
   seek(t: Date): Promise<void>;
   stop(): void;
   readonly stats: { transport: Transport; codec: string; framesDecoded: number; latencyMs?: number; hardware?: boolean };
-  /** Returns the function that removes the callback. */
+  /**
+   * Returns the function that removes the callback.
+   *
+   * `error` carries `{ reason: 'NO_FIRST_FRAME' | 'STALLED', cause?: string }`.
+   * `cause` is the last reason the player recorded for that play: the `name` of
+   * a rejected `play()` of the element (`NotAllowedError` when autoplay is
+   * blocked, for example) or `hls:<details>` for a fatal hls.js error
+   * (`hls:manifestLoadError`, for example).
+   *
+   * A callback that throws neither stops the other callbacks nor affects the
+   * player: its exception is rethrown asynchronously (`reportError`, else a
+   * microtask), the same for every event.
+   */
   on(e: 'first-frame' | 'transport-changed' | 'error', cb: (d: unknown) => void): () => void;
 }
 
@@ -69,6 +81,30 @@ export class PlayerError extends Error {
 
 type PlayerEvent = Parameters<Player['on']>[0];
 
+/** The payload of the `error` event. `cause` is left out when nothing was recorded. */
+function failure(reason: FailureReason, cause: string | undefined): { reason: FailureReason; cause?: string } {
+  return cause === undefined ? { reason } : { reason, cause };
+}
+
+/** The `name` of a rejection of the element's `play()`, e.g. `NotAllowedError`. */
+function causeOf(rejection: unknown): string {
+  if (typeof rejection === 'object' && rejection !== null && 'name' in rejection && typeof rejection.name === 'string') {
+    return rejection.name;
+  }
+  return 'unknown';
+}
+
+/** Raises an exception outside the current call stack, where it can neither skip a listener nor break the player. */
+function rethrowAsync(error: unknown): void {
+  if (typeof reportError === 'function') {
+    reportError(error);
+  } else {
+    queueMicrotask(() => {
+      throw error;
+    });
+  }
+}
+
 /** What a call to `play` will do, once its arguments have been checked. */
 type Plan =
   | { readonly transport: 'webrtc' }
@@ -92,6 +128,10 @@ interface Run {
   readonly transport: Transport;
   readonly startedAt: number;
   readonly watchdog: Watchdog;
+  /** Presented frames; the stall watchdog and `stats.framesDecoded` read it. */
+  readonly frames: FrameCount;
+  /** The last reason a start or the playback went wrong, for the `cause` of an `error`. */
+  cause?: string;
   /** Recordings: the instance and the reference time of `seek`. */
   recording?: { readonly hls: HlsLike; readonly origin: Date };
   stopFirstFrame?: () => void;
@@ -120,7 +160,12 @@ export function createPlayer(opts: PlayerOptions = {}): Player {
     const registered = listeners[event];
     // A snapshot, so that a callback may unsubscribe itself or another one.
     for (const listener of [...registered]) {
-      if (registered.has(listener)) listener(data);
+      if (!registered.has(listener)) continue;
+      try {
+        listener(data);
+      } catch (error) {
+        rethrowAsync(error);
+      }
     }
   };
 
@@ -128,6 +173,7 @@ export function createPlayer(opts: PlayerOptions = {}): Player {
     const ending = run;
     run = undefined;
     ending?.watchdog.cancel();
+    ending?.frames.stop();
     ending?.stopFirstFrame?.();
     ending?.detach?.();
   };
@@ -145,27 +191,26 @@ export function createPlayer(opts: PlayerOptions = {}): Player {
     const plan = planFor(src, prefer);
 
     endRun();
+    // Counting starts before the transport does, so a first-frame listener already sees its frame.
+    const frames = countFrames(element);
     // The deadline runs from here, so a track request that never answers is reported too.
     const current: Run = {
       transport: plan.transport,
       startedAt: now(),
+      frames,
       watchdog: startWatchdog({
         setTimer,
         now,
-        framesDecoded: () => framesDecoded(element),
+        framesDecoded: () => frames.count(),
+        playbackActive: () => isPlaybackActive(element),
         onFailure: (reason) => {
-          if (run === current) emit('error', { reason });
+          if (run === current) emit('error', failure(reason, current.cause));
         },
       }),
     };
     run = current;
 
     try {
-      if (plan.transport !== lastTransport) {
-        lastTransport = plan.transport;
-        emit('transport-changed', { transport: plan.transport });
-        if (run !== current) return; // the callback stopped or restarted the player
-      }
       if (plan.transport === 'webrtc') {
         const track = await mediaLink.webrtcTrack(slot);
         if (run !== current) return; // stopped or replaced while waiting for the track
@@ -176,13 +221,23 @@ export function createPlayer(opts: PlayerOptions = {}): Player {
         current.detach = () => {
           hls.destroy();
         };
-        startHls(hls, element, plan.url);
+        startHls(hls, element, plan.url, (details) => {
+          current.cause = `hls:${details}`;
+        });
+      }
+      // The transport is announced once it runs: a failed set-up announces nothing, so a retry still does.
+      if (plan.transport !== lastTransport) {
+        lastTransport = plan.transport;
+        emit('transport-changed', { transport: plan.transport });
+        if (run !== current) return; // the callback stopped or restarted the player
       }
       current.stopFirstFrame = watchFirstFrame(element, () => {
         onFirstFrame(current);
       });
-      // A refused or interrupted play() needs no handling here: without a frame the deadline reports it.
-      element.play().catch(() => undefined);
+      // A refused or interrupted play() raises nothing by itself: without a frame the deadline reports it, with this cause.
+      element.play().catch((rejection: unknown) => {
+        current.cause = causeOf(rejection);
+      });
     } catch (error) {
       if (run === current) endRun();
       throw error;
@@ -211,7 +266,7 @@ export function createPlayer(opts: PlayerOptions = {}): Player {
       return {
         transport: lastTransport ?? 'webrtc',
         codec: run?.recording ? hlsCodec(run.recording.hls) : 'unknown',
-        framesDecoded: run && video ? framesDecoded(video) : 0,
+        framesDecoded: run ? run.frames.count() : 0,
       };
     },
     on(event, callback) {

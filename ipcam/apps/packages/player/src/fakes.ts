@@ -1,6 +1,7 @@
 // Test doubles shared by the unit tests. Not exported from index.ts.
+import { Events } from 'hls.js';
 import { vi } from 'vitest';
-import type { HlsLike } from './hls';
+import type { HlsErrorData, HlsLike } from './hls';
 import type { MediaLink } from './player';
 
 /** A fake clock: `now` and `setTimer` are injected into the player. */
@@ -55,6 +56,15 @@ export class FakeMediaStream {
 type FrameCallback = () => void;
 
 /**
+ * Which playback quality counter the fake element offers:
+ * - `quality`: getVideoPlaybackQuality().totalVideoFrames counts the frames.
+ * - `zero`: getVideoPlaybackQuality() exists but totalVideoFrames stays 0, the
+ *   unverified case of a MediaStream-backed element (ruling R31).
+ * - `webkit`: no getVideoPlaybackQuality, only webkitDecodedFrameCount.
+ */
+export type QualityCounter = 'quality' | 'zero' | 'webkit';
+
+/**
  * The part of HTMLVideoElement that the player touches. With `rvfc: false` the
  * element has no requestVideoFrameCallback, like an older browser.
  */
@@ -62,6 +72,13 @@ export class FakeVideo {
   srcObject: MediaProvider | null = null;
   currentTime = 0;
   playCalls = 0;
+  paused = false;
+  seeking = false;
+  ended = false;
+  /** What play() returns. Tests replace it to refuse playback, for example. */
+  playResult: () => Promise<void> = () => Promise.resolve();
+  getVideoPlaybackQuality?: () => VideoPlaybackQuality;
+  webkitDecodedFrameCount?: number;
   requestVideoFrameCallback?: (callback: FrameCallback) => number;
   cancelVideoFrameCallback?: (handle: number) => void;
   /** Handles passed to cancelVideoFrameCallback. */
@@ -72,7 +89,18 @@ export class FakeVideo {
   private readonly frameCallbacks = new Map<number, FrameCallback>();
   private readonly listeners = new Map<string, Set<() => void>>();
 
-  constructor({ rvfc }: { rvfc: boolean }) {
+  constructor({ rvfc, counter }: { rvfc: boolean; counter: QualityCounter }) {
+    if (counter === 'webkit') {
+      this.webkitDecodedFrameCount = 0;
+    } else {
+      this.getVideoPlaybackQuality = () =>
+        ({
+          totalVideoFrames: counter === 'zero' ? 0 : this.frames,
+          droppedVideoFrames: 0,
+          corruptedVideoFrames: 0,
+          creationTime: 0,
+        }) as VideoPlaybackQuality;
+    }
     if (rvfc) {
       this.requestVideoFrameCallback = (callback) => {
         const handle = this.nextHandle++;
@@ -117,21 +145,13 @@ export class FakeVideo {
 
   play(): Promise<void> {
     this.playCalls += 1;
-    return Promise.resolve();
-  }
-
-  getVideoPlaybackQuality(): VideoPlaybackQuality {
-    return {
-      totalVideoFrames: this.frames,
-      droppedVideoFrames: 0,
-      corruptedVideoFrames: 0,
-      creationTime: 0,
-    } as VideoPlaybackQuality;
+    return this.playResult();
   }
 
   /** The element presents one frame: the position moves and the browser fires its events. */
   renderFrame(): void {
     this.frames += 1;
+    if (this.webkitDecodedFrameCount !== undefined) this.webkitDecodedFrameCount = this.frames;
     this.currentTime += 0.04;
     const due = [...this.frameCallbacks.values()];
     this.frameCallbacks.clear();
@@ -144,8 +164,8 @@ export class FakeVideo {
   }
 }
 
-export function fakeVideo(rvfc = true): FakeVideo {
-  return new FakeVideo({ rvfc });
+export function fakeVideo(rvfc = true, counter: QualityCounter = 'quality'): FakeVideo {
+  return new FakeVideo({ rvfc, counter });
 }
 
 /** The tests run in Node, which has no MediaStream. */
@@ -168,12 +188,24 @@ export class FakeLink implements MediaLink {
   }
 }
 
+type HlsErrorListener = (event: Events.ERROR, data: HlsErrorData) => void;
+
 export class FakeHls implements HlsLike {
   media: HTMLMediaElement | null = null;
   levels: { videoCodec?: string }[] = [];
   currentLevel = -1;
   loadedUrl: string | undefined;
   destroyed = false;
+  private errorListeners: HlsErrorListener[] = [];
+
+  on(_event: Events.ERROR, listener: HlsErrorListener): void {
+    this.errorListeners.push(listener);
+  }
+
+  /** hls.js reports an error, fatal or not. `details` is its ErrorDetails value, e.g. `manifestLoadError`. */
+  emitError(details: string, fatal = true): void {
+    for (const listener of [...this.errorListeners]) listener(Events.ERROR, { fatal, details });
+  }
 
   attachMedia(media: HTMLMediaElement): void {
     this.media = media;
@@ -186,5 +218,6 @@ export class FakeHls implements HlsLike {
   destroy(): void {
     this.destroyed = true;
     this.media = null;
+    this.errorListeners = [];
   }
 }
