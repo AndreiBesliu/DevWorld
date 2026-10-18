@@ -175,6 +175,8 @@ survives_process_death() {
     echo "the app did not start again in a new process (pid ${before} before, ${after:-none} after)" | annotate error "emulator S1 ${label}"
   elif grep -q 'loadUrl:' <<<"${log}"; then
     echo "the restored Activity ran the launch extras again:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
+  elif ! grep -q 'restored=true' <<<"${log}"; then
+    echo "the app started again, but its Activity was not restored from a saved state:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
   elif ! grep -q 'page loaded' <<<"${log}"; then
     echo "the restored app loaded no page within 30 s:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
   else

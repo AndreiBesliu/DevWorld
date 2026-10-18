@@ -6,6 +6,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.content.Intent
 import android.content.res.Configuration
+import android.os.Bundle
 import android.os.Debug
 import android.os.PowerManager
 import android.os.Process
@@ -13,6 +14,7 @@ import android.util.Log
 import android.view.WindowManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
+import androidx.savedstate.SavedStateRegistry
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -22,6 +24,9 @@ import com.getcapacitor.annotation.CapacitorPlugin
 import java.net.URLEncoder
 
 private const val TAG = "SpikeMetrics"
+
+/** The key of the marker in the Activity's saved state: this Activity has handled its launch extras. */
+private const val HANDLED_KEY = "spikeAutorunHandled"
 
 private val THERMAL_NAMES = mapOf(
     PowerManager.THERMAL_STATUS_NONE to "NONE",
@@ -67,13 +72,15 @@ internal fun autorunQuery(autorun: String?, hub: String?): String? {
  * autorun launch (`adb shell am start ... --es autorun S1 --es hub <url>`)
  * reloads the page with the extras as its query string.
  *
- * Only a cold start honours the extras: `load()` reads them when the Bridge
- * is created and removes them from the Activity's Intent, so a Bridge created
- * again from the same Intent in this process does not start the scenario
- * again (the system hands a process that died a fresh copy of the Intent), and
- * a warm start (`onNewIntent`) does not read them at all. That makes a
- * recreated Activity lose the run, so the manifest's `configChanges` keep the
- * Activity from being recreated by a configuration change. The Activity is exported
+ * Only a cold start honours the extras. `load()` reads them once and removes
+ * them from the Activity's Intent, and it marks the Activity's saved state
+ * (the system keeps it across a process death). An Activity that is restored
+ * with the marker (it was created again, or its process died and the system
+ * started it from the launch Intent it kept, extras included) ignores the
+ * extras: its scenario ended with the old page, and the next `am start` is the
+ * way to run it again. A warm start (`onNewIntent`) does not read them at all.
+ * The manifest's `configChanges` keep configuration changes from creating the
+ * Activity again, because that would lose the run in progress. The Activity is exported
  * and takes any `hub` URL: any app on the device can start a run against a
  * hub of its choosing. That is by design for a spike that is never published
  * (SPIKE-ONLY); the results hold no addresses or serial numbers (PH0-22).
@@ -100,15 +107,20 @@ class MetricsPlugin : Plugin() {
 
     override fun load() {
         val intent = activity.intent
+        val registry = activity.savedStateRegistry
+        val restored = registry.consumeRestoredStateForKey(HANDLED_KEY) != null
+        if (registry.getSavedStateProvider(HANDLED_KEY) == null) {
+            registry.registerSavedStateProvider(HANDLED_KEY, SavedStateRegistry.SavedStateProvider { Bundle().apply { putBoolean(HANDLED_KEY, true) } })
+        }
         val autorun = intent.getStringExtra("autorun")
         val hub = intent.getStringExtra("hub")
-        val query = autorunQuery(autorun, hub)
+        val query = autorunQuery(autorun, hub).takeUnless { restored }
         intent.removeExtra("autorun")
         intent.removeExtra("hub")
         Log.i(
             TAG,
-            "load: pid=${Process.myPid()} activity=${id(activity)} bridge=${id(bridge)} intent=${id(intent)} " +
-                "autorun=$autorun hub=${hub != null} config=${configForLog(activity.resources.configuration)}",
+            "load: pid=${Process.myPid()} activity=${id(activity)} bridge=${id(bridge)} intent=${id(intent)} restored=$restored " +
+                "autorun=$autorun hub=${hub != null} run=${query != null} config=${configForLog(activity.resources.configuration)}",
         )
         // Runs after the bridge has started its own first load of the page.
         val webView = bridge.webView

@@ -5,9 +5,12 @@
 // arguments into these parameters (Tasks 10 and 11); the browser end-to-end
 // tests read the hooks (Task 12).
 //
-// On Android only a cold start honours the extras: the metrics plugin reads
-// them once, when the Bridge is created, and removes them from the Intent, so
-// a warm start or a Bridge created again does not run the scenario again. The
+// On Android only a cold start honours the extras. The metrics plugin reads
+// them once, when the Bridge is created, and marks the Activity's saved state.
+// An Activity that is restored with the marker (created again, or started again
+// after its process died, from the launch Intent that the system kept with its
+// extras) ignores them, and so does a warm start: the scenario does not run
+// again, and an interrupted run is repeated by starting the app again. The
 // spike's Activity is exported and takes any `hub` URL, so any app on the
 // device can start a run against a hub of its choosing. That is by design for
 // a spike that is never published (SPIKE-ONLY); the results hold no addresses
