@@ -71,6 +71,30 @@ function Read-Page {
   $text
 }
 
+# The WebView2 browser process's arguments and the TCP ports that WebView2
+# listens on: whether the DevTools port was asked for and opened.
+function Get-WebView2State {
+  $ErrorActionPreference = 'Continue'
+  $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue)
+  $browser = @($procs | Where-Object { $_.CommandLine -notmatch '--type=' } | ForEach-Object {
+      $line = "$($_.ProcessId) (parent $($_.ParentProcessId)): $($_.CommandLine)"
+      if ($line.Length -gt 700) { $line.Substring(0, 700) } else { $line }
+    })
+  $ids = @($procs | ForEach-Object ProcessId)
+  $ports = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+      Where-Object { $ids -contains $_.OwningProcess } | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" })
+  $policies = @('HKLM:\SOFTWARE\Policies\Microsoft\Edge', 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2') | ForEach-Object {
+    $values = Get-ItemProperty -LiteralPath $_ -ErrorAction SilentlyContinue
+    if ($values) { "${_}: $(($values.PSObject.Properties | Where-Object Name -notlike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', ')" }
+  }
+  @(
+    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS here: $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+    "WebView2 browser processes: $(if ($browser) { $browser -join ' | ' } else { '(none)' })",
+    "WebView2 listens on: $(if ($ports) { $ports -join ', ' } else { '(nothing)' })",
+    "Edge policies: $(if ($policies) { $policies -join ' | ' } else { '(none)' })"
+  ) -join "`n"
+}
+
 # What is wrong with an S1 result, or $null.
 function Get-ResultProblem($Result) {
   $samples = @(Get-Field (Get-Field $Result 'samples') 'firstFrameMs').Where({ $null -ne $_ })
@@ -143,7 +167,8 @@ function Test-Start([string] $Label, [int] $Index) {
     Write-Annotation error "windows S1 $Label" $problem
     Write-Annotation error "windows S1 $Label diagnosis" (@(
         "page: $page",
-        "app running: $(-not $process.HasExited); WebView2 processes: $(@(Get-Process -Name msedgewebview2 -ErrorAction SilentlyContinue).Count)",
+        "app running: $(-not $process.HasExited) (pid $($process.Id)); WebView2 processes: $(@(Get-Process -Name msedgewebview2 -ErrorAction SilentlyContinue).Count)",
+        (Get-WebView2State),
         'app stderr:', (Get-Tail $appErr 12),
         'app stdout:', (Get-Tail $appOut 4),
         'spikehub log:', (Get-Tail $hubLog 8)
