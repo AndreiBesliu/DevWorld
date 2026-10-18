@@ -1,0 +1,3 @@
+# Media written by cmd/mediagen; media/README.md is the only tracked file there.
+/media/*
+!/media/README.md

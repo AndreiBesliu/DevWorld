@@ -58,3 +58,45 @@ jobs:
         run: go tool govulncheck ./...
       - name: Licenses
         run: tools/scripts/check-licenses.sh
+
+  media:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+      - name: Install ffmpeg
+        # ffmpeg with libx264 and libx265 only generates the test media in CI. It is
+        # never shipped and never part of a release asset (Global Constraints, Licenses).
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          ffmpeg -version | head -n 1
+      - name: Generate media
+        run: go run ./tools/spikes/video/cmd/mediagen -out "${RUNNER_TEMP}/spike-video-media"
+      - name: Check media against the spec
+        # Tests the files that the next step uploads. A missing ffmpeg fails instead of skipping.
+        env:
+          MEDIAGEN_DIR: ${{ runner.temp }}/spike-video-media
+          MEDIAGEN_REQUIRE_FFMPEG: '1'
+        run: go test -count=1 -v -run TestMediagen ./tools/spikes/video/cmd/mediagen/...
+      - name: Upload media
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spike-video-media
+          path: ${{ runner.temp }}/spike-video-media
+          if-no-files-found: error
+          retention-days: 7
+          # H.264, H.265 and fMP4 do not compress further.
+          compression-level: 0
