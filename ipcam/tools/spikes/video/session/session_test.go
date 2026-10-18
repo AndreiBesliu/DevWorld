@@ -143,9 +143,9 @@ func TestSession_ClosesWhenTheClientCloses(t *testing.T) {
 		t.Fatal("the session did not close after the client closed")
 	}
 	waitUntil(t, "the session leaves the sent fan-out", func() bool { return !fanout.has(sim, s) })
-	if state := s.pc.ConnectionState(); state != webrtc.PeerConnectionStateClosed {
-		t.Errorf("peer connection state = %v, want closed", state)
-	}
+	waitUntil(t, "the hub's peer connection is closed", func() bool {
+		return s.pc.ConnectionState() == webrtc.PeerConnectionStateClosed
+	})
 }
 
 func TestClose_IsIdempotentAndReleasesSources(t *testing.T) {
