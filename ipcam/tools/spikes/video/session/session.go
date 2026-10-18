@@ -65,10 +65,12 @@
 //
 //	{"t":"bound","slot":0,"epoch":8,"codec":"H264","profile":"4d401f","fallback":"42e01f"}
 //
-// A bind that cannot switch the slot's track (to the codec, or to the later
-// timestamps) fails with CODEC_UNSUPPORTED, whatever the reason; like any
-// failed bind it leaves the slot carrying what it carried, and the session
-// reporting only that.
+// A bind that cannot switch the slot's track to the codec fails with
+// CODEC_UNSUPPORTED, whatever the reason; like any failed bind it leaves the
+// slot carrying what it carried, and the session reporting only that. A bind
+// that keeps the codec and cannot switch the track to move the timestamps to
+// the hub clock goes ahead on the old track, with the timestamps it would have
+// had, and the hub logs a warning.
 package session
 
 import (

@@ -93,6 +93,29 @@ describe('S5', () => {
     expect(result.samples.resumeMs).toEqual([2900]);
   });
 
+  it('S5_withoutRequestVideoFrameCallback_isNaInsteadOfNoFrame', async () => {
+    const t = setup({ fakePlayer: true, rvfc: false });
+
+    const running = runScenario('S5', t.env);
+    await vi.advanceTimersByTimeAsync(100);
+    // The player's first-frame, which is all the start can wait for without requestVideoFrameCallback.
+    t.players[0]?.emit('first-frame', { transport: 'webrtc', elapsedMs: 100 });
+    await vi.advanceTimersByTimeAsync(1900);
+    const video = t.stage.all[0] as FakeVideo;
+    t.doc.hide();
+    video.pause();
+    await vi.advanceTimersByTimeAsync(125_000);
+    t.doc.show();
+    await vi.advanceTimersByTimeAsync(400);
+    await liveFrames(video, 4);
+    const result = await finish(running);
+
+    // first-frame fires once per play, so it cannot time the return.
+    expect(result.notes).toContain('resume: n/a (no requestVideoFrameCallback)');
+    expect(result.notes).not.toContain('no frame within 30 s of the return');
+    expect(result.samples).toEqual({});
+  });
+
   it('S5_framesDoNotKeepComing_noResumeAndANote', async () => {
     const t = setup({ fakePlayer: true });
 

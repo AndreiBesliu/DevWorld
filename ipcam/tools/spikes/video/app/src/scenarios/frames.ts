@@ -65,7 +65,9 @@ export function isFrameOfStart(
  * Listens, from now on, for the first frame of a start made at `t0` and for
  * the player's error. With requestVideoFrameCallback (R8) the frame is the
  * element's first presented frame that isFrameOfStart accepts, timed at its
- * display; without it, the player's `first-frame` event. `wait` resolves with
+ * display; without it, the player's `first-frame` event, which comes once per
+ * play, so it times a play() and not a return to a play that goes on (S5
+ * needs requestVideoFrameCallback). `wait` resolves with
  * the time since `t0`, the error, or `timeout` after `ms`; `stop` stops
  * listening.
  */

@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 	"sync/atomic"
@@ -463,5 +464,44 @@ func TestBind_FailedCodecSwitchOnAnEmptySlotBindsNothing(t *testing.T) {
 	}
 	if au := c.au(t, 0); !au.idr || au.camera != 2 {
 		t.Errorf("first access unit = %v, want the IDR of camera 2", au)
+	}
+}
+
+func TestRebind_FailedTimestampSkipKeepsTheOldTrack(t *testing.T) {
+	sim := newTestSim(t, "sim-01", 1, "sub", h264AUs("4d401f", 1, 48, 4), 12)
+	sim.emit(t, 2)
+	var fail atomic.Bool
+	clock := newFakeClock()
+	var logs syncBuffer
+	opts := failingReplaceTrack(clock, &fail)
+	opts.log = slog.New(slog.NewTextHandler(&logs, nil))
+	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": sim}, opts)
+
+	c.bind(t, 0, "sim-01", "sub", 1)
+	c.next(t, "bound")
+	got := []rxAU{c.au(t, 0), c.au(t, 0)}
+	c.send(t, `{"t":"unbind","slot":0}`)
+	clock.advance(t, 2*time.Second)
+
+	// The re-bind keeps the codec; it needs a new track only to move the
+	// timestamps to the hub clock, and that fails. It is not a codec problem,
+	// so the bind goes ahead on the old track.
+	fail.Store(true)
+	c.bind(t, 0, "sim-01", "sub", 2)
+	for m := waitFor(t, c.msgs); m.T != "bound"; m = waitFor(t, c.msgs) {
+		if m.T == "error" {
+			t.Fatalf("got %s, want the bind to go ahead without the timestamp skip", m.raw)
+		}
+	}
+	got = append(got, c.au(t, 0), c.au(t, 0))
+	if want := "1/0* 1/1 1/0* 1/1"; frames(got) != want {
+		t.Fatalf("slot 0 received %s, want %s", frames(got), want)
+	}
+	checkContinuous(t, got)
+	// The old track goes on 1 ms after its last frame, without the 2 s skip.
+	checkSteps(t, got, []int64{90, 90, 90})
+	if out := logs.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "injected ReplaceTrack failure") {
+		t.Errorf("log = %q, want a warning with the ReplaceTrack error", out)
 	}
 }

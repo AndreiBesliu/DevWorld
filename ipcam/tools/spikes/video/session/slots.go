@@ -168,9 +168,9 @@ func (sl *slot) run(done <-chan struct{}) {
 				continue
 			}
 			if cur.afterBurst {
-				if err := sl.useTrack(sl.codec); err != nil {
-					sl.log.Warn("cannot stamp a live frame at the hub clock; it goes out on the old track", "slot", sl.index, "err", err)
-				}
+				// The codec stays, so useTrack logs a failure rather than
+				// return it, and the frame goes out on the old track.
+				_ = sl.useTrack(sl.codec)
 				cur.afterBurst = false
 			}
 			sl.write(au, frameInterval(cur.src))
@@ -244,6 +244,10 @@ func (sl *slot) apply(b binding, cur feed) (feed, error) {
 // first live frame comes any time within a frame period after the burst
 // (Task 9c). A new track continues the sequence numbers and starts at the
 // timestamp the slot chooses; the slot needs one for a new codec too.
+//
+// A failed switch to a new codec is the bind's error. When the codec stays,
+// the slot logs the failure and goes on with the old track and its
+// timestamps: the bind is not refused for a reason that is not the codec's.
 func (sl *slot) useTrack(c webrtc.RTPCodecParameters) error {
 	ts, due := sl.ts, sl.due
 	if !sl.lastAt.IsZero() {
@@ -257,18 +261,33 @@ func (sl *slot) useTrack(c webrtc.RTPCodecParameters) error {
 		ticks := uint32(math.Round(at.Sub(sl.lastAt).Seconds() * float64(c.ClockRate)))
 		ts, due = sl.lastTS+ticks, sl.lastAt.Add(tickDuration(ticks, c.ClockRate))
 	}
-	if c.PayloadType == sl.codec.PayloadType && ts == sl.ts {
+	sameCodec := c.PayloadType == sl.codec.PayloadType
+	if sameCodec && ts == sl.ts {
 		return nil
 	}
-	track, err := sl.newTrack(c, ts)
+	track, err := sl.switchTrack(c, ts)
+	if err != nil && sameCodec {
+		sl.log.Warn("cannot move the timestamps of a slot to the hub clock; it keeps its track", "slot", sl.index, "err", err)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if err := sl.replaceTrack(sl.sender, track); err != nil {
-		return fmt.Errorf("replace track: %w", err)
-	}
 	sl.track, sl.codec, sl.ts, sl.due, sl.remainder = track, c, ts, due, 0
 	return nil
+}
+
+// switchTrack moves the sender to a new track in codec c whose next sample is
+// stamped ts.
+func (sl *slot) switchTrack(c webrtc.RTPCodecParameters, ts uint32) (*webrtc.TrackLocalStaticSample, error) {
+	track, err := sl.newTrack(c, ts)
+	if err != nil {
+		return nil, err
+	}
+	if err := sl.replaceTrack(sl.sender, track); err != nil {
+		return nil, fmt.Errorf("replace track: %w", err)
+	}
+	return track, nil
 }
 
 // write sends one access unit; step is the time until the next one.
