@@ -28,6 +28,8 @@ export default defineConfig(
     // Gradle's output: AGP merges those assets into build/intermediates/assets,
     // so a local build leaves the minified bundle there.
     'apps/mobile/android/**/build/**',
+    // Cargo's output: tauri-codegen leaves the embedded app and Tauri's own scripts there.
+    'apps/desktop/src-tauri/target/**',
   ]),
   js.configs.recommended,
   tseslint.configs.recommended,

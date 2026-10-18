@@ -1,0 +1,24 @@
+[package]
+name = "ipcam-desktop"
+version = "0.0.0"
+edition = "2024"
+# A test build of Phase 0, never published (OPN-01).
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2.7.1", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.1", features = [] }
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Graphics_Dxgi"], optional = true }
+
+[features]
+default = []
+# SPIKE-ONLY (plan 2026-10-18-phase0b-video-spike, Task 11): the Tauri command
+# spike_metrics (src/spike_metrics.rs). Off by default; the spike build turns it
+# on (the build:spike and bundle:spike scripts of package.json).
+spike-metrics = ["dep:serde", "dep:sysinfo", "dep:windows"]

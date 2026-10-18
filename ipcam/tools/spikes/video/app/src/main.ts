@@ -2,10 +2,12 @@
 // opened with ?autorun=<scenario>&hub=<url> (R5).
 import { parseAutorun, reportAutorunError } from './autorun';
 import { installAndroidNative } from './native-android';
+import { installTauriNative } from './native-tauri';
 import { startApp } from './ui';
 
-// Before the start page reads window.spikeNative.
+// Before the start page reads window.spikeNative. Each installs it only in its own shell.
 installAndroidNative();
+installTauriNative();
 
 const root = document.getElementById('app');
 if (root) {
