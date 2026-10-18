@@ -68,7 +68,7 @@ jobs:
         run: pnpm --filter spike-video-app build
       - name: Sync the Android project
         # Copies the app's dist/ into the project and generates the plugin wiring.
-        run: pnpm --filter @ipcam/mobile exec cap sync android
+        run: pnpm --filter @ipcam/mobile run sync
       - name: Line counter tests
         run: pnpm --filter @ipcam/mobile test
       - name: Build and unit tests

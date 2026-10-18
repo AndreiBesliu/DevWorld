@@ -15,11 +15,11 @@ hub_log="$3"
 app=ro.ipcam.spike
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Prints standard input as one error annotation titled $1.
+# Prints standard input as one annotation of level $1 (error, notice) titled $2.
 annotate() {
   local body
   body="$(sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "") $0 }')"
-  echo "::error title=$1::${body:-(nothing)}"
+  echo "::$1 title=$2::${body:-(nothing)}"
 }
 
 # The page's state, the app's log lines and spikehub's log, as annotations.
@@ -33,10 +33,23 @@ diagnose() {
     echo "the WebView's DevTools socket cannot be reached"
   else
     node "${here}/read-page.ts" 9222 2>&1 | head -c 6000
-  fi | annotate "emulator page"
-  adb logcat -d -v brief | grep -E 'Capacitor|chromium|cr_|WebView|AndroidRuntime|ro\.ipcam' | tail -n 60 | annotate "emulator logcat"
-  tail -n 40 "${hub_log}" | annotate "spikehub log"
+  fi | annotate error "emulator page"
+  adb logcat -d -v brief | grep -E '^[VDIWEF]/(Capacitor[^ (]*|chromium|cr_[A-Za-z]+|WebViewFactory|AndroidRuntime) *\(' |
+    tail -n 60 | annotate error "emulator logcat"
+  tail -n 40 "${hub_log}" | annotate error "spikehub log"
 }
+
+# The emulator's network comes up a little after boot: start S1 only when
+# spikehub answers (toybox nc: -w connect timeout, -q quit after stdin ends).
+booted=${SECONDS}
+until adb shell 'nc -w 2 -q 1 10.0.2.2 7080 </dev/null' >/dev/null 2>&1; do
+  if ((SECONDS - booted >= 120)); then
+    echo "the emulator could not reach spikehub at 10.0.2.2:7080 for 2 min" | annotate error "emulator network"
+    break
+  fi
+  sleep 2
+done
+echo "spikehub reachable check took $((SECONDS - booted)) s" | annotate notice "emulator network"
 
 adb install -r "${apk}"
 adb shell am start -W -n "${app}/.MainActivity" --es autorun S1 --es hub http://10.0.2.2:7080
@@ -48,18 +61,22 @@ while ((SECONDS < deadline)); do
       continue
     fi
     samples="$(jq '.samples.firstFrameMs // [] | length' "${file}")"
-    jq -c '{scenario, device, durationS, interrupted, notes, firstFrameMs: .samples.firstFrameMs}' "${file}"
     if ((samples == 20)); then
-      echo "S1 stored with 20 samples: $(basename "${file}")"
+      # Nearest rank: p50 is the 10th and p90 the 18th of the 20 sorted samples.
+      jq -r '(.samples.firstFrameMs | sort) as $ms
+        | "S1 stored with 20 samples: first frame p50 \($ms[9]) ms, p90 \($ms[17]) ms, max \($ms[19]) ms;"
+          + " \(.device.model) \(.device.os) \(.device.webview); notes: \(.notes | join("; "))"' "${file}" |
+        annotate notice "emulator S1"
       exit 0
     fi
-    jq -r '"S1 stored with \(.samples.firstFrameMs // [] | length) of 20 samples; notes: \(.notes | join("; "))"' "${file}" | annotate "emulator S1"
+    jq -r '"S1 stored with \(.samples.firstFrameMs // [] | length) of 20 samples; notes: \(.notes | join("; "))"' "${file}" |
+      annotate error "emulator S1"
     diagnose
     exit 1
   done
   sleep 5
 done
 
-echo "no S1 result within 5 min" | annotate "emulator S1"
+echo "no S1 result within 5 min" | annotate error "emulator S1"
 diagnose
 exit 1
