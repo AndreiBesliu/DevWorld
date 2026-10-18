@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Counts the native code of each plugin folder and fails when one is over the
-# budget (APP-01, MV14: at most 400 lines per plugin and platform; the Rust of
-# the Windows shell stays under 300).
+# Counts the native code of each plugin folder and fails when one has more
+# lines than the budget (APP-01, MV14: at most 400 lines per plugin and
+# platform, so a budget of 400; the Rust of the Windows shell stays under 300,
+# so a budget of 299).
 #
 #   tools/scripts/count-native-lines.sh <budget> <folder>...
 #
@@ -10,7 +11,7 @@
 # files count; a line counts unless it is blank or holds only a comment (a
 # line that starts with //, or a /* ... */ block that starts its line).
 # Prints "<folder>: <n> lines (budget <budget>)" per folder. Exits 1 when a
-# folder is over the budget, 2 on a usage error.
+# folder has more lines than the budget, 2 on a usage error.
 # Tested by apps/mobile/test/count-native-lines.test.ts.
 set -euo pipefail
 

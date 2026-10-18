@@ -63,7 +63,7 @@ while ((SECONDS < deadline)); do
     samples="$(jq '.samples.firstFrameMs // [] | length' "${file}")"
     if ((samples == 20)); then
       # Nearest rank: p50 is the 10th and p90 the 18th of the 20 sorted samples.
-      jq -r '(.samples.firstFrameMs | sort) as $ms
+      jq -r '(.samples.firstFrameMs | sort | map(round)) as $ms
         | "S1 stored with 20 samples: first frame p50 \($ms[9]) ms, p90 \($ms[17]) ms, max \($ms[19]) ms;"
           + " \(.device.model) \(.device.os) \(.device.webview); notes: \(.notes | join("; "))"' "${file}" |
         annotate notice "emulator S1"
