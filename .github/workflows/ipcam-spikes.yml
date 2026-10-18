@@ -1,0 +1,60 @@
+name: ipcam-spikes
+
+on:
+  push:
+    paths:
+      - 'ipcam/tools/spikes/video/**'
+      - 'ipcam/tools/**'
+      - 'ipcam/go.work'
+      - 'ipcam/go.work.sum'
+      - '.github/workflows/ipcam-spikes.yml'
+  pull_request:
+    paths:
+      - 'ipcam/tools/spikes/video/**'
+      - 'ipcam/tools/**'
+      - 'ipcam/go.work'
+      - 'ipcam/go.work.sum'
+      - '.github/workflows/ipcam-spikes.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipcam-spikes-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Go version comes from go.work alone; never switch toolchains silently.
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+jobs:
+  go:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+      - name: Build
+        run: go build ./tools/...
+      - name: Lint
+        run: go tool golangci-lint run ./tools/spikes/video/...
+      - name: Test
+        run: go test -race ./tools/spikes/video/...
+      - name: Vulnerabilities
+        # govulncheck needs a directory that holds a go.mod.
+        working-directory: ipcam/tools/spikes/video
+        run: go tool govulncheck ./...
+      - name: Licenses
+        run: tools/scripts/check-licenses.sh
