@@ -366,6 +366,9 @@ func (s *rtspSource) Codec() Codec               { return s.codec }
 func (s *rtspSource) SentLog() <-chan SentRecord { return nil }
 func (s *rtspSource) Jitter() time.Duration      { return 0 }
 
+// JitterSnapshot is the zero snapshot: the hub does not pace an RTSP source.
+func (s *rtspSource) JitterSnapshot() JitterSnapshot { return JitterSnapshot{} }
+
 func (s *rtspSource) Profile() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

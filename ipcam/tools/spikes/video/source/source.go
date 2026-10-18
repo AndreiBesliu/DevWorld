@@ -86,4 +86,9 @@ type Source interface {
 	// period since the source started. Only a simulator paces its sends; any
 	// other source reports 0.
 	Jitter() time.Duration
+	// JitterSnapshot captures the pacing statistics at this moment. The jitter
+	// of an interval is the later snapshot's P99Since the earlier one, so that a
+	// run can be measured on its own although the source outlives it. A source
+	// that does not pace its sends returns the zero snapshot.
+	JitterSnapshot() JitterSnapshot
 }

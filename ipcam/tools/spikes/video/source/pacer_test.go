@@ -83,6 +83,111 @@ func TestJitterMeter_P99(t *testing.T) {
 	}
 }
 
+func TestJitterSnapshot_P99OverAnInterval(t *testing.T) {
+	const period = 50 * time.Millisecond
+	m := newJitterMeter(period)
+	at := time.Unix(1000, 0)
+	m.observe(at)
+	feed := func(n int, late map[int]time.Duration) {
+		for i := 1; i <= n; i++ {
+			at = at.Add(period + late[i])
+			m.observe(at)
+		}
+	}
+
+	// Interval 1: two of 100 intervals are 7 ms late, so the 99th smallest deviation is 7 ms.
+	feed(100, map[int]time.Duration{5: 7 * time.Millisecond, 6: 7 * time.Millisecond})
+	first := m.snapshot()
+	// Interval 2: 100 intervals on time.
+	feed(100, nil)
+	second := m.snapshot()
+	// Interval 3: 100 intervals, three of them 20 ms late.
+	feed(100, map[int]time.Duration{10: 20 * time.Millisecond, 11: 20 * time.Millisecond, 12: 20 * time.Millisecond})
+	third := m.snapshot()
+
+	zero := JitterSnapshot{}
+	if got := first.P99Since(zero); got != 7*time.Millisecond {
+		t.Errorf("interval 1: p99 = %v, want 7ms", got)
+	}
+	if got := second.P99Since(first); got != 0 {
+		t.Errorf("interval 2: p99 = %v, want 0: the late frames of interval 1 are not part of it", got)
+	}
+	if got := third.P99Since(second); got != 20*time.Millisecond {
+		t.Errorf("interval 3: p99 = %v, want 20ms", got)
+	}
+	// Intervals 2 and 3 together: 3 of 200 intervals are late, so the 99th percentile is the 198th smallest.
+	if got := third.P99Since(first); got != 20*time.Millisecond {
+		t.Errorf("intervals 2 and 3: p99 = %v, want 20ms", got)
+	}
+	if got, want := third.P99Since(zero), m.p99(); got != want {
+		t.Errorf("since the start: p99 = %v, want the p99 of the whole run, %v", got, want)
+	}
+	// An interval with no send, a zero snapshot and snapshots in the wrong order
+	// have nothing to report.
+	if got := third.P99Since(third); got != 0 {
+		t.Errorf("empty interval: p99 = %v, want 0", got)
+	}
+	if got := zero.P99Since(zero); got != 0 {
+		t.Errorf("zero snapshots: p99 = %v, want 0", got)
+	}
+	if got := first.P99Since(third); got != 0 {
+		t.Errorf("earlier.P99Since(later) = %v, want 0", got)
+	}
+}
+
+func TestJitterSnapshot_IsACopy(t *testing.T) {
+	const period = 50 * time.Millisecond
+	m := newJitterMeter(period)
+	at := time.Unix(1000, 0)
+	m.observe(at)
+	m.observe(at.Add(period))
+	snap := m.snapshot()
+	// Later sends, even a huge stall, do not change a snapshot that was taken.
+	m.observe(at.Add(time.Hour))
+	if got := snap.P99Since(JitterSnapshot{}); got != 0 {
+		t.Errorf("snapshot changed after it was taken: p99 = %v, want 0", got)
+	}
+}
+
+func TestSim_JitterSnapshotSeparatesTheIntervals(t *testing.T) {
+	const (
+		fps    = 12
+		delay  = 30 * time.Millisecond
+		period = time.Second / fps
+	)
+	clock := newFakeClock()
+	src := NewSim("sim", 1, synthAUs(48, 12), fps, 0, clock)
+	start := clock.Now()
+	tick := func(k int, extra time.Duration) {
+		clock.tickAt(t, start.Add(time.Duration(k)*period+extra))
+		waitFor(t, src.SentLog())
+	}
+
+	before := src.JitterSnapshot()
+	for k := 1; k <= 100; k++ {
+		extra := time.Duration(0)
+		if k%10 == 0 {
+			extra = delay // the send is late; the next one is on schedule again
+		}
+		tick(k, extra)
+	}
+	mid := src.JitterSnapshot()
+	for k := 101; k <= 200; k++ {
+		tick(k, 0)
+	}
+	end := src.JitterSnapshot()
+
+	if got := mid.P99Since(before); got < delay || got > delay+time.Millisecond {
+		t.Errorf("busy interval: p99 = %v, want about %v", got, delay)
+	}
+	if got := end.P99Since(mid); got > time.Millisecond {
+		t.Errorf("idle interval: p99 = %v, want about 0", got)
+	}
+	if got := end.P99Since(JitterSnapshot{}); got != src.Jitter() {
+		t.Errorf("since the start: p99 = %v, Jitter() = %v, want them equal", got, src.Jitter())
+	}
+}
+
 func TestSystemClock_Ticks(t *testing.T) {
 	var clock Clock = SystemClock{}
 	before := clock.Now()

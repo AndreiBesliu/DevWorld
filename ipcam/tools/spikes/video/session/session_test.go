@@ -138,7 +138,7 @@ func TestSession_ClosesWhenTheClientCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-s.done:
+	case <-s.Done():
 	case <-time.After(30 * time.Second):
 		t.Fatal("the session did not close after the client closed")
 	}
@@ -166,5 +166,24 @@ func TestClose_IsIdempotentAndReleasesSources(t *testing.T) {
 	}
 	if fanout.has(sim, s) {
 		t.Error("a closed session is still in the sent fan-out")
+	}
+}
+
+func TestDone_ClosesWhenTheSessionCloses(t *testing.T) {
+	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	s := connect(t, testAPI(t), c, nil, testOptions(source.SystemClock{}, nil))
+
+	select {
+	case <-s.Done():
+		t.Fatal("Done is closed on a session that is open")
+	default:
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-s.Done():
+	default:
+		t.Fatal("Done is not closed after Close")
 	}
 }

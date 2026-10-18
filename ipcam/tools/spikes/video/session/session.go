@@ -27,6 +27,14 @@
 // source was bound, not the ones it sent before (R26). "jitter" comes every
 // 10 s while anything is bound, and "pair" whenever ICE selects a pair.
 //
+// "jitter" is the hub's pacing jitter over the interval before the message
+// (R28): the p99 deviation of the frame send interval from the frame period,
+// for the sends of the 10 s since the previous "jitter" message, or since the
+// bind for a simulator that was bound later; the worst of the bound simulators.
+// The simulators outlive the sessions, so a figure over their whole life would
+// blame a viewer's run for a busy hub of an hour ago, and hide a busy hub of
+// the last seconds. The client keeps the maximum over its run.
+//
 // H.264 goes out in the first offered profile-level-id, in offer order, whose
 // profile_idc is the stream's (R20). The level is not enforced, and the first
 // entry is the one that Pion binds, so "bound" names what the client receives.
@@ -265,6 +273,11 @@ func (s *Session) Close() error {
 	})
 	return s.closeErr
 }
+
+// Done returns a channel that is closed when the session closes, whether Close
+// was called, the viewer closed the connection or the connection failed. A
+// caller that keeps sessions in a list drops a session when Done is closed.
+func (s *Session) Done() <-chan struct{} { return s.done }
 
 // SelectedPair returns the ICE candidate types ("host", "srflx", "prflx" or
 // "relay") of the selected pair, never addresses (PH0-22). ok is false while

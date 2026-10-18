@@ -369,6 +369,9 @@ func TestRTSP_ReadsFromLocalServer(t *testing.T) {
 			if src.Jitter() != 0 {
 				t.Errorf("Jitter() = %v: the hub does not pace an RTSP source", src.Jitter())
 			}
+			if snap := src.JitterSnapshot(); snap.P99Since(JitterSnapshot{}) != 0 || snap.P99Since(snap) != 0 {
+				t.Error("an RTSP source reports pacing jitter in its snapshot")
+			}
 
 			stop() // the source ends and closes the subscription
 			for range live {

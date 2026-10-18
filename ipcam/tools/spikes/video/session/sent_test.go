@@ -211,12 +211,19 @@ func TestSentLog_WarnsWhenTheStreamDiffersFromTheBindKey(t *testing.T) {
 	}
 }
 
+// jitterReport lets 10 s of the session's clock pass and returns the jitter
+// message that follows, or fails the test when none does.
+func jitterReport(t *testing.T, c *testClient, clock *fakeClock) rxMsg {
+	t.Helper()
+	clock.advance(t, 10*time.Second)
+	return c.next(t, "jitter")
+}
+
 func TestJitter_ReportsTheWorstBoundSourceEvery10s(t *testing.T) {
 	late := newTestSim(t, "sim-01", 1, "sub", h264AUs("4d401f", 1, 48, 12), 12)
 	steady := newTestSim(t, "sim-02", 2, "sub", h264AUs("4d401f", 2, 48, 12), 12)
-	late.emit(t, 1)
-	late.emitLate(t, 30*time.Millisecond)
-	steady.emit(t, 3)
+	late.emit(t, 1) // the first send of a simulator only starts its measurement
+	steady.emit(t, 1)
 	clock := newFakeClock()
 	c := newClient(t, clientConfig{slots: 2, offer: chromeLike})
 	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": late, "sim-02/sub": steady}, testOptions(clock, nil))
@@ -234,10 +241,77 @@ func TestJitter_ReportsTheWorstBoundSourceEvery10s(t *testing.T) {
 	c.next(t, "bound")
 	c.bind(t, 1, "sim-01", "sub", 2)
 	c.next(t, "bound")
-	clock.advance(t, 10*time.Second)
+	late.emitLate(t, 30*time.Millisecond)
+	late.emit(t, 2)
+	steady.emit(t, 3)
 
-	m := c.next(t, "jitter")
+	m := jitterReport(t, c, clock)
 	if want := `{"t":"jitter","ms":30}`; m.raw != want {
 		t.Errorf("jitter = %s, want %s", m.raw, want)
+	}
+}
+
+// Each report covers the 10 s since the previous one (R28): the hub may be busy
+// for a while, and the run's number is the worst report.
+func TestJitter_ReportsOnlyTheIntervalBeforeEachReport(t *testing.T) {
+	sim := newTestSim(t, "sim-01", 1, "sub", h264AUs("4d401f", 1, 48, 12), 12)
+	sim.emit(t, 1)
+	clock := newFakeClock()
+	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": sim}, testOptions(clock, nil))
+	c.bind(t, 0, "sim-01", "sub", 1)
+	c.next(t, "bound")
+
+	sim.emitLate(t, 30*time.Millisecond)
+	sim.emit(t, 5)
+	if m := jitterReport(t, c, clock); m.raw != `{"t":"jitter","ms":30}` {
+		t.Errorf("first report = %s, want 30 ms: the interval had a late frame", m.raw)
+	}
+	sim.emit(t, 6)
+	if m := jitterReport(t, c, clock); m.raw != `{"t":"jitter","ms":0}` {
+		t.Errorf("second report = %s, want 0 ms: the late frame of the first interval is not part of it", m.raw)
+	}
+	sim.emitLate(t, 50*time.Millisecond)
+	sim.emit(t, 5)
+	if m := jitterReport(t, c, clock); m.raw != `{"t":"jitter","ms":50}` {
+		t.Errorf("third report = %s, want 50 ms", m.raw)
+	}
+}
+
+// A simulator runs for the life of the hub, so a viewer that binds it is not
+// told about the frames it sent before the bind.
+func TestJitter_LeavesOutSendsBeforeTheBind(t *testing.T) {
+	sim := newTestSim(t, "sim-01", 1, "sub", h264AUs("4d401f", 1, 48, 12), 12)
+	sim.emit(t, 1)
+	sim.emitLate(t, 40*time.Millisecond) // a busy hub, before any viewer
+	sim.emit(t, 2)
+	clock := newFakeClock()
+	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": sim}, testOptions(clock, nil))
+	c.bind(t, 0, "sim-01", "sub", 1)
+	c.next(t, "bound")
+
+	sim.emit(t, 4)
+	if m := jitterReport(t, c, clock); m.raw != `{"t":"jitter","ms":0}` {
+		t.Errorf("jitter = %s, want 0 ms: the late frame was sent before the bind", m.raw)
+	}
+}
+
+// Rebinding a source that stays bound on another slot keeps its interval.
+func TestJitter_KeepsTheIntervalOfASourceOnTwoSlots(t *testing.T) {
+	sim := newTestSim(t, "sim-01", 1, "sub", h264AUs("4d401f", 1, 48, 12), 12)
+	sim.emit(t, 1)
+	clock := newFakeClock()
+	c := newClient(t, clientConfig{slots: 2, offer: chromeLike})
+	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": sim}, testOptions(clock, nil))
+	c.bind(t, 0, "sim-01", "sub", 1)
+	c.next(t, "bound")
+	sim.emitLate(t, 30*time.Millisecond)
+	c.bind(t, 1, "sim-01", "sub", 2)
+	c.next(t, "bound")
+	sim.emit(t, 3)
+
+	if m := jitterReport(t, c, clock); m.raw != `{"t":"jitter","ms":30}` {
+		t.Errorf("jitter = %s, want 30 ms: the second bind of the source starts no new interval", m.raw)
 	}
 }

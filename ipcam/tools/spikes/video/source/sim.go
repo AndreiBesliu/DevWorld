@@ -119,6 +119,8 @@ func (s *sim) FPS() int                   { return s.fps }
 func (s *sim) SentLog() <-chan SentRecord { return s.sent }
 func (s *sim) Jitter() time.Duration      { return s.pacer.jitter() }
 
+func (s *sim) JitterSnapshot() JitterSnapshot { return s.pacer.jitterSnapshot() }
+
 func (s *sim) Subscribe() ([]AccessUnit, <-chan AccessUnit, func()) {
 	return s.gop.subscribe()
 }

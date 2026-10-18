@@ -90,8 +90,9 @@ type pairMsg struct {
 	Remote string `json:"remote"`
 }
 
-// jitterMsg reports the hub's pacing jitter, the p99 deviation of the frame
-// send interval, in ms.
+// jitterMsg reports the hub's pacing jitter, in ms: the worst, over the bound
+// simulators, of the p99 deviation of the frame send interval from the frame
+// period, over the 10 s before the message (R28).
 type jitterMsg struct {
 	T  string  `json:"t"`
 	MS float64 `json:"ms"`

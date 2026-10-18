@@ -11,7 +11,8 @@ const (
 	// sentInterval is how often a session reports the frames that its bound
 	// simulators sent.
 	sentInterval = 500 * time.Millisecond
-	// jitterInterval is how often a session reports the hub's pacing jitter.
+	// jitterInterval is how often a session reports the hub's pacing jitter,
+	// and how long the interval is that a report covers.
 	jitterInterval = 10 * time.Second
 )
 
@@ -100,6 +101,9 @@ type boundSource struct {
 	cam     uint8
 	recs    [][3]float64
 	warned  bool // the stream profile mismatch has been logged
+	// jitterSince is the source's pacing statistics when it was bound or when
+	// the last jitter message was made, whichever is later.
+	jitterSince source.JitterSnapshot
 }
 
 // retain notes that one more slot carries src, bound as profile.
@@ -111,7 +115,7 @@ func (s *Session) retain(src source.Source, profile string) {
 	}
 	b, ok := s.bound[src]
 	if !ok {
-		b = &boundSource{profile: profile}
+		b = &boundSource{profile: profile, jitterSince: src.JitterSnapshot()}
 		s.bound[src] = b
 	}
 	b.slots++
@@ -188,13 +192,19 @@ func (s *Session) flushSent() {
 	}
 }
 
-// reportJitter sends the worst pacing jitter of the bound sources, if any.
+// reportJitter sends the worst pacing jitter of the bound sources over the
+// interval since the last report, if any source is bound (R28). A source that
+// was bound during the interval counts from its bind: a simulator runs for the
+// life of the hub, and what it did before the viewer bound it is not the
+// viewer's run.
 func (s *Session) reportJitter() {
 	s.sentMu.Lock()
 	var worst time.Duration
 	bound := len(s.bound) > 0
-	for src := range s.bound {
-		worst = max(worst, src.Jitter())
+	for src, b := range s.bound {
+		now := src.JitterSnapshot()
+		worst = max(worst, now.P99Since(b.jitterSince))
+		b.jitterSince = now
 	}
 	s.sentMu.Unlock()
 	if bound {

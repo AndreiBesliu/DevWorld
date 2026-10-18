@@ -41,6 +41,9 @@ const (
 	maxJitter = 2 * time.Second
 )
 
+// jitterBuckets is the number of buckets of the jitter histogram.
+const jitterBuckets = int(maxJitter/jitterResolution) + 1
+
 // jitterMeter measures how far the send intervals of a source deviate from its
 // frame period.
 type jitterMeter struct {
@@ -49,7 +52,7 @@ type jitterMeter struct {
 	mu     sync.Mutex
 	last   time.Time
 	seen   bool
-	counts [maxJitter/jitterResolution + 1]uint32
+	counts [jitterBuckets]uint32
 	total  uint64
 }
 
@@ -79,18 +82,57 @@ func (m *jitterMeter) observe(at time.Time) {
 func (m *jitterMeter) p99() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.total == 0 {
+	return p99Of(&m.counts, nil, m.total)
+}
+
+// snapshot copies the histogram.
+func (m *jitterMeter) snapshot() JitterSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	counts := m.counts
+	return JitterSnapshot{counts: &counts, total: m.total}
+}
+
+// p99Of returns the p99 of the total intervals that counts holds, less the
+// ones that base holds, if it is not nil.
+func p99Of(counts, base *[jitterBuckets]uint32, total uint64) time.Duration {
+	if total == 0 {
 		return 0
 	}
-	rank := (m.total*99 + 99) / 100 // ceil(0.99 * total)
+	rank := (total*99 + 99) / 100 // ceil(0.99 * total)
 	var seen uint64
-	for i, n := range m.counts {
+	for i, n := range counts {
+		if base != nil {
+			n -= base[i]
+		}
 		seen += uint64(n)
 		if seen >= rank {
 			return time.Duration(i) * jitterResolution
 		}
 	}
 	return maxJitter
+}
+
+// JitterSnapshot is the pacing statistics of a source at one moment. It lets a
+// caller measure the jitter of an interval instead of the whole run: take a
+// snapshot at the start of the interval and another at its end, and ask the
+// later one for P99Since the earlier. The zero value stands for the start of
+// the source.
+type JitterSnapshot struct {
+	counts *[jitterBuckets]uint32
+	total  uint64
+}
+
+// P99Since is the p99 deviation of the frame send interval from the frame
+// period, over the sends between the earlier snapshot and this one, rounded
+// down to 0.1 ms. It is 0 when there was no send in between, and for a source
+// that does not pace its sends. The snapshots must come from the same source,
+// the earlier one first; when they do not, the result is 0 or meaningless.
+func (s JitterSnapshot) P99Since(earlier JitterSnapshot) time.Duration {
+	if s.counts == nil || earlier.total > s.total {
+		return 0
+	}
+	return p99Of(s.counts, earlier.counts, s.total-earlier.total)
 }
 
 // pacer calls a function once per frame period and measures how evenly it does.
@@ -119,3 +161,6 @@ func (p *pacer) run(tick func(at time.Time)) {
 
 // jitter is the p99 deviation of the intervals between ticks from the period.
 func (p *pacer) jitter() time.Duration { return p.meter.p99() }
+
+// jitterSnapshot is the pacing statistics so far.
+func (p *pacer) jitterSnapshot() JitterSnapshot { return p.meter.snapshot() }
