@@ -41,11 +41,13 @@ diagnose() {
 
 # The emulator's network comes up a little after boot: start S1 only when
 # spikehub answers (toybox nc: -w connect timeout, -q quit after stdin ends).
+# If it stays unreachable for 2 min, S1 cannot run: report why and stop.
 booted=${SECONDS}
 until adb shell 'nc -w 2 -q 1 10.0.2.2 7080 </dev/null' >/dev/null 2>&1; do
   if ((SECONDS - booted >= 120)); then
     echo "the emulator could not reach spikehub at 10.0.2.2:7080 for 2 min" | annotate error "emulator network"
-    break
+    diagnose
+    exit 1
   fi
   sleep 2
 done
