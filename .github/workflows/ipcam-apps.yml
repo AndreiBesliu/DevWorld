@@ -7,6 +7,10 @@ on:
       - 'ipcam/tools/spikes/video/app/**'
       # The spike app's band tests read the shared test vectors.
       - 'ipcam/tools/spikes/video/band/vectors.json'
+      # The Android metrics plugin's TypeScript is typechecked and linted here.
+      - 'ipcam/tools/spikes/video/android-metrics/**'
+      # The native line counter; its test is in ipcam/apps/mobile/test.
+      - 'ipcam/tools/scripts/count-native-lines.sh'
       - 'ipcam/package.json'
       - 'ipcam/pnpm-*.yaml'
       - 'ipcam/tsconfig.base.json'
@@ -19,6 +23,10 @@ on:
       - 'ipcam/tools/spikes/video/app/**'
       # The spike app's band tests read the shared test vectors.
       - 'ipcam/tools/spikes/video/band/vectors.json'
+      # The Android metrics plugin's TypeScript is typechecked and linted here.
+      - 'ipcam/tools/spikes/video/android-metrics/**'
+      # The native line counter; its test is in ipcam/apps/mobile/test.
+      - 'ipcam/tools/scripts/count-native-lines.sh'
       - 'ipcam/package.json'
       - 'ipcam/pnpm-*.yaml'
       - 'ipcam/tsconfig.base.json'
