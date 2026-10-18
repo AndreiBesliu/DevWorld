@@ -82,6 +82,16 @@ describe('countFrames', () => {
 });
 
 describe('isPlaybackActive', () => {
+  it('isPlaybackActive_hiddenDocument_isFalse', () => {
+    const video = fakeVideo();
+
+    video.ownerDocument.hidden = true;
+    expect(isPlaybackActive(video.element)).toBe(false);
+
+    video.ownerDocument.hidden = false;
+    expect(isPlaybackActive(video.element)).toBe(true);
+  });
+
   it('isPlaybackActive_pausedSeekingOrEnded_isFalse', () => {
     const video = fakeVideo();
     expect(isPlaybackActive(video.element)).toBe(true);

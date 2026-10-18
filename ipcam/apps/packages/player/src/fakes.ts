@@ -75,6 +75,8 @@ export class FakeVideo {
   paused = false;
   seeking = false;
   ended = false;
+  /** The part of the owner document that the player reads: `hidden` is true while the app is in the background. */
+  readonly ownerDocument = { hidden: false };
   /** What play() returns. Tests replace it to refuse playback, for example. */
   playResult: () => Promise<void> = () => Promise.resolve();
   getVideoPlaybackQuality?: () => VideoPlaybackQuality;

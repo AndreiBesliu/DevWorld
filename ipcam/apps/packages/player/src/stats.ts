@@ -51,9 +51,14 @@ export function countFrames(video: HTMLVideoElement): FrameCount {
   };
 }
 
-/** False while the element is paused, seeking or ended: no frames are expected then (ruling R31). */
+/**
+ * False while the element is paused, seeking or ended, or while its document is
+ * hidden: no frames are expected then (rulings R31 and R32). A hidden document
+ * is the app in the background: requestVideoFrameCallback does not fire for it,
+ * so the silence is no stall. Picture-in-picture keeps the document visible.
+ */
 export function isPlaybackActive(video: HTMLVideoElement): boolean {
-  return !video.paused && !video.seeking && !video.ended;
+  return !video.paused && !video.seeking && !video.ended && !video.ownerDocument.hidden;
 }
 
 /**

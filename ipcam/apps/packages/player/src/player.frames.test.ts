@@ -222,6 +222,47 @@ describe('no stall while the element is not playing', () => {
     expect(emitted('error')).toEqual([{ reason: 'STALLED' }]);
   });
 
+  it('live_documentHidden_raisesNoStalledDuringTwoMinutesInTheBackground', async () => {
+    // S5: the app goes to the background and requestVideoFrameCallback stops firing (ruling R32).
+    const { player, video, clock, emitted } = setup();
+    await player.play(LIVE);
+    frames(clock, video, 5);
+
+    video.ownerDocument.hidden = true;
+    clock.advance(120_000);
+
+    expect(emitted('error')).toEqual([]);
+  });
+
+  it('live_returnFromTheBackground_theStallWindowStartsOnReturn', async () => {
+    const { player, video, clock, emitted } = setup();
+    await player.play(LIVE);
+    frames(clock, video, 5);
+    clock.advance(1000); // the stall poll has seen the frames
+    video.ownerDocument.hidden = true;
+    clock.advance(120_000);
+
+    video.ownerDocument.hidden = false; // back in the foreground, the stream has not resumed yet
+    clock.advance(2999);
+    expect(emitted('error')).toEqual([]);
+    clock.advance(501);
+    expect(emitted('error')).toEqual([{ reason: 'STALLED' }]);
+  });
+
+  it('live_returnFromTheBackground_framesThatFlowAgainRaiseNoStalled', async () => {
+    const { player, video, clock, emitted } = setup();
+    await player.play(LIVE);
+    frames(clock, video, 5);
+    video.ownerDocument.hidden = true;
+    clock.advance(120_000);
+
+    video.ownerDocument.hidden = false;
+    clock.advance(1000);
+    frames(clock, video, 50);
+
+    expect(emitted('error')).toEqual([]);
+  });
+
   it('paused_beforeTheFirstFrame_stillRaisesNoFirstFrameAt4s', async () => {
     // Only the stall watchdog stands down: a play() that never starts is reported.
     const { player, video, clock, emitted } = setup();

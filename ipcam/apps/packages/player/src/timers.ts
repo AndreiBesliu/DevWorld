@@ -32,10 +32,11 @@ export interface WatchdogOptions {
   now: () => number;
   framesDecoded: () => number;
   /**
-   * False while no frames are expected (paused, seeking, ended). The stall
-   * check stands down then, and when this turns true again it starts a fresh
-   * STALL_MS window: the time spent not playing never counts as a stall. It is
-   * read at every poll, so a pause shorter than STALL_POLL_MS may go unseen.
+   * False while no frames are expected (paused, seeking, ended, document
+   * hidden). The stall check stands down then, and when this turns true again
+   * it starts a fresh STALL_MS window: the time spent not playing never counts
+   * as a stall. It is read at every poll, so a pause shorter than
+   * STALL_POLL_MS may go unseen.
    */
   playbackActive: () => boolean;
   /** Called at most once. The watchdog has already disarmed itself when it runs. */
