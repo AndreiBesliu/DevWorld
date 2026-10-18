@@ -2,6 +2,7 @@ package ro.ipcam.pip
 
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
+import android.util.Rational
 import androidx.core.app.PictureInPictureModeChangedInfo
 import androidx.core.util.Consumer
 import com.getcapacitor.JSObject
@@ -11,7 +12,8 @@ import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 
 /** Picture-in-picture of the whole Activity at 16:9, the shape of a camera picture (spec §6.6). */
-internal fun pipParams(): PictureInPictureParams = TODO("Task 10: 16:9")
+internal fun pipParams(): PictureInPictureParams =
+    PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build()
 
 /**
  * The `pip` plugin: `enter()` puts the Activity into picture-in-picture, and the
