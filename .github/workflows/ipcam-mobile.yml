@@ -147,8 +147,9 @@ jobs:
 
   emulator:
     # AND-3: the APK on an API 36 emulator runs S1 by autorun (R5) against
-    # spikehub with 4 simulated cameras on the runner, from three cold starts
-    # in a row (one start per job could not show a launch that fails now and then).
+    # spikehub with 4 simulated cameras on the runner, from five cold starts
+    # in a row and a sixth that changes the font scale during the run (one start
+    # per job could not show a launch that fails now and then).
     needs: android
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -209,4 +210,4 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back none
           working-directory: ipcam
-          script: apps/mobile/ci/emulator-smoke.sh "${RUNNER_TEMP}/apk/app-spike-debug.apk" "${RUNNER_TEMP}/results" "${RUNNER_TEMP}/spikehub.log" 3
+          script: apps/mobile/ci/emulator-smoke.sh "${RUNNER_TEMP}/apk/app-spike-debug.apk" "${RUNNER_TEMP}/results" "${RUNNER_TEMP}/spikehub.log" 5

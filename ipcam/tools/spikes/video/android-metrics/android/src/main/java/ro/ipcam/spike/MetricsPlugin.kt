@@ -69,8 +69,11 @@ internal fun autorunQuery(autorun: String?, hub: String?): String? {
  *
  * Only a cold start honours the extras: `load()` reads them when the Bridge
  * is created and removes them from the Activity's Intent, so a Bridge created
- * again from the same Intent does not start the scenario again, and a warm
- * start (`onNewIntent`) does not read them at all. The Activity is exported
+ * again from the same Intent in this process does not start the scenario
+ * again (the system hands a process that died a fresh copy of the Intent), and
+ * a warm start (`onNewIntent`) does not read them at all. That makes a
+ * recreated Activity lose the run, so the manifest's `configChanges` keep the
+ * Activity from being recreated by a configuration change. The Activity is exported
  * and takes any `hub` URL: any app on the device can start a run against a
  * hub of its choosing. That is by design for a spike that is never published
  * (SPIKE-ONLY); the results hold no addresses or serial numbers (PH0-22).

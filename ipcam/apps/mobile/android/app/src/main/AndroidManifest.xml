@@ -10,8 +10,15 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/AppTheme">
 
+        <!-- The Activity handles every configuration change itself (Capacitor's
+             default list plus mcc, mnc, fontScale, layoutDirection, colorMode,
+             touchscreen, fontWeightAdjustment and grammaticalGender). A change it
+             does not list creates the Activity and its WebView again, which ends a
+             running scenario and, in the spike, loses the launch extras (autorun)
+             for good. A SIM, a network operator or the font scale changing in the
+             middle of a 30 min run must not do that. ci/emulator-smoke.sh checks it. -->
         <activity
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density|mcc|mnc|fontScale|layoutDirection|colorMode|touchscreen|fontWeightAdjustment|grammaticalGender"
             android:name=".MainActivity"
             android:label="@string/title_activity_main"
             android:theme="@style/AppTheme.NoActionBarLaunch"
