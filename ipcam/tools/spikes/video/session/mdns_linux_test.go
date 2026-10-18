@@ -66,16 +66,18 @@ func TestMDNS_CoexistsWithExistingListener(t *testing.T) {
 	}
 
 	c := newClient(t, clientConfig{slots: 1, offer: chromeLike, mdns: true})
-	var candidates int
+	var name string // the client's mDNS host name
 	for _, line := range strings.Split(c.offer, "\r\n") {
-		if strings.HasPrefix(line, "a=candidate:") {
-			candidates++
-			if !strings.Contains(line, ".local ") || ipLiteral.MatchString(line) {
-				t.Fatalf("the client published %q, want a .local host candidate", line)
-			}
+		if !strings.HasPrefix(line, "a=candidate:") {
+			continue
 		}
+		fields := strings.Fields(line) // foundation component transport priority address port typ host ...
+		if len(fields) < 8 || !strings.HasSuffix(fields[4], ".local") || fields[7] != "host" || ipLiteral.MatchString(line) {
+			t.Fatalf("the client published %q, want a .local host candidate", line)
+		}
+		name = fields[4]
 	}
-	if candidates == 0 {
+	if name == "" {
 		t.Fatal("the offer holds no candidate")
 	}
 
@@ -85,15 +87,32 @@ func TestMDNS_CoexistsWithExistingListener(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	// Without the hub's candidates the client cannot reach the hub: the
-	// connection comes up only if the hub resolves the client's .local name
-	// and checks it.
+	// connection can only start with the hub's checks to the address it
+	// resolved for the client's .local name.
 	if err := c.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: withoutCandidates(answerSDP)}); err != nil {
 		t.Fatal(err)
 	}
 	waitClosed(t, c.open)
-	if _, remote, ok := s.SelectedPair(); !ok || remote != "host" {
-		t.Errorf("hub's remote candidate = %q (selected %v), want the resolved host candidate", remote, ok)
+	// Pion adds a .local remote candidate to its agent only once the mDNS
+	// query for it has an answer. The selected pair's remote type is not
+	// checked: once the client has learned the hub's addresses from those
+	// checks, its own checks can reach the hub first from an address that the
+	// hub knows only as peer-reflexive, and ICE may select that pair.
+	waitUntil(t, "the hub holds the client's resolved host candidate", func() bool {
+		return hasRemoteHostCandidate(s, name)
+	})
+}
+
+// hasRemoteHostCandidate reports whether the hub's ICE agent holds a remote
+// host candidate with the given address.
+func hasRemoteHostCandidate(s *Session, address string) bool {
+	for _, stat := range s.pc.GetStats() {
+		if c, ok := stat.(webrtc.ICECandidateStats); ok && c.Type == webrtc.StatsTypeRemoteCandidate &&
+			c.CandidateType == webrtc.ICECandidateTypeHost && c.IP == address {
+			return true
+		}
 	}
+	return false
 }
 
 func TestNewAPI_ReportsMDNSUnavailableWhenThePortIsTaken(t *testing.T) {
