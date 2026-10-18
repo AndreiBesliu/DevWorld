@@ -32,7 +32,7 @@ budget=$((10#${budget})) # (( )) would read 0400 as octal
 # An awk program that prints the number of code lines in the files it reads.
 # shellcheck disable=SC2016 # awk, not the shell, reads the $ fields
 code_lines='
-  # Whether the rest of the line, from character i on, holds code. in_block
+  # Whether the line holds anything but whitespace and comments. in_block
   # carries a /* ... */ across lines.
   function has_code(line,    i, n, c, pair, code) {
     n = length(line)
