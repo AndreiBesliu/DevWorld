@@ -73,9 +73,10 @@ jobs:
         run: pnpm --filter @ipcam/mobile test
       - name: Build and unit tests
         working-directory: ipcam/apps/mobile/android
+        # --continue: one run reports every failing task, not only the first.
         run: |
           set -o pipefail
-          ./gradlew --no-daemon --console=plain assembleSpikeDebug testSpikeDebugUnitTest 2>&1 | tee "${RUNNER_TEMP}/gradle.log"
+          ./gradlew --no-daemon --console=plain --continue assembleSpikeDebug testSpikeDebugUnitTest 2>&1 | tee "${RUNNER_TEMP}/gradle.log"
       - name: Show Gradle failures as annotations
         # Job logs cannot be read from everywhere; check-run annotations can
         # (gh api repos/<owner>/<repo>/check-runs/<job id>/annotations).
