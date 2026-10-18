@@ -25,6 +25,10 @@ const (
 	fallbackFrameInterval = 50 * time.Millisecond
 	// requestQueue is how many bind and unbind requests may wait for a slot.
 	requestQueue = 16
+	// maxClockSkip bounds how far a bind skips a slot's timestamps forward. A
+	// skip of half the 32-bit range (6.6 h at 90 kHz) or more would read as a
+	// step backward.
+	maxClockSkip = time.Hour
 )
 
 var errNoSendableCodec = errors.New("the offer has no H.264 in packetization mode 1 and no H.265")
@@ -46,7 +50,9 @@ type binding struct {
 // slot is one recvonly video m-line of the client's offer. It writes the
 // camera bound to it, first the cached GOP and then the live frames, into
 // one RTP stream: a rebind or a change of codec keeps the SSRC and continues
-// the sequence numbers and timestamps (spec §6.3 step 6).
+// the sequence numbers and timestamps (spec §6.3 step 6). The timestamps do
+// not lag the hub clock: a bind skips them forward over the time the slot was
+// empty (see the package doc).
 type slot struct {
 	index   int
 	offered []webrtc.RTPCodecParameters // the codecs the answer lists for the slot
@@ -54,6 +60,7 @@ type slot struct {
 	reqs    chan binding
 	notify  func(any)
 	log     *slog.Logger
+	now     func() time.Time // the hub clock
 	// replaceTrack switches the sender to another track: RTPSender.ReplaceTrack,
 	// except in tests that make it fail.
 	replaceTrack func(*webrtc.RTPSender, webrtc.TrackLocal) error
@@ -64,20 +71,24 @@ type slot struct {
 	seq       uint16  // the sequence number of the next RTP packet
 	ts        uint32  // the timestamp of the next sample
 	remainder float64 // the fraction of a tick that the next sample inherits
+	// due is the hub time that ts stands for: the RTP clock started at the hub
+	// time of the first sample and advances by the step of each sample. Zero
+	// until the slot has written a sample.
+	due time.Time
 }
 
 // newSlot creates a slot and its first track, created at answer time in the
-// first codec of the answer that the hub can send.
-func newSlot(index int, offered []webrtc.RTPCodecParameters, notify func(any), log *slog.Logger,
+// first codec of the answer that the hub can send. now reads the hub clock.
+func newSlot(index int, offered []webrtc.RTPCodecParameters, notify func(any), log *slog.Logger, now func() time.Time,
 	replaceTrack func(*webrtc.RTPSender, webrtc.TrackLocal) error,
 ) (*slot, error) {
-	sl := &slot{index: index, offered: offered, reqs: make(chan binding, requestQueue), notify: notify, log: log, replaceTrack: replaceTrack}
+	sl := &slot{index: index, offered: offered, reqs: make(chan binding, requestQueue), notify: notify, log: log, now: now, replaceTrack: replaceTrack}
 	var b [6]byte
 	_, _ = rand.Read(b[:]) // crypto/rand.Read never returns an error
 	sl.seq, sl.ts = binary.BigEndian.Uint16(b[:2]), binary.BigEndian.Uint32(b[2:])
 	for _, c := range offered {
 		if sendable(c) {
-			track, err := sl.newTrack(c)
+			track, err := sl.newTrack(c, sl.ts)
 			if err != nil {
 				return nil, err
 			}
@@ -88,10 +99,11 @@ func newSlot(index int, offered []webrtc.RTPCodecParameters, notify func(any), l
 	return nil, fmt.Errorf("slot %d: %w", index, errNoSendableCodec)
 }
 
-// newTrack creates a track that continues the slot's RTP stream in codec c.
-func (sl *slot) newTrack(c webrtc.RTPCodecParameters) (*webrtc.TrackLocalStaticSample, error) {
+// newTrack creates a track that continues the slot's RTP stream in codec c,
+// its next sample stamped ts.
+func (sl *slot) newTrack(c webrtc.RTPCodecParameters, ts uint32) (*webrtc.TrackLocalStaticSample, error) {
 	track, err := webrtc.NewTrackLocalStaticSample(c.RTPCodecCapability, fmt.Sprintf("slot-%d", sl.index), "spikehub",
-		webrtc.WithRTPSequenceNumber(sl.seq), webrtc.WithRTPTimestamp(sl.ts), webrtc.WithPayloader(sl.payloader))
+		webrtc.WithRTPSequenceNumber(sl.seq), webrtc.WithRTPTimestamp(ts), webrtc.WithPayloader(sl.payloader))
 	if err != nil {
 		return nil, fmt.Errorf("slot %d: create track: %w", sl.index, err)
 	}
@@ -176,17 +188,18 @@ func (sl *slot) handle(b binding, cur feed) feed {
 }
 
 // apply switches the slot to the feed b asks for: it switches the track to b's
-// codec, stops the current feed, announces the binding and writes the source's
-// cached GOP, which starts at its last IDR. The codec comes first, because it
-// is the step that can fail: then the slot is left as it was, still writing the
-// current feed, and the client gets an error for the epoch of the bind.
+// codec and to the hub clock, stops the current feed, announces the binding
+// and writes the source's cached GOP, which starts at its last IDR. The track
+// comes first, because it is the step that can fail: then the slot is left as
+// it was, still writing the current feed, and the client gets an error for the
+// epoch of the bind.
 func (sl *slot) apply(b binding, cur feed) (feed, error) {
 	if b.src == nil {
 		cur.stop()
 		return feed{}, nil
 	}
-	if err := sl.useCodec(b.codec); err != nil {
-		sl.log.Error("cannot switch the codec of a slot", "slot", sl.index, "codec", b.codec.MimeType, "err", err)
+	if err := sl.useTrack(b.codec); err != nil {
+		sl.log.Error("cannot switch the track of a slot", "slot", sl.index, "codec", b.codec.MimeType, "err", err)
 		sl.notify(errorMsg{T: "error", Slot: sl.index, Epoch: b.epoch, Code: codeCodecUnsupported})
 		return cur, err
 	}
@@ -203,25 +216,38 @@ func (sl *slot) apply(b binding, cur feed) (feed, error) {
 	return feed{src: b.src, live: live, cancel: cancel}, nil
 }
 
-// useCodec makes the slot send in codec c. A new codec needs a new track,
-// which continues the sequence numbers and timestamps of the old one.
-func (sl *slot) useCodec(c webrtc.RTPCodecParameters) error {
-	if c.PayloadType == sl.codec.PayloadType {
+// useTrack makes the slot send in codec c, with timestamps that do not lag the
+// hub clock. A new track continues the sequence numbers and timestamps of the
+// old one; the slot needs one for a new codec, and to skip its timestamps
+// forward to the hub clock when they have fallen behind it, as they do while
+// the slot is empty (TrackLocalStaticSample stamps a sample by the durations of
+// the samples before it, and none are written then).
+func (sl *slot) useTrack(c webrtc.RTPCodecParameters) error {
+	ts, due := sl.ts, sl.due
+	if now := sl.now(); !due.IsZero() && now.After(due) {
+		ts += uint32(min(now.Sub(due), maxClockSkip).Seconds() * float64(c.ClockRate))
+		due = now
+	}
+	if c.PayloadType == sl.codec.PayloadType && ts == sl.ts {
 		return nil
 	}
-	track, err := sl.newTrack(c)
+	track, err := sl.newTrack(c, ts)
 	if err != nil {
 		return err
 	}
 	if err := sl.replaceTrack(sl.sender, track); err != nil {
 		return fmt.Errorf("replace track: %w", err)
 	}
-	sl.track, sl.codec, sl.remainder = track, c, 0
+	sl.track, sl.codec, sl.ts, sl.due, sl.remainder = track, c, ts, due, 0
 	return nil
 }
 
 // write sends one access unit; step is the time until the next one.
 func (sl *slot) write(au source.AccessUnit, step time.Duration) {
+	if sl.due.IsZero() {
+		sl.due = sl.now()
+	}
+	sl.due = sl.due.Add(step)
 	if err := sl.track.WriteSample(media.Sample{Data: annexB(au.NALUs), Duration: step}); err != nil {
 		sl.log.Debug("write a frame", "slot", sl.index, "err", err)
 	}

@@ -62,24 +62,33 @@ export function isPlaybackActive(video: HTMLVideoElement): boolean {
 }
 
 /**
- * Calls `onFirstFrame` once, when the first frame has been presented. Returns a
- * function that stops watching.
+ * Calls `onFirstFrame` once, when the first frame of a play that started at
+ * `startedAt` (performance clock) has been presented. Returns a function that
+ * stops watching.
  *
  * It uses requestVideoFrameCallback wherever the element has it (feature
- * detection, not browser sniffing). Without it, the first `timeupdate` with
- * `currentTime > 0` stands in for the first frame.
+ * detection, not browser sniffing). Where its metadata says when a frame
+ * arrived (`receiveTime`: WebRTC in Chromium), a frame that arrived before
+ * `startedAt` belongs to an earlier play of the same track and does not count.
+ * Without rVFC, the first `timeupdate` with `currentTime > 0` stands in for
+ * the first frame.
  */
-export function watchFirstFrame(video: HTMLVideoElement, onFirstFrame: () => void): () => void {
+export function watchFirstFrame(video: HTMLVideoElement, startedAt: number, onFirstFrame: () => void): () => void {
   if (typeof video.requestVideoFrameCallback === 'function') {
-    let waiting = true;
-    const handle = video.requestVideoFrameCallback(() => {
-      waiting = false;
+    let pending: number | undefined;
+    const onFrame: VideoFrameRequestCallback = (_now, metadata) => {
+      if (metadata.receiveTime !== undefined && metadata.receiveTime < startedAt) {
+        pending = video.requestVideoFrameCallback(onFrame);
+        return;
+      }
+      pending = undefined;
       onFirstFrame();
-    });
+    };
+    pending = video.requestVideoFrameCallback(onFrame);
     return () => {
-      if (!waiting) return;
-      waiting = false;
-      video.cancelVideoFrameCallback(handle);
+      if (pending === undefined) return;
+      video.cancelVideoFrameCallback(pending);
+      pending = undefined;
     };
   }
 

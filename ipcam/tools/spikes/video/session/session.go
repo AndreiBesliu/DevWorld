@@ -27,6 +27,16 @@
 // source was bound, not the ones it sent before (R26). "jitter" comes every
 // 10 s while anything is bound, and "pair" whenever ICE selects a pair.
 //
+// Each slot is one RTP stream for the whole session: a bind keeps its SSRC,
+// continues its sequence numbers and sends whole access units only. Its
+// timestamps follow the hub clock. The cached GOP that a bind sends first is
+// stamped 1 ms apart (R24, spec §6.3 step 6), live frames one frame period
+// apart, and a bind skips the timestamps forward over the time the slot was
+// empty (by at most an hour), so that they never lag the hub clock. Receivers
+// time each frame by its RTP timestamp: when the timestamps stood still while
+// a slot was empty, Chrome 141 held frames for seconds after a few quick
+// re-binds, and showed frames of one bind in the next (Task 9b).
+//
 // "jitter" is the hub's pacing jitter over the interval before the message
 // (R28): the p99 deviation of the frame send interval from the frame period,
 // for the sends of the 10 s since the previous "jitter" message, or since the
@@ -48,9 +58,10 @@
 //
 //	{"t":"bound","slot":0,"epoch":8,"codec":"H264","profile":"4d401f","fallback":"42e01f"}
 //
-// A bind that cannot switch the slot to the codec fails with CODEC_UNSUPPORTED,
-// whatever the reason; like any failed bind it leaves the slot carrying what it
-// carried, and the session reporting only that.
+// A bind that cannot switch the slot's track (to the codec, or to the later
+// timestamps) fails with CODEC_UNSUPPORTED, whatever the reason; like any
+// failed bind it leaves the slot carrying what it carried, and the session
+// reporting only that.
 package session
 
 import (
@@ -207,7 +218,7 @@ func (s *Session) negotiate(offerSDP string) (string, error) {
 		if tr.Kind() != webrtc.RTPCodecTypeVideo || tr.Direction() != webrtc.RTPTransceiverDirectionSendonly {
 			continue
 		}
-		sl, err := newSlot(len(s.slots), tr.Receiver().GetParameters().Codecs, s.notify, s.log, s.replaceTrack)
+		sl, err := newSlot(len(s.slots), tr.Receiver().GetParameters().Codecs, s.notify, s.log, s.clock.Now, s.replaceTrack)
 		if err != nil {
 			return "", err
 		}

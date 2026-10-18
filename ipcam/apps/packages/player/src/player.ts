@@ -42,6 +42,11 @@ export interface Player {
   /**
    * Returns the function that removes the callback.
    *
+   * `first-frame` fires once per play, at the first presented frame of that
+   * play. Where the browser says when a frame arrived (WebRTC in Chromium), a
+   * frame that arrived before `play` was called, an earlier play's frame of
+   * the same track, does not count.
+   *
    * `error` carries `{ reason: 'NO_FIRST_FRAME' | 'STALLED', cause?: string }`.
    * `cause` is the last reason the player recorded for that play: the `name` of
    * a rejected `play()` of the element (`NotAllowedError` when autoplay is
@@ -56,7 +61,11 @@ export interface Player {
 }
 
 export interface PlayerOptions {
-  /** Milliseconds on a monotonic clock. Default: `performance.now`. */
+  /**
+   * Milliseconds on a monotonic clock. Default: `performance.now`. `first-frame`
+   * compares the start of a play on it with the `receiveTime` of
+   * requestVideoFrameCallback, which is on the performance clock.
+   */
   now?: () => number;
   /** Default: `setTimeout`. */
   setTimer?: SetTimer;
@@ -231,7 +240,7 @@ export function createPlayer(opts: PlayerOptions = {}): Player {
         emit('transport-changed', { transport: plan.transport });
         if (run !== current) return; // the callback stopped or restarted the player
       }
-      current.stopFirstFrame = watchFirstFrame(element, () => {
+      current.stopFirstFrame = watchFirstFrame(element, current.startedAt, () => {
         onFirstFrame(current);
       });
       // A refused or interrupted play() raises nothing by itself: without a frame the deadline reports it, with this cause.

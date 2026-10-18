@@ -42,14 +42,14 @@ export const liveSource = (cameraId: string, profile: Profile): PlayerSource => 
 
 /**
  * Whether a presented frame belongs to the start made at `t0`, "the first frame
- * of the matching epoch". A slot's track is reused from bind to bind, and a
- * frame of the previous bind can still be presented after the next bind: Chrome
- * 141 did, 0.15 to 1 s late, when the previous stream had been unbound in the
- * middle of its cached-GOP burst. The player's `first-frame` fires for such a
- * frame too. Where the browser says when a frame arrived (the `receiveTime` of
- * requestVideoFrameCallback, for WebRTC in Chromium), a frame counts when it
- * arrived at or after `t0`; elsewhere when its band differs from `stale`, the
- * band the element showed before the start.
+ * of the matching epoch". A slot's track is reused from bind to bind, so a
+ * frame of the previous bind can still be presented after the next bind:
+ * Chrome 141 did, 0.15 to 1 s late, while the hub's RTP timestamps stood still
+ * across an empty slot (the session package fixed that in Task 9b; this check
+ * stays as a guard). Where the browser says when a frame arrived (the
+ * `receiveTime` of requestVideoFrameCallback, for WebRTC in Chromium), a frame
+ * counts when it arrived at or after `t0`; elsewhere when its band differs from
+ * `stale`, the band the element showed before the start.
  */
 export function isFrameOfStart(
   metadata: { receiveTime?: number },
@@ -119,10 +119,7 @@ export function watchStart(
 
 /**
  * How long a started stream plays before the scenario empties its slot again,
- * as a person looks at the tile they tapped. Unbinding in the middle of the
- * cached-GOP burst that follows a bind (R24) made Chrome present leftover
- * frames of that bind 0.15 to 1 s into the next start, a delay that no tap
- * causes.
+ * as a person looks at the tile they tapped.
  */
 export const PLAY_BEFORE_STOP_MS = 1000;
 

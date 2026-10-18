@@ -83,7 +83,8 @@ func TestRebind_SwitchesOnNextIDR(t *testing.T) {
 	a.emit(t, 2)
 	b.emit(t, 6) // b's GOP cache holds frames 4 (IDR) and 5
 	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
-	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": a, "sim-02/sub": b}, testOptions(source.SystemClock{}, nil))
+	// The hub clock stands still, so no time passes between the binds.
+	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": a, "sim-02/sub": b}, testOptions(newFakeClock(), nil))
 
 	c.bind(t, 0, "sim-01", "sub", 1)
 	if m := c.next(t, "bound"); m.Epoch != 1 {
@@ -118,7 +119,8 @@ func TestRebind_ChangesCodecWithinOneRTPStream(t *testing.T) {
 	h264.emit(t, 1)
 	h265.emit(t, 2)
 	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
-	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": h264, "mx-h265/main": h265}, testOptions(source.SystemClock{}, nil))
+	// The hub clock stands still, so no time passes between the binds.
+	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": h264, "mx-h265/main": h265}, testOptions(newFakeClock(), nil))
 
 	c.bind(t, 0, "sim-01", "sub", 1)
 	c.next(t, "bound")
@@ -176,6 +178,64 @@ func TestUnbind_StopsTheSlot(t *testing.T) {
 		t.Errorf("slot 0 received %s, want %s", frames(got), want)
 	}
 	checkContinuous(t, got)
+}
+
+func TestRebind_AfterAnIdleSlot_TimestampsFollowTheClock(t *testing.T) {
+	sim := newTestSim(t, "sim-01", 1, "sub", h264AUs("4d401f", 1, 48, 4), 12)
+	sim.emit(t, 2) // the GOP cache holds frames 0 (IDR) and 1
+	clock := newFakeClock()
+	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": sim}, testOptions(clock, nil))
+
+	c.bind(t, 0, "sim-01", "sub", 1)
+	c.next(t, "bound")
+	got := []rxAU{c.au(t, 0), c.au(t, 0)}
+	c.send(t, `{"t":"unbind","slot":0}`)
+	c.send(t, `{"t":"ping","c0":1}`)
+	c.next(t, "pong") // the unbind has been handled
+	sim.emit(t, 2)    // frames 2 and 3 of the camera, which the empty slot does not send
+	c.quiet(t, 0, 100*time.Millisecond)
+
+	clock.advance(t, 2*time.Second)
+	c.bind(t, 0, "sim-01", "sub", 2)
+	c.next(t, "bound")
+	for range 4 {
+		got = append(got, c.au(t, 0))
+	}
+	sim.emit(t, 1)
+	got = append(got, c.au(t, 0))
+
+	// Whole access units, one RTP stream, the re-bind starting at its IDR.
+	if want := "1/0* 1/1 1/0* 1/1 1/2 1/3 1/4*"; frames(got) != want {
+		t.Fatalf("slot 0 received %s, want %s", frames(got), want)
+	}
+	checkContinuous(t, got)
+	// The slot's RTP clock does not stop while the slot is empty: the re-bind's
+	// IDR is stamped 2 s (180000 ticks) after the first bind's, as the hub clock
+	// says, not one frame period after the last frame sent. The cached frames
+	// stay 1 ms apart (R24).
+	checkSteps(t, got, []int64{90, 180000 - 90, 90, 90, 90, 7500})
+}
+
+func TestRebind_AfterHoursIdle_SkipsAnHour(t *testing.T) {
+	sim := newTestSim(t, "sim-01", 1, "sub", h264AUs("4d401f", 1, 48, 4), 12)
+	sim.emit(t, 2)
+	clock := newFakeClock()
+	c := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	connect(t, testAPI(t), c, map[string]source.Source{"sim-01/sub": sim}, testOptions(clock, nil))
+
+	c.bind(t, 0, "sim-01", "sub", 1)
+	c.next(t, "bound")
+	got := []rxAU{c.au(t, 0), c.au(t, 0)}
+	c.send(t, `{"t":"unbind","slot":0}`)
+	clock.advance(t, 2*time.Hour)
+	c.bind(t, 0, "sim-01", "sub", 2)
+	c.next(t, "bound")
+	got = append(got, c.au(t, 0))
+
+	// The skip stops at one hour (324000000 ticks), well short of half the
+	// 32-bit timestamp range (6.6 h), which a receiver reads as a step backward.
+	checkSteps(t, got, []int64{90, 7500 + 324000000})
 }
 
 // failingReplaceTrack returns session options in which the slots' ReplaceTrack

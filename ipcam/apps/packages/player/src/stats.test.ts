@@ -117,7 +117,7 @@ describe('watchFirstFrame', () => {
     const video = fakeVideo(true);
     const onFirstFrame = vi.fn();
 
-    watchFirstFrame(video.element, onFirstFrame);
+    watchFirstFrame(video.element, 0, onFirstFrame);
     expect(onFirstFrame).not.toHaveBeenCalled();
     video.renderFrame();
     video.renderFrame();
@@ -126,10 +126,35 @@ describe('watchFirstFrame', () => {
     expect(video.pendingFrameCallbacks).toBe(0);
   });
 
+  it('rvfcPresent_frameReceivedBeforeTheStart_waitsForTheNextOne', () => {
+    const video = fakeVideo(true);
+    const onFirstFrame = vi.fn();
+
+    const cancel = watchFirstFrame(video.element, 1000, onFirstFrame);
+    video.renderFrame({ receiveTime: 999 });
+    expect(onFirstFrame).not.toHaveBeenCalled();
+    expect(video.pendingFrameCallbacks).toBe(1);
+
+    cancel(); // cancels the callback registered for the next frame
+    video.renderFrame({ receiveTime: 1001 });
+    expect(onFirstFrame).not.toHaveBeenCalled();
+    expect(video.pendingFrameCallbacks).toBe(0);
+  });
+
+  it('rvfcPresent_frameReceivedAtTheStart_isTheFirstFrame', () => {
+    const video = fakeVideo(true);
+    const onFirstFrame = vi.fn();
+
+    watchFirstFrame(video.element, 1000, onFirstFrame);
+    video.renderFrame({ receiveTime: 1000 });
+
+    expect(onFirstFrame).toHaveBeenCalledTimes(1);
+  });
+
   it('rvfcPresent_ignoresTimeupdate', () => {
     const video = fakeVideo(true);
     const onFirstFrame = vi.fn();
-    watchFirstFrame(video.element, onFirstFrame);
+    watchFirstFrame(video.element, 0, onFirstFrame);
 
     video.currentTime = 5;
     video.fireTimeUpdate();
@@ -142,7 +167,7 @@ describe('watchFirstFrame', () => {
     const video = fakeVideo(false);
     const onFirstFrame = vi.fn();
 
-    watchFirstFrame(video.element, onFirstFrame);
+    watchFirstFrame(video.element, 0, onFirstFrame);
     video.fireTimeUpdate();
     expect(onFirstFrame).not.toHaveBeenCalled();
 
@@ -156,7 +181,7 @@ describe('watchFirstFrame', () => {
     const video = fakeVideo(true);
     const onFirstFrame = vi.fn();
 
-    const cancel = watchFirstFrame(video.element, onFirstFrame);
+    const cancel = watchFirstFrame(video.element, 0, onFirstFrame);
     cancel();
     video.renderFrame();
 
@@ -168,7 +193,7 @@ describe('watchFirstFrame', () => {
     const video = fakeVideo(false);
     const onFirstFrame = vi.fn();
 
-    const cancel = watchFirstFrame(video.element, onFirstFrame);
+    const cancel = watchFirstFrame(video.element, 0, onFirstFrame);
     expect(video.listenerCount('timeupdate')).toBe(1);
     cancel();
     video.renderFrame();
@@ -179,7 +204,7 @@ describe('watchFirstFrame', () => {
 
   it('cancel_afterTheFirstFrame_cancelsNothing', () => {
     const video = fakeVideo(true);
-    const cancel = watchFirstFrame(video.element, () => undefined);
+    const cancel = watchFirstFrame(video.element, 0, () => undefined);
     video.renderFrame();
 
     cancel();

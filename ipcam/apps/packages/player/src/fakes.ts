@@ -53,7 +53,10 @@ export class FakeMediaStream {
   }
 }
 
-type FrameCallback = () => void;
+/** What the fake passes to a frame callback: the metadata fields a test sets. */
+export type FrameMetadata = Partial<VideoFrameCallbackMetadata>;
+
+type FrameCallback = (now: number, metadata: FrameMetadata) => void;
 
 /**
  * Which playback quality counter the fake element offers:
@@ -150,14 +153,18 @@ export class FakeVideo {
     return this.playResult();
   }
 
-  /** The element presents one frame: the position moves and the browser fires its events. */
-  renderFrame(): void {
+  /**
+   * The element presents one frame: the position moves and the browser fires
+   * its events. `metadata` is what the frame callbacks get, `receiveTime` for
+   * example.
+   */
+  renderFrame(metadata: FrameMetadata = {}): void {
     this.frames += 1;
     if (this.webkitDecodedFrameCount !== undefined) this.webkitDecodedFrameCount = this.frames;
     this.currentTime += 0.04;
     const due = [...this.frameCallbacks.values()];
     this.frameCallbacks.clear();
-    for (const callback of due) callback();
+    for (const callback of due) callback(0, metadata);
     this.fireTimeUpdate();
   }
 

@@ -34,6 +34,23 @@ describe('live over WebRTC', () => {
     expect(player.stats).toEqual({ transport: 'webrtc', codec: 'unknown', framesDecoded: 2 });
   });
 
+  it('firstFrame_frameReceivedBeforePlay_isNotTheFirstFrame', async () => {
+    // A slot's track outlives a play, so the element can present a frame that
+    // arrived before this play() started (Task 9b): the previous play's.
+    const { player, video, clock, emitted } = setup();
+    clock.advance(1000);
+    await player.play(LIVE);
+
+    clock.advance(150);
+    video.renderFrame({ receiveTime: 400 });
+    expect(emitted('first-frame')).toEqual([]);
+
+    clock.advance(50);
+    video.renderFrame({ receiveTime: 1180 });
+    expect(emitted('first-frame')).toEqual([{ transport: 'webrtc', elapsedMs: 200 }]);
+    expect(player.stats.framesDecoded).toBe(2); // the replayed frame was presented all the same
+  });
+
   it('play_webrtc_usesTheConfiguredSlot', async () => {
     const { player, link } = setup({ slot: 3 });
     await player.play(LIVE);

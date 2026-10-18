@@ -109,8 +109,8 @@ export class FakeVideo extends EventTarget {
 
   /**
    * A frame of the previous bind presented after the track is attached again.
-   * Chrome 141 did this in the smoke run, 0.15 to 1 s late, when the previous
-   * stream had been unbound in the middle of its cached-GOP burst.
+   * Chrome 141 did this in the Task 9 smoke run, 0.15 to 1 s late, while the
+   * hub's RTP timestamps stood still across an empty slot (fixed in Task 9b).
    */
   replaysLastFrame = false;
 
