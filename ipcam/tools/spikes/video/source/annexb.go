@@ -209,6 +209,15 @@ func paramKindOf(codec Codec, nalu []byte) paramKind {
 	return paramNone
 }
 
+// isDelimiter reports whether the NAL unit is an access unit delimiter, which
+// begins an access unit.
+func isDelimiter(codec Codec, nalu []byte) bool {
+	if codec == CodecH265 {
+		return h265.NALUType((nalu[0]>>1)&0x3f) == h265.NALUType_AUD_NUT
+	}
+	return h264.NALUType(nalu[0]&0x1f) == h264.NALUTypeAccessUnitDelimiter
+}
+
 // profileOf returns the Source.Profile string for an SPS, or "" when the SPS is
 // too short to hold one.
 func profileOf(codec Codec, sps []byte) string {

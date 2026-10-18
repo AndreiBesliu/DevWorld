@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/netip"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -25,6 +27,7 @@ type rtspSource struct {
 	id    string
 	codec Codec
 	log   *slog.Logger
+	scrub *scrubber // for the text of errors, which may carry the camera's URL
 	gop   *gop
 
 	mu      sync.Mutex
@@ -40,7 +43,8 @@ type rtspSource struct {
 	params    map[paramKind][]byte // latest parameter sets: from the SDP, then from the stream
 	counter   uint16
 	prevPTS   time.Duration
-	synced    bool
+	synced    bool // the first access unit has been decoded and judged
+	warned    bool // the first decode error has been logged
 }
 
 // NewRTSP connects to the camera at rawURL, which may carry credentials, and
@@ -48,12 +52,21 @@ type rtspSource struct {
 //
 // The URL is the owner's secret and is only kept in memory: it is never
 // logged, and no error that NewRTSP returns or logs contains it, its
-// credentials or its host. The source is known by id in the logs.
+// credentials, its host or any IP address (PH0-22). The source is known by id in
+// the logs.
 //
 // Frames come over TCP, so none is lost on the way. When the connection ends or
 // ctx is done, the source ends: subscriptions close, and the cached GOP stays.
 // An IDR that lacks parameter sets gets the ones from the SDP or from earlier in
 // the stream, because some cameras send them only once.
+//
+// The stream is joined at any packet, so the first access unit may lack its
+// first NAL units: it is dropped, unless it is an IDR that begins with the
+// parameter sets, which a camera that starts to play at a keyframe sends.
+//
+// A camera that plays but sends nothing that decodes leaves the source silent,
+// with no frame rate and no profile. The first decode error is therefore logged
+// at Warn, scrubbed; later ones at Debug.
 func NewRTSP(ctx context.Context, id string, rawURL string) (Source, error) {
 	u, err := base.ParseURL(rawURL)
 	if err != nil {
@@ -68,22 +81,7 @@ func NewRTSP(ctx context.Context, id string, rawURL string) (Source, error) {
 	}
 
 	log := slog.Default().With("source", id)
-	tcp := gortsplib.ProtocolTCP
-	// The client logs through the standard logger when no callback is set.
-	c := &gortsplib.Client{
-		Scheme:   u.Scheme,
-		Host:     u.Host,
-		Protocol: &tcp,
-		OnDecodeError: func(err error) {
-			log.Debug("rtsp decode error", "err", scrub.text(err))
-		},
-		OnPacketsLost: func(lost uint64) {
-			log.Debug("rtsp packets lost", "count", lost)
-		},
-		OnTransportSwitch: func(err error) {
-			log.Debug("rtsp transport switch", "err", scrub.text(err))
-		},
-	}
+	c := newRTSPClient(u, log, scrub)
 	if err := c.Start(); err != nil {
 		return fail(err)
 	}
@@ -99,7 +97,7 @@ func NewRTSP(ctx context.Context, id string, rawURL string) (Source, error) {
 	if err != nil {
 		return abort(err)
 	}
-	s, medi, forma, err := newRTSPSource(id, log, desc)
+	s, medi, forma, err := newRTSPSource(id, log, scrub, desc)
 	if err != nil {
 		return abort(err)
 	}
@@ -131,9 +129,30 @@ func NewRTSP(ctx context.Context, id string, rawURL string) (Source, error) {
 	return s, nil
 }
 
+// newRTSPClient returns the RTSP client of a source, over TCP. Its callbacks log
+// at Debug, with the text of errors scrubbed, to the logger of the source: the
+// client would log to the standard logger, unscrubbed, when they are not set.
+func newRTSPClient(u *base.URL, log *slog.Logger, scrub *scrubber) *gortsplib.Client {
+	tcp := gortsplib.ProtocolTCP
+	return &gortsplib.Client{
+		Scheme:   u.Scheme,
+		Host:     u.Host,
+		Protocol: &tcp,
+		OnDecodeError: func(err error) {
+			log.Debug("rtsp decode error", "err", scrub.text(err))
+		},
+		OnPacketsLost: func(lost uint64) {
+			log.Debug("rtsp packets lost", "count", lost)
+		},
+		OnTransportSwitch: func(err error) {
+			log.Debug("rtsp transport switch", "err", scrub.text(err))
+		},
+	}
+}
+
 // newRTSPSource picks the first H.264 or H.265 video track of desc.
-func newRTSPSource(id string, log *slog.Logger, desc *description.Session) (*rtspSource, *description.Media, format.Format, error) {
-	s := &rtspSource{id: id, log: log, gop: newGOP(), params: map[paramKind][]byte{}}
+func newRTSPSource(id string, log *slog.Logger, scrub *scrubber, desc *description.Session) (*rtspSource, *description.Media, format.Format, error) {
+	s := &rtspSource{id: id, log: log, scrub: scrub, gop: newGOP(), params: map[paramKind][]byte{}}
 	for _, medi := range desc.Medias {
 		if medi.Type != description.MediaTypeVideo {
 			continue
@@ -194,18 +213,22 @@ func (s *rtspSource) onPacket(pkt *rtp.Packet, pts time.Duration) {
 	nalus, err := s.decode(pkt)
 	if err != nil {
 		if !s.isBenign(err) {
-			s.log.Debug("rtsp frame dropped", "err", err)
+			s.logDecodeError(err)
 		}
 		return
 	}
-	// The stream is joined at any packet, so the first access unit may lack its
-	// first NAL units. Every client of the cached GOP would show the damage.
-	if !s.synced {
-		s.synced = true
+	nalus = ownedNALUs(nalus)
+	first := !s.synced
+	s.synced = true
+	if len(nalus) == 0 {
 		return
 	}
-	nalus = ownedNALUs(nalus)
-	if len(nalus) == 0 {
+	idr := isRandomAccess(s.codec, nalus)
+	// The stream is joined at any packet, so the first access unit may lack its
+	// first NAL units, and every client of the cached GOP would show the damage.
+	// One that begins with the parameter sets is whole: a camera that starts to
+	// play at a keyframe sends it, and it is worth a GOP of waiting.
+	if first && (!idr || !s.beginsWithParameterSets(nalus)) {
 		return
 	}
 	// Without a marker bit, the decoder completes an access unit when a packet
@@ -215,7 +238,6 @@ func (s *rtspSource) onPacket(pkt *rtp.Packet, pts time.Duration) {
 		auPTS = prevPTS
 	}
 
-	idr := isRandomAccess(s.codec, nalus)
 	s.remember(nalus...)
 	if idr {
 		nalus = s.withParameterSets(nalus)
@@ -238,20 +260,78 @@ func (s *rtspSource) isBenign(err error) bool {
 	return slices.ContainsFunc(s.benign, func(b error) bool { return errors.Is(err, b) })
 }
 
-// withParameterSets puts the latest parameter sets that the access unit lacks in
-// front of it.
-func (s *rtspSource) withParameterSets(nalus [][]byte) [][]byte {
-	has := map[paramKind]bool{}
-	for _, n := range nalus {
-		has[paramKindOf(s.codec, n)] = true
+// logDecodeError logs the error of a packet that cannot be decoded. The first
+// one of a source is a Warn, because a camera that plays but yields nothing
+// decodable otherwise leaves no trace above Debug; the rest are Debug, so that
+// a broken camera does not flood the log.
+func (s *rtspSource) logDecodeError(err error) {
+	if s.warned {
+		s.log.Debug("rtsp frame dropped", "err", s.scrub.text(err))
+		return
 	}
-	var missing [][]byte
-	for _, kind := range []paramKind{paramVPS, paramSPS, paramPPS} {
-		if set := s.params[kind]; set != nil && !has[kind] {
-			missing = append(missing, set)
+	s.warned = true
+	s.log.Warn("rtsp frame dropped; later ones are logged at debug level", "err", s.scrub.text(err))
+}
+
+// parameterSetKinds lists the parameter sets of a codec in the order a decoder
+// needs them: the VPS, which only H.265 has, then the SPS and the PPS.
+func (s *rtspSource) parameterSetKinds() []paramKind {
+	if s.codec == CodecH265 {
+		return []paramKind{paramVPS, paramSPS, paramPPS}
+	}
+	return []paramKind{paramSPS, paramPPS}
+}
+
+// beginsWithParameterSets reports whether the access unit starts, after an
+// access unit delimiter if it has one, with all the parameter sets of its codec.
+func (s *rtspSource) beginsWithParameterSets(nalus [][]byte) bool {
+	leading := map[paramKind]bool{}
+	for _, n := range nalus {
+		kind := paramKindOf(s.codec, n)
+		if kind == paramNone && len(leading) == 0 && isDelimiter(s.codec, n) {
+			continue
+		}
+		if kind == paramNone {
+			break
+		}
+		leading[kind] = true
+	}
+	for _, kind := range s.parameterSetKinds() {
+		if !leading[kind] {
+			return false
 		}
 	}
-	return append(missing, nalus...)
+	return true
+}
+
+// withParameterSets puts the NAL units of an access unit in the order that a
+// decoder parses them: the access unit delimiter, the VPS (H.265 only), the SPS
+// and the PPS, then the rest as it was. A parameter set that the access unit
+// carries stays as it is, and one that it lacks is the latest stored one.
+func (s *rtspSource) withParameterSets(nalus [][]byte) [][]byte {
+	var delimiters, rest [][]byte
+	carried := map[paramKind][][]byte{}
+	for _, n := range nalus {
+		switch kind := paramKindOf(s.codec, n); {
+		case kind != paramNone:
+			carried[kind] = append(carried[kind], n)
+		case isDelimiter(s.codec, n):
+			delimiters = append(delimiters, n)
+		default:
+			rest = append(rest, n)
+		}
+	}
+	out := make([][]byte, 0, len(nalus)+len(s.parameterSetKinds()))
+	out = append(out, delimiters...)
+	for _, kind := range s.parameterSetKinds() {
+		switch {
+		case len(carried[kind]) > 0:
+			out = append(out, carried[kind]...)
+		case s.params[kind] != nil:
+			out = append(out, s.params[kind])
+		}
+	}
+	return append(out, rest...)
 }
 
 // ownedNALUs copies the NAL units into one new buffer, because the depacketiser
@@ -306,8 +386,20 @@ func (s *rtspSource) Subscribe() ([]AccessUnit, <-chan AccessUnit, func()) {
 	return s.gop.subscribe()
 }
 
-// scrubber removes the parts of a camera URL from error text.
+// scrubber removes the parts of a camera URL from error text, and every IP
+// address (PH0-22): when the URL names the camera by host name, Go's dial errors
+// carry the address that the name resolved to, and a DNS error carries that of
+// the server.
 type scrubber struct{ replacer *strings.Replacer }
+
+const redacted = "<redacted>"
+
+var (
+	ipv4Literal = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	// ipv6Candidate matches a run of the characters of an IPv6 address, with an
+	// optional zone, that holds a colon. redactIPv6 checks that it is one.
+	ipv6Candidate = regexp.MustCompile(`[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?:%[0-9A-Za-z_.-]+)?`)
+)
 
 func newScrubber(rawURL string, u *base.URL) *scrubber {
 	secrets := []string{rawURL, u.String(), u.Host, u.Hostname(), u.Port(), strings.Trim(u.Path, "/"), u.RawQuery}
@@ -320,7 +412,7 @@ func newScrubber(rawURL string, u *base.URL) *scrubber {
 	var oldnew []string
 	for _, secret := range secrets {
 		if secret != "" {
-			oldnew = append(oldnew, secret, "<redacted>")
+			oldnew = append(oldnew, secret, redacted)
 		}
 	}
 	return &scrubber{replacer: strings.NewReplacer(oldnew...)}
@@ -330,5 +422,23 @@ func (s *scrubber) text(err error) string {
 	if err == nil {
 		return "no error"
 	}
-	return s.replacer.Replace(err.Error())
+	text := redactIPv6(s.replacer.Replace(err.Error()))
+	return ipv4Literal.ReplaceAllString(text, redacted)
+}
+
+// redactIPv6 replaces the IPv6 addresses in text, which it finds as the longest
+// prefix of each candidate that parses as one. IPv4-mapped addresses go with
+// them, so it runs before the IPv4 pass.
+func redactIPv6(text string) string {
+	return ipv6Candidate.ReplaceAllStringFunc(text, func(candidate string) string {
+		if strings.Count(candidate, ":") < 2 {
+			return candidate
+		}
+		for end := len(candidate); end >= 2; end-- {
+			if _, err := netip.ParseAddr(candidate[:end]); err == nil {
+				return redacted + candidate[end:]
+			}
+		}
+		return candidate
+	})
 }
