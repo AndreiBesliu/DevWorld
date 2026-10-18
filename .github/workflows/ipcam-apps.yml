@@ -5,6 +5,8 @@ on:
     paths:
       - 'ipcam/apps/**'
       - 'ipcam/tools/spikes/video/app/**'
+      # The spike app's band tests read the shared test vectors.
+      - 'ipcam/tools/spikes/video/band/vectors.json'
       - 'ipcam/package.json'
       - 'ipcam/pnpm-*.yaml'
       - 'ipcam/tsconfig.base.json'
@@ -15,6 +17,8 @@ on:
     paths:
       - 'ipcam/apps/**'
       - 'ipcam/tools/spikes/video/app/**'
+      # The spike app's band tests read the shared test vectors.
+      - 'ipcam/tools/spikes/video/band/vectors.json'
       - 'ipcam/package.json'
       - 'ipcam/pnpm-*.yaml'
       - 'ipcam/tsconfig.base.json'

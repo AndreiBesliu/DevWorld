@@ -37,6 +37,25 @@ importers:
         specifier: 26.6.4
         version: 26.6.4
 
+  tools/spikes/video/app:
+    dependencies:
+      '@ipcam/player':
+        specifier: workspace:*
+        version: link:../../../../apps/packages/player
+    devDependencies:
+      '@types/node':
+        specifier: 26.6.4
+        version: 26.6.4
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vite:
+        specifier: 8.3.2
+        version: 8.3.2(@types/node@26.6.4)
+      vitest:
+        specifier: 5.0.3
+        version: 5.0.3(@types/node@26.6.4)(vite@8.3.2(@types/node@26.6.4))
+
 packages:
 
   '@cacheable/memory@2.2.0':
