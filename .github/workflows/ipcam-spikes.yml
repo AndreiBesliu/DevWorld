@@ -51,7 +51,19 @@ jobs:
       - name: Lint
         run: go tool golangci-lint run ./tools/spikes/video/...
       - name: Test
-        run: go test -race ./tools/spikes/video/...
+        # -count=1: a result restored from the Go build cache would hide a flaky test.
+        run: |
+          set -o pipefail
+          go test -count=1 -race ./tools/spikes/video/... 2>&1 | tee "$RUNNER_TEMP/test.log"
+      - name: Show test failures as annotations
+        # Job logs cannot be read from everywhere; check-run annotations can
+        # (gh api repos/<owner>/<repo>/check-runs/<job id>/annotations). GitHub keeps 10
+        # error annotations per step, so the failure lines go into one annotation.
+        if: failure()
+        run: |
+          grep -E -- '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE|\s+\S+_test\.go:[0-9]+:)' "$RUNNER_TEMP/test.log" \
+            | head -60 | sed -e 's/%/%25/g' \
+            | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "::error title=go test::") $0 } END { if (NR) print "\n" }'
       - name: Vulnerabilities
         # govulncheck needs a directory that holds a go.mod.
         working-directory: ipcam/tools/spikes/video
