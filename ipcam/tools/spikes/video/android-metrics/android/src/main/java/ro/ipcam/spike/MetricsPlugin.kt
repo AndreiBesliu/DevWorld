@@ -43,12 +43,23 @@ internal fun autorunQuery(autorun: String?, hub: String?): String? {
  * knows; `keepAwake({ on })` keeps the screen on while a scenario runs. An
  * autorun launch (`adb shell am start ... --es autorun S1 --es hub <url>`)
  * reloads the page with the extras as its query string.
+ *
+ * Only a cold start honours the extras: `load()` reads them when the Bridge
+ * is created and removes them from the Activity's Intent, so a Bridge created
+ * again from the same Intent does not start the scenario again, and a warm
+ * start (`onNewIntent`) does not read them at all. The Activity is exported
+ * and takes any `hub` URL: any app on the device can start a run against a
+ * hub of its choosing. That is by design for a spike that is never published
+ * (SPIKE-ONLY); the results hold no addresses or serial numbers (PH0-22).
  */
 @CapacitorPlugin(name = "SpikeMetrics")
 class MetricsPlugin : Plugin() {
     override fun load() {
         val intent = activity.intent
-        val query = autorunQuery(intent.getStringExtra("autorun"), intent.getStringExtra("hub")) ?: return
+        val query = autorunQuery(intent.getStringExtra("autorun"), intent.getStringExtra("hub"))
+        intent.removeExtra("autorun")
+        intent.removeExtra("hub")
+        if (query == null) return
         // Runs after the bridge has started its own first load of the page.
         val webView = bridge.webView
         webView.post { webView.loadUrl("${bridge.localUrl}/?$query") }

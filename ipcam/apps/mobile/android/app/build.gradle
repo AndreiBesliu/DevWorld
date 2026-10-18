@@ -19,6 +19,11 @@ android {
             dimension "purpose"
         }
         // The product's settings: no cleartext traffic (spec §6.7).
+        // SPIKE-ONLY (plan 2026-10-18-phase0b-video-spike, Task 10): the spike
+        // metrics plugin is wired into this flavour too, because
+        // capacitor.build.gradle is generated from package.json for every
+        // flavour. TODO (Phase 4): split the wiring per flavour, so that
+        // `production` ships without the spike metrics plugin.
         production {
             dimension "purpose"
         }
@@ -39,6 +44,8 @@ dependencies {
 
 // The plugins (capacitor.build.gradle) are library modules without flavours,
 // so their unit tests run as part of the app's.
+// SPIKE-ONLY (plan 2026-10-18-phase0b-video-spike, Task 10): the spike metrics
+// plugin's tests. TODO (Phase 4): drop them with the plugin (see `production`).
 tasks.matching { it.name == 'testSpikeDebugUnitTest' }.configureEach {
     dependsOn ':ipcam-capacitor-pip:testDebugUnitTest', ':spike-android-metrics:testDebugUnitTest'
 }

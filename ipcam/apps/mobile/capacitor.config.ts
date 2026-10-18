@@ -13,8 +13,10 @@ const config: CapacitorConfig = {
     // origin is http://localhost, so it may call the spike hub over plain HTTP
     // on the LAN (port 7080) without mixed-content blocking. The app's network
     // security config allows that cleartext only in the `spike` flavour.
-    // Capacitor reads this one config in every flavour; Phase 4 drops it for
-    // the default https://localhost of spec §11.5.
+    // Capacitor reads this one config in every flavour, so the `production`
+    // flavour gets the scheme too, although it forbids cleartext.
+    // TODO (Phase 4): split the scheme per flavour: `http` in `spike` only,
+    // and the default https://localhost of spec §11.5 in `production`.
     androidScheme: 'http',
   },
 };

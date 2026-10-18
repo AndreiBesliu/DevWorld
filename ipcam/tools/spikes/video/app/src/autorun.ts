@@ -4,6 +4,14 @@
 // Android and Windows shells turn their intent extras and command-line
 // arguments into these parameters (Tasks 10 and 11); the browser end-to-end
 // tests read the hooks (Task 12).
+//
+// On Android only a cold start honours the extras: the metrics plugin reads
+// them once, when the Bridge is created, and removes them from the Intent, so
+// a warm start or a Bridge created again does not run the scenario again. The
+// spike's Activity is exported and takes any `hub` URL, so any app on the
+// device can start a run against a hub of its choosing. That is by design for
+// a spike that is never published (SPIKE-ONLY); the results hold no addresses
+// or serial numbers (PH0-22).
 import { ConnectError } from './hubhttp';
 import {
   publish,

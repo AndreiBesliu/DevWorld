@@ -20,8 +20,15 @@ const PLAYER_IMPORT_MESSAGE =
 const PLAYER_FORBIDDEN_SPECIFIER = String.raw`^(react|react-dom)(\/|$)|^(@capacitor|@tauri-apps)\/`;
 
 export default defineConfig(
-  // `cap sync` copies the spike app's dist/ into the Android project's assets.
-  globalIgnores(['**/dist/**', '**/coverage/**', 'apps/mobile/android/app/src/main/assets/**']),
+  globalIgnores([
+    '**/dist/**',
+    '**/coverage/**',
+    // `cap sync` copies the spike app's dist/ into the Android project's assets.
+    'apps/mobile/android/app/src/main/assets/**',
+    // Gradle's output: AGP merges those assets into build/intermediates/assets,
+    // so a local build leaves the minified bundle there.
+    'apps/mobile/android/**/build/**',
+  ]),
   js.configs.recommended,
   tseslint.configs.recommended,
   {

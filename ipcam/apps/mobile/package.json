@@ -2,7 +2,7 @@
   "name": "@ipcam/mobile",
   "version": "0.0.0",
   "private": true,
-  "description": "Android shell (Capacitor). In Phase 0 it carries the video spike app as a test APK that is never published (OPN-01).",
+  "description": "Android shell (Capacitor). In Phase 0 it carries the video spike app as a test APK that is never published (OPN-01). SPIKE-ONLY: the spike-android-metrics dependency, which `cap sync` wires into every Android flavour, production included. TODO (Phase 4): no metrics plugin in production.",
   "type": "module",
   "engines": {
     "node": ">=22"
