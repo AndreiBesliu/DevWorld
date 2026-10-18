@@ -1,5 +1,5 @@
 // What several scenarios do with a player and its element: start a stream and
-// time its first frame, follow the presented frames, wait for the next one.
+// time its first frame, follow the presented frames.
 import type { Player, PlayerSource } from '@ipcam/player';
 import type { BandCode } from '../band';
 import { BindError, type BindResult, type Profile, type SpikeSession } from '../session';
@@ -208,33 +208,4 @@ export function onPresentedFrames(video: HTMLVideoElement, cb: (displayPerfMs: n
     stopped = true;
     cancelAnimationFrame(handle);
   };
-}
-
-/**
- * The display time of the next frame the element presents: with
- * requestVideoFrameCallback where the element has it (R8), else the next
- * `timeupdate`.
- */
-export function nextFrame(video: HTMLVideoElement): { frame: Promise<number>; stop(): void } {
-  let stop: () => void = () => undefined;
-  const frame = new Promise<number>((resolve) => {
-    if (typeof video.requestVideoFrameCallback === 'function') {
-      const handle = video.requestVideoFrameCallback((now, metadata) => {
-        resolve(metadata.expectedDisplayTime ?? now);
-      });
-      stop = () => {
-        video.cancelVideoFrameCallback(handle);
-      };
-      return;
-    }
-    const onTimeUpdate = (): void => {
-      video.removeEventListener('timeupdate', onTimeUpdate);
-      resolve(performance.now());
-    };
-    video.addEventListener('timeupdate', onTimeUpdate);
-    stop = () => {
-      video.removeEventListener('timeupdate', onTimeUpdate);
-    };
-  });
-  return { frame, stop };
 }

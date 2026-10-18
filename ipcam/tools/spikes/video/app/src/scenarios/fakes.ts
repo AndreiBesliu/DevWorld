@@ -111,6 +111,8 @@ export class FakeVideo extends EventTarget {
    * A frame of the previous bind presented after the track is attached again.
    * Chrome 141 did this in the Task 9 smoke run, 0.15 to 1 s late, while the
    * hub's RTP timestamps stood still across an empty slot (fixed in Task 9b).
+   * The element also presents its track's last frame again when play()
+   * resumes it after a pause, as after the background (S5).
    */
   replaysLastFrame = false;
 
@@ -147,6 +149,15 @@ export class FakeVideo extends EventTarget {
 
   play(): Promise<void> {
     this.playCalls.push({ muted: this.muted, playsInline: this.playsInline });
+    if (this.paused && this.replaysLastFrame) {
+      const source = this.source;
+      const last = source instanceof FakeMediaStream ? source.tracks.find((t) => t instanceof FakeTrack)?.last : undefined;
+      if (last) {
+        setTimeout(() => {
+          if (this.source === source) this.present(last.band, last.receivedAt);
+        }, 16);
+      }
+    }
     this.paused = false;
     return Promise.resolve();
   }
