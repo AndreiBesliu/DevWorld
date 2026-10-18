@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ClockSync, glassToGlassMs, type PingSample } from './clock';
+import { ClockSync, glassToGlassMs, predatesBind, type PingSample } from './clock';
 
 /** The hub's clock is the client's plus this many ms. */
 const TRUE_OFFSET_MS = 1000;
@@ -167,5 +167,74 @@ describe('glassToGlassMs', () => {
 
     expect(glassToGlassMs(7_000, hubOrigin + 6_940, offsetMs, deviceOrigin)).toBeCloseTo(60, 6);
     expect(glassToGlassMs(7_000, hubOrigin + 6_940, 0, hubOrigin)).toBeCloseTo(60, 6);
+  });
+});
+
+describe('predatesBind', () => {
+  const timeOrigin = 1_729_260_000_000;
+  // The bind left at origin + 12000.4 ms on the client's clock, which reads
+  // origin + 12250.4 ms on the hub's.
+  const requestedPerfMs = 12_000.4;
+  const offsetMs = 250;
+
+  it('predatesBind_cachedGopRecord_isTrue', () => {
+    // The hub cached this frame a second before the bind and replays it with its
+    // original emit time, so a latency measured on it would include the cache's age.
+    expect(predatesBind(timeOrigin + 11_250, requestedPerfMs, offsetMs, timeOrigin)).toBe(true);
+    expect(predatesBind(timeOrigin + 12_250, requestedPerfMs, offsetMs, timeOrigin)).toBe(true);
+  });
+
+  it('predatesBind_liveRecord_isFalse', () => {
+    expect(predatesBind(timeOrigin + 12_251, requestedPerfMs, offsetMs, timeOrigin)).toBe(false);
+    expect(predatesBind(timeOrigin + 13_000, requestedPerfMs, offsetMs, timeOrigin)).toBe(false);
+  });
+
+  it('predatesBind_recordAtTheBindInstant_isKept', () => {
+    // Only a record that is strictly earlier than the bind is discarded.
+    const bindOnTheHub = timeOrigin + 12_000 + offsetMs;
+
+    expect(predatesBind(bindOnTheHub, 12_000, offsetMs, timeOrigin)).toBe(false);
+    expect(predatesBind(bindOnTheHub - 1, 12_000, offsetMs, timeOrigin)).toBe(true);
+  });
+
+  it('predatesBind_usesTheOffset', () => {
+    // The same record is live on a hub that runs 250 ms ahead and cached on one
+    // that runs 250 ms behind: the offset moves the bind onto the hub's clock.
+    const sentHubMs = timeOrigin + 12_100;
+
+    expect(predatesBind(sentHubMs, 12_000, -250, timeOrigin)).toBe(false);
+    expect(predatesBind(sentHubMs, 12_000, 250, timeOrigin)).toBe(true);
+  });
+
+  it('predatesBind_deviceClockOneHourOff_sameVerdicts', () => {
+    // As for glassToGlassMs: the device's wall clock is an hour ahead, so its
+    // timeOrigin is an hour ahead and the pings measure an offset an hour
+    // lower. Both cancel, and the verdicts equal those of a correct clock.
+    const hubOrigin = 1_729_260_000_000;
+    const deviceOrigin = hubOrigin + 3_600_000;
+    const slowOffset = -3_600_000 + 250;
+    const records = [hubOrigin + 11_250, hubOrigin + 12_249, hubOrigin + 12_251, hubOrigin + 14_000];
+
+    const onDevice = records.map((r) => predatesBind(r, 12_000, slowOffset, deviceOrigin));
+    const onHub = records.map((r) => predatesBind(r, 12_000, 250, hubOrigin));
+
+    expect(onDevice).toStrictEqual([true, true, false, false]);
+    expect(onHub).toStrictEqual(onDevice);
+  });
+
+  it('predatesBind_cachedGopThenLiveFrames_onlyTheLiveOnesRemain', async () => {
+    // A 12 fps source with a 12-frame GOP, cached up to the moment of the bind:
+    // 12 replayed records (the last ones are the newest of the cache), then live
+    // ones. The offset comes from ClockSync, the way Task 9 gets it.
+    const samples = Array.from({ length: 20 }, (_, i) => pingSample(1_000 * (i + 1), 2, 2, 250));
+    const { offsetMs: estimated } = await new ClockSync(pingsFrom(samples)).estimate();
+    const bindOnTheHub = timeOrigin + 30_000 + estimated;
+    const frameMs = 1000 / 12;
+    const cached = Array.from({ length: 12 }, (_, i): [number, number, number] => [i, 0, bindOnTheHub - (12 - i) * frameMs]);
+    const live = Array.from({ length: 5 }, (_, i): [number, number, number] => [12 + i, 0, bindOnTheHub + (i + 1) * frameMs]);
+
+    const kept = [...cached, ...live].filter(([, , hubMs]) => !predatesBind(hubMs, 30_000, estimated, timeOrigin));
+
+    expect(kept.map(([frame]) => frame)).toStrictEqual([12, 13, 14, 15, 16]);
   });
 });

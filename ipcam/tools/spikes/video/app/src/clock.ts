@@ -78,3 +78,22 @@ export class ClockSync {
 export function glassToGlassMs(displayPerfMs: number, sentHubMs: number, offsetMs: number, timeOrigin: number): number {
   return timeOrigin + offsetMs - sentHubMs + displayPerfMs;
 }
+
+/**
+ * Whether a `sent` record is older than the bind that is being measured (ruling
+ * R26). When a camera is bound, the hub starts the stream at the GOP it has
+ * cached, and those frames keep the time at which they were first emitted, so a
+ * latency taken on them would include the age of the cache (up to one GOP, 1 s)
+ * instead of the transport. Only records the hub emitted at or after the bind
+ * count as samples.
+ *
+ * `requestedPerfMs` is `BindResult.requestedPerfMs`, the performance-clock time
+ * at which `bind` was called; `offsetMs` is the current `ClockSync` estimate.
+ * Like `glassToGlassMs`, it puts the performance clock on the Unix scale with
+ * `timeOrigin` and then on the hub's with the offset, so the device's wall clock
+ * does not enter. A cached frame emitted within half a round trip before the
+ * hub received the bind is kept: its cache age is that short.
+ */
+export function predatesBind(sentHubMs: number, requestedPerfMs: number, offsetMs: number, timeOrigin: number): boolean {
+  return sentHubMs < timeOrigin + requestedPerfMs + offsetMs;
+}

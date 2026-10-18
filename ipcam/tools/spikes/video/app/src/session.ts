@@ -17,8 +17,9 @@ export interface BindResult {
   fallback?: string;
   /**
    * `performance.now()` when `bind` was called. Sent records whose hub time
-   * precedes it (`performance.timeOrigin + requestedPerfMs + offsetMs`) belong
-   * to the GOP the hub had cached, not to the bind, and are not latency samples (R26).
+   * precedes it belong to the GOP the hub had cached, not to the bind, and are
+   * not latency samples (R26): `predatesBind` (clock.ts) says which, given this
+   * value and the `ClockSync` offset.
    */
   requestedPerfMs: number;
 }
