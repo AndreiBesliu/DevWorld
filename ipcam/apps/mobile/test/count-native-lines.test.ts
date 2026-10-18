@@ -73,6 +73,73 @@ describe('count-native-lines.sh', () => {
     expect(run.stdout).toContain(`${plugin}: 4 lines (budget 400)`);
   });
 
+  it('countNativeLines_codeAfterAClosingComment_countsAsCode', () => {
+    const source = [
+      '/* c */ val a = 1',
+      '/** doc */ fun f() {}',
+      '/* only */ /* comments */',
+      '/* a */ /* b */ val z = 2',
+      '/*',
+      ' * A block that ends on a line with code.',
+      ' */ val b = 3',
+      '/* closes at once */',
+    ].join('\n');
+    const plugin = fixture({ 'A.kt': source });
+
+    const run = count('400', plugin);
+
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`${plugin}: 4 lines (budget 400)`);
+  });
+
+  it('countNativeLines_blockOpenedAfterCode_theCommentLinesAreNotCounted', () => {
+    const source = [
+      'val y = 3 /* starts here',
+      'a comment line',
+      'val hidden = 1',
+      'ends here */',
+      'val z = 4',
+      'val w = 5 /* inline */ + 6',
+      'val v = 7 /* opens again',
+      '   and closes */ val u = 8',
+      'val t = 9',
+    ].join('\n');
+    const plugin = fixture({ 'A.kt': source });
+
+    const run = count('400', plugin);
+
+    // y, z, w, v, u (the line that closes the block holds code) and t.
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`${plugin}: 6 lines (budget 400)`);
+  });
+
+  it('countNativeLines_commentMarkersInsideStrings_areCode', () => {
+    const source = [
+      'val mime = "video/*"', // a MIME type, not the start of a comment
+      'val escaped = "a \\" /* b"',
+      'val next = 1',
+      'val url = "http://host" // trailing',
+    ].join('\n');
+    const plugin = fixture({ 'A.kt': source });
+
+    const run = count('400', plugin);
+
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`${plugin}: 4 lines (budget 400)`);
+  });
+
+  it('countNativeLines_budgetWithALeadingZero_isDecimal', () => {
+    // Bash reads 0400 as octal 256 in arithmetic, and 08 not at all.
+    const plugin = fixture({ 'A.kt': kotlin(300) });
+
+    const run = count('0400', plugin);
+
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`${plugin}: 300 lines (budget 400)`);
+    expect(count('08', fixture({ 'A.kt': kotlin(8) })).status).toBe(0);
+    expect(count('08', fixture({ 'A.kt': kotlin(9) })).status).toBe(1);
+  });
+
   it('countNativeLines_eachPluginHasItsOwnBudget', () => {
     const small = fixture({ 'A.kt': kotlin(300) });
     const big = fixture({ 'A.rs': kotlin(301) });
