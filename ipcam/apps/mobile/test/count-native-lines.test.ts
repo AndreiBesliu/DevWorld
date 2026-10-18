@@ -128,6 +128,29 @@ describe('count-native-lines.sh', () => {
     expect(run.stdout).toContain(`${plugin}: 4 lines (budget 400)`);
   });
 
+  it('countNativeLines_multiLineRawString_isCodeAndItsCommentMarkersAreText', () => {
+    // A Kotlin, Java or Swift raw string spans lines; a /* inside it opens no comment.
+    const source = [
+      'val s = """',
+      '  some /* text',
+      '  // and more',
+      '"""',
+      'val t = 1',
+      'val u = "" // an empty string is no raw string',
+      '/* a real comment',
+      'val hidden = 1 */',
+      'val v = """one line /* """',
+      'val w = 2',
+    ].join('\n');
+    const plugin = fixture({ 'A.kt': source });
+
+    const run = count('400', plugin);
+
+    // The raw string takes 4 lines, then t, u, v and w.
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`${plugin}: 8 lines (budget 400)`);
+  });
+
   it('countNativeLines_budgetWithALeadingZero_isDecimal', () => {
     // Bash reads 0400 as octal 256 in arithmetic, and 08 not at all.
     const plugin = fixture({ 'A.kt': kotlin(300) });
