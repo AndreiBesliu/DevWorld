@@ -12,6 +12,13 @@
 # command), and when that command, asked through WebView2's DevTools port,
 # counts at least one WebView2 process.
 #
+# The DevTools port is opened by the machine policy AdditionalBrowserArguments
+# for the app's executable, which the script writes. The runner's processes are
+# elevated, and WebView2 Runtime 150 and later ignores the variable
+# WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS and per-user policies in an elevated
+# process (WebView2Feedback issue 5645). The runner is discarded after the job,
+# so the policy is not removed.
+#
 # On failure it prints the cause as check annotations, which can be read where
 # the job log cannot.
 #
@@ -31,6 +38,7 @@ $ErrorActionPreference = 'Stop'
 
 $hubUrl = 'http://localhost:7080'
 $debugPort = 9222
+$argumentsPolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
 $pageState = Join-Path $PSScriptRoot 'page-state.ts'
 # Start-Process takes the programs and the hub its folders by full path.
 $App = (Resolve-Path -LiteralPath $App).Path
@@ -83,15 +91,12 @@ function Get-WebView2State {
   $ids = @($procs | ForEach-Object ProcessId)
   $ports = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
       Where-Object { $ids -contains $_.OwningProcess } | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" })
-  $policies = @('HKLM:\SOFTWARE\Policies\Microsoft\Edge', 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2') | ForEach-Object {
-    $values = Get-ItemProperty -LiteralPath $_ -ErrorAction SilentlyContinue
-    if ($values) { "${_}: $(($values.PSObject.Properties | Where-Object Name -notlike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', ')" }
-  }
+  $values = Get-ItemProperty -LiteralPath $argumentsPolicy -ErrorAction SilentlyContinue
+  $policy = if ($values) { @($values.PSObject.Properties | Where-Object Name -notlike 'PS*' | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', ' }
   @(
-    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS here: $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+    "policy AdditionalBrowserArguments: $(if ($policy) { $policy } else { '(none)' })",
     "WebView2 browser processes: $(if ($browser) { $browser -join ' | ' } else { '(none)' })",
-    "WebView2 listens on: $(if ($ports) { $ports -join ', ' } else { '(nothing)' })",
-    "Edge policies: $(if ($policies) { $policies -join ' | ' } else { '(none)' })"
+    "WebView2 listens on: $(if ($ports) { $ports -join ', ' } else { '(nothing)' })"
   ) -join "`n"
 }
 
@@ -206,7 +211,9 @@ while ($true) {
 }
 
 # Every WebView2 the app creates opens its DevTools port, which Read-Page asks.
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$debugPort"
+# The policy's value name is the executable's file name.
+$null = New-Item -Path $argumentsPolicy -Force
+$null = New-ItemProperty -LiteralPath $argumentsPolicy -Name (Split-Path -Leaf $App) -Value "--remote-debugging-port=$debugPort" -PropertyType String -Force
 $failures = 0
 for ($start = 1; $start -le $Starts; $start++) {
   if (-not (Test-Start "start $start of $Starts" $start)) { $failures++ }

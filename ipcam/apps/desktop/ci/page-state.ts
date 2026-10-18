@@ -2,8 +2,7 @@
 // the smoke test of ipcam-windows.yml: the page address, window.__spikeErrors,
 // the results the page holds, the start of the screen text and the raw answer
 // of the shell's `spike_metrics` command. It asks WebView2's DevTools port,
-// which the environment variable
-// WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<port> opens.
+// which windows-smoke.ps1 opens with --remote-debugging-port=<port>.
 //
 //   node apps/desktop/ci/page-state.ts <port>
 
