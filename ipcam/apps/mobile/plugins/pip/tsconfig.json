@@ -1,0 +1,9 @@
+{
+  // The plugin's JavaScript API. It ships TypeScript source (package.json
+  // "exports") that its consumers' Vite builds compile, so nothing emits.
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": []
+  },
+  "include": ["src"]
+}

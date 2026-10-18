@@ -1,0 +1,23 @@
+// The Android library of the `pip` plugin; `cap sync` adds it to the app.
+// Its Kotlin counts for MV14 (tools/scripts/count-native-lines.sh).
+apply plugin: 'com.android.library'
+
+android {
+    namespace = "ro.ipcam.pip"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        minSdk = rootProject.ext.minSdkVersion
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+}
+
+dependencies {
+    implementation project(':capacitor-android')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    testImplementation "junit:junit:$junitVersion"
+    // Runs the framework's PictureInPictureParams on the JVM.
+    testImplementation "org.robolectric:robolectric:$robolectricVersion"
+}

@@ -13,8 +13,11 @@
     "build": "vite build"
   },
   "dependencies": {
+    "@capacitor/core": "8.5.2",
+    "@ipcam/capacitor-pip": "workspace:*",
     "@ipcam/player": "workspace:*",
-    "hash-wasm": "4.12.0"
+    "hash-wasm": "4.12.0",
+    "spike-android-metrics": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "26.6.4",

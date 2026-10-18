@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- SPIKE-ONLY (plan 2026-10-18-phase0b-video-spike, Task 10): MV4 holds a
+         1-pixel camera capture so that the WebView reports which decoder it uses. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+</manifest>

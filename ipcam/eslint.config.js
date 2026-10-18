@@ -20,7 +20,8 @@ const PLAYER_IMPORT_MESSAGE =
 const PLAYER_FORBIDDEN_SPECIFIER = String.raw`^(react|react-dom)(\/|$)|^(@capacitor|@tauri-apps)\/`;
 
 export default defineConfig(
-  globalIgnores(['**/dist/**', '**/coverage/**']),
+  // `cap sync` copies the spike app's dist/ into the Android project's assets.
+  globalIgnores(['**/dist/**', '**/coverage/**', 'apps/mobile/android/app/src/main/assets/**']),
   js.configs.recommended,
   tseslint.configs.recommended,
   {

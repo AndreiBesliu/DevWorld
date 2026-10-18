@@ -1,0 +1,46 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace = "ro.ipcam.spike"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        // Temporary id of the Phase 0 test APK, never published (OPN-01).
+        applicationId = "ro.ipcam.spike"
+        minSdk = rootProject.ext.minSdkVersion
+        targetSdk = rootProject.ext.targetSdkVersion
+        versionCode = 1
+        versionName = "1.0"
+    }
+    flavorDimensions "purpose"
+    productFlavors {
+        // SPIKE-ONLY (plan 2026-10-18-phase0b-video-spike, Task 10): plain HTTP to
+        // the spike hub on the LAN and the CAMERA permission for MV4 (src/spike).
+        spike {
+            dimension "purpose"
+        }
+        // The product's settings: no cleartext traffic (spec §6.7).
+        production {
+            dimension "purpose"
+        }
+    }
+    androidResources {
+        // Files and folders left out of the packaged assets, Capacitor's choice for web apps.
+        ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+    }
+}
+
+dependencies {
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+// The plugins (capacitor.build.gradle) are library modules without flavours,
+// so their unit tests run as part of the app's.
+tasks.matching { it.name == 'testSpikeDebugUnitTest' }.configureEach {
+    dependsOn ':ipcam-capacitor-pip:testDebugUnitTest', ':spike-android-metrics:testDebugUnitTest'
+}
+
+apply from: 'capacitor.build.gradle'

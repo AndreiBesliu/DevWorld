@@ -1,8 +1,10 @@
 packages:
   - apps/packages/*
   - apps/mobile
+  - apps/mobile/plugins/*
   - apps/desktop
   - tools/spikes/video/app
+  - tools/spikes/video/android-metrics
 
 # Refuse versions published less than 7 days ago (minutes; spec section 11.10).
 minimumReleaseAge: 10080
