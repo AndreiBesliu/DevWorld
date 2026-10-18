@@ -55,8 +55,6 @@ jobs:
         run: |
           set -o pipefail
           go test -count=1 -race ./tools/spikes/video/... 2>&1 | tee "$RUNNER_TEMP/test.log"
-          # TEMPORARY (Task 5): sample the session tests for flakes; reverted by the next commit.
-          go test -count=20 -race ./tools/spikes/video/session/... 2>&1 | tee -a "$RUNNER_TEMP/test.log"
       - name: Show test failures as annotations
         # Job logs cannot be read from everywhere; check-run annotations can
         # (gh api repos/<owner>/<repo>/check-runs/<job id>/annotations). GitHub keeps 10
