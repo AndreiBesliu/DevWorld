@@ -4,16 +4,24 @@ package ro.ipcam.spike
 
 import android.os.BatteryManager
 import android.os.Build
+import android.content.Intent
+import android.content.res.Configuration
 import android.os.Debug
 import android.os.PowerManager
+import android.os.Process
+import android.util.Log
 import android.view.WindowManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
+import com.getcapacitor.WebViewListener
 import com.getcapacitor.annotation.CapacitorPlugin
 import java.net.URLEncoder
+
+private const val TAG = "SpikeMetrics"
 
 private val THERMAL_NAMES = mapOf(
     PowerManager.THERMAL_STATUS_NONE to "NONE",
@@ -27,6 +35,21 @@ private val THERMAL_NAMES = mapOf(
 
 /** PowerManager's thermal status by its name in the spike app (THERMAL_LEVELS), or null for a status it does not know. */
 internal fun thermalName(status: Int): String? = THERMAL_NAMES[status]
+
+/**
+ * A page address for the log: without its query, which holds the hub's address
+ * (PH0-22), but with the scenario an autorun asks for.
+ */
+internal fun pageForLog(url: String?): String {
+    if (url == null) return "none"
+    val scenario = Regex("[?&]autorun=([^&#]*)").find(url)?.groupValues?.get(1)
+    return url.substringBefore('?').substringBefore('#') + (scenario?.let { " (autorun $it)" } ?: "")
+}
+
+private fun id(any: Any?): String = Integer.toHexString(System.identityHashCode(any))
+
+/** The start of Configuration.toString(): the part a configuration change alters (mcc, mnc, locale, size, density). */
+private fun configForLog(config: Configuration): String = config.toString().take(150)
 
 /**
  * The spike app's query string for the launch extras `autorun` and `hub` (R5),
@@ -54,16 +77,72 @@ internal fun autorunQuery(autorun: String?, hub: String?): String? {
  */
 @CapacitorPlugin(name = "SpikeMetrics")
 class MetricsPlugin : Plugin() {
+    // What the page and the Activity do, for the emulator job's annotations
+    // (ci/emulator-smoke.sh): they show how often the app was created and
+    // which address the WebView was given.
+    private val pageEvents = object : WebViewListener() {
+        override fun onPageStarted(webView: WebView) {
+            Log.i(TAG, "page started: ${pageForLog(webView.url)}")
+        }
+
+        override fun onPageLoaded(webView: WebView) {
+            Log.i(TAG, "page loaded: ${pageForLog(webView.url)}")
+        }
+
+        override fun onRenderProcessGone(webView: WebView, detail: RenderProcessGoneDetail): Boolean {
+            Log.w(TAG, "render process gone: crashed=${detail.didCrash()}")
+            return false // not handled, as without this listener
+        }
+    }
+
     override fun load() {
         val intent = activity.intent
-        val query = autorunQuery(intent.getStringExtra("autorun"), intent.getStringExtra("hub"))
+        val autorun = intent.getStringExtra("autorun")
+        val hub = intent.getStringExtra("hub")
+        val query = autorunQuery(autorun, hub)
         intent.removeExtra("autorun")
         intent.removeExtra("hub")
-        if (query == null) return
+        Log.i(
+            TAG,
+            "load: pid=${Process.myPid()} activity=${id(activity)} bridge=${id(bridge)} intent=${id(intent)} " +
+                "autorun=$autorun hub=${hub != null} config=${configForLog(activity.resources.configuration)}",
+        )
         // Runs after the bridge has started its own first load of the page.
         val webView = bridge.webView
-        webView.post { webView.loadUrl("${bridge.localUrl}/?$query") }
+        webView.post {
+            bridge.addWebViewListener(pageEvents)
+            Log.i(TAG, "load posted: attached=${webView.isAttachedToWindow} url=${pageForLog(webView.url)}")
+            if (query != null) {
+                val url = "${bridge.localUrl}/?$query"
+                webView.loadUrl(url)
+                Log.i(TAG, "loadUrl: ${pageForLog(url)}")
+            }
+        }
     }
+
+    private fun lifecycle(event: String, config: Configuration? = null) {
+        Log.i(
+            TAG,
+            "$event: activity=${id(activity)} changingConfigurations=${activity.isChangingConfigurations}" +
+                (config?.let { " config=${configForLog(it)}" } ?: ""),
+        )
+    }
+
+    override fun handleOnStart() = lifecycle("start")
+
+    override fun handleOnResume() = lifecycle("resume")
+
+    override fun handleOnPause() = lifecycle("pause")
+
+    override fun handleOnStop() = lifecycle("stop")
+
+    override fun handleOnDestroy() = lifecycle("destroy", activity.resources.configuration)
+
+    override fun handleOnNewIntent(intent: Intent) {
+        Log.i(TAG, "new intent: autorun=${intent.hasExtra("autorun")} (a warm start ignores the extras)")
+    }
+
+    override fun handleOnConfigurationChanged(newConfig: Configuration) = lifecycle("configuration changed", newConfig)
 
     @PluginMethod
     fun read(call: PluginCall) {

@@ -33,4 +33,15 @@ class MetricsPluginTest {
         assertEquals("autorun=S1", autorunQuery("S1", null))
         assertNull(autorunQuery(null, "http://10.0.2.2:7080"))
     }
+
+    @Test
+    fun pageForLog_dropsTheHubAddressAndKeepsTheScenario() {
+        assertEquals(
+            "http://localhost/ (autorun S1)",
+            pageForLog("http://localhost/?autorun=S1&hub=http%3A%2F%2F10.0.2.2%3A7080"),
+        )
+        assertEquals("http://localhost/", pageForLog("http://localhost/"))
+        assertEquals("http://localhost/ (autorun S1)", pageForLog("http://localhost/?hub=http%3A%2F%2Fx&autorun=S1#top"))
+        assertEquals("none", pageForLog(null))
+    }
 }
