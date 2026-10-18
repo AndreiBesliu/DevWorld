@@ -103,14 +103,18 @@ async function measure(
     match();
   });
   try {
-    const bind = session.bind(0, cam.id, profile);
+    // Handled from the start: if play() throws, nobody else waits for the answer.
+    const bind = session.bind(0, cam.id, profile).then(
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    );
     await player.play(liveSource(cam.id, profile));
-    try {
-      bound = await bind;
-    } catch (error) {
-      run.note(`${profile}: bind error ${bindFailure(error)}`);
+    const answer = await bind;
+    if ('error' in answer) {
+      run.note(`${profile}: bind error ${bindFailure(answer.error)}`);
       return;
     }
+    bound = answer.result;
     const deadline = run.now() + PROFILE_TIMEOUT_MS;
     while (taken < SAMPLES && run.now() < deadline) {
       await run.sleep(POLL_MS);

@@ -269,7 +269,8 @@ class HubSession implements SpikeSession {
         },
       };
       const timer = setTimeout(() => {
-        this.pairWaiters.splice(this.pairWaiters.indexOf(waiter), 1);
+        const index = this.pairWaiters.indexOf(waiter);
+        if (index >= 0) this.pairWaiters.splice(index, 1);
         resolve('n/a');
       }, PAIR_TIMEOUT_MS);
       this.pairWaiters.push(waiter);

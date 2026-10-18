@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { autorun, parseAutorun } from './autorun';
+import { autorun, parseAutorun, type AutorunError } from './autorun';
+import { ConnectError } from './hubhttp';
 import { ResultsQueue, type KeyValueStore, type ScenarioResult } from './results';
 import { finish, setup, TEST_HUB } from './scenarios/fakes';
 
@@ -26,7 +27,42 @@ describe('autorun', () => {
     // Without hub, the page's own origin: the web app served by the hub.
     expect(parseAutorun('?autorun=S3-9', 'http://localhost:7080')).toEqual({ scenario: 'S3-9', hub: 'http://localhost:7080' });
     expect(parseAutorun('', 'http://localhost:7080')).toBeUndefined();
-    expect(parseAutorun('?autorun=S99', 'http://localhost:7080')).toBeUndefined();
+  });
+
+  it('parseAutorun_unknownScenario_isAnErrorWithoutAddresses', () => {
+    expect(parseAutorun('?autorun=S99', 'http://localhost:7080')).toEqual({ scenario: 'S99', kind: 'unknown-scenario' });
+    expect(parseAutorun('?autorun=http://192.168.1.20:7080/x', 'http://localhost:7080')).toEqual({
+      scenario: '<url>',
+      kind: 'unknown-scenario',
+    });
+  });
+
+  it('autorun_hubUnreachable_exposesTheErrorWithoutTheUrl', async () => {
+    // Tasks 10-12 read the error instead of waiting for a result that never comes.
+    const target: { __spikeResults?: ScenarioResult[]; __spikeErrors?: AutorunError[] } = {};
+    const queue = new ResultsQueue({ storage: memory(), hubUrl: () => TEST_HUB });
+
+    const failed = autorun(
+      { scenario: 'S1', hub: TEST_HUB },
+      { connect: () => Promise.reject(new ConnectError('refused', TEST_HUB, 'Failed to fetch')), queue, target },
+    );
+
+    await expect(failed).rejects.toBeInstanceOf(ConnectError);
+    expect(target.__spikeErrors).toEqual([{ scenario: 'S1', kind: 'connect', code: 'refused' }]);
+    expect(target.__spikeResults ?? []).toEqual([]);
+    expect(JSON.stringify(target.__spikeErrors)).not.toContain('192.168.1.20');
+  });
+
+  it('autorun_scenarioThrows_exposesTheError', async () => {
+    const t = setup();
+    t.env.holdWakeLock = () => Promise.reject(new TypeError('wake lock exploded'));
+    const target: { __spikeErrors?: AutorunError[] } = {};
+    const queue = new ResultsQueue({ storage: memory(), hubUrl: () => TEST_HUB });
+
+    const failed = autorun({ scenario: 'S8', hub: TEST_HUB }, { connect: () => Promise.resolve(t.env), queue, target });
+
+    await expect(failed).rejects.toBeInstanceOf(TypeError);
+    expect(target.__spikeErrors).toEqual([{ scenario: 'S8', kind: 'scenario', code: 'TypeError' }]);
   });
 
   it('autorun_runsScenarioAndExposesResults', async () => {

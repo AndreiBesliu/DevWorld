@@ -10,6 +10,7 @@
 // Notes: `player error: <reason>[ (hint: <cause>)]`, `bind error <code> on slot <n>`.
 import type { Player } from '@ipcam/player';
 import type { HubCamera } from '../cameras';
+import { readNativeMetrics } from '../native';
 import type { Profile } from '../session';
 import { bindFailure, describeFailure, liveSource, playerFailure } from './frames';
 import type { Run, ScenarioDefinition } from './runner';
@@ -26,8 +27,8 @@ async function sampleMemory(run: Run): Promise<void> {
   if (heap !== undefined) run.sample('jsHeapMb', heap);
   const native = run.env.native;
   if (!native) return;
-  const metrics = await run.within(native.metrics(), 5000).catch(() => undefined);
-  if (metrics !== undefined && metrics !== 'timeout' && metrics.memMb !== undefined) run.sample('memMb', metrics.memMb);
+  const metrics = await readNativeMetrics(native, run.env.clock.setTimer);
+  if (metrics !== 'n/a' && metrics.memMb !== undefined) run.sample('memMb', metrics.memMb);
 }
 
 export const S4: ScenarioDefinition = {
@@ -57,15 +58,18 @@ export const S4: ScenarioDefinition = {
       session.unbind(slot);
     };
     const startSlot = async (player: Player, slot: number, cam: HubCamera, profile: Profile): Promise<void> => {
-      const bind = session.bind(slot, cam.id, profile);
+      // Handled from the start: if play() throws, nobody else waits for the answer.
+      const bind = session.bind(slot, cam.id, profile).then(
+        () => undefined,
+        (error: unknown) => ({ error }),
+      );
       playing.add(player);
       await player.play(liveSource(cam.id, profile));
-      try {
-        await bind;
-      } catch (error) {
+      const refused = await bind;
+      if (refused) {
         playing.delete(player); // nothing to play: not an unprovoked error
         player.stop();
-        run.note(`bind error ${bindFailure(error)} on slot ${slot}`);
+        run.note(`bind error ${bindFailure(refused.error)} on slot ${slot}`);
       }
     };
     const showPage = async (page: number): Promise<void> => {

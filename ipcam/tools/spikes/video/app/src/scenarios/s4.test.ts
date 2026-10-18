@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { finish, setup } from './fakes';
+import { finish, refusingPlayer, setup, unhandledRejections } from './fakes';
 import { runScenario } from './index';
 
 beforeEach(() => {
@@ -12,6 +12,36 @@ afterEach(() => {
 });
 
 describe('S4', () => {
+  it('S4_nativeMetricsThrow_runsTheFull30Minutes', async () => {
+    const t = setup({
+      fakePlayer: true,
+      native: {
+        metrics: () => {
+          throw new Error('the bridge is gone');
+        },
+      },
+    });
+
+    const result = await finish(runScenario('S4', t.env));
+
+    expect(result.samples.pageSwitches).toEqual([29]);
+    expect(result.samples.memMb).toBeUndefined();
+    expect(result.notes.filter((note) => note.startsWith('failed'))).toEqual([]);
+  });
+
+  it('S4_playRejects_leavesNoUnhandledRejection', async () => {
+    const t = setup({ fakePlayer: true, hub: { answer: () => ({ error: 'CODEC_UNSUPPORTED' }) } });
+    t.env.createPlayer = (opts) => refusingPlayer(opts.slot);
+
+    let notes: string[] = [];
+    const unhandled = await unhandledRejections(async () => {
+      notes = (await finish(runScenario('S4', t.env))).notes;
+    });
+
+    expect(unhandled).toEqual([]);
+    expect(notes).toContain('failed: Error: no track for this slot');
+  });
+
   it('S4_pagesEvery60sTogglesFullscreenEvery90sAndCountsUnprovokedErrors', async () => {
     let heap = 50;
     const t = setup({

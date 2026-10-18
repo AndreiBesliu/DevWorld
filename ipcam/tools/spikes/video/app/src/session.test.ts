@@ -421,6 +421,23 @@ describe('messages from the hub', () => {
     await expect(session.pair()).resolves.toEqual({ local: 'host', remote: 'host' });
   });
 
+  it('pair_timeoutOfAWaiterThatIsGone_removesNoOtherWaiter', async () => {
+    // A drain that took a waiter off the list without clearing its timer (none
+    // does today) must not make that timer remove another waiter.
+    vi.useFakeTimers();
+    const { session, rpc } = await open();
+    void session.pair(); // waiter A, times out at 10 s
+    await vi.advanceTimersByTimeAsync(1000);
+    const later = session.pair(); // waiter B, times out at 11 s
+    (session as unknown as { pairWaiters: unknown[] }).pairWaiters.shift(); // A leaves, its timer stays
+
+    await vi.advanceTimersByTimeAsync(9500); // A's timer fires
+    rpc.receive({ t: 'pair', local: 'host', remote: 'prflx' });
+    await vi.advanceTimersByTimeAsync(1000); // past B's own timeout
+
+    await expect(later).resolves.toEqual({ local: 'host', remote: 'prflx' });
+  });
+
   it('onJitter_deliversEachReportInMs', async () => {
     const { session, rpc } = await open();
     const reports: number[] = [];

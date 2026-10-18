@@ -1,6 +1,7 @@
 // Test doubles for the scenario tests: a fake hub behind the SpikeSession
 // interface, video elements, the stage, the document and a player. Not part of
 // the shipped app.
+import { setImmediate as realSetImmediate } from 'node:timers';
 import { createPlayer, type MediaLink, type Player, type PlayerOptions, type PlayerSource } from '@ipcam/player';
 import { vi } from 'vitest';
 import type { BandCode } from '../band';
@@ -506,6 +507,13 @@ export class FakePlayer implements Player {
   }
 }
 
+/** A player whose play() rejects, as @ipcam/player's does when the track cannot be had. */
+export function refusingPlayer(slot = 0): FakePlayer {
+  const player = new FakePlayer(slot);
+  player.play = () => Promise.reject(new Error('no track for this slot'));
+  return player;
+}
+
 /** What the wake lock fake records. */
 export class FakeWakeLock {
   held = 0;
@@ -617,6 +625,28 @@ export function setup(options: SetupOptions = {}): TestSetup {
     players,
     wakeLock,
   };
+}
+
+/**
+ * Runs `fn` and returns the promise rejections that nothing handled meanwhile
+ * (Node's `unhandledRejection`), after giving Node a real turn to report them
+ * (node:timers is not faked).
+ */
+export async function unhandledRejections(fn: () => Promise<unknown>): Promise<unknown[]> {
+  const seen: unknown[] = [];
+  const listener = (reason: unknown): void => {
+    seen.push(reason);
+  };
+  process.on('unhandledRejection', listener);
+  try {
+    await fn();
+    await new Promise((resolve) => {
+      realSetImmediate(resolve);
+    });
+    return seen;
+  } finally {
+    process.off('unhandledRejection', listener);
+  }
 }
 
 /**

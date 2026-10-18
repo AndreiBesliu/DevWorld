@@ -11,7 +11,10 @@
 // (the substream fallback).
 // Notes, per camera: `<cam>/<profile>: bound <codec>[, fallback profile <id>]` or
 // `<cam>/<profile>: error <code>`, `<cam>/<profile>: no first frame within 4 s`,
-// and the outcome `<cam>: ok|fallback|unsupported-profile`.
+// and one outcome (Task 13 reads it): `<cam>: ok` (the main stream plays),
+// `<cam>: fallback` or `<cam>: unsupported-profile` (it does not, the substream
+// does, and the screen shows that case's label), `<cam>: fallback-failed`
+// (neither plays: the substream was refused or showed no frame within 4 s).
 import type { Player } from '@ipcam/player';
 import type { BandCode } from '../band';
 import type { MessageKey } from '../i18n';
@@ -77,7 +80,11 @@ export const S9: ScenarioDefinition = {
       }
       stage.say(t(path.label));
       const sub = await tryStream(run, clear(), path.cam, 'sub');
-      if (sub !== undefined) run.sample(`${path.cam}.subFirstFrameMs`, sub);
+      if (sub === undefined) {
+        run.note(`${path.cam}: fallback-failed`);
+        continue;
+      }
+      run.sample(`${path.cam}.subFirstFrameMs`, sub);
       run.note(`${path.cam}: ${path.failure}`);
     }
   },

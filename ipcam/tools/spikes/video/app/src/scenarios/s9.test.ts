@@ -43,6 +43,31 @@ describe('S9', () => {
     expect(t.stage.said).toContain(t.env.t('h265Unsupported'));
   });
 
+  it('S9_subFallbackFails_isFallbackFailed', async () => {
+    // The fallback itself fails: mx-h265's substream is refused, mx-high51's
+    // shows no frame. Neither camera has a working path.
+    const t = setup({
+      hub: {
+        answer: (_slot, cam, profile): BindAnswer =>
+          profile === 'main' || cam === 'mx-h265' ? { error: 'CODEC_UNSUPPORTED' } : { codec: 'H264' },
+        firstFrameMs: () => undefined,
+      },
+    });
+
+    const result = await finish(runScenario('S9', t.env));
+
+    expect(result.notes).toEqual(
+      expect.arrayContaining([
+        'mx-h265/sub: error CODEC_UNSUPPORTED',
+        'mx-h265: fallback-failed',
+        'mx-high51/sub: no first frame within 4 s',
+        'mx-high51: fallback-failed',
+      ]),
+    );
+    expect(result.notes).not.toContain('mx-h265: fallback');
+    expect(result.notes).not.toContain('mx-high51: unsupported-profile');
+  });
+
   it('S9_highProfileNotOffered_isUnsupportedProfileWithTheSubFallbackRecorded', async () => {
     // Firefox offers Constrained Baseline only: the hub refuses High as main, and
     // sends the substream in the closest offered profile, which is a fallback, not a failure (R23).

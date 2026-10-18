@@ -79,26 +79,49 @@ describe('ResultsQueue', () => {
     expect(JSON.parse(storage.getItem(PENDING_KEY) ?? '[]')).toEqual([result('S2', [2])]);
   });
 
-  it('results_resultAddedDuringAFlush_isKept', async () => {
+  it('results_resultPublishedDuringAnUpload_isSentInTheSameFlush', async () => {
     const storage = new MemoryStore();
-    let answer: ((response: Response) => void) | undefined;
+    const answers: ((response: Response) => void)[] = [];
     const fetchMock = vi.fn<typeof fetch>(
       () =>
         new Promise<Response>((resolve) => {
-          answer = resolve;
+          answers.push(resolve);
         }),
     );
     const queue = new ResultsQueue({ storage, fetch: fetchMock, hubUrl: () => TEST_HUB });
     queue.add(result('S1'));
 
     const flushing = queue.flush();
-    expect(queue.flush()).toBe(flushing); // one upload at a time
-    queue.add(result('S2'));
-    await Promise.resolve();
-    answer?.(new Response('{}', { status: 201 }));
+    queue.add(result('S2')); // a run ends while S1 is on its way
+    expect(queue.flush()).toBe(flushing); // one upload at a time, which takes S2 along
+    await vi.waitFor(() => {
+      expect(answers).toHaveLength(1);
+    });
+    answers[0]?.(new Response('{}', { status: 201 }));
+    await vi.waitFor(() => {
+      expect(answers).toHaveLength(2);
+    });
+    answers[1]?.(new Response('{}', { status: 201 }));
 
-    expect(await flushing).toBe(1);
-    expect(JSON.parse(storage.getItem(PENDING_KEY) ?? '[]')).toEqual([result('S2')]);
+    expect(await flushing).toBe(0);
+    const sent = fetchMock.mock.calls.map(([, init]) => (JSON.parse(String(init?.body)) as ScenarioResult).scenario);
+    expect(sent).toEqual(['S1', 'S2']);
+    expect(JSON.parse(storage.getItem(PENDING_KEY) ?? '[]')).toEqual([]);
+  });
+
+  it('results_resultThatFailed_isNotRetriedInTheSameFlush', async () => {
+    // The hub is gone: each result costs one attempt per flush, not one per pass.
+    const storage = new MemoryStore();
+    const fetchMock = vi.fn<typeof fetch>(() => {
+      if (fetchMock.mock.calls.length === 1) queue.add(result('S2')); // a run ends during the first attempt
+      return Promise.reject(new TypeError('Failed to fetch'));
+    });
+    const queue = new ResultsQueue({ storage, fetch: fetchMock, hubUrl: () => TEST_HUB });
+    queue.add(result('S1'));
+
+    expect(await queue.flush()).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(storage.getItem(PENDING_KEY) ?? '[]')).toEqual([result('S1'), result('S2')]);
   });
 
   it('results_storageUnavailable_keepsTheResultInMemory', async () => {

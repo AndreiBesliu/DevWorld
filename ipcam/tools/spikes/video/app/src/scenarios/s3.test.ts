@@ -1,7 +1,24 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NativeMetrics } from '../native';
 import { finish, setup } from './fakes';
 import { runScenario } from './index';
+
+/** The declarations of each rule in the page's style sheet, by selector. */
+function pageStyles(): Map<string, Map<string, string>> {
+  const html = readFileSync(new URL('../../index.html', import.meta.url), 'utf8');
+  const css = /<style>([\s\S]*?)<\/style>/.exec(html)?.[1] ?? '';
+  const rules = new Map<string, Map<string, string>>();
+  for (const [, selector = '', body = ''] of css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const declarations = new Map<string, string>();
+    for (const declaration of body.split(';')) {
+      const [property = '', ...value] = declaration.split(':');
+      if (property.trim() !== '') declarations.set(property.trim(), value.join(':').trim());
+    }
+    rules.set(selector.trim(), declarations);
+  }
+  return rules;
+}
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -52,6 +69,46 @@ describe('S3', () => {
     // The camera is held for MV4 and released at the end; the screen said why first.
     expect(released).toBe(1);
     expect(t.stage.said).toContain(t.env.t('mv4Explain'));
+  });
+
+  it('S3_mainPhase_mv4ExplanationStaysOverTheFullscreenVideo', async () => {
+    // The camera is still held while the main stream fills the screen, so the
+    // reason for its light must stay readable over the fullscreen video.
+    const t = setup({ fakePlayer: true, hub: { stats: { fps: 12 } }, overrides: { captureForDecoderInfo: () => Promise.resolve(() => undefined) } });
+
+    const running = runScenario('S3-4', t.env);
+    await vi.advanceTimersByTimeAsync(11 * 60_000); // into the 2 min of main
+    expect(t.stage.big).toBeDefined();
+    expect(t.stage.said.at(-1)).toBe(t.env.t('mv4Explain'));
+    await finish(running);
+
+    const styles = pageStyles();
+    const overlay = styles.get('.stage .full');
+    const messageOverOverlay = styles.get('.stage:has(> .full:not([hidden])) .message');
+    expect(overlay?.get('position')).toBe('fixed');
+    expect(messageOverOverlay?.get('position')).toBe('fixed');
+    expect(Number(messageOverOverlay?.get('z-index'))).toBeGreaterThan(Number(overlay?.get('z-index') ?? 0));
+  });
+
+  it('S3_nativeMetricsThrow_theGridIsMeasuredAllTheSame', async () => {
+    // A broken shell bridge costs the shell's numbers, not the run.
+    const t = setup({
+      fakePlayer: true,
+      hub: { stats: { fps: 12 } },
+      native: {
+        metrics: () => {
+          throw new Error('the bridge is gone');
+        },
+      },
+    });
+
+    const result = await finish(runScenario('S3-4', t.env));
+
+    expect(result.samples.gridFps).toHaveLength(300);
+    expect(result.samples.mainFps).toHaveLength(60);
+    expect(result.samples.thermal).toBeUndefined();
+    expect(result.notes).toContain('native metrics: n/a');
+    expect(result.notes.filter((note) => note.startsWith('failed'))).toEqual([]);
   });
 
   it('S3_withoutNativeOrDecoderInfo_marksThemNa', async () => {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { finish, setup } from './fakes';
+import { finish, refusingPlayer, setup, unhandledRejections } from './fakes';
 import { runScenario } from './index';
 
 beforeEach(() => {
@@ -58,6 +58,20 @@ describe('S2', () => {
       expect(samples, key).toHaveLength(100);
       for (const ms of samples) expect(ms, key).toBeCloseTo(120, 3);
     }
+  });
+
+  it('S2_playRejects_leavesNoUnhandledRejection', async () => {
+    // play() fails, then the bind it raced with is refused: someone must have its answer.
+    const t = setup({ fakePlayer: true, hub: { answer: () => ({ error: 'CODEC_UNSUPPORTED' }) } });
+    t.env.createPlayer = (opts) => refusingPlayer(opts.slot);
+
+    let notes: string[] = [];
+    const unhandled = await unhandledRejections(async () => {
+      notes = (await finish(runScenario('S2', t.env))).notes;
+    });
+
+    expect(unhandled).toEqual([]);
+    expect(notes).toContain('failed: Error: no track for this slot');
   });
 
   it('S2_framesOfAnotherStream_areNotMatched', async () => {

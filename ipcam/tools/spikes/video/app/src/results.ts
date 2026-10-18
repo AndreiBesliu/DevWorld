@@ -92,7 +92,8 @@ export class ResultsQueue {
   /**
    * Uploads every pending result, one after the other, and keeps the ones the
    * hub did not take. Resolves with the number still pending. A call during an
-   * upload gets that upload.
+   * upload gets that upload, which also sends the results added meanwhile
+   * (each result is tried once per flush).
    */
   flush(): Promise<number> {
     this.flushing ??= this.upload().finally(() => {
@@ -102,15 +103,17 @@ export class ResultsQueue {
   }
 
   private async upload(): Promise<number> {
-    const batch = this.read();
     const failed: ScenarioResult[] = [];
-    for (const result of batch) {
-      if (!(await this.post(result))) failed.push(result);
+    // Results added during the upload come after the ones read before, so a
+    // second pass takes those that appeared during the first, and so on.
+    for (let tried = 0, pending = this.read(); tried < pending.length; pending = this.read()) {
+      for (const result of pending.slice(tried)) {
+        if (!(await this.post(result))) failed.push(result);
+      }
+      tried = pending.length;
     }
-    // Results added during the upload come after the batch.
-    const added = this.read().slice(batch.length);
-    this.write([...failed, ...added]);
-    return failed.length + added.length;
+    this.write(failed);
+    return failed.length;
   }
 
   private async post(result: ScenarioResult): Promise<boolean> {

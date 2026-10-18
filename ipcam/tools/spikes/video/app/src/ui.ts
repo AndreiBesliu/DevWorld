@@ -3,7 +3,7 @@
 // button and a status each, the results not yet uploaded, and the stage on
 // which the scenarios show their video. Romanian by default, English one tap away.
 import { createPlayer } from '@ipcam/player';
-import { autorun, type AutorunRequest } from './autorun';
+import { autorun, type AutorunRequest, type ErrorsTarget } from './autorun';
 import { readBand } from './band';
 import { fetchCameras, simCameras } from './cameras';
 import { captureForDecoderInfo } from './decoderinfo';
@@ -11,9 +11,9 @@ import { detectDevice, type DeviceInfo, type Platform } from './device';
 import { ConnectError } from './hubhttp';
 import { createI18n, type MessageKey, type Translate } from './i18n';
 import { sampleStats } from './metrics';
-import { spikeNative } from './native';
+import { readNativeMetrics, spikeNative } from './native';
 import { publish, ResultsQueue, SCENARIO_IDS, type KeyValueStore, type ScenarioId, type ScenarioResult } from './results';
-import type { ScenarioEnv, Stage } from './scenarios/context';
+import type { Clock, ScenarioEnv, Stage } from './scenarios/context';
 import { runScenario } from './scenarios/index';
 import { openSession } from './session';
 import { holdWakeLock, type ScreenWakeLock } from './wakelock';
@@ -166,6 +166,16 @@ export function startApp(root: HTMLElement): App {
   let unattended = false;
   let deviceLine = describeDevice(device);
   (globalThis as { __spikeResults?: ScenarioResult[] }).__spikeResults ??= [];
+  (globalThis as ErrorsTarget).__spikeErrors ??= [];
+  const clock: Clock = {
+    now: () => performance.now(),
+    setTimer: (fn, ms) => {
+      const id = setTimeout(fn, ms);
+      return () => {
+        clearTimeout(id);
+      };
+    },
+  };
 
   // Older browsers and some WebViews have no navigator.wakeLock, whatever lib.dom says.
   const wakeLock = (): ScreenWakeLock | undefined => ('wakeLock' in navigator ? navigator.wakeLock : undefined);
@@ -182,15 +192,7 @@ export function startApp(root: HTMLElement): App {
       ...(unattended ? {} : { ask: (question: string) => stage.ask(question, t('yes'), t('no')) }),
       ...(native ? { native } : {}),
       doc: document,
-      clock: {
-        now: () => performance.now(),
-        setTimer: (fn, ms) => {
-          const id = setTimeout(fn, ms);
-          return () => {
-            clearTimeout(id);
-          };
-        },
-      },
+      clock,
       openSession,
       createPlayer,
       readBand: (video) => readBand(video, canvas),
@@ -269,8 +271,8 @@ export function startApp(root: HTMLElement): App {
       const pair = await session.pair();
       session.close();
       safeSet(storage, HUB_KEY, hub());
-      const metrics = await native?.metrics().catch(() => undefined);
-      deviceLine = describeDevice(device, metrics);
+      const metrics = native ? await readNativeMetrics(native, clock.setTimer) : undefined;
+      deviceLine = metrics === 'n/a' ? `${describeDevice(device)}, ${t('nativeNa')}` : describeDevice(device, metrics);
       connection = [
         t('connected', { cameras: simCameras(cameras).length, pair: pair === 'n/a' ? 'n/a' : `${pair.local}/${pair.remote}` }),
       ];

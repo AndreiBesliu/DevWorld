@@ -75,6 +75,7 @@
       .stage .full {
         position: fixed;
         inset: 0;
+        z-index: 1;
         background: #000;
         display: flex;
         align-items: center;
@@ -86,6 +87,17 @@
         font-weight: bold;
         padding: 8px;
         border: 2px solid currentColor;
+      }
+      /* Over the fullscreen video, at the top: S3's MV4 explanation stays readable while the camera is held. */
+      .stage:has(> .full:not([hidden])) .message {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 2;
+        margin: 0;
+        background: Canvas;
+        color: CanvasText;
       }
     </style>
   </head>

@@ -34,3 +34,35 @@ export interface SpikeNative {
 export function spikeNative(): SpikeNative | undefined {
   return (globalThis as { spikeNative?: SpikeNative }).spikeNative;
 }
+
+/** How long the shell may take to answer metrics() before they count as n/a. */
+export const NATIVE_METRICS_TIMEOUT_MS = 3000;
+
+/**
+ * The shell's metrics, or `n/a` when there is no shell or its facade throws,
+ * rejects or does not answer within NATIVE_METRICS_TIMEOUT_MS: a broken bridge
+ * must neither keep the page busy nor stop a run. `setTimer` arms the timeout
+ * and returns its cancel function.
+ */
+export function readNativeMetrics(
+  native: SpikeNative | undefined,
+  setTimer: (fn: () => void, ms: number) => () => void,
+): Promise<NativeMetrics | 'n/a'> {
+  if (!native) return Promise.resolve('n/a');
+  return new Promise((resolve) => {
+    const cancel = setTimer(() => {
+      resolve('n/a');
+    }, NATIVE_METRICS_TIMEOUT_MS);
+    const settle = (value: NativeMetrics | 'n/a'): void => {
+      cancel();
+      resolve(value);
+    };
+    try {
+      native.metrics().then(settle, () => {
+        settle('n/a');
+      });
+    } catch {
+      settle('n/a');
+    }
+  });
+}

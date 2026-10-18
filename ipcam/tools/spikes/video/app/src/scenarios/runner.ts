@@ -5,6 +5,7 @@
 import type { MediaLink, Player } from '@ipcam/player';
 import { simCameras, type HubCamera } from '../cameras';
 import { ConnectError } from '../hubhttp';
+import { readNativeMetrics } from '../native';
 import { scrubText, type ScenarioId, type ScenarioResult } from '../results';
 import type { SpikeSession } from '../session';
 import type { ScenarioEnv } from './context';
@@ -48,8 +49,6 @@ export interface ScenarioDefinition {
   run(run: Run): Promise<void>;
 }
 
-const NATIVE_METRICS_TIMEOUT_MS = 2000;
-
 function describe(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
@@ -92,7 +91,10 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
     notes.push(`interrupted: the page was hidden ${Math.round((env.clock.now() - start) / 1000)} s into the run`);
     interrupt();
   };
-  if (!definition.backgroundsOnPurpose) env.doc.addEventListener('visibilitychange', onVisibility);
+  if (!definition.backgroundsOnPurpose) {
+    env.doc.addEventListener('visibilitychange', onVisibility);
+    onVisibility(); // a run started while the page is hidden: an autorun sent to a phone whose screen is off
+  }
 
   const guard = <T>(promise: Promise<T>): Promise<T> => Promise.race([promise, interruption]);
   const delay = (ms: number): { promise: Promise<void>; cancel: () => void } => {
@@ -170,14 +172,18 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
   let failure: unknown;
   let device: ScenarioResult['device'] = env.device;
   try {
-    const metrics = env.native ? await run.within(env.native.metrics(), NATIVE_METRICS_TIMEOUT_MS).catch(() => undefined) : undefined;
-    if (metrics !== undefined && metrics !== 'timeout') {
-      device = {
-        ...device,
-        ...(metrics.model ? { model: metrics.model } : {}),
-        ...(metrics.os ? { os: metrics.os } : {}),
-        ...(metrics.webview ? { webview: metrics.webview } : {}),
-      };
+    if (env.native) {
+      const metrics = await guard(readNativeMetrics(env.native, env.clock.setTimer));
+      if (metrics === 'n/a') {
+        run.note('native metrics: n/a');
+      } else {
+        device = {
+          ...device,
+          ...(metrics.model ? { model: metrics.model } : {}),
+          ...(metrics.os ? { os: metrics.os } : {}),
+          ...(metrics.webview ? { webview: metrics.webview } : {}),
+        };
+      }
     }
     await definition.run(run);
   } catch (error) {

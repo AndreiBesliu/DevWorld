@@ -16,7 +16,7 @@
 // `native metrics: n/a`, `tile <n>: ...` for a tile that did not start.
 import type { Player } from '@ipcam/player';
 import type { TileStats } from '../metrics';
-import { THERMAL_LEVELS, type NativeMetrics } from '../native';
+import { readNativeMetrics, THERMAL_LEVELS } from '../native';
 import type { Profile, SpikeSession } from '../session';
 import { describeBound, describeFailure, startStream } from './frames';
 import type { Run, ScenarioDefinition } from './runner';
@@ -26,14 +26,13 @@ const MAIN_MS = 2 * 60_000;
 const STATS_EVERY_MS = 2000;
 const NATIVE_EVERY_MS = 10_000;
 const FIRST_FRAME_TIMEOUT_MS = 10_000;
-const NATIVE_TIMEOUT_MS = 5000;
 
 /** Records the shell's metrics under `prefix` (`main` gives `mainCpuPctTotal`); nothing without a shell. */
 export async function recordNative(run: Run, prefix = ''): Promise<void> {
   const native = run.env.native;
   if (!native) return;
-  const metrics: NativeMetrics | 'timeout' | undefined = await run.within(native.metrics(), NATIVE_TIMEOUT_MS).catch(() => undefined);
-  if (metrics === undefined || metrics === 'timeout') return;
+  const metrics = await readNativeMetrics(native, run.env.clock.setTimer);
+  if (metrics === 'n/a') return;
   const put = (key: string, value: number | undefined): void => {
     if (value !== undefined) run.sample(prefix ? `${prefix}${key[0]?.toUpperCase() ?? ''}${key.slice(1)}` : key, value);
   };

@@ -89,6 +89,46 @@ describe('the run of a scenario', () => {
     expect(t.session().closed).toBe(true);
   });
 
+  it('runner_startedWhileHidden_isInterrupted', async () => {
+    // An autorun intent sent while the phone's screen is off (Task 10).
+    const t = setup();
+    t.doc.hide();
+
+    const result = await finish(runScenario('S1', t.env));
+
+    expect(result.interrupted).toBe(true);
+    expect(result.notes).toContain('interrupted: the page was hidden 0 s into the run');
+    expect(result.samples.firstFrameMs).toBeUndefined();
+  });
+
+  it('runner_nativeMetricsThrow_naAndTheScenarioRuns', async () => {
+    const t = setup({
+      native: {
+        metrics: () => {
+          throw new Error('the bridge is gone');
+        },
+      },
+    });
+
+    const result = await finish(runScenario('S10', t.env));
+
+    expect(result.notes).toEqual(['native metrics: n/a', 'pair: n/a', 'prompt: n/a']);
+    expect(result.device).toEqual(t.env.device);
+  });
+
+  it('runner_nativeMetricsNeverAnswer_naAfter3s', async () => {
+    const t = setup({ native: { metrics: () => new Promise(() => undefined) } });
+
+    const running = runScenario('S10', t.env);
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(t.sessions).toHaveLength(0); // still waiting for the shell
+    await vi.advanceTimersByTimeAsync(1);
+    expect(t.sessions).toHaveLength(1);
+    const result = await finish(running);
+
+    expect(result.notes).toEqual(['native metrics: n/a', 'pair: n/a', 'prompt: n/a']);
+  });
+
   it('runner_collectsTheHubJitterOfTheRun', async () => {
     const t = setup();
 
