@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -308,7 +309,8 @@ type testClient struct {
 type clientConfig struct {
 	slots int
 	offer codecOffer
-	mdns  bool // publish the host candidates as .local names
+	// onlyIP, when set, is the one local address the client gathers on.
+	onlyIP net.IP
 }
 
 func newClient(t *testing.T, cfg clientConfig) *testClient {
@@ -344,8 +346,8 @@ func newClient(t *testing.T, cfg clientConfig) *testClient {
 	var se webrtc.SettingEngine
 	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
-	if cfg.mdns {
-		se.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryAndGather)
+	if cfg.onlyIP != nil {
+		se.SetIPFilter(func(ip net.IP) bool { return ip.Equal(cfg.onlyIP) })
 	}
 	pc, err := webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithSettingEngine(se)).NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
