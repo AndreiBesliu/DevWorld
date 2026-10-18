@@ -7,6 +7,8 @@ on:
       - 'ipcam/apps/packages/**'
       - 'ipcam/tools/spikes/video/app/**'
       - 'ipcam/tools/spikes/video/android-metrics/**'
+      # The MV14 step runs the line counter.
+      - 'ipcam/tools/scripts/count-native-lines.sh'
       # The Capacitor and plugin versions come from the lockfile.
       - 'ipcam/pnpm-lock.yaml'
       - 'ipcam/package.json'
@@ -18,6 +20,8 @@ on:
       - 'ipcam/apps/packages/**'
       - 'ipcam/tools/spikes/video/app/**'
       - 'ipcam/tools/spikes/video/android-metrics/**'
+      # The MV14 step runs the line counter.
+      - 'ipcam/tools/scripts/count-native-lines.sh'
       # The Capacitor and plugin versions come from the lockfile.
       - 'ipcam/pnpm-lock.yaml'
       - 'ipcam/package.json'
@@ -89,33 +93,6 @@ jobs:
         run: |
           set -o pipefail
           ./gradlew --no-daemon --console=plain --continue --warning-mode all assembleSpikeDebug testSpikeDebugUnitTest 2>&1 | tee "${RUNNER_TEMP}/gradle.log"
-      - name: Show Gradle warnings as annotations
-        # Job logs cannot be read from everywhere, check-run annotations can: list
-        # the deprecations (--warning-mode all) with the build file that causes each.
-        if: always()
-        run: |
-          log="${RUNNER_TEMP}/gradle.log"
-          [[ -f "${log}" ]] || exit 0
-          notice() {
-            sed -e 's/%/%25/g' | awk -v title="$1" 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "::notice title=" title "::") $0 } END { if (NR) print "\n" }'
-          }
-          echo "log lines: $(wc -l < "${log}"); lines with deprecated or incompatible: $(grep -c -E 'deprecated|incompatible with Gradle' "${log}" || true)" | notice "Gradle log"
-          { grep -E '^WARNING:' "${log}" || true; } | sort | uniq -c | sort -rn | head -20 | notice "Gradle AGP warnings"
-          # One line per deprecation: its message, then the file and line that causes it.
-          awk '/deprecated|incompatible with Gradle/ { msg = $0; want = 1; next }
-            want && /^[[:space:]]+at / {
-              where = $0
-              sub(/^.*\(/, "", where); sub(/\)$/, "", where); sub(/^.*\/ipcam\//, "", where); sub(/node_modules\/\.pnpm\/[^\/]*\//, "", where)
-              sub(/Implicit lookup of properties in parent projects has been deprecated\. This will fail with an error in Gradle 10\. /, "", msg)
-              print substr(msg, 1, 60) " <== " where
-              want = 0
-            }' "${log}" | sort | uniq -c | sort -rn > "${RUNNER_TEMP}/deprecations.txt"
-          # An annotation holds about 4000 characters: 12 lines at a time.
-          split -l 12 -d "${RUNNER_TEMP}/deprecations.txt" "${RUNNER_TEMP}/deprecations."
-          for part in "${RUNNER_TEMP}"/deprecations.[0-9]*; do
-            [[ -f "${part}" ]] || continue # no deprecations: the glob matches nothing
-            notice "Gradle deprecations ${part##*.}" < "${part}"
-          done
       - name: Show Gradle failures as annotations
         # Job logs cannot be read from everywhere; check-run annotations can
         # (gh api repos/<owner>/<repo>/check-runs/<job id>/annotations).
