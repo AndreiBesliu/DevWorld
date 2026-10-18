@@ -9,6 +9,7 @@ on:
       - 'ipcam/pnpm-*.yaml'
       - 'ipcam/tsconfig.base.json'
       - 'ipcam/eslint.config.js'
+      - 'ipcam/vitest.config.ts'
       - '.github/workflows/ipcam-apps.yml'
   pull_request:
     paths:
@@ -18,6 +19,7 @@ on:
       - 'ipcam/pnpm-*.yaml'
       - 'ipcam/tsconfig.base.json'
       - 'ipcam/eslint.config.js'
+      - 'ipcam/vitest.config.ts'
       - '.github/workflows/ipcam-apps.yml'
 
 permissions:
@@ -55,5 +57,9 @@ jobs:
         run: pnpm lint
       - name: Test
         run: pnpm test
+      # The root Vitest entry is not used by the steps above, so check here that
+      # it still starts: it lists test files without running them.
+      - name: Root Vitest projects
+        run: pnpm exec vitest list --filesOnly
       - name: Build
         run: pnpm build

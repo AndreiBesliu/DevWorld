@@ -2,6 +2,11 @@ import js from '@eslint/js';
 import { defineConfig, globalIgnores } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
+// typescript is held at 6.0.x in package.json: typescript-eslint (8.71.2 and
+// its canary alike) declares `typescript <6.1.0` and refuses to load under
+// TypeScript 7 (tracking issue typescript-eslint/typescript-eslint#10940).
+// Revisit when a typescript-eslint release at least 14 days old supports 7.x.
+
 // APP-22: the player is framework-agnostic and must stay portable between the
 // Capacitor and Tauri shells, so it may not depend on React or on either shell.
 const PLAYER_IMPORT_MESSAGE =
