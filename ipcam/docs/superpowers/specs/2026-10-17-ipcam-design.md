@@ -5,7 +5,7 @@
 | Câmp | Valoare |
 |---|---|
 | Data | 2026-10-17; revizuit 2026-10-18 (răspunsurile proprietarului: O12–O16, §2.1) |
-| Stare | Draft pentru review |
+| Stare | Aprobat de proprietar pe 2026-10-18 |
 | Cerințe confirmate | [docs/brief.md](../../brief.md) (confirmat de proprietar pe 2026-10-17) |
 | Ordinea autorității | jurnalul aprobat al conversației cu proprietarul (transcris în §2.1; la diferențe, jurnalul câștigă) > `docs/research/2026-10-17-research-critique.md` > `docs/research/2026-10-17-technical-landscape.md` (recomandarea Flutter din acesta e înlocuită de A3) |
 | Nume și cititori | `ipcam` e nume de lucru (numele final îl alege proprietarul, §19); cititori: proprietarul (non-dezvoltator) și agenții AI care implementează și întrețin produsul |
