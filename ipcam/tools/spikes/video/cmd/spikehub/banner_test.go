@@ -46,7 +46,7 @@ func TestBanner_ListsPrivateURLsAndFirewallHint(t *testing.T) {
 
 func TestBanner_UsesCommaBelowDiacritics(t *testing.T) {
 	var out bytes.Buffer
-	writeBanner(&out, bannerInfo{port: 7080, mdnsUnavailable: true, lan: []lanAddr{{Name: "Wi-Fi", IP: net.IPv4(192, 168, 1, 12)}}})
+	writeBanner(&out, bannerInfo{port: 7080, mdnsUnavailable: true, keepsAwake: true, lan: []lanAddr{{Name: "Wi-Fi", IP: net.IPv4(192, 168, 1, 12)}}})
 	// ş and ţ (with cedilla) are the Turkish letters; Romanian has ș and ț.
 	if strings.ContainsAny(out.String(), "şţŞŢ") {
 		t.Errorf("banner uses cedilla letters:\n%s", out.String())
@@ -82,6 +82,36 @@ func TestBanner_WithoutAPrivateNetworkSaysSo(t *testing.T) {
 	// The hint is still useful: the owner may connect the PC to Wi-Fi and look again.
 	if !strings.Contains(text, "Rețele private") {
 		t.Errorf("banner lacks the firewall hint:\n%s", text)
+	}
+}
+
+// spikehub keeps Windows from sleeping while it serves, and says so (R49); the
+// guide quotes the line.
+func TestBanner_SaysWhetherThePCStaysAwake(t *testing.T) {
+	const awake = "Cât timp această fereastră e deschisă, PC-ul nu intră în repaus."
+	const failed = "Atenție: spikehub nu poate împiedica intrarea PC-ului în repaus."
+	for _, tc := range []struct {
+		name  string
+		info  bannerInfo
+		wants []string
+		nots  []string
+	}{
+		{"kept awake", bannerInfo{port: 7080, keepsAwake: true}, []string{awake}, []string{failed}},
+		{"not on this OS", bannerInfo{port: 7080}, nil, []string{"repaus"}},
+		{"the request failed", bannerInfo{port: 7080, awakeErr: errors.New("access denied")}, []string{failed}, []string{awake}},
+	} {
+		var out bytes.Buffer
+		writeBanner(&out, tc.info)
+		for _, want := range tc.wants {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("%s: banner lacks %q:\n%s", tc.name, want, out.String())
+			}
+		}
+		for _, not := range tc.nots {
+			if strings.Contains(out.String(), not) {
+				t.Errorf("%s: banner has %q:\n%s", tc.name, not, out.String())
+			}
+		}
 	}
 }
 

@@ -181,7 +181,7 @@ type probeRun struct {
 
 // runProbe runs spikehub -real with the given answers to its prompts, then
 // an Enter for «Apăsați Enter pentru a închide.». The hub must not listen,
-// start WebRTC or read media: the probe serves nothing.
+// start WebRTC, keep the PC awake or read media: the probe serves nothing.
 func runProbe(t *testing.T, frameTimeout time.Duration, cams []*cameraServer, answers ...string) *probeRun {
 	t.Helper()
 	captureLogs(t) // restores the default logger, which run replaces
@@ -216,6 +216,10 @@ func runProbe(t *testing.T, frameTimeout time.Duration, cams []*cameraServer, an
 		newAPI: func(bool) (*webrtc.API, bool, error) {
 			t.Error("spikehub -real started WebRTC")
 			return nil, false, errors.New("the probe must not start WebRTC")
+		},
+		keepAwake: func() (func(), error) {
+			t.Error("spikehub -real kept the PC awake")
+			return func() {}, nil
 		},
 		realFrameTimeout: frameTimeout,
 	}

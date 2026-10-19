@@ -65,6 +65,10 @@ type bannerInfo struct {
 	sims            int
 	resultsDir      string
 	mdnsUnavailable bool
+	// keepsAwake is set when Windows keeps the PC awake for spikehub (R49), and
+	// awakeErr is why it could not; both are empty on the other systems.
+	keepsAwake bool
+	awakeErr   error
 }
 
 // writeBanner prints the start banner, in Romanian: where the phone connects,
@@ -107,6 +111,13 @@ func writeBanner(w io.Writer, b bannerInfo) {
 		p("rezultate (MV13) poate fi alta. Fiecare fișier de rezultate va purta mdnsUnavailable: true.")
 	}
 	p("")
+	switch {
+	case b.keepsAwake:
+		p("Cât timp această fereastră e deschisă, PC-ul nu intră în repaus.")
+	case b.awakeErr != nil:
+		p("Atenție: spikehub nu poate împiedica intrarea PC-ului în repaus. Pe durata probei,")
+		p("opriți repausul din setările de alimentare ale Windows.")
+	}
 	if b.resultsDir != "" {
 		p("Rezultatele se salvează în: %s", b.resultsDir)
 	}

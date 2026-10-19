@@ -111,6 +111,9 @@ type env struct {
 	newAPI func(mdns bool) (*webrtc.API, bool, error)
 	// clock paces the simulated cameras; the default is the system clock.
 	clock source.Clock
+	// keepAwake keeps the PC from sleeping while the hub serves. The default is
+	// defaultKeepAwake, which is nil, and nothing is asked, outside Windows.
+	keepAwake keepAwakeFunc
 	// realFrameTimeout is how long -real waits for a camera's first frame.
 	realFrameTimeout time.Duration
 }
@@ -133,6 +136,9 @@ func (e env) withDefaults() env {
 	}
 	if e.clock == nil {
 		e.clock = source.SystemClock{}
+	}
+	if e.keepAwake == nil {
+		e.keepAwake = defaultKeepAwake
 	}
 	if e.realFrameTimeout == 0 {
 		e.realFrameTimeout = realFrameTimeout
@@ -212,11 +218,25 @@ func run(ctx context.Context, args []string, e env) error {
 		return fmt.Errorf("nu pot folosi portul %d (îl folosește alt program?): %w", cfg.port, err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
+	// The PC stays awake from here until run returns (R49).
+	var keepsAwake bool
+	var awakeErr error
+	if e.keepAwake != nil {
+		var release func()
+		release, awakeErr = e.keepAwake()
+		if awakeErr != nil {
+			log.Warn("cannot keep the PC from sleeping", "err", awakeErr)
+		} else {
+			keepsAwake = true
+			defer release()
+		}
+	}
 	lan, lanErr := e.lan()
 	writeBanner(e.stdout, bannerInfo{
 		port: port, lan: lan, lanErr: lanErr, sims: cfg.sims, resultsDir: cfg.results, mdnsUnavailable: mdnsUnavailable,
+		keepsAwake: keepsAwake, awakeErr: awakeErr,
 	})
-	log.Info("spikehub listens", "port", port, "sims", cfg.sims, "mdnsUnavailable", mdnsUnavailable)
+	log.Info("spikehub listens", "port", port, "sims", cfg.sims, "mdnsUnavailable", mdnsUnavailable, "keepsAwake", keepsAwake)
 
 	srv := &http.Server{
 		Handler:           h.Handler(),

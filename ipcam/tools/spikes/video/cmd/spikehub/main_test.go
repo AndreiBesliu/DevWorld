@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,6 +79,9 @@ type harnessOptions struct {
 	newAPI    func(bool) (*webrtc.API, bool, error)
 	// lan lists the addresses for the banner; nil gives one Wi-Fi address.
 	lan func() ([]lanAddr, error)
+	// keepAwake replaces the request that keeps the PC awake; nil takes the
+	// default, which does nothing outside Windows.
+	keepAwake func() (func(), error)
 }
 
 // startHub runs the hub until the test ends or stop is called. It returns once
@@ -112,6 +116,7 @@ func startHub(t *testing.T, opts harnessOptions) *harness {
 		stderr:    h.stderr,
 		askSecret: opts.askSecret,
 		newAPI:    opts.newAPI,
+		keepAwake: opts.keepAwake,
 		clock:     newFakeClock(), // the simulators do not run on their own
 		lan:       lan,
 		listen: func(int) (net.Listener, error) {
@@ -282,6 +287,45 @@ func TestRun_ExplainsMissingMediaInRomanian(t *testing.T) {
 	err := run(t.Context(), []string{"-media", filepath.Join(t.TempDir(), "nope"), "-port", "0", "-mdns=false"}, env{stdout: io.Discard, stderr: io.Discard})
 	if err == nil || !strings.Contains(err.Error(), "fișierele media") {
 		t.Errorf("run with no media: error %v, want one in Romanian that names the media files", err)
+	}
+}
+
+// spikehub keeps Windows from sleeping for as long as it serves (R49): the
+// phone part takes 1.5 h with nobody at the PC. The request is made once at
+// start and withdrawn at shutdown.
+func TestRun_KeepsThePCAwakeWhileItServes(t *testing.T) {
+	var calls, releases atomic.Int32
+	h := startHub(t, harnessOptions{keepAwake: func() (func(), error) {
+		calls.Add(1)
+		return func() { releases.Add(1) }, nil
+	}})
+
+	if c, r := calls.Load(), releases.Load(); c != 1 || r != 0 {
+		t.Errorf("while serving: %d requests, %d releases; want 1 and 0", c, r)
+	}
+	if banner := h.stdout.String(); !strings.Contains(banner, "Cât timp această fereastră e deschisă, PC-ul nu intră în repaus.") {
+		t.Errorf("banner does not say that the PC stays awake:\n%s", banner)
+	}
+	if err := h.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	if c, r := calls.Load(), releases.Load(); c != 1 || r != 1 {
+		t.Errorf("after shutdown: %d requests, %d releases; want 1 and 1", c, r)
+	}
+}
+
+func TestRun_SaysSoWhenItCannotKeepThePCAwake(t *testing.T) {
+	h := startHub(t, harnessOptions{keepAwake: func() (func(), error) {
+		return nil, errors.New("SetThreadExecutionState: access denied")
+	}})
+
+	banner := h.stdout.String()
+	if !strings.Contains(banner, "Atenție: spikehub nu poate împiedica intrarea PC-ului în repaus.") ||
+		strings.Contains(banner, "PC-ul nu intră în repaus") {
+		t.Errorf("banner does not warn that the PC may sleep:\n%s", banner)
+	}
+	if err := h.stop(t); err != nil {
+		t.Fatal(err)
 	}
 }
 
