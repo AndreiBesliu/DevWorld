@@ -195,34 +195,10 @@ jobs:
           SPIKE_MEDIA: ${{ runner.temp }}/spike-video-media
           SPIKE_HUB_LOG: ${{ runner.temp }}/spikehub.log
           SPIKE_OPENH264: ${{ steps.openh264.outputs.folder }}
-          # THROWAWAY CI diagnostics (Task 12 fix 1).
-          MOZ_LOG: timestamp,nicer:5,mtransport:5,signaling:3,StunAddrsRequest:5,nsIOService:4,NetworkLinkService:4
-          MOZ_LOG_FILE: ${{ runner.temp }}/moz/firefox.log
         run: |
           set -o pipefail
-          mkdir -p "${RUNNER_TEMP}/moz"
           google-chrome --version
-          pnpm --filter spike-video-e2e e2e --project firefox 2>&1 | tee "${RUNNER_TEMP}/e2e.log"
-      - name: THROWAWAY diagnostics
-        if: success() || failure()
-        run: |
-          ip -4 addr | tools/scripts/annotate.sh 'ip addr' 40 notice || true
-          ip -4 route | tools/scripts/annotate.sh 'ip route' 40 notice || true
-          sed -n 's/^e2e-ice: //p' "${RUNNER_TEMP}/e2e.log" | grep 'S10: selecte' | cut -c1-300 | tools/scripts/annotate.sh 'ice S10' 150 notice || true
-          find "${RUNNER_TEMP}/moz" -type f -printf "%s %p\n" | tools/scripts/annotate.sh 'moz files' 40 notice || true
-          cat "${RUNNER_TEMP}"/moz/firefox.log* > "${RUNNER_TEMP}/moz-all.log" || true
-          grep -E 'nicer|mtransport|StunAddrs|nsIOService|NetworkLink' "${RUNNER_TEMP}/moz-all.log" | grep -viE 'GetNewIceConnectionState|rtcp|SetIceCredentials' | sed -E 's/^[0-9-]+ ([0-9:.]+) UTC - /\1 /' | cut -c1-260 > "${RUNNER_TEMP}/moz-sel.log" || true
-          wc -l "${RUNNER_TEMP}/moz-all.log" "${RUNNER_TEMP}/moz-sel.log" | tools/scripts/annotate.sh 'moz counts' 10 notice || true
-          mkdir -p "${RUNNER_TEMP}/chunks"
-          head -c 18000 "${RUNNER_TEMP}/moz-sel.log" | split -C 3700 - "${RUNNER_TEMP}/chunks/c" || true
-          for f in "${RUNNER_TEMP}"/chunks/c*; do name="$(basename "${f}")"; tools/scripts/annotate.sh "moz ${name}" 200 notice < "${f}" || true; done
-      - name: THROWAWAY diagnostics 2
-        if: success() || failure()
-        run: |
-          grep -iE 'error|fail|default|addr|interface|gather|offline|online|local' "${RUNNER_TEMP}/moz-sel.log" > "${RUNNER_TEMP}/moz-key.log" || true
-          mkdir -p "${RUNNER_TEMP}/chunks2"
-          head -c 33000 "${RUNNER_TEMP}/moz-key.log" | split -C 3700 - "${RUNNER_TEMP}/chunks2/k" || true
-          for f in "${RUNNER_TEMP}"/chunks2/k*; do name="$(basename "${f}")"; tools/scripts/annotate.sh "key ${name}" 200 notice < "${f}" || true; done
+          pnpm --filter spike-video-e2e e2e 2>&1 | tee "${RUNNER_TEMP}/e2e.log"
       - name: Show the measurements as a notice
         # Each test prints what it measured on a line that starts with "e2e: ".
         if: success() || failure()
