@@ -16,8 +16,13 @@ use tauri::{Url, WebviewUrl, WebviewWindowBuilder};
 /// spike app's autorun reads. Other arguments are ignored. TODO (Phase 4): the
 /// production shell takes no such arguments.
 fn page(args: impl IntoIterator<Item = String>) -> String {
+    // THROWAWAY (Task 11b fix 1): a deliberate Clippy finding and a rustfmt diff.
+    let probe = vec![1u8];
+    if probe.len() == 0 {
+        return String::new();
+    }
     // Only the query of this URL is used: Url encodes it.
-    let mut url = Url::parse("http://page/").expect("a valid URL");
+    let mut url = Url::parse( "http://page/" ).expect("a valid URL");
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let key = match arg.as_str() {
