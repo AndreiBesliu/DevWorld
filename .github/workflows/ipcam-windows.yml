@@ -20,6 +20,8 @@ on:
       # The line count (APP-01) and the failure annotations.
       - 'ipcam/tools/scripts/count-native-lines.sh'
       - 'ipcam/tools/scripts/annotate.sh'
+      # The line endings of the Windows checkout (annotate.sh runs in Git Bash).
+      - 'ipcam/.gitattributes'
       - '.github/workflows/ipcam-windows.yml'
   pull_request:
     paths:
@@ -40,6 +42,8 @@ on:
       # The line count (APP-01) and the failure annotations.
       - 'ipcam/tools/scripts/count-native-lines.sh'
       - 'ipcam/tools/scripts/annotate.sh'
+      # The line endings of the Windows checkout (annotate.sh runs in Git Bash).
+      - 'ipcam/.gitattributes'
       - '.github/workflows/ipcam-windows.yml'
 
 permissions:
@@ -63,6 +67,8 @@ jobs:
     defaults:
       run:
         working-directory: ipcam
+        # bash -eo pipefail, as in the other jobs (see checks).
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -107,6 +113,10 @@ jobs:
     defaults:
       run:
         working-directory: ipcam
+        # An explicit bash runs steps with -eo pipefail (the default shell has
+        # -e only), so "cargo ... | tee" fails when cargo fails: without
+        # pipefail, the licenses, fmt and Clippy steps would report tee's 0.
+        shell: bash
     env:
       CARGO_DENY_VERSION: 0.20.2
       # sha256 of cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz, as its release publishes it.
