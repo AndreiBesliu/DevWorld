@@ -18,8 +18,16 @@
 #   Activity from the launch Intent it kept, extras included, and the scenario
 #   must not run again.
 #
-# In quick mode only the cold starts run (ipcam-mobile runs 3 on a push); the
-# full mode adds the two checks above (on a pull request, with 5 starts).
+# After the first start that gives its result, one more check reads the device
+# facts that AND-1's report needs from the metrics plugin (spec §16.3, R48): the
+# stored S1 result must carry the phone's memory (device.ramMb > 0), and the
+# plugin's answer, read in the page, a charging state that is a boolean and
+# matches the system's (the emulator reports AC power, so it is true there).
+# Without it, a misspelt key or a lost EXTRA_PLUGGED read would pass every test.
+#
+# In quick mode only the cold starts and the device facts run (ipcam-mobile runs
+# 3 starts on a push); the full mode adds the two checks above (on a pull
+# request, with 5 starts).
 #
 # On failure it prints the cause as check annotations, which can be read where
 # the job log cannot. Each check and the outcome also go to the job's step
@@ -113,10 +121,14 @@ echo "spikehub reachable check took $((SECONDS - booted)) s" | annotate notice "
 
 adb install -r "${apk}"
 
+# The S1 result that the last successful cold_start stored.
+stored_s1=""
+
 # Starts the app cold with the launch extras (the process is gone, so the app has
 # nothing but them) and waits for the S1 result. $1: the label of the start,
 # $2: "probe" to change the font scale 5 s after the launch. Returns 0 with a
-# notice when the result holds 20 samples, else 1 with an error and the diagnosis.
+# notice when the result holds 20 samples (and sets stored_s1), else 1 with an
+# error and the diagnosis.
 cold_start() {
   local label="$1" probe="${2:-}" launch stored="" problem="" deadline file samples known line
   adb shell am force-stop "${app}"
@@ -167,6 +179,48 @@ cold_start() {
     echo "launch: ${launch}"
     app_log 12
   } | annotate notice "emulator S1 ${label}"
+  stored_s1="${stored}"
+}
+
+# The device facts of the metrics plugin, with the app still on the page of the
+# start that stored $1: device.ramMb in the stored S1 result, and ramMb and
+# charging in what window.spikeNative.metrics() answers now, with charging
+# compared to the system's own power state. Returns 0 with a notice, else 1
+# with an error.
+device_facts() {
+  local stored="$1" ram metrics="" pid powered system charging line problems=()
+  ram="$(jq -c '.device.ramMb' "${stored}")"
+  jq -e '(.device.ramMb | type == "number") and .device.ramMb > 0' "${stored}" >/dev/null ||
+    problems+=("the stored S1 result has no device.ramMb > 0 (got ${ram})")
+  pid="$(adb shell pidof "${app}" | tr -d '\r')"
+  if [[ -z "${pid}" ]] || ! adb forward tcp:9222 "localabstract:webview_devtools_remote_${pid}" >/dev/null; then
+    problems+=("the WebView's DevTools socket cannot be reached (pid ${pid:-none})")
+  else
+    metrics="$(node "${here}/read-page.ts" 9222 metrics 2>&1 | head -c 1500 || true)"
+    jq -e '(.ramMb | type == "number") and .ramMb > 0' <<<"${metrics}" >/dev/null 2>&1 ||
+      problems+=("the metrics plugin answered no ramMb > 0: ${metrics}")
+    # Any power source counts, as in the plugin: AC, USB, wireless or dock.
+    powered="$(adb shell dumpsys battery | tr -d '\r' | grep -E '^ *(AC|USB|Wireless|Dock) powered:' | sed -E 's/^ +//' | paste -sd ';' - || true)"
+    system=false
+    if [[ "${powered}" == *'powered: true'* ]]; then
+      system=true
+    fi
+    if ! jq -e '.charging | type == "boolean"' <<<"${metrics}" >/dev/null 2>&1; then
+      problems+=("the metrics plugin answered no boolean charging: ${metrics}")
+    else
+      charging="$(jq -r '.charging' <<<"${metrics}")"
+      [[ "${charging}" == "${system}" ]] ||
+        problems+=("the metrics plugin says charging ${charging}, but the system says${powered:+ ${powered}} (charging ${system})")
+    fi
+  fi
+  if ((${#problems[@]} > 0)); then
+    printf '%s\n' "${problems[@]}" | annotate error "emulator device facts"
+    summarize "- device facts: failed: ${problems[*]}"
+    return 1
+  fi
+  line="S1 device.ramMb ${ram}; metrics plugin: ramMb $(jq -c '.ramMb' <<<"${metrics}"), charging ${charging} (system:${powered:+ ${powered}})"
+  summarize "- device facts: ${line}"
+  echo "${line}" | annotate notice "emulator device facts"
 }
 
 # After a start with its result: the app goes to the background (its Activity
@@ -211,12 +265,23 @@ survives_process_death() {
 
 summarize "### Emulator smoke test (AND-3), ${mode} mode"
 failures=0
-checks=${starts}
+checks=$((starts + 1)) # the starts and the device facts
+facts=""
 for ((start = 1; start <= starts; start++)); do
-  cold_start "start ${start} of ${starts}" || failures=$((failures + 1))
+  if ! cold_start "start ${start} of ${starts}"; then
+    failures=$((failures + 1))
+  elif [[ -z "${facts}" ]]; then
+    facts=checked
+    device_facts "${stored_s1}" || failures=$((failures + 1))
+  fi
 done
+if [[ -z "${facts}" ]]; then
+  # No start stored a result, so the device facts could not be read either.
+  failures=$((failures + 1))
+  summarize "- device facts: not checked, no start stored an S1 result"
+fi
 if [[ "${mode}" == full ]]; then
-  checks=$((starts + 3))
+  checks=$((checks + 3))
   cold_start "probe (font scale change)" probe || failures=$((failures + 1))
   if cold_start "start before process death"; then
     survives_process_death || failures=$((failures + 1))
