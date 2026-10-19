@@ -133,7 +133,7 @@ jobs:
     # The browser end-to-end tests (plan Task 12, tools/spikes/video/e2e): spikehub
     # with the spike app embedded and 4 simulated cameras on the media of the
     # media job, and the app in Google Chrome (installed on the runner, with
-    # H.264) and in Playwright's Firefox.
+    # H.264) and in Playwright's Firefox with Mozilla's OpenH264 plugin (spec §14.7).
     needs: media
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -175,11 +175,26 @@ jobs:
           go build -o "${RUNNER_TEMP}/spikehub" ./tools/spikes/video/cmd/spikehub
       - name: Install Firefox
         run: pnpm --filter spike-video-e2e exec playwright install --with-deps firefox
+      - name: Install OpenH264 for Firefox
+        # Without the plugin Playwright's Firefox offers no H.264 for WebRTC (see
+        # install-openh264.sh). Its folder goes to the tests as SPIKE_OPENH264.
+        id: openh264
+        run: |
+          log="${RUNNER_TEMP}/openh264.log"
+          if ! folder="$(tools/spikes/video/e2e/install-openh264.sh "${RUNNER_TEMP}/openh264" 2> "${log}")"; then
+            cat "${log}" >&2
+            tools/scripts/annotate.sh 'OpenH264 install' 40 < "${log}"
+            exit 1
+          fi
+          cat "${log}" >&2
+          ls -l "${folder}"
+          echo "folder=${folder}" >> "${GITHUB_OUTPUT}"
       - name: End-to-end tests
         env:
           SPIKE_HUB: ${{ runner.temp }}/spikehub
           SPIKE_MEDIA: ${{ runner.temp }}/spike-video-media
           SPIKE_HUB_LOG: ${{ runner.temp }}/spikehub.log
+          SPIKE_OPENH264: ${{ steps.openh264.outputs.folder }}
         run: |
           set -o pipefail
           google-chrome --version

@@ -102,8 +102,7 @@ function summary(values: number[], quantiles = [0.5, 0.9]): string {
 /**
  * The video codecs the browser offers to receive, in offer order: the encoding
  * names, with the profile-level-id and packetization-mode of H.264. It is the
- * evidence for S9 (what the browser can be sent) and for a CI browser without
- * H.264.
+ * evidence for S9 (what the browser can be sent) and for expectH264.
  */
 async function offeredVideoCodecs(page: Page): Promise<string> {
   return page.evaluate(async () => {
@@ -129,23 +128,18 @@ async function offeredVideoCodecs(page: Page): Promise<string> {
 const browserOf = (page: Page): string => `${test.info().project.name} ${page.context().browser()?.version() ?? ''}`.trim();
 
 /**
- * Expected limitation of the CI browser (Task 12 report): Playwright's Firefox
- * offers no H.264 for WebRTC (it ships without the OpenH264 plugin and turns
- * the plugin download off, media.gmp-manager.updateEnabled = false), so the hub
- * refuses every session the app opens, which always has a video slot ("the
- * offer has no H.264 in packetization mode 1 and no H.265"). Spec §14.7 makes
- * Firefox WebRTC informational unless OpenH264 is preinstalled. While Firefox
- * offers no H.264, its tests are marked as expected to fail (test.fail): they
- * still run and must fail, the run reports them as expected failures, and they
- * turn into ordinary tests as soon as the browser offers H.264. Chrome is never
- * excused: without H.264 its tests fail.
+ * The hub sends H.264 in packetization mode 1 (or H.265, which neither CI
+ * browser offers), so a browser that offers no such H.264 gets no session.
+ * Checked first, so that such a run fails at once and says why. Chrome has
+ * H.264 (channel 'chrome', or Chrome for Testing locally, R33); Firefox has it
+ * only with the OpenH264 plugin, which the run preinstalls (SPIKE_OPENH264,
+ * install-openh264.sh, spec §14.7).
  */
-function firefoxWithoutH264IsExpectedToFail(page: Page, offered: string): void {
-  if (test.info().project.name !== 'firefox' || /\bH264 [0-9a-f]{6} pm1\b/.test(offered)) return;
-  const limitation =
-    'expected limitation of the CI browser: Playwright\'s Firefox offers no H.264 for WebRTC (no OpenH264 plugin), so the hub refuses the session';
-  console.log(`e2e: ${browserOf(page)}: ${limitation}; offered: ${offered}`);
-  test.fail(true, limitation);
+function expectH264(page: Page, offered: string): void {
+  expect(
+    offered,
+    `${browserOf(page)} offers no H.264 in packetization mode 1 to receive; Firefox needs the OpenH264 plugin (SPIKE_OPENH264, install-openh264.sh)`,
+  ).toMatch(/\bH264 [0-9a-f]{6} pm1\b/);
 }
 
 test('S1 p90 first frame ≤ 1500 ms', { tag: '@chrome' }, async ({ page }) => {
@@ -260,7 +254,7 @@ async function runS9(page: Page): Promise<{ result: ScenarioResult; labels: stri
   const browser = browserOf(page);
   const offered = await offeredVideoCodecs(page);
   console.log(`e2e: S9 ${browser} offers to receive: ${offered}`);
-  firefoxWithoutH264IsExpectedToFail(page, offered);
+  expectH264(page, offered);
   const result = await resultOf(page, 'S9', 2 * 60_000);
   const labels = await page.evaluate(() => window.__e2eLabels ?? []);
   const outcomes = result.notes.filter((note) => /^mx-[\w-]+: [a-z-]+$/.test(note));
@@ -293,7 +287,7 @@ test('Firefox × mx-high51 → "profil video nesuportat" label and sub fallback'
 test('S10: selected pair is host or prflx', { tag: ['@chrome', '@firefox'] }, async ({ page }) => {
   // MV13 at http://localhost on the runner: both ends of the pair on the LAN, no relay.
   await startAutorun(page, 'S10');
-  firefoxWithoutH264IsExpectedToFail(page, await offeredVideoCodecs(page));
+  expectH264(page, await offeredVideoCodecs(page));
   const result = await resultOf(page, 'S10', 60_000);
   const pair = result.notes.find((note) => note.startsWith('pair: '));
   console.log(`e2e: S10 ${browserOf(page)}: ${pair ?? 'no pair note'}`);

@@ -15,12 +15,18 @@
 //   Chrome for Testing (R33: Playwright's bundled Chromium has no H.264);
 //   without it, the installed Google Chrome (channel `chrome`), as on the CI
 //   runners.
+// - SPIKE_OPENH264: the folder of Mozilla's OpenH264 media plugin that
+//   install-openh264.sh prints. The `firefox` project hands it to Firefox as
+//   MOZ_GMP_PATH (spec §14.7: Firefox runs with OpenH264 preinstalled). Without
+//   it Playwright's Firefox offers no H.264 for WebRTC, and the Firefox tests
+//   fail at their first check.
 //
 // Tests carry the tag of the browsers they run in: @chrome, @firefox. They run
 // one at a time, without retries: they share one hub and measure time.
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { defineConfig } from '@playwright/test';
+import { basename, dirname, join } from 'node:path';
+import { defineConfig, type LaunchOptions } from '@playwright/test';
 
 const HUB_URL = 'http://localhost:7080';
 
@@ -29,9 +35,33 @@ const media = process.env.SPIKE_MEDIA;
 const chrome = process.env.SPIKE_CHROME;
 const results = process.env.SPIKE_RESULTS ?? join(tmpdir(), 'spike-video-e2e-results');
 const hubLog = process.env.SPIKE_HUB_LOG ?? join(tmpdir(), 'spike-video-e2e-hub.log');
+const openh264 = process.env.SPIKE_OPENH264;
 
 if (hub !== undefined && media === undefined) {
   throw new Error('SPIKE_HUB is set without SPIKE_MEDIA, the folder of cmd/mediagen');
+}
+
+/**
+ * Firefox with the OpenH264 plugin in `folder`, the way Linux distributions
+ * preinstall it: Firefox loads every plugin folder in MOZ_GMP_PATH when it
+ * starts, and with the plugin enabled and its updates off it keeps that one.
+ * Firefox names a plugin after its folder's parent (gmp-<id>), so the folder is
+ * checked here and a wrong one fails the run at once.
+ */
+function firefoxWithOpenH264(folder: string): LaunchOptions {
+  if (basename(dirname(folder)) !== 'gmp-gmpopenh264' || !existsSync(join(folder, 'gmpopenh264.info'))) {
+    throw new Error(`SPIKE_OPENH264=${folder} is not a folder that install-openh264.sh made (gmp-gmpopenh264/<version> with gmpopenh264.info)`);
+  }
+  // Playwright gives the browser this environment instead of its own.
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env)) if (value !== undefined) env[name] = value;
+  return {
+    env: { ...env, MOZ_GMP_PATH: folder },
+    firefoxUserPrefs: {
+      'media.gmp-gmpopenh264.enabled': true,
+      'media.gmp-gmpopenh264.autoupdate': false,
+    },
+  };
 }
 
 export default defineConfig({
@@ -58,7 +88,10 @@ export default defineConfig({
     {
       name: 'firefox',
       grep: /@firefox/,
-      use: { browserName: 'firefox' },
+      use: {
+        browserName: 'firefox',
+        ...(openh264 === undefined ? {} : { launchOptions: firefoxWithOpenH264(openh264) }),
+      },
     },
   ],
   ...(hub === undefined
