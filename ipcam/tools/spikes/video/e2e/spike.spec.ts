@@ -88,11 +88,6 @@ async function resultOf(page: Page, scenario: ScenarioId, timeoutMs: number): Pr
   return result;
 }
 
-const autorun = async (page: Page, scenario: ScenarioId, timeoutMs: number): Promise<ScenarioResult> => {
-  await startAutorun(page, scenario);
-  return resultOf(page, scenario, timeoutMs);
-};
-
 const describeResult = (result: ScenarioResult): string =>
   `notes: ${result.notes.join('; ')}; samples: ${JSON.stringify(result.samples)}`;
 
@@ -130,9 +125,33 @@ async function offeredVideoCodecs(page: Page): Promise<string> {
   });
 }
 
+/** The project's browser and its version, for the measurement lines. */
+const browserOf = (page: Page): string => `${test.info().project.name} ${page.context().browser()?.version() ?? ''}`.trim();
+
+/**
+ * Expected limitation of the CI browser (Task 12 report): Playwright's Firefox
+ * offers no H.264 for WebRTC (it ships without the OpenH264 plugin and turns
+ * the plugin download off, media.gmp-manager.updateEnabled = false), so the hub
+ * refuses every session the app opens, which always has a video slot ("the
+ * offer has no H.264 in packetization mode 1 and no H.265"). Spec §14.7 makes
+ * Firefox WebRTC informational unless OpenH264 is preinstalled. While Firefox
+ * offers no H.264, its tests are marked as expected to fail (test.fail): they
+ * still run and must fail, the run reports them as expected failures, and they
+ * turn into ordinary tests as soon as the browser offers H.264. Chrome is never
+ * excused: without H.264 its tests fail.
+ */
+function firefoxWithoutH264IsExpectedToFail(page: Page, offered: string): void {
+  if (test.info().project.name !== 'firefox' || /\bH264 [0-9a-f]{6} pm1\b/.test(offered)) return;
+  const limitation =
+    'expected limitation of the CI browser: Playwright\'s Firefox offers no H.264 for WebRTC (no OpenH264 plugin), so the hub refuses the session';
+  console.log(`e2e: ${browserOf(page)}: ${limitation}; offered: ${offered}`);
+  test.fail(true, limitation);
+}
+
 test('S1 p90 first frame ≤ 1500 ms', { tag: '@chrome' }, async ({ page }) => {
   // HUB-06 / MV1: S1 binds sim-01's substream 20 times, each from an empty slot.
-  const result = await autorun(page, 'S1', 3 * 60_000);
+  await startAutorun(page, 'S1');
+  const result = await resultOf(page, 'S1', 3 * 60_000);
   const starts = result.samples.firstFrameMs ?? [];
   console.log(`e2e: S1 first frame: ${summary(starts)}`);
 
@@ -236,11 +255,12 @@ test('4-tile grid 60 s: fps ≥ 90 % of 12 and dropped ≤ 2 %', { tag: '@chrome
 
 /** Runs S9 and returns its result with the labels the stage showed. */
 async function runS9(page: Page): Promise<{ result: ScenarioResult; labels: string[]; offered: string }> {
-  const browser = test.info().project.name;
   await page.addInitScript(recordLabels);
   await startAutorun(page, 'S9');
+  const browser = browserOf(page);
   const offered = await offeredVideoCodecs(page);
   console.log(`e2e: S9 ${browser} offers to receive: ${offered}`);
+  firefoxWithoutH264IsExpectedToFail(page, offered);
   const result = await resultOf(page, 'S9', 2 * 60_000);
   const labels = await page.evaluate(() => window.__e2eLabels ?? []);
   const outcomes = result.notes.filter((note) => /^mx-[\w-]+: [a-z-]+$/.test(note));
@@ -272,9 +292,11 @@ test('Firefox × mx-high51 → "profil video nesuportat" label and sub fallback'
 
 test('S10: selected pair is host or prflx', { tag: ['@chrome', '@firefox'] }, async ({ page }) => {
   // MV13 at http://localhost on the runner: both ends of the pair on the LAN, no relay.
-  const result = await autorun(page, 'S10', 60_000);
+  await startAutorun(page, 'S10');
+  firefoxWithoutH264IsExpectedToFail(page, await offeredVideoCodecs(page));
+  const result = await resultOf(page, 'S10', 60_000);
   const pair = result.notes.find((note) => note.startsWith('pair: '));
-  console.log(`e2e: S10 ${test.info().project.name}: ${pair ?? 'no pair note'}`);
+  console.log(`e2e: S10 ${browserOf(page)}: ${pair ?? 'no pair note'}`);
 
   expect(pair, describeResult(result)).toMatch(/^pair: (host|prflx)\/(host|prflx)$/);
 });
