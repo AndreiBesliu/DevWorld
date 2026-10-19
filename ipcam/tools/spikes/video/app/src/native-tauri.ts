@@ -21,6 +21,8 @@ export interface TauriMetrics {
   private_mb: number | null;
   /** How many WebView2 processes the sums include: the page's webview2Procs. */
   webview2_procs: number;
+  /** The PC's physical memory in MiB; 0 when the shell cannot tell. */
+  ram_mb: number;
   /** The CPU's brand string; empty when the shell cannot tell. */
   cpu_model: string;
   /**
@@ -44,15 +46,17 @@ export interface TauriInstallDeps {
 /**
  * The command's answer as NativeMetrics: memory is the private bytes, the CPU
  * brand is the model of the PC, the runtime version reads "WebView2 <version>",
- * a null sum (no WebView2 process, R52) and an empty name are left out (n/a).
+ * a null sum (no WebView2 process, R52), an empty name and 0 MiB of RAM are
+ * left out (n/a).
  */
 function toNativeMetrics(answer: TauriMetrics): NativeMetrics {
-  const { cpu_pct_total, cpu_pct_app, private_mb, webview2_procs, cpu_model, gpu, os, webview } = answer;
+  const { cpu_pct_total, cpu_pct_app, private_mb, webview2_procs, ram_mb, cpu_model, gpu, os, webview } = answer;
   return {
     cpuPctTotal: cpu_pct_total,
     ...(cpu_pct_app === null ? {} : { cpuPctApp: cpu_pct_app }),
     ...(private_mb === null ? {} : { memMb: private_mb }),
     webview2Procs: webview2_procs,
+    ...(ram_mb > 0 ? { ramMb: ram_mb } : {}),
     ...(cpu_model ? { model: cpu_model } : {}),
     ...(gpu ? { gpu } : {}),
     ...(os ? { os } : {}),

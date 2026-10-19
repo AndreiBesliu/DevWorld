@@ -18,7 +18,8 @@
 //! they would cover the app process alone, so they are `None` (null, n/a in the
 //! page), and `webview2_procs`, which the page records, is 0. The shell is
 //! single-instance (main.rs) because every instance shares the first one's
-//! WebView2 processes.
+//! WebView2 processes. The answer also names the PC's CPU, GPU and memory,
+//! which the report notes for WIN-1.
 
 use serde::Serialize;
 use std::sync::{Mutex, PoisonError};
@@ -52,6 +53,8 @@ struct SpikeMetrics {
     /// Private bytes (commit charge), which the page records as memMb (R37).
     private_mb: Option<f32>,
     webview2_procs: u32,
+    /// The PC's physical memory in MiB; 0 when the shell cannot tell.
+    ram_mb: u64,
     cpu_model: String,
     gpu: String,
     /// The long OS version, such as "Windows 11 Pro".
@@ -77,6 +80,8 @@ struct Proc {
 struct Machine {
     cpus: usize,
     cpu_pct_total: f32,
+    /// Physical memory, MiB.
+    ram_mb: u64,
     cpu_model: String,
     gpu: String,
     os: String,
@@ -106,6 +111,7 @@ fn sum(app: u32, procs: &[Proc], machine: &Machine) -> SpikeMetrics {
         rss_mb: total(|p| p.rss_bytes as f32 / MIB),
         private_mb: total(|p| p.private_bytes as f32 / MIB),
         webview2_procs: u32::try_from(members.len() - 1).unwrap_or(u32::MAX),
+        ram_mb: machine.ram_mb,
         cpu_model: machine.cpu_model.clone(),
         gpu: machine.gpu.clone(),
         os: machine.os.clone(),
@@ -127,9 +133,11 @@ impl Sampler {
         let cpus = CpuRefreshKind::nothing().with_cpu_usage();
         let mut system = System::new_with_specifics(RefreshKind::nothing().with_cpu(cpus));
         refresh(&mut system);
+        system.refresh_memory();
         let machine = Machine {
             cpus: system.cpus().len(),
             cpu_pct_total: system.global_cpu_usage(),
+            ram_mb: system.total_memory() >> 20,
             cpu_model: system
                 .cpus()
                 .first()
@@ -255,6 +263,7 @@ mod tests {
         let machine = Machine {
             cpus: 4,
             cpu_pct_total: 37.5,
+            ram_mb: 16069,
             cpu_model: "Intel(R) Core(TM) i5-12400".to_owned(),
             gpu: "Intel(R) UHD Graphics 730".to_owned(),
             os: "Windows 11 Pro".to_owned(),
@@ -273,6 +282,7 @@ mod tests {
                 // 30 + 40 + 150 + 10 MiB.
                 private_mb: Some(230.0),
                 webview2_procs: 3,
+                ram_mb: 16069,
                 cpu_model: "Intel(R) Core(TM) i5-12400".to_owned(),
                 gpu: "Intel(R) UHD Graphics 730".to_owned(),
                 os: "Windows 11 Pro".to_owned(),

@@ -11,6 +11,8 @@ export type ThermalStatus = (typeof THERMAL_LEVELS)[number];
 export interface NativeMetrics {
   thermal?: ThermalStatus;
   batteryPct?: number;
+  /** Android: the phone is on the charger (plugged in), also when the battery level holds (R48). */
+  charging?: boolean;
   memMb?: number;
   cpuPctTotal?: number;
   cpuPctApp?: number;
@@ -19,6 +21,8 @@ export interface NativeMetrics {
    * shell leaves those two out (n/a), since they would cover the app process alone (R52).
    */
   webview2Procs?: number;
+  /** The device's physical memory in MiB, for the report's device facts. */
+  ramMb?: number;
   model?: string;
   os?: string;
   webview?: string;

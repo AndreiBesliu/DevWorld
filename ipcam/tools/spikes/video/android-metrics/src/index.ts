@@ -8,8 +8,15 @@ export interface AndroidMetrics {
   /** PowerManager.getCurrentThermalStatus as a name: NONE, LIGHT, MODERATE, SEVERE, CRITICAL, EMERGENCY or SHUTDOWN. */
   thermal?: string;
   batteryPct?: number;
+  /**
+   * Whether the phone is on the charger: plugged in (EXTRA_PLUGGED of the sticky battery intent), also when the
+   * battery is full or held at a level, else BatteryManager.isCharging (R48).
+   */
+  charging?: boolean;
   /** Proportional set size (PSS) of the app process in MiB. The WebView renderer is a process of its own and is not in it. */
   memMb?: number;
+  /** The phone's physical memory in MiB (ActivityManager.MemoryInfo.totalMem). */
+  ramMb?: number;
   /** Manufacturer and model, for example `samsung SM-A245F`. */
   model?: string;
   /** Android version and SDK level, for example `Android 15 (API 35)`. */

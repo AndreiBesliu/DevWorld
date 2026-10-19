@@ -12,8 +12,8 @@
 # not interrupted, comes from platform windows-tauri, has 20 first-frame
 # samples and names the CPU (the model comes from the shell's spike_metrics
 # command), and when that command, asked through WebView2's DevTools port,
-# counts at least one WebView2 process, reports the app's memory and names the
-# OS and the WebView2 Runtime.
+# counts at least one WebView2 process, reports the app's memory and the PC's,
+# and names the OS and the WebView2 Runtime.
 #
 # Then it checks that the app is single-instance (R52): it starts the app,
 # minimizes its window and starts it again. After 5 s the second start must
@@ -139,6 +139,7 @@ function Get-MetricsProblem([string] $Page) {
   $json = $metrics | ConvertTo-Json -Compress
   if ((Get-Field $metrics 'webview2_procs') -lt 1) { return "spike_metrics counts no WebView2 process: $json" }
   if ((Get-Field $metrics 'rss_mb') -le 0 -or (Get-Field $metrics 'private_mb') -le 0) { return "spike_metrics reports no memory: $json" }
+  if ((Get-Field $metrics 'ram_mb') -le 0) { return "spike_metrics reports no physical memory of the PC: $json" }
   if (-not (Get-Field $metrics 'os')) { return "spike_metrics names no OS: $json" }
   if (-not (Get-Field $metrics 'webview')) { return "spike_metrics names no WebView2 Runtime: $json" }
   $null

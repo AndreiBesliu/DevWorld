@@ -2,9 +2,11 @@
 // spike reads from Android and production does not need. Never shipped.
 package ro.ipcam.spike
 
+import android.app.ActivityManager
 import android.os.BatteryManager
 import android.os.Build
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Configuration
 import android.os.Bundle
 import android.os.Debug
@@ -40,6 +42,16 @@ private val THERMAL_NAMES = mapOf(
 
 /** PowerManager's thermal status by its name in the spike app (THERMAL_LEVELS), or null for a status it does not know. */
 internal fun thermalName(status: Int): String? = THERMAL_NAMES[status]
+
+/**
+ * Whether the phone is on the charger (R48). `plugged` is EXTRA_PLUGGED of the
+ * sticky ACTION_BATTERY_CHANGED intent (null without one) and `isCharging` is
+ * BatteryManager.isCharging. Plugged in counts even when the battery does not
+ * charge: full, or held at a level by the phone's battery protection. Without
+ * the intent, isCharging decides; null when neither is known.
+ */
+internal fun onCharger(plugged: Int?, isCharging: Boolean?): Boolean? =
+    if (plugged != null) plugged != 0 || isCharging == true else isCharging
 
 /**
  * A page address for the log: without its query, which holds the hub's address
@@ -166,8 +178,17 @@ class MetricsPlugin : Plugin() {
         power?.let { thermalName(it.currentThermalStatus) }?.let { metrics.put("thermal", it) }
         val battery = context.getSystemService(BatteryManager::class.java)
         battery?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)?.takeIf { it in 0..100 }?.let { metrics.put("batteryPct", it) }
+        // A phone on the charger does not measure MV5's battery drain (R48). A null receiver only reads the sticky intent.
+        val batteryState = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val plugged = batteryState?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)?.takeIf { it >= 0 }
+        onCharger(plugged, battery?.isCharging)?.let { metrics.put("charging", it) }
         // PSS of this process in KiB. The WebView renderer is a process of its own and is not in it.
         metrics.put("memMb", Debug.getPss() / 1024.0)
+        // The phone's physical memory, which the report notes for AND-1 (spec §16.3).
+        context.getSystemService(ActivityManager::class.java)?.let { activities ->
+            val memory = ActivityManager.MemoryInfo().also { activities.getMemoryInfo(it) }
+            memory.totalMem.takeIf { it > 0 }?.let { metrics.put("ramMb", it / (1024 * 1024)) }
+        }
         metrics.put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
         metrics.put("os", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         WebView.getCurrentWebViewPackage()?.let { metrics.put("webview", "${it.packageName} ${it.versionName}") }

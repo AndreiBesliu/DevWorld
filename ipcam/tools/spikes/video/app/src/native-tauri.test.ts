@@ -9,6 +9,7 @@ const WIN1: TauriMetrics = {
   rss_mb: 512.5,
   private_mb: 301.25,
   webview2_procs: 5,
+  ram_mb: 16069,
   cpu_model: 'Intel(R) Core(TM) i5-12400',
   gpu: 'Intel(R) UHD Graphics 730',
   os: 'Windows 11 Pro',
@@ -30,6 +31,7 @@ describe('installTauriNative', () => {
       // Private bytes, not the working sets (R37).
       memMb: 301.25,
       webview2Procs: 5,
+      ramMb: 16069,
       model: 'Intel(R) Core(TM) i5-12400',
       gpu: 'Intel(R) UHD Graphics 730',
       os: 'Windows 11 Pro',
@@ -42,11 +44,11 @@ describe('installTauriNative', () => {
     expect(native.keepAwake).toBeUndefined();
   });
 
-  it('nativeTauri_unknownNames_areLeftOut', async () => {
+  it('nativeTauri_unknownNamesAndRam_areLeftOut', async () => {
     // The shell sends empty names when it cannot tell (no display adapter, a CPU without a brand string,
-    // no OS name or WebView2 Runtime version).
+    // no OS name or WebView2 Runtime version), and 0 MiB of RAM when it cannot read the total.
     const invoke = vi.fn<TauriInstallDeps['invoke']>(() =>
-      Promise.resolve({ ...WIN1, cpu_model: '', gpu: '', os: '', webview: '' }),
+      Promise.resolve({ ...WIN1, cpu_model: '', gpu: '', os: '', webview: '', ram_mb: 0 }),
     );
     const target: { spikeNative?: SpikeNative } = {};
 
@@ -73,6 +75,7 @@ describe('installTauriNative', () => {
     await expect(target.spikeNative?.metrics()).resolves.toEqual({
       cpuPctTotal: 12.5,
       webview2Procs: 0,
+      ramMb: 16069,
       model: 'Intel(R) Core(TM) i5-12400',
       gpu: 'Intel(R) UHD Graphics 730',
       os: 'Windows 11 Pro',

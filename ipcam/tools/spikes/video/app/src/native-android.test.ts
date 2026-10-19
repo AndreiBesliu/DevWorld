@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { AndroidMetrics } from 'spike-android-metrics';
 import { installAndroidNative, type AndroidPlugins } from './native-android';
 import type { SpikeNative } from './native';
 import { unhandledRejections } from './scenarios/fakes';
@@ -42,11 +43,13 @@ function fakePlugins(read: Awaited<ReturnType<AndroidPlugins['metrics']['read']>
 const A24 = {
   thermal: 'MODERATE',
   batteryPct: 81,
+  charging: false,
   memMb: 212.5,
+  ramMb: 5482,
   model: 'samsung SM-A245F',
   os: 'Android 15 (API 35)',
   webview: 'com.google.android.webview 141.0.7390.122',
-};
+} satisfies AndroidMetrics;
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -127,6 +130,21 @@ describe('installAndroidNative', () => {
 
     expect(pipSubscriptions).toEqual(['pipChanged', 'pipChanged']);
     expect(seen).toEqual([true]);
+  });
+
+  it('nativeAndroid_onTheCharger_chargingAndRamAreMapped', async () => {
+    // R48: a phone on the charger, also one held at a level (full, or Samsung's battery protection).
+    const { plugins } = fakePlugins({ batteryPct: 100, charging: true, ramMb: 5482 });
+    const target: { spikeNative?: SpikeNative } = {};
+
+    installAndroidNative({ platform: 'android', plugins, target });
+
+    const metrics = await target.spikeNative?.metrics();
+    expect(metrics).toEqual({ batteryPct: 100, charging: true, ramMb: 5482 });
+    // NativeMetrics has the fields the page records (batch C reads them).
+    const charging: boolean | undefined = metrics?.charging;
+    const ramMb: number | undefined = metrics?.ramMb;
+    expect([charging, ramMb]).toEqual([true, 5482]);
   });
 
   it('nativeAndroid_unknownThermalStatus_isLeftOut', async () => {

@@ -27,6 +27,20 @@ class MetricsPluginTest {
     }
 
     @Test
+    fun onCharger_pluggedInCountsAlsoWhenTheBatteryDoesNotCharge() {
+        // EXTRA_PLUGGED: 0 on battery, BATTERY_PLUGGED_AC (1), USB (2) or WIRELESS (4) on a charger.
+        assertEquals(false, onCharger(0, false))
+        assertEquals(true, onCharger(1, true))
+        // Full, or held at 85 % by the battery protection: plugged in but not charging (R48).
+        assertEquals(true, onCharger(2, false))
+        assertEquals(true, onCharger(4, null))
+        // Without the sticky intent, isCharging decides; without either, the shell cannot tell.
+        assertEquals(true, onCharger(null, true))
+        assertEquals(false, onCharger(null, false))
+        assertNull(onCharger(null, null))
+    }
+
+    @Test
     fun autorunQuery_launchExtrasBecomeTheAppsQueryString() {
         // R5: adb shell am start ... --es autorun S1 --es hub http://10.0.2.2:7080
         assertEquals("autorun=S1&hub=http%3A%2F%2F10.0.2.2%3A7080", autorunQuery("S1", "http://10.0.2.2:7080"))
