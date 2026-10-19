@@ -144,6 +144,20 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ipcam/apps/desktop/src-tauri -> target
+      - name: THROWAWAY (Task 11b fix 1) Clippy without llvm-rc
+        working-directory: ipcam/apps/desktop/src-tauri
+        run: |
+          {
+            command -v llvm-rc || echo "llvm-rc: not on PATH"
+            ls -d /usr/lib/llvm-*/bin/llvm-rc /usr/bin/llvm-rc* 2>&1 || true
+            mkdir -p ../../../tools/spikes/video/app/dist
+            rc=0
+            cargo clippy --color never --locked --target x86_64-pc-windows-msvc --all-targets --features spike-metrics -- -D warnings > "${RUNNER_TEMP}/no-rc.log" 2>&1 || rc=$?
+            echo "Clippy without llvm-rc: exit ${rc}"
+            grep -E -A1 '^error: failed to run custom build|panicked at' "${RUNNER_TEMP}/no-rc.log" || true
+          } > "${RUNNER_TEMP}/no-rc.txt" 2>&1
+          cat "${RUNNER_TEMP}/no-rc.txt"
+          echo "::notice title=no llvm-rc::$(sed -e 's/%/%25/g' "${RUNNER_TEMP}/no-rc.txt" | awk '{ printf "%s%%0A", $0 }')"
       - name: Resource compiler for Clippy
         # tauri-build's build script compiles the shell's Windows resources
         # (icon, version info) for Clippy too. From Linux, embed-resource runs
@@ -220,26 +234,33 @@ jobs:
         with:
           persist-credentials: false
       - name: THROWAWAY (Task 11b fix 1) annotate.sh in Git Bash
-        # The runner's line-ending setting and the checkout it made; a CRLF copy
-        # of annotate.sh (what the checkout would hold without .gitattributes);
-        # then a fake build failure, so that "Show build failures as annotations"
-        # runs tools/scripts/annotate.sh here. The evidence goes into a notice.
+        # The runner's line-ending setting and the checkout it made; the CRLF
+        # copy of annotate.sh that git writes for a path no attribute covers
+        # (the checkout without ipcam/.gitattributes), and what both copies
+        # print in Git Bash; then a fake build failure, so that "Show build
+        # failures as annotations" runs tools/scripts/annotate.sh here.
         run: |
-          sed 's/$/\r/' tools/scripts/annotate.sh > "${RUNNER_TEMP}/annotate-crlf.sh"
+          blob="$(git rev-parse HEAD:ipcam/tools/scripts/annotate.sh)"
+          git cat-file --filters --path=unattributed.sh "${blob}" > "${RUNNER_TEMP}/annotate-crlf.sh"
           chmod +x "${RUNNER_TEMP}/annotate-crlf.sh"
           {
             git --version
             echo "bash ${BASH_VERSION}"
             git config --show-origin --get-all core.autocrlf || echo "core.autocrlf: unset"
             git ls-files --eol tools/scripts/annotate.sh tools/scripts/count-native-lines.sh package.json apps/desktop/ci/windows-smoke.ps1
+            echo "checked-out tools/scripts/annotate.sh:"
             head -c 32 tools/scripts/annotate.sh | od -c
-            rc=0
-            printf 'x\n' | "${RUNNER_TEMP}/annotate-crlf.sh" crlf > "${RUNNER_TEMP}/crlf.out" 2>&1 || rc=$?
-            echo "CRLF copy of annotate.sh: exit ${rc}, output (cat -A):"
-            cat -A "${RUNNER_TEMP}/crlf.out"
+            echo "git's conversion for an unattributed path:"
+            head -c 32 "${RUNNER_TEMP}/annotate-crlf.sh" | od -c
+            for script in tools/scripts/annotate.sh "${RUNNER_TEMP}/annotate-crlf.sh"; do
+              rc=0
+              printf 'error: 100%% fake\r\n  --> src/main.rs:1:1\r\n' | "${script}" t > "${RUNNER_TEMP}/out.txt" 2>&1 || rc=$?
+              echo "${script##*/}: exit ${rc}, output (od -c):"
+              od -c "${RUNNER_TEMP}/out.txt"
+            done
           } > "${RUNNER_TEMP}/eol.txt" 2>&1
           cat "${RUNNER_TEMP}/eol.txt"
-          echo "::notice title=eol evidence::$(sed -e 's/%/%25/g' -e 's/\r/^M/g' "${RUNNER_TEMP}/eol.txt" | awk '{ printf "%s%%0A", $0 }')"
+          echo "::notice title=eol evidence::$(sed -e 's/%/%25/g' "${RUNNER_TEMP}/eol.txt" | awk '{ printf "%s%%0A", $0 }')"
           printf 'error[E0425]: deliberate failure (Task 11b fix 1), 100%% fake\r\n  --> src/main.rs:1:1\r\n' > "${RUNNER_TEMP}/build.log"
           exit 1
       # The pnpm version comes from "packageManager" in ipcam/package.json alone.
