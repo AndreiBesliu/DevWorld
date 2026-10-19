@@ -12,8 +12,9 @@
 // so that the binds fall at every phase of the cameras' frames (12 fps: one
 // frame every 83.3 ms). The session's first bind is no re-bind; in CI, as the
 // first bind after the hub and Chrome started, it once took 115 ms to its first
-// frame (which arrived 103 ms after the bind). It is a warm-up, reported and
-// not judged; S1 judges first binds against HUB-06's 1.5 s.
+// frame (which arrived 103 ms after the bind). It is a warm-up, judged as a
+// cold bind: a first frame of its own within HUB-06's 1.5 s (it plays for 1 s,
+// so a later frame shows as none).
 //
 // A bind passes when its first presented frame arrived after the bind (rVFC
 // receiveTime ≥ bind time) and was presented within 100 ms of it, and the
@@ -42,6 +43,11 @@ interface Bind {
 }
 
 const median = (values: number[]): number | undefined => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+/** The median and max of `values` for the summary line, or "none" when there are none. */
+const medianAndMax = (values: number[]): string =>
+  values.length === 0 ? 'none' : `median ${median(values)} ms, max ${Math.max(...values)} ms`;
+/** HUB-06: a cold bind shows its first frame within 1.5 s (MV1's LAN p90). */
+const COLD_BIND_MS = 1500;
 
 for (const mode of ['b2b', 'switch'] as const) {
   test(`HUB-06 re-binds (${mode}): each bind's own first frame and its frames within ${LIMIT_MS} ms`, { tag: '@chrome' }, async ({ page }) => {
@@ -160,12 +166,14 @@ for (const mode of ['b2b', 'switch'] as const) {
     const holds = binds.flatMap((bind) => bind.holdMs);
     console.log(
       `e2e: re-binds ${mode}, jitter ${JITTER_MS} ms: ${binds.length - failed.length}/${binds.length} ok; ` +
-        `first frame median ${median(firsts)} ms, max ${Math.max(...firsts)} ms; ` +
-        `arrival to display median ${median(holds)} ms, max ${Math.max(...holds)} ms; ` +
+        `first frame ${medianAndMax(firsts)}; ` +
+        `arrival to display ${medianAndMax(holds)}; ` +
         `warm-up bind: ${warmUp === null ? 'no frame' : `first frame ${warmUp.ms} ms, arrived ${warmUp.receivedMs} ms`}`,
     );
 
     expect(hubErrors, 'errors from the hub').toEqual([]);
+    expect(warmUp, 'the warm-up bind showed no frame of its own within 1 s').not.toBeNull();
+    expect(warmUp?.ms, 'the warm-up bind (a cold bind, HUB-06)').toBeLessThanOrEqual(COLD_BIND_MS);
     expect(binds).toHaveLength(BINDS);
     expect(failed, 'binds whose first frame was late or not their own, or whose frames were held').toEqual([]);
   });

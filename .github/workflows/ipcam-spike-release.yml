@@ -9,14 +9,17 @@ name: ipcam-spike-release
 #     embedded, and spike-video-media.zip, the same media for them;
 #   - ipcam-spike.apk (the spike flavour, debug-signed; never in a store);
 #   - ipcam-desktop-setup.exe (the Windows shell's NSIS installer, unsigned);
-#   - ipcam-spike-sbom.spdx.json (Syft) and SHA256SUMS.
+#   - ipcam-spike-sbom.spdx.json (Syft), THIRD_PARTY_NOTICES.txt (also in
+#     spikehub-windows.zip) and SHA256SUMS.
 #
-# A spike-video-v* tag publishes them as a GitHub pre-release. A manual run
-# builds and checks every asset and keeps them as the workflow artifact
-# spike-video-release; with publish set, a manual run on such a tag publishes
-# them too (for a tag run that failed before it published). Every build here
-# starts without caches: a restored Go build cache or Rust target folder is not
-# verified, and these files go to the owner.
+# A spike-video-v* tag publishes them as a GitHub pre-release, once the ipcam
+# workflows have succeeded on the tagged commit (ci-status). A manual run builds
+# and checks every asset, reports what the ipcam workflows did on its commit,
+# and keeps the assets as the workflow artifact spike-video-release; with
+# publish set, a manual run on such a tag publishes them too (for a tag run that
+# failed before it published; publishing again replaces the assets). Every build
+# here starts without caches: a restored Go build cache or Rust target folder is
+# not verified, and these files go to the owner.
 
 on:
   push:
@@ -152,6 +155,23 @@ jobs:
             exit 1
           }
           ls -l "${out}"
+      - name: Third-party notices
+        # The license texts of the Go modules compiled into spikehub and of the npm
+        # packages bundled into the app (go-licenses, pinned in tools/go.mod).
+        run: |
+          mkdir -p "${RUNNER_TEMP}/notices"
+          tools/scripts/third-party-notices.sh > "${RUNNER_TEMP}/notices/THIRD_PARTY_NOTICES.txt" 2> "${RUNNER_TEMP}/notices.log" || {
+            grep -v -e 'Error discovering license URL' -e "can't be inspected" "${RUNNER_TEMP}/notices.log" | tail -n 40 |
+              tools/scripts/annotate.sh 'third-party notices'
+            exit 1
+          }
+          grep -E '^(Go|Go module|npm package|Notices of)' "${RUNNER_TEMP}/notices/THIRD_PARTY_NOTICES.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-notices
+          path: ${{ runner.temp }}/notices
+          if-no-files-found: error
+          retention-days: 1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-spikehub
@@ -279,7 +299,9 @@ jobs:
   sbom:
     # What the release is built from, by Syft, in a fresh checkout (no
     # node_modules): the Go modules (go.mod), the JS packages (pnpm-lock.yaml),
-    # the Rust crates (Cargo.lock) and the Gradle wrapper under ipcam/.
+    # the Rust crates (Cargo.lock) and the Gradle wrapper under ipcam/. The APK's
+    # Gradle dependencies have no lockfile, so it does not list them (the release
+    # notes say so; ci-6).
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -333,8 +355,10 @@ jobs:
             # The owner's PC: spikehub.exe with the media folder that its -media
             # default (./media) expects, and spikehub-camere-reale.cmd, which
             # starts it with -real (it asks for the owner's RTSP URLs, typed
-            # hidden, kept in memory only) with a double click.
+            # hidden, kept in memory only) with a double click, and the
+            # third-party notices of spikehub and the app.
             cp "${in}/release-spikehub/spikehub-windows-amd64.exe" "${win}/spikehub.exe"
+            cp "${in}/release-notices/THIRD_PARTY_NOTICES.txt" "${win}/"
             cp -R "${in}/release-media" "${win}/media"
             printf '@echo off\r\ncd /d "%%~dp0"\r\nspikehub.exe -real\r\n' > "${win}/spikehub-camere-reale.cmd"
             # H.264, H.265 and fMP4 do not compress further: zip stores them as they are.
@@ -344,18 +368,19 @@ jobs:
             (cd "${linux}" && zip -q -r -n .h264:.h265:.m4s:.mp4 "${out}/spike-video-media.zip" media)
             cp "${in}/release-spikehub/spikehub-linux-arm64" "${in}/release-spikehub/spikehub-linux-armv7" \
               "${in}/release-apk/ipcam-spike.apk" "${in}/release-desktop/ipcam-desktop-setup.exe" \
-              "${in}/release-sbom/ipcam-spike-sbom.spdx.json" "${out}/"
+              "${in}/release-sbom/ipcam-spike-sbom.spdx.json" "${in}/release-notices/THIRD_PARTY_NOTICES.txt" "${out}/"
             (cd "${out}" && sha256sum -- * > SHA256SUMS)
           } 2>&1 | tee "${RUNNER_TEMP}/assemble.log"
       - name: Check the release
         # Every asset is there and matches SHA256SUMS; each spikehub is built
         # for its target and embeds the app; the archives hold what the guide
-        # names; and every text that the guide quotes between « » exists in
-        # the programs (tools/scripts/check-guide-labels.sh).
+        # names; the notices list spikehub's modules and the app's packages; and
+        # every text that the guide quotes between « » exists in the files of
+        # the program it names (tools/scripts/check-guide-labels.sh).
         run: |
           out="${RUNNER_TEMP}/release"
           problems=()
-          want=(SHA256SUMS ipcam-desktop-setup.exe ipcam-spike-sbom.spdx.json ipcam-spike.apk
+          want=(SHA256SUMS THIRD_PARTY_NOTICES.txt ipcam-desktop-setup.exe ipcam-spike-sbom.spdx.json ipcam-spike.apk
             spike-video-media.zip spikehub-linux-arm64 spikehub-linux-armv7 spikehub-windows.zip)
           have="$(find "${out}" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort | tr '\n' ' ')"
           [[ "${have}" == "$(printf '%s\n' "${want[@]}" | LC_ALL=C sort | tr '\n' ' ')" ]] ||
@@ -388,7 +413,7 @@ jobs:
               grep -qxF -- "${entry}" <<< "${listing}" || problems+=("$(basename "${zip}") has no ${entry}")
             done
           }
-          check_zip "${out}/spikehub-windows.zip" spikehub.exe spikehub-camere-reale.cmd "${media[@]}"
+          check_zip "${out}/spikehub-windows.zip" spikehub.exe spikehub-camere-reale.cmd THIRD_PARTY_NOTICES.txt "${media[@]}"
           check_zip "${out}/spike-video-media.zip" "${media[@]}"
           # The APK carries the spike app (Capacitor's webDir).
           check_zip "${out}/ipcam-spike.apk" AndroidManifest.xml classes.dex assets/public/index.html
@@ -396,11 +421,32 @@ jobs:
           [[ "${kind}" == *'Nullsoft Installer'* ]] || problems+=("ipcam-desktop-setup.exe is not an NSIS installer: ${kind}")
           jq -e '(.spdxVersion | startswith("SPDX-")) and (.packages | length > 100)' "${out}/ipcam-spike-sbom.spdx.json" > /dev/null ||
             problems+=("ipcam-spike-sbom.spdx.json is not an SPDX document with the release's packages")
+          for entry in 'Go: the standard library and runtime' 'Go module: github.com/pion/webrtc/v4 ' \
+            'Go module: golang.org/x/sys ' 'npm package: hls.js ' 'Notices of @ipcam/player'; do
+            grep -qF -- "${entry}" "${out}/THIRD_PARTY_NOTICES.txt" || problems+=("THIRD_PARTY_NOTICES.txt has no ${entry}")
+          done
 
-          # The owner's guide against the programs it describes: spikehub.exe
-          # (the app and the hub), the APK, and the Windows shell's names.
-          labels="$(tools/scripts/check-guide-labels.sh docs/spike-video.md "${RUNNER_TEMP}/spikehub.exe" "${out}/ipcam-spike.apk" \
-            apps/desktop/src-tauri/tauri.conf.json apps/desktop/src-tauri/src/main.rs 2>&1)" || problems+=("${labels}")
+          # The owner's guide against the programs it describes, each quote
+          # against the files of the program it names: the hub's sources and the
+          # spikehub.exe of the zip; the app's texts (i18n.ts), the app inside the
+          # APK (its built scripts, unpacked: the APK deflates them) and inside
+          # spikehub.exe; the Android app's strings.xml; the Windows shell's
+          # names (tauri.conf.json, main.rs).
+          hub_sources=()
+          for file in tools/spikes/video/cmd/spikehub/*.go; do
+            [[ "${file}" == *_test.go ]] || hub_sources+=("${file}")
+          done
+          unzip -q -o "${out}/ipcam-spike.apk" 'assets/public/*' -d "${RUNNER_TEMP}/apk-app" ||
+            problems+=("ipcam-spike.apk: the app's files cannot be unpacked")
+          mapfile -t apk_scripts < <(find "${RUNNER_TEMP}/apk-app/assets/public" -name '*.js' 2>/dev/null)
+          [[ ${#apk_scripts[@]} -gt 0 ]] || problems+=("ipcam-spike.apk holds no script of the app")
+          labels="$(tools/scripts/check-guide-labels.sh docs/spike-video.md \
+            --program hub "${hub_sources[@]}" --program hub "${RUNNER_TEMP}/spikehub.exe" \
+            --program app tools/spikes/video/app/src/i18n.ts --program app "${apk_scripts[@]}" \
+            --program app "${RUNNER_TEMP}/spikehub.exe" \
+            --program android apps/mobile/android/app/src/main/res/values/strings.xml \
+            --program desktop apps/desktop/src-tauri/tauri.conf.json apps/desktop/src-tauri/src/main.rs 2>&1)" ||
+            problems+=("${labels}")
 
           if [[ ${#problems[@]} -gt 0 ]]; then
             printf '%s\n' "${problems[@]}" | tools/scripts/annotate.sh 'release check'
@@ -428,12 +474,47 @@ jobs:
           # The archives and binaries are compressed already, or nearly so.
           compression-level: 0
 
+  ci-status:
+    # The ipcam workflows (ipcam-spikes, ipcam-apps, ipcam-mobile, ipcam-windows)
+    # on this commit: a release is published only when every run and every job
+    # of them succeeded (tools/scripts/check-workflow-runs.sh). A run that does
+    # not publish reports what it found and goes on. It runs after the builds,
+    # which gives a commit's own runs time to finish.
+    needs: assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: ipcam/tools/scripts
+      - name: Check the ipcam workflows on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISHING: ${{ github.event_name == 'push' || inputs.publish }}
+        run: |
+          if out="$(ipcam/tools/scripts/check-workflow-runs.sh "${GITHUB_REPOSITORY}" "${GITHUB_SHA}" \
+            ipcam-spikes ipcam-apps ipcam-mobile ipcam-windows 2>&1)"; then
+            printf '%s\n' "${out}" | tee -a "${GITHUB_STEP_SUMMARY}" | ipcam/tools/scripts/annotate.sh 'ipcam workflows' 20 notice
+          elif [[ "${PUBLISHING}" == true ]]; then
+            printf '%s\n' "${out}" | ipcam/tools/scripts/annotate.sh 'ipcam workflows' 40
+            exit 1
+          else
+            printf '%s\n' "${out}" | tee -a "${GITHUB_STEP_SUMMARY}" | ipcam/tools/scripts/annotate.sh 'ipcam workflows' 40 warning
+          fi
+
   publish:
     # The GitHub pre-release of a spike-video-v* tag: on the tag push, or on a
-    # manual run on the tag with publish set. The tag is pushed only after the
-    # owner approves the release (R6).
+    # manual run on the tag with publish set, and only when ci-status found the
+    # ipcam workflows green on the tagged commit. The tag is pushed only after
+    # the owner approves the release (R6). Publishing again (a manual run after
+    # a failed one) replaces the assets of the existing release.
     if: github.event_name == 'push' || inputs.publish
-    needs: assets
+    needs: [assets, ci-status]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -456,7 +537,7 @@ jobs:
         with:
           name: spike-video-release
           path: ${{ runner.temp }}/release
-      - name: Create the pre-release
+      - name: Create or update the pre-release
         # The notes are for the owner, in Romanian.
         env:
           GH_TOKEN: ${{ github.token }}
@@ -470,13 +551,29 @@ jobs:
             echo "Pe PC (Windows 11): spikehub-windows.zip și ipcam-desktop-setup.exe. Pe telefon (Galaxy A24): ipcam-spike.apk."
             echo
             echo "Celelalte fișiere nu vă trebuie: spikehub pentru Linux pe ARM (de exemplu un Raspberry Pi) cu spike-video-media.zip,"
-            echo "lista componentelor (SBOM) și sumele de control (SHA256SUMS)."
+            echo "lista componentelor (SBOM), licențele componentelor terțe (THIRD_PARTY_NOTICES.txt) și sumele de control (SHA256SUMS)."
+            echo
+            echo "Lista componentelor (ipcam-spike-sbom.spdx.json) cuprinde ce fixează fișierele de blocare din sursă:"
+            echo "modulele Go (go.mod, go.sum), pachetele npm (pnpm-lock.yaml), crate-urile Rust (Cargo.lock) și wrapper-ul Gradle."
+            echo "Bibliotecile Android pe care Gradle le adaugă în APK nu au sume de control fixate și nu apar în listă."
+            echo "THIRD_PARTY_NOTICES.txt cuprinde licențele modulelor Go din spikehub și ale pachetelor npm din aplicație;"
+            echo "pe cele ale bibliotecilor Android din APK și ale crate-urilor Rust din ipcam-desktop nu le cuprinde."
             echo
             echo "Sunt versiuni de test, nesemnate, doar pentru această probă."
           } > "${notes}"
-          out="$(gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag --prerelease \
-            --title "Proba video ipcam, Faza 0 (b): ${TAG}" --notes-file "${notes}" "${RUNNER_TEMP}"/release/* 2>&1)" || {
-            printf '%s\n' "${out}" | ipcam/tools/scripts/annotate.sh publish
-            exit 1
-          }
+          title="Proba video ipcam, Faza 0 (b): ${TAG}"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            # Published before (a run that failed after it, or a repeated run): replace the assets and the notes.
+            out="$({ gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" --clobber "${RUNNER_TEMP}"/release/* &&
+              gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --prerelease --title "${title}" --notes-file "${notes}"; } 2>&1)" || {
+              printf '%s\n' "${out}" | ipcam/tools/scripts/annotate.sh publish
+              exit 1
+            }
+          else
+            out="$(gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag --prerelease \
+              --title "${title}" --notes-file "${notes}" "${RUNNER_TEMP}"/release/* 2>&1)" || {
+              printf '%s\n' "${out}" | ipcam/tools/scripts/annotate.sh publish
+              exit 1
+            }
+          fi
           echo "${out}"

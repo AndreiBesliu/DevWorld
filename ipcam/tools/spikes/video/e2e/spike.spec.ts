@@ -181,10 +181,13 @@ test('S1 p90 first frame ≤ 1500 ms', { tag: '@chrome' }, async ({ page }) => {
   expect(p(starts, 0.9)).toBeLessThanOrEqual(1500);
 });
 
-test('band decodes on ≥ 95 % of sampled frames', { tag: '@chrome' }, async ({ page }) => {
+test('S2: band decodes on ≥ 95 % of sampled frames and MV2 p95 < 1000 ms on loopback', { tag: '@chrome' }, async ({ page }) => {
   // S2 measures latency by the band, on sim-01's substream (360 lines, 8 px
   // blocks) and then its main stream (1080 lines, 16 px blocks). While it runs,
-  // the shown frame is read every 50 ms with the app's own band reader.
+  // the shown frame is read every 50 ms with the app's own band reader. MV2 (a
+  // critical item on AND-1) is judged here on loopback: 100 samples per stream,
+  // each above 0 ms (a sample at or below 0 means a wrong clock offset sign or a
+  // frame matched to the wrong record) and p95 below 1 s, as spikereport judges it.
   await startAutorun(page, 'S2');
   await page.evaluate(() => {
     const read = window.__spikeReadBand;
@@ -216,6 +219,13 @@ test('band decodes on ≥ 95 % of sampled frames', { tag: '@chrome' }, async ({ 
   expect(rate).toBeGreaterThanOrEqual(0.95);
   // The band names the media file (R1): 1 is the substream, 2 the main stream.
   expect(Object.keys(counts.byCamera).sort()).toEqual(['1', '2']);
+
+  for (const profile of ['sub', 'main'] as const) {
+    const latencies = result.samples[`${profile}LatencyMs`] ?? [];
+    expect(latencies, `${profile}: ${describeResult(result)}`).toHaveLength(100);
+    expect(Math.min(...latencies), `${profile}: the lowest latency`).toBeGreaterThan(0);
+    expect(p(latencies, 0.95), `${profile}: p95 (MV2, LAN p95 < 1 s)`).toBeLessThan(1000);
+  }
 });
 
 test('4-tile grid 60 s: fps ≥ 90 % of 12 and dropped ≤ 2 %', { tag: '@chrome' }, async ({ page }) => {
@@ -281,6 +291,23 @@ test('4-tile grid 60 s: fps ≥ 90 % of 12 and dropped ≤ 2 %', { tag: '@chrome
     expect(tile.fps).toBeGreaterThanOrEqual(0.9 * 12);
     expect(tile.droppedPct).toBeLessThanOrEqual(2);
   }
+});
+
+test('S7: 20 HLS starts ≤ 2000 ms and 20 seeks ≤ 1500 ms (MV10)', { tag: '@chrome' }, async ({ page }) => {
+  // MV10, a critical item on AND-1: hls.js on MSE plays the hub's 10 min
+  // recording (/media/hls/) 20 times and seeks to a random point each time.
+  // spikereport judges every start and every seek, not a percentile, and so
+  // does this test.
+  await startAutorun(page, 'S7');
+  const result = await resultOf(page, 'S7', 4 * 60_000);
+  const starts = result.samples.startMs ?? [];
+  const seeks = result.samples.seekMs ?? [];
+  console.log(`e2e: S7 start: ${summary(starts)}; seek: ${summary(seeks)}`);
+
+  expect(starts, describeResult(result)).toHaveLength(20);
+  expect(seeks, describeResult(result)).toHaveLength(20);
+  expect(Math.max(...starts), 'the slowest start (MV10: ≤ 2 s)').toBeLessThanOrEqual(2000);
+  expect(Math.max(...seeks), 'the slowest seek (MV10: ≤ 1.5 s)').toBeLessThanOrEqual(1500);
 });
 
 /** Runs S9 and returns its result with the labels the stage showed. */

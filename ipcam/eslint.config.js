@@ -30,6 +30,8 @@ export default defineConfig(
     'apps/mobile/android/**/build/**',
     // Cargo's output: tauri-codegen leaves the embedded app and Tauri's own scripts there.
     'apps/desktop/src-tauri/target/**',
+    // A local spikehub build copies the spike app's dist/ there (gitignored), as CI does.
+    'tools/spikes/video/cmd/spikehub/web/**',
   ]),
   js.configs.recommended,
   tseslint.configs.recommended,

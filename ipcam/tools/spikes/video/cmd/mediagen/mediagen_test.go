@@ -154,11 +154,18 @@ func TestMediagen_ManifestMatchesSpec(t *testing.T) {
 // (-skip_frame nokey) and hands each one over once (-fps_mode passthrough; at
 // the rate it guesses for a raw .h264 file it would duplicate frames). It skips
 // without MEDIAGEN_DIR, since generating the media takes minutes; CI's media
-// job runs it on the files it uploads.
+// job runs it on the files it uploads. Under either require flag
+// (MEDIAGEN_REQUIRE_FFMPEG, SPIKE_REQUIRE_MEDIA), which CI sets, a missing
+// MEDIAGEN_DIR fails instead (R19): CI must not skip it silently.
 func TestMediagen_BandDecodesAtGOPStarts(t *testing.T) {
 	requireFFmpeg(t)
 	out := os.Getenv("MEDIAGEN_DIR")
 	if out == "" {
+		for _, flag := range []string{"MEDIAGEN_REQUIRE_FFMPEG", "SPIKE_REQUIRE_MEDIA"} {
+			if os.Getenv(flag) == "1" {
+				t.Fatalf("MEDIAGEN_DIR is not set but %s=1", flag)
+			}
+		}
 		t.Skip("MEDIAGEN_DIR is not set")
 	}
 	// Global Constraints, "Simulated media" and "Band": GOP = fps; 16 px blocks

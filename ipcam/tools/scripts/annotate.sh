@@ -8,8 +8,9 @@
 #
 # Keeps the first <lines> lines (default 150), drops carriage returns and
 # escapes % and the line breaks, so the annotation shows the text as it was.
-# The title is plain text without "," or ":". Prints nothing when stdin is
-# empty. Exits 2 on a usage error.
+# The title is escaped as the runner reads a property of a workflow command
+# (%, CR, LF, ":" and ","), so any text can be a title. Prints nothing when
+# stdin is empty. Exits 2 on a usage error.
 set -euo pipefail
 
 usage() {
@@ -26,7 +27,14 @@ level="${3:-error}"
 
 # awk reads all of stdin, so the command that writes it never meets a closed pipe.
 awk -v title="${title}" -v lines="${lines}" -v level="${level}" '
-  BEGIN { ORS = "" }
+  BEGIN {
+    ORS = ""
+    gsub(/%/, "%25", title)
+    gsub(/\r/, "%0D", title)
+    gsub(/\n/, "%0A", title)
+    gsub(/:/, "%3A", title)
+    gsub(/,/, "%2C", title)
+  }
   NR <= lines {
     gsub(/\r/, "")
     gsub(/%/, "%25")

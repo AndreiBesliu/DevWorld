@@ -18,10 +18,15 @@
 #   Activity from the launch Intent it kept, extras included, and the scenario
 #   must not run again.
 #
-# On failure it prints the cause as check annotations, which can be read where
-# the job log cannot.
+# In quick mode only the cold starts run (ipcam-mobile runs 3 on a push); the
+# full mode adds the two checks above (on a pull request, with 5 starts).
 #
-#   apps/mobile/ci/emulator-smoke.sh <apk> <spikehub results folder> <spikehub log> [starts]
+# On failure it prints the cause as check annotations, which can be read where
+# the job log cannot. Each check and the outcome also go to the job's step
+# summary ($GITHUB_STEP_SUMMARY), which GitHub keeps whole, while it shows only
+# about ten annotations of a level per step.
+#
+#   apps/mobile/ci/emulator-smoke.sh <apk> <spikehub results folder> <spikehub log> [starts] [full|quick]
 set -euo pipefail
 shopt -s nullglob
 
@@ -29,6 +34,11 @@ apk="$1"
 results="$2"
 hub_log="$3"
 starts="${4:-3}"
+mode="${5:-full}"
+if [[ ! "${starts}" =~ ^[1-9][0-9]*$ || ! "${mode}" =~ ^(full|quick)$ ]]; then
+  echo "usage: $0 <apk> <spikehub results folder> <spikehub log> [starts] [full|quick]" >&2
+  exit 2
+fi
 app=ro.ipcam.spike
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 run_timeout=150 # seconds one start may take; S1 takes about a minute
@@ -40,6 +50,13 @@ annotate() {
   text="$(cat)"
   body="$(printf '%s' "${text:0:3300}" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "") $0 }')"
   echo "::$1 title=$2::${body:-(nothing)}"
+}
+
+# Appends a line to the job's step summary, when there is one.
+summarize() {
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    printf '%s\n' "$*" >> "${GITHUB_STEP_SUMMARY}"
+  fi
 }
 
 # The app's own log lines (tag SpikeMetrics): each Activity and page it went through.
@@ -101,7 +118,7 @@ adb install -r "${apk}"
 # $2: "probe" to change the font scale 5 s after the launch. Returns 0 with a
 # notice when the result holds 20 samples, else 1 with an error and the diagnosis.
 cold_start() {
-  local label="$1" probe="${2:-}" launch stored="" problem="" deadline file samples
+  local label="$1" probe="${2:-}" launch stored="" problem="" deadline file samples known line
   adb shell am force-stop "${app}"
   adb logcat -b all -c
   # Only a result stored from now on belongs to this start, not a late one of an earlier start.
@@ -136,14 +153,17 @@ cold_start() {
 
   if [[ -z "${stored}" ]]; then
     echo "${problem:-no S1 result within ${run_timeout} s}; ${launch}" | annotate error "emulator S1 ${label}"
+    summarize "- ${label}: failed: ${problem:-no S1 result within ${run_timeout} s}"
     diagnose
     return 1
   fi
+  # Nearest rank: p50 is the 10th and p90 the 18th of the 20 sorted samples.
+  line="$(jq -r '(.samples.firstFrameMs | sort | map(round)) as $ms
+    | "S1 stored with 20 samples: first frame p50 \($ms[9]) ms, p90 \($ms[17]) ms, max \($ms[19]) ms;"
+      + " \(.device.model) \(.device.os) \(.device.webview); notes: \(.notes | join("; "))"' "${stored}")"
+  summarize "- ${label}: ${line}"
   {
-    # Nearest rank: p50 is the 10th and p90 the 18th of the 20 sorted samples.
-    jq -r '(.samples.firstFrameMs | sort | map(round)) as $ms
-      | "S1 stored with 20 samples: first frame p50 \($ms[9]) ms, p90 \($ms[17]) ms, max \($ms[19]) ms;"
-        + " \(.device.model) \(.device.os) \(.device.webview); notes: \(.notes | join("; "))"' "${stored}"
+    echo "${line}"
     echo "launch: ${launch}"
     app_log 12
   } | annotate notice "emulator S1 ${label}"
@@ -154,7 +174,7 @@ cold_start() {
 # Intent starts it again. Returns 0 when the app is back in a new process and
 # did not load the page with the launch extras again, else 1 with the diagnosis.
 survives_process_death() {
-  local label="process death" before after log
+  local label="process death" before after log deadline
   before="$(adb shell pidof "${app}" | tr -d '\r')"
   adb shell input keyevent KEYCODE_HOME
   sleep 3
@@ -181,24 +201,36 @@ survives_process_death() {
     echo "the restored app loaded no page within 30 s:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
   else
     echo "new process ${after} after ${before}; no autorun again:"$'\n'"${log}" | annotate notice "emulator S1 ${label}"
+    summarize "- ${label}: the app came back in a new process and did not run the scenario again"
     return 0
   fi
+  summarize "- ${label}: failed (see the annotations)"
   diagnose
   return 1
 }
 
+summarize "### Emulator smoke test (AND-3), ${mode} mode"
 failures=0
+checks=${starts}
 for ((start = 1; start <= starts; start++)); do
   cold_start "start ${start} of ${starts}" || failures=$((failures + 1))
 done
-cold_start "probe (font scale change)" probe || failures=$((failures + 1))
-if cold_start "start before process death"; then
-  survives_process_death || failures=$((failures + 1))
-else
-  failures=$((failures + 1))
+if [[ "${mode}" == full ]]; then
+  checks=$((starts + 3))
+  cold_start "probe (font scale change)" probe || failures=$((failures + 1))
+  if cold_start "start before process death"; then
+    survives_process_death || failures=$((failures + 1))
+  else
+    failures=$((failures + 1))
+  fi
 fi
 
+if ((failures == 0)); then
+  summarize "All ${checks} checks passed."
+else
+  summarize "${failures} of ${checks} checks failed."
+fi
 if ((failures > 0)); then
-  echo "${failures} of $((starts + 3)) checks failed" | annotate error "emulator S1"
+  echo "${failures} of ${checks} checks failed" | annotate error "emulator S1"
   exit 1
 fi

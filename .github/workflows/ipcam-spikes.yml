@@ -7,8 +7,10 @@ on:
       - 'ipcam/tools/**'
       - 'ipcam/go.work'
       - 'ipcam/go.work.sum'
-      # The e2e job builds the spike app and its workspace dependencies (the player).
+      # The e2e job builds the spike app and its workspace dependencies (the player,
+      # and the PiP plugin, which the app imports).
       - 'ipcam/apps/packages/**'
+      - 'ipcam/apps/mobile/plugins/pip/**'
       - 'ipcam/package.json'
       - 'ipcam/pnpm-*.yaml'
       - 'ipcam/tsconfig.base.json'
@@ -22,8 +24,10 @@ on:
       - 'ipcam/tools/**'
       - 'ipcam/go.work'
       - 'ipcam/go.work.sum'
-      # The e2e job builds the spike app and its workspace dependencies (the player).
+      # The e2e job builds the spike app and its workspace dependencies (the player,
+      # and the PiP plugin, which the app imports).
       - 'ipcam/apps/packages/**'
+      - 'ipcam/apps/mobile/plugins/pip/**'
       - 'ipcam/package.json'
       - 'ipcam/pnpm-*.yaml'
       - 'ipcam/tsconfig.base.json'
@@ -87,6 +91,33 @@ jobs:
             tools/scripts/annotate.sh 'PH0-22 redaction scan' 60 < "${RUNNER_TEMP}/redactscan.log"
           fi
 
+  scripts:
+    # The shell tests of tools/scripts (tools/scripts/test): the guide's label
+    # check, the annotations, the release's third-party notices and its check of
+    # the ipcam workflows' runs, each on fixtures or with fake tools.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Script tests
+        run: |
+          set -o pipefail
+          failed=0
+          for test in tools/scripts/test/*.test.sh; do
+            echo "== ${test}"
+            "${test}" 2>&1 | tee -a "${RUNNER_TEMP}/scripts.log" || failed=1
+          done
+          exit "${failed}"
+      - name: Show failures as an annotation
+        if: failure()
+        run: |
+          grep -E -A8 '^FAIL ' "${RUNNER_TEMP}/scripts.log" | tools/scripts/annotate.sh 'script tests' 80
+
   go:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -125,6 +156,11 @@ jobs:
         # govulncheck needs a directory that holds a go.mod.
         working-directory: ipcam/tools/spikes/video
         run: go tool govulncheck ./...
+      - name: Vulnerabilities of the tools
+        # The tools module holds no code of its own: "tool" names the tools it pins
+        # (golangci-lint, govulncheck, go-licenses), which CI runs on the code.
+        working-directory: ipcam/tools
+        run: go tool govulncheck ./... tool
       - name: Licenses
         run: tools/scripts/check-licenses.sh
 
