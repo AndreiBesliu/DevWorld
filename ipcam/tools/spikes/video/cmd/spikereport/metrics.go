@@ -821,23 +821,28 @@ func (e *evaluator) mv9() {
 	}
 }
 
-// p90Check judges `got` of `expected` readings on their p90 (a missing one counts as infinitely slow).
-func p90Check(name string, got []float64, expected int, limit float64) (check, float64) {
-	p90 := percentileOf(got, expected, 0.9)
-	if math.IsInf(p90, 1) {
-		return holds(false, fmt.Sprintf("%s: doar %d din %d reușite", name, len(got), expected)), p90
+// allWithin judges `got` of `expected` readings on every one of them being within `limit`, like
+// MV15: a reading that did not come (no first frame, no `seeked` within 10 s) counts as infinitely
+// slow, so one timeout fails it. It returns the slowest reading.
+func allWithin(name string, got []float64, expected int, limit float64) (check, float64) {
+	worst := percentileOf(got, expected, 1)
+	if math.IsInf(worst, 1) {
+		return holds(false, fmt.Sprintf("%s: doar %d din %d reușite", name, len(got), expected)), worst
 	}
-	return holds(p90 <= limit, fmt.Sprintf("%s p90 %s (max %s; %d din %d)", name, ms(p90), ms(maxOf(got)), len(got), expected)), p90
+	return holds(worst <= limit, fmt.Sprintf("%s max %s (mediana %s; %d din %d)", name, ms(worst), ms(percentile(got, 0.5)), len(got), expected)), worst
 }
 
+// mv10 judges every one of the 20 starts and 20 seeks, not a percentile: the spec gives none
+// ("start ≤ 2 s; seek ≤ 1.5 s"), and MV10 is a critical item of AND-1, so a recording that
+// sometimes never plays or never seeks must not pass.
 func (e *evaluator) mv10() {
 	r := e.runs["S7"]
 	if r == nil {
 		return
 	}
-	start, startP90 := p90Check("pornire", r.Samples["startMs"], mv10Runs, mv10MaxStartMs)
-	seek, _ := p90Check("salt", r.Samples["seekMs"], mv10Runs, mv10MaxSeekMs)
-	e.finish("MV10", startP90, "ms", []check{start, seek}, runNotes(r))
+	start, slowestStart := allWithin("pornire", r.Samples["startMs"], mv10Runs, mv10MaxStartMs)
+	seek, _ := allWithin("salt", r.Samples["seekMs"], mv10Runs, mv10MaxSeekMs)
+	e.finish("MV10", slowestStart, "ms", []check{start, seek}, runNotes(r))
 }
 
 // ---- MV12, MV13: the ICE pair ----
@@ -1075,7 +1080,7 @@ func thresholdOf(code string) string {
 	case "MV9":
 		return "live reluat în ≤ 3 s după 2 min în fundal"
 	case "MV10":
-		return "pornire ≤ 2 s; salt ≤ 1,5 s (p90 din 20)"
+		return "pornire ≤ 2 s; salt ≤ 1,5 s (toate cele 20)"
 	case "MV12":
 		return "perechea ICE aleasă nu e relay"
 	case "MV13":

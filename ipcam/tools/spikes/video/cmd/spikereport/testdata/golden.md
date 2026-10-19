@@ -34,7 +34,7 @@ De completat de proprietar: memoria RAM a telefonului (nu apare în rezultate).
 | MV7 | memorie +2,1 %; heap JS +3,9 %; reporniri neprovocate: 0 | creștere memorie ≤ 10 %; 0 reporniri neprovocate | Da |
 | MV8 | 300 s în PiP; pauză maximă între cadre 210 ms; 2995 cadre | 5 min în PiP fără pauze de peste 2 s | Da |
 | MV9 | reluare în 1480 ms după 123 s în fundal | live reluat în ≤ 3 s după 2 min în fundal | Da |
-| MV10 | pornire p90 1031 ms (max 1080 ms; 20 din 20); salt p90 826 ms (max 846 ms; 20 din 20) | pornire ≤ 2 s; salt ≤ 1,5 s (p90 din 20) | Da |
+| MV10 | pornire max 1080 ms (mediana 803 ms; 20 din 20); salt max 846 ms (mediana 623 ms; 20 din 20) | pornire ≤ 2 s; salt ≤ 1,5 s (toate cele 20) | Da |
 | MV12 | pereche host/host; cerere de permisiune: nu | perechea ICE aleasă nu e relay | Da |
 | MV15 | max 2566 ms (mediana 2336 ms, min 2150 ms; 10 rulări) | ≤ 3 s pe AND-1 (10 rulări) | Da |
 | G9 | mx-h265: fallback; mx-high51: ok | fiecare cale: ok sau retragere pe substream etichetată; fără fallback-failed | Da |
@@ -132,7 +132,7 @@ De completat de proprietar: GPU-ul și memoria RAM ale PC-ului (nu apar în rezu
 | MV3/9 | fps minim 11,86; pierdute max 0,5 % | fps ≥ 90 % din sursă (≥ 10,8 la 12 fps); pierdute ≤ 2 % | Da |
 | MV3/16 | nemăsurat: S3-16 nu a rulat | fps ≥ 90 % din sursă (≥ 10,8 la 12 fps); pierdute ≤ 2 % | — |
 | MV7 | nemăsurat: S4 nu a rulat | creștere memorie ≤ 10 %; 0 reporniri neprovocate | — |
-| MV10 | nemăsurat: S7 nu a rulat | pornire ≤ 2 s; salt ≤ 1,5 s (p90 din 20) | — |
+| MV10 | nemăsurat: S7 nu a rulat | pornire ≤ 2 s; salt ≤ 1,5 s (toate cele 20) | — |
 | MV13 | pereche host/host; cerere de permisiune: necunoscut (n/a) | ambele capete host sau prflx, fără relay | Da |
 | G9 | nemăsurat: S9 nu a rulat | fiecare cale: ok sau retragere pe substream etichetată; fără fallback-failed | — |
 
@@ -291,7 +291,7 @@ Fiecare element pornește când aprobați bugetul pentru el (OPN-09, OPN-16; pâ
 - MV2 se calculează cu offsetul dintre ceasul dispozitivului și al hub-ului (ping pe canalul de date), nu cu ceasul dispozitivului; mostrele exclud cadrele din GOP-ul păstrat în cache la legarea unei camere, care au vârsta cache-ului în loc de întârzierea transportului (R26).
 - Jitterul hub-ului (R28) e p99 al abaterii de trimitere pe ferestre de 10 s; o rulare e marcată când o fereastră depășește 20 ms.
 - Dintre rulările valide ale aceluiași scenariu pe același dispozitiv contează cea mai nouă (după ceasul dispozitivului). Rulările întrerupte și cele eșuate sunt listate, dar nu intră în praguri.
-- Specificația nu dă un percentil pentru MV10: se folosește p90 din 20, ca la MV1. MV15 cere ca toate cele 10 rulări să fie ≤ 3 s. O pornire sau o rulare care nu s-a terminat (MV1, MV10, MV15) se numără ca infinit de lentă.
+- Specificația nu dă un percentil pentru MV10 (este un prag critic al AND-1): se cere ca toate cele 20 de porniri și toate cele 20 de salturi să fie în prag, ca la MV15 (toate cele 10 rulări ≤ 3 s); nicio pornire sau salt nu poate expira. MV1 folosește p90 din 20, cum cere specificația. O pornire, un salt sau o rulare care nu s-a terminat (MV1, MV10, MV15) se numără ca infinit de lent.
 - MV14 (linii Kotlin pentru PiP și rețeaua locală) nu apare în rezultate: îl numără `tools/scripts/count-native-lines.sh` în CI.
 
 ## Date brute

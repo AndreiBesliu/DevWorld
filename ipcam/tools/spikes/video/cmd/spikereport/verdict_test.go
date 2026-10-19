@@ -213,6 +213,16 @@ func TestVerdicts_FromTheResults(t *testing.T) {
 			t.Errorf("verdict = %q, want %q", got, VerdictNOGOMobil)
 		}
 	})
+	t.Run("HLS starts that sometimes never show a frame", func(t *testing.T) {
+		rs := allRuns()
+		s7 := find(t, rs, androidDevice, "S7")
+		s7.Samples["startMs"] = s7.Samples["startMs"][:18]
+		s7.Samples["seekMs"] = s7.Samples["seekMs"][:18]
+		s7.Notes = append(s7.Notes, "start 3: no first frame within 10 s", "start 9: no first frame within 10 s")
+		if got := AndroidVerdict(ComputeMV(rs)); got != VerdictNOGOMobil {
+			t.Errorf("verdict = %q, want %q: MV10 is a critical item", got, VerdictNOGOMobil)
+		}
+	})
 	t.Run("a PC that cannot decode 16 tiles", func(t *testing.T) {
 		rs := allRuns()
 		find(t, rs, windowsDevice, "S3-16").Samples["cpuPctApp"] = rep(40, 60)

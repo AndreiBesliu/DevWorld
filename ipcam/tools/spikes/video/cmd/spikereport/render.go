@@ -535,7 +535,7 @@ func (r Report) limits(d *doc) {
 	d.text("- MV2 se calculează cu offsetul dintre ceasul dispozitivului și al hub-ului (ping pe canalul de date), nu cu ceasul dispozitivului; mostrele exclud cadrele din GOP-ul păstrat în cache la legarea unei camere, care au vârsta cache-ului în loc de întârzierea transportului (R26).")
 	d.text("- Jitterul hub-ului (R28) e p99 al abaterii de trimitere pe ferestre de 10 s; o rulare e marcată când o fereastră depășește 20 ms.")
 	d.text("- Dintre rulările valide ale aceluiași scenariu pe același dispozitiv contează cea mai nouă (după ceasul dispozitivului). Rulările întrerupte și cele eșuate sunt listate, dar nu intră în praguri.")
-	d.text("- Specificația nu dă un percentil pentru MV10: se folosește p90 din 20, ca la MV1. MV15 cere ca toate cele 10 rulări să fie ≤ 3 s. O pornire sau o rulare care nu s-a terminat (MV1, MV10, MV15) se numără ca infinit de lentă.")
+	d.text("- Specificația nu dă un percentil pentru MV10 (este un prag critic al AND-1): se cere ca toate cele 20 de porniri și toate cele 20 de salturi să fie în prag, ca la MV15 (toate cele 10 rulări ≤ 3 s); nicio pornire sau salt nu poate expira. MV1 folosește p90 din 20, cum cere specificația. O pornire, un salt sau o rulare care nu s-a terminat (MV1, MV10, MV15) se numără ca infinit de lent.")
 	d.text("- MV14 (linii Kotlin pentru PiP și rețeaua locală) nu apare în rezultate: îl numără `tools/scripts/count-native-lines.sh` în CI.")
 	d.blank()
 }

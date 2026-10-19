@@ -521,6 +521,7 @@ func TestComputeMV_MV10(t *testing.T) {
 		f.add("S7", map[string][]float64{"startMs": start, "seekMs": seek})
 		return f.list()
 	}
+	// tail is n readings of `slow` after 20-n of `fast`.
 	tail := func(n int, fast, slow float64) []float64 { return append(rep(fast, 20-n), rep(slow, n)...) }
 	tests := []struct {
 		name        string
@@ -531,9 +532,21 @@ func TestComputeMV_MV10(t *testing.T) {
 		{"limits", rep(2000, 20), rep(1500, 20), "pass"},
 		{"start over 2 s", rep(2001, 20), rep(700, 20), "fail"},
 		{"seek over 1.5 s", rep(900, 20), rep(1501, 20), "fail"},
-		{"two slow starts are the tail above p90", tail(2, 900, 9000), rep(700, 20), "pass"},
-		{"three are not", tail(3, 900, 9000), rep(700, 20), "fail"},
-		{"seeks that never finished count as slow", rep(900, 20), rep(700, 17), "fail"},
+		// MV10 is judged on every start and seek, not on a percentile: one slow reading fails it.
+		{"one start over 2 s among 20 fast ones", tail(1, 900, 2001), rep(700, 20), "fail"},
+		{"one seek over 1.5 s among 20 fast ones", rep(900, 20), tail(1, 700, 1501), "fail"},
+		{"one start at the limit, the rest fast", tail(1, 900, 2000), rep(700, 20), "pass"},
+		{"one seek at the limit, the rest fast", rep(900, 20), tail(1, 700, 1500), "pass"},
+		{"two slow starts", tail(2, 900, 9000), rep(700, 20), "fail"},
+		{"two slow seeks", rep(900, 20), tail(2, 700, 9000), "fail"},
+		// A start without a first frame within 10 s notes `start <n>: ...` and gives no startMs
+		// (nor a seek, since the seek follows the start); a seek without `seeked` gives no seekMs.
+		{"one start that never showed a frame", rep(900, 19), rep(700, 19), "fail"},
+		{"two starts that never showed a frame", rep(900, 18), rep(700, 18), "fail"},
+		{"one seek that never finished", rep(900, 20), rep(700, 19), "fail"},
+		{"two seeks that never finished", rep(900, 20), rep(700, 18), "fail"},
+		{"seeks that never finished", rep(900, 20), rep(700, 17), "fail"},
+		{"no start numbers at all", nil, rep(700, 20), "fail"},
 		{"no seek numbers at all", rep(900, 20), nil, "fail"},
 	}
 	for _, tc := range tests {
@@ -543,6 +556,41 @@ func TestComputeMV_MV10(t *testing.T) {
 			}
 		})
 	}
+}
+
+// MV10 shows the slowest start, which is what it is judged on, and says which readings are missing.
+func TestComputeMV_MV10_ShowsTheWorstReading(t *testing.T) {
+	run := func(start, seek []float64, notes ...string) MV {
+		f := newFixture(androidModel)
+		f.add("S7", map[string][]float64{"startMs": start, "seekMs": seek}, notes...)
+		return ComputeMV(f.list())[mvKey(androidDevice, "MV10")]
+	}
+	t.Run("all 20 within the limits", func(t *testing.T) {
+		mv := run(append(rep(900, 19), 1800), append(rep(700, 19), 1400))
+		if !mv.Pass || mv.Value != 1800 {
+			t.Fatalf("MV10 = %+v, want a pass with the slowest start (1800 ms) as its value", mv)
+		}
+		for _, want := range []string{"pornire max 1800 ms", "salt max 1400 ms", "20 din 20"} {
+			if !strings.Contains(mv.Text, want) {
+				t.Errorf("text %q lacks %q", mv.Text, want)
+			}
+		}
+	})
+	t.Run("two starts without a first frame", func(t *testing.T) {
+		mv := run(rep(900, 18), rep(700, 18), "start 3: no first frame within 10 s", "start 9: no first frame within 10 s")
+		if mv.Pass || !math.IsInf(mv.Value, 1) {
+			t.Fatalf("MV10 = %+v, want a failure with an infinite value", mv)
+		}
+		if !strings.Contains(mv.Text, "pornire: doar 18 din 20 reușite") {
+			t.Errorf("text %q does not say that 18 of 20 starts came", mv.Text)
+		}
+	})
+	t.Run("a seek over the limit names the seek", func(t *testing.T) {
+		mv := run(rep(900, 20), append(rep(700, 19), 1501))
+		if mv.Pass || !strings.Contains(mv.Text, "salt max 1501 ms") {
+			t.Fatalf("MV10 = %+v, want a failure that shows the slowest seek (1501 ms)", mv)
+		}
+	})
 }
 
 func TestComputeMV_MV12AndMV13(t *testing.T) {
