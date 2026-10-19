@@ -256,6 +256,27 @@ func TestRun_PassesTheMDNSFlagToNewAPI(t *testing.T) {
 	}
 }
 
+// The hub's HTTP port is IPv4 only, like its ICE (R25). Dual-stack, Firefox at
+// http://localhost reaches it over [::1] and then, without a camera permission,
+// looks for its default IPv6 address only; on a host without an IPv6 route it
+// gathers no ICE candidate and never connects.
+func TestDefaultListen_IsIPv4Only(t *testing.T) {
+	ln, err := env{}.withDefaults().listen(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	addr := ln.Addr().(*net.TCPAddr)
+	if addr.IP.To4() == nil {
+		t.Errorf("the hub listens on %v, want an IPv4 address (0.0.0.0)", addr)
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("::1", strconv.Itoa(addr.Port)), time.Second)
+	if err == nil {
+		_ = conn.Close()
+		t.Errorf("a client reached the hub over [::1]:%d, want it refused so that the browser falls back to 127.0.0.1", addr.Port)
+	}
+}
+
 func TestRun_ExplainsMissingMediaInRomanian(t *testing.T) {
 	captureLogs(t)
 	err := run(t.Context(), []string{"-media", filepath.Join(t.TempDir(), "nope"), "-port", "0", "-mdns=false"}, env{stdout: io.Discard, stderr: io.Discard})
