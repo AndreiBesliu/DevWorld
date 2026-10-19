@@ -309,7 +309,7 @@ func gateG5(mv map[string]MV) Gate {
 			if len(tiles) > 0 {
 				decision = append(decision, fmt.Sprintf("Pică și MV4/main: %s, deci ce se face cu ecranul complet se decide separat, împreună cu dvs., la analiza rezultatelor, în PR-ul raportului (R54).", fullscreenSoftware))
 			} else {
-				decision = append(decision, fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar pică MV4/main: %s. Specificația trece MV4 doar printre pragurile critice cu 9 plăci, deci verdictul e GO condiționat, nu NO-GO mobil (R54). Ce se face cu ecranul complet se decide împreună cu dvs., la analiza rezultatelor, în PR-ul raportului.", fullscreenSoftware))
+				decision = append(decision, fmt.Sprintf("Pragurile critice de bază (cu 4 plăci) trec, dar pică MV4/main: %s. Specificația trece MV4 doar printre pragurile critice cu 9 plăci, deci verdictul e GO condiționat, nu NO-GO mobil (R54). Ce se face cu ecranul complet se decide împreună cu dvs., la analiza rezultatelor, în PR-ul raportului.", fullscreenSoftware))
 			}
 			change = append(change, "Decizia proprietarului asupra ecranului complet decodat software (MV4/main): de completat de proprietar. O decizie tehnică ce rezultă de aici se scrie în §2.2, cu trimitere la G5.")
 		}

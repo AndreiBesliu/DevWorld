@@ -220,7 +220,7 @@ func explain(g Gate) string {
 		case !fullscreen:
 			return fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar cu 9 plăci pică %s. Plafonul de 9 plăci pe telefon (A6) se schimbă doar cu aprobarea dvs.", labels(tiles, false))
 		case len(tiles) == 0:
-			return fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar pică MV4/main: %s. Ce se face cu ecranul complet se decide împreună cu dvs. (R54).", fullscreenSoftware)
+			return fmt.Sprintf("Pragurile critice de bază (cu 4 plăci) trec, dar pică MV4/main: %s. Ce se face cu ecranul complet se decide împreună cu dvs. (R54).", fullscreenSoftware)
 		default:
 			return fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar cu 9 plăci pică %s. Plafonul de 9 plăci pe telefon (A6) se schimbă doar cu aprobarea dvs. Pică și MV4/main: %s (R54).", labels(tiles, false), fullscreenSoftware)
 		}

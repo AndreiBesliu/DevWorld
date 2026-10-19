@@ -238,13 +238,15 @@ func isIPv6(text string, start, end int) bool {
 // isMAC says whether the match at text[start:end] is a whole MAC address: not glued to a
 // letter or a digit, and not a part of a longer run of hex groups. A ":" or "-" before it
 // belongs to a label (MAC:, wlan0:, eth-) unless what precedes it is a group of its own, two
-// hex digits ("00:aa:bb:cc:dd:ee:ff" is seven groups).
+// hex digits ("00:aa:bb:cc:dd:ee:ff" is seven groups). The label may end in a letter of any
+// script ("fizică:").
 func isMAC(text string, start, end int) bool {
 	switch before := charBefore(text, start); {
 	case before == ':' || before == '-':
 		from := start - 1
-		for from > 0 && isASCIIAlnum(rune(text[from-1])) {
-			from--
+		for from > 0 && isAlnum(charBefore(text, from)) {
+			_, size := utf8.DecodeLastRuneInString(text[:from])
+			from -= size
 		}
 		if label := text[from : start-1]; label == "" || len(label) == 2 && isHex(label) {
 			return false

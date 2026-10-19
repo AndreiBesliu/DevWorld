@@ -675,6 +675,14 @@ func TestR54_ASoftwareFullscreenDecoderIsGOConditionatWithItsOwnReason(t *testin
 		if anyLineHasAll(summary, "**GO condiționat**", "cu 9 plăci pică") {
 			t.Errorf("the summary says a 9-tile item failed:\n%s", summary)
 		}
+		// MV4/main is itself critical (R54), so "everything critical passes" would contradict the
+		// MV4/main row that shows a software decode in S3-4.
+		if anyLineHasAll(summary, "**GO condiționat**", "trece tot ce e critic") || strings.Contains(g.Decision, "trece tot ce e critic") {
+			t.Errorf("the summary or G5 says every critical item passes while MV4/main fails:\n%s\n%s", summary, g.Decision)
+		}
+		if !anyLineHasAll(summary, "**GO condiționat**", "Pragurile critice de bază (cu 4 plăci) trec") {
+			t.Errorf("the summary does not name the basis that passes:\n%s", summary)
+		}
 		if !anyLineHasAll(summary, "De decis de dvs.", "ecranul complet", "MV4/main") || anyLineHasAll(summary, "De decis de dvs.", "A6") {
 			t.Errorf("the summary asks the owner about the wrong decision:\n%s", summary)
 		}

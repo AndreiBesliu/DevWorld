@@ -104,6 +104,7 @@ func TestScan_MAC(t *testing.T) {
 		{"eth-AA-BB-CC-DD-EE-01", "AA-BB-CC-DD-EE-01"},
 		{"MAC-aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff"},
 		{"hub la 10.x și MAC:aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff"},
+		{"Adresa fizică:aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff"},
 		{"_aa:bb:cc:dd:ee:ff_", "aa:bb:cc:dd:ee:ff"},
 	} {
 		expectOne(t, tc.text, MAC, tc.want)
