@@ -1,8 +1,12 @@
 // Command spikehub is the hub of the Phase 0 (b) video spike: it serves the
-// spike app, simulated cameras (and, with -real, up to four real ones) over
-// WebRTC, the HLS recording, and stores the results that the app uploads.
+// spike app, simulated cameras over WebRTC, the HLS recording, and stores the
+// results that the app uploads.
 //
-//	spikehub [-media DIR] [-sims 16] [-port 7080] [-results DIR] [-mdns=true] [-real]
+//	spikehub [-media DIR] [-sims 16] [-port 7080] [-results DIR] [-mdns=true]
+//	spikehub -real
+//
+// With -real it serves nothing: it probes up to four of the owner's real
+// cameras, prints what each sends and exits (R43, real.go).
 //
 // See ipcam/docs/superpowers/plans/2026-10-18-phase0b-video-spike.md, Task 6.
 // The routes are:
@@ -14,8 +18,7 @@
 //	POST /spike/v1/results      a scenario result, stored in the results folder
 //
 // The camera numbers that the list and the "sent" messages carry are 1 to 16
-// for sim-01 to sim-16, 17 for mx-h265, 18 for mx-high51 and 19 to 22 for
-// real-1 to real-4 (R1, R3).
+// for sim-01 to sim-16, 17 for mx-h265 and 18 for mx-high51 (R1, R3).
 package main
 
 import (
@@ -70,7 +73,7 @@ func parseFlags(args []string, out io.Writer) (config, error) {
 	flags.IntVar(&cfg.port, "port", 7080, "TCP port of the hub (0 picks a free one)")
 	flags.StringVar(&cfg.results, "results", "./results", "folder for the results files")
 	flags.BoolVar(&cfg.mdns, "mdns", true, "resolve the .local candidates of browsers with mDNS")
-	flags.BoolVar(&cfg.real, "real", false, "ask for up to 4 RTSP URLs of real cameras (typed hidden, kept in memory only)")
+	flags.BoolVar(&cfg.real, "real", false, "only probe up to 4 real cameras, whose RTSP URLs are typed hidden, and exit; serves nothing")
 	if err := flags.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -91,8 +94,8 @@ func parseFlags(args []string, out io.Writer) (config, error) {
 // A nil field takes the default.
 type env struct {
 	stdout, stderr io.Writer
-	// askSecret asks for the RTSP URLs of -real. The default reads the terminal,
-	// hidden.
+	// askSecret asks for the RTSP URLs of -real, and for its final Enter. The
+	// default reads the terminal, hidden.
 	askSecret askFunc
 	// listen opens the hub's port. The default listens on all IPv4 interfaces:
 	// a phone needs every interface, and IPv4 only matches the hub's ICE (R25).
@@ -108,6 +111,8 @@ type env struct {
 	newAPI func(mdns bool) (*webrtc.API, bool, error)
 	// clock paces the simulated cameras; the default is the system clock.
 	clock source.Clock
+	// realFrameTimeout is how long -real waits for a camera's first frame.
+	realFrameTimeout time.Duration
 }
 
 func (e env) withDefaults() env {
@@ -128,6 +133,9 @@ func (e env) withDefaults() env {
 	}
 	if e.clock == nil {
 		e.clock = source.SystemClock{}
+	}
+	if e.realFrameTimeout == 0 {
+		e.realFrameTimeout = realFrameTimeout
 	}
 	return e
 }
@@ -155,7 +163,8 @@ func waitForEnter() {
 	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 }
 
-// run starts the hub and serves until ctx is done.
+// run starts the hub and serves until ctx is done, or with -real probes the
+// real cameras and returns.
 func run(ctx context.Context, args []string, e env) error {
 	e = e.withDefaults()
 	cfg, err := parseFlags(args, e.stderr)
@@ -165,6 +174,9 @@ func run(ctx context.Context, args []string, e env) error {
 	// source and session log through the default logger.
 	slog.SetDefault(slog.New(slog.NewTextHandler(e.stderr, nil)))
 	log := slog.Default()
+	if cfg.real {
+		return runRealProbe(ctx, e)
+	}
 
 	m, err := loadMedia(cfg.media)
 	if err != nil {
@@ -177,17 +189,6 @@ func run(ctx context.Context, args []string, e env) error {
 	cat, err := newCatalog(m, cfg.sims, e.clock)
 	if err != nil {
 		return err
-	}
-	if cfg.real {
-		ask := e.askSecret
-		if ask == nil {
-			if ask, err = newTerminalAsker(ctx, os.Stdin, e.stdout); err != nil {
-				return err
-			}
-		}
-		if err := addRealCameras(ctx, cat, ask, e.stderr, source.NewRTSP); err != nil {
-			return err
-		}
 	}
 
 	web, err := fs.Sub(webFiles, "web")
@@ -213,13 +214,9 @@ func run(ctx context.Context, args []string, e env) error {
 	port := ln.Addr().(*net.TCPAddr).Port
 	lan, lanErr := e.lan()
 	writeBanner(e.stdout, bannerInfo{
-		port: port, lan: lan, lanErr: lanErr, sims: cfg.sims, real: cat.real, resultsDir: cfg.results, mdnsUnavailable: mdnsUnavailable,
+		port: port, lan: lan, lanErr: lanErr, sims: cfg.sims, resultsDir: cfg.results, mdnsUnavailable: mdnsUnavailable,
 	})
-	log.Info("spikehub listens", "port", port, "sims", cfg.sims, "real", cat.real, "mdnsUnavailable", mdnsUnavailable)
-	for i := 1; i <= cat.real; i++ {
-		id := fmt.Sprintf("real-%d", i)
-		go warnWhenSilent(ctx, e.stderr, id, cat.sources[id+"/main"], silentCameraTimeout)
-	}
+	log.Info("spikehub listens", "port", port, "sims", cfg.sims, "mdnsUnavailable", mdnsUnavailable)
 
 	srv := &http.Server{
 		Handler:           h.Handler(),

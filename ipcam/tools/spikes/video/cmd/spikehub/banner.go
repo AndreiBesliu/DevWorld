@@ -61,9 +61,8 @@ type bannerInfo struct {
 	lan  []lanAddr
 	// lanErr is why the interfaces could not be listed; lan is empty then.
 	lanErr error
-	// sims is the number of simulated cameras, real the number of real ones
-	// (real-1 to real-N).
-	sims, real      int
+	// sims is the number of simulated cameras.
+	sims            int
 	resultsDir      string
 	mdnsUnavailable bool
 }
@@ -101,13 +100,6 @@ func writeBanner(w io.Writer, b bannerInfo) {
 	p("  - telefonul și calculatorul trebuie să fie în aceeași subrețea.")
 	p("")
 	p("Camere simulate: %d, plus 2 pentru matricea de coduri (mx-h265, mx-high51).", b.sims)
-	if b.real > 0 {
-		names := make([]string, b.real)
-		for i := range names {
-			names[i] = fmt.Sprintf("real-%d", i+1)
-		}
-		p("Camere reale: %s.", strings.Join(names, ", "))
-	}
 	if b.mdnsUnavailable {
 		p("")
 		p("Atenție: portul mDNS (UDP 5353) nu a putut fi deschis, deci spikehub nu poate rezolva")

@@ -46,7 +46,7 @@ func TestBanner_ListsPrivateURLsAndFirewallHint(t *testing.T) {
 
 func TestBanner_UsesCommaBelowDiacritics(t *testing.T) {
 	var out bytes.Buffer
-	writeBanner(&out, bannerInfo{port: 7080, mdnsUnavailable: true, real: 2})
+	writeBanner(&out, bannerInfo{port: 7080, mdnsUnavailable: true, lan: []lanAddr{{Name: "Wi-Fi", IP: net.IPv4(192, 168, 1, 12)}}})
 	// ş and ţ (with cedilla) are the Turkish letters; Romanian has ș and ț.
 	if strings.ContainsAny(out.String(), "şţŞŢ") {
 		t.Errorf("banner uses cedilla letters:\n%s", out.String())
@@ -99,14 +99,6 @@ func TestBanner_ReportsAnInterfaceListingError(t *testing.T) {
 	}
 	if strings.Contains(text, "Nu am găsit nicio rețea privată") {
 		t.Errorf("banner says that no private network was found, but the listing failed:\n%s", text)
-	}
-}
-
-func TestBanner_CountsRealCameras(t *testing.T) {
-	var out bytes.Buffer
-	writeBanner(&out, bannerInfo{port: 7080, sims: 4, real: 2})
-	if !strings.Contains(out.String(), "real-1, real-2") {
-		t.Errorf("banner does not name the real cameras:\n%s", out.String())
 	}
 }
 

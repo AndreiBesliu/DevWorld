@@ -15,10 +15,6 @@ const (
 	maxSims            = 16
 	cameraMatrixH265   = 17
 	cameraMatrixHigh51 = 18
-	// firstRealCamera is the number of real-1; real-N is firstRealCamera+N-1.
-	firstRealCamera = 19
-	// maxRealCameras is how many real cameras -real asks for.
-	maxRealCameras = 4
 )
 
 // stream is one pre-encoded file of cmd/mediagen's output, read once and
@@ -73,21 +69,21 @@ type camera struct {
 	Profiles     []string `json:"profiles"`
 }
 
-// catalog is the cameras of the hub and the sources that serve them. It is
-// built once at start; the sources live for the process (R28).
+// catalog is the cameras of the hub and the sources that serve them: the
+// simulators, and never a real camera (R43, see real.go). It is built once at
+// start; the sources live for the process (R28).
 type catalog struct {
 	cameras []camera
 	// sources maps "<camera id>/<profile>" (R2), for example "sim-04/sub", to the
 	// source a bind may name.
 	sources map[string]source.Source
-	real    int
 }
 
 // newCatalog starts the simulated cameras: sims of them with a sub and a main
 // stream, then the two cameras of the codec matrix. The matrix cameras play
 // their own file as main and the standard sub stream as sub, so that the
 // fallback to sub (G9) stays on the same camera. sims is 0 to maxSims: the
-// numbers above it belong to the codec matrix and the real cameras.
+// numbers above it belong to the codec matrix.
 func newCatalog(m *media, sims int, clock source.Clock) (*catalog, error) {
 	if sims < 0 || sims > maxSims {
 		return nil, fmt.Errorf("%d simulated cameras; the hub serves 0 to %d", sims, maxSims)
@@ -126,15 +122,4 @@ func newSim(id string, number uint8, profile string, s stream, clock source.Cloc
 	const cameras = maxSims + 2
 	phase := (int(number) - 1) * (len(s.aus) / cameras)
 	return source.NewSim(id, number, s.aus, s.fps, phase, clock, source.WithStreamProfile(profile))
-}
-
-// addReal lists a real camera, named by its source's ID ("real-1" and so on). A
-// real camera has one stream, which the hub serves as both main and sub.
-func (c *catalog) addReal(src source.Source) {
-	c.real++
-	c.sources[src.ID()+"/main"] = src
-	c.sources[src.ID()+"/sub"] = src
-	c.cameras = append(c.cameras, camera{
-		ID: src.ID(), Camera: firstRealCamera + c.real - 1, Codec: string(src.Codec()), Profiles: []string{"main", "sub"},
-	})
 }

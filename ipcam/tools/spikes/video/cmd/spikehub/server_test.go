@@ -200,6 +200,25 @@ func TestOffer_ReturnsSDPAnswer(t *testing.T) {
 	}
 }
 
+// No client can watch a real camera through the hub (R43): a bind of real-1,
+// with or without -real, names no camera.
+func TestOffer_ABindOfARealCameraNamesNoCamera(t *testing.T) {
+	hub := newTestHub(t, 4)
+	c := newOfferClient(t, 1)
+	c.connect(t, hub)
+
+	for epoch, profile := range []string{"main", "sub"} {
+		bind := fmt.Sprintf(`{"t":"bind","slot":0,"cam":"real-1","profile":%q,"epoch":%d}`, profile, epoch+1)
+		if err := c.dc.SendText(bind); err != nil {
+			t.Fatal(err)
+		}
+		want := fmt.Sprintf(`{"t":"error","slot":0,"epoch":%d,"code":"UNKNOWN_CAMERA"}`, epoch+1)
+		if m := c.next(t, "error"); m != want {
+			t.Errorf("bind real-1/%s: %s, want %s", profile, m, want)
+		}
+	}
+}
+
 func TestOffer_RejectsBadRequests(t *testing.T) {
 	hub := newTestHub(t, 1)
 	post := func(body string) int {

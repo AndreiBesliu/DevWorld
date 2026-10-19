@@ -156,26 +156,20 @@ func TestCatalog_CodecMatrixCamerasKeepTheStandardSubstream(t *testing.T) {
 	}
 }
 
-func TestCatalog_ListsRealCamerasAfterTheMatrixCameras(t *testing.T) {
-	cat, _ := newTestCatalog(t, 2)
-	realSim := source.NewSim("real-1", 99, oneAU(), 20, 0, newFakeClock())
-	cat.addReal(realSim)
-
-	last := cat.cameras[len(cat.cameras)-1]
-	if last.ID != "real-1" || last.Camera != 19 || last.Codec != "H264" || !slices.Equal(last.Profiles, []string{"main", "sub"}) {
-		t.Errorf("last camera = %+v, want real-1, camera 19, H264, profiles main and sub", last)
+// Real cameras are never served (R43): spikehub -real only probes them, and
+// the catalog that sessions bind from holds the simulators alone.
+func TestCatalog_HasNoRealCameras(t *testing.T) {
+	cat, _ := newTestCatalog(t, maxSims)
+	for key := range cat.sources {
+		if !strings.HasPrefix(key, "sim-") && !strings.HasPrefix(key, "mx-") {
+			t.Errorf("the catalog serves %s", key)
+		}
 	}
-	if cat.sources["real-1/main"] != realSim || cat.sources["real-1/sub"] != realSim {
-		t.Error("real-1 is not served as main and sub")
+	for _, c := range cat.cameras {
+		if !strings.HasPrefix(c.ID, "sim-") && !strings.HasPrefix(c.ID, "mx-") {
+			t.Errorf("the camera list names %s", c.ID)
+		}
 	}
-	if got := cat.cameras[len(cat.cameras)-2].ID; got != "mx-high51" {
-		t.Errorf("camera before real-1 = %q, want mx-high51", got)
-	}
-}
-
-// oneAU returns a few access units for a source that the test registers as a real camera.
-func oneAU() []source.AccessUnit {
-	return []source.AccessUnit{{NALUs: [][]byte{{0x67, 0x4d, 0x40, 0x1f, 0xac}, {0x68, 0xee}, {0x65, 0x88, 0x80}}, IDR: true}}
 }
 
 func TestLoadMedia_NamesTheMissingFile(t *testing.T) {
