@@ -10,7 +10,10 @@
 // - switch (like a camera switch): bind without the unbind;
 // alternating sim-01/sub and sim-02/sub, playing 1 s plus a random 0 to 84 ms,
 // so that the binds fall at every phase of the cameras' frames (12 fps: one
-// frame every 83.3 ms).
+// frame every 83.3 ms). The session's first bind is no re-bind; in CI, as the
+// first bind after the hub and Chrome started, it once took 115 ms to its first
+// frame (which arrived 103 ms after the bind). It is a warm-up, reported and
+// not judged; S1 judges first binds against HUB-06's 1.5 s.
 //
 // A bind passes when its first presented frame arrived after the bind (rVFC
 // receiveTime ≥ bind time) and was presented within 100 ms of it, and the
@@ -44,7 +47,7 @@ for (const mode of ['b2b', 'switch'] as const) {
   test(`HUB-06 re-binds (${mode}): each bind's own first frame and its frames within ${LIMIT_MS} ms`, { tag: '@chrome' }, async ({ page }) => {
     // Same origin as the hub, for its offer endpoint.
     await page.goto('/spike/v1/cameras');
-    const { binds, hubErrors } = await page.evaluate(
+    const { warmUp, binds, hubErrors } = await page.evaluate(
       async ({ count, mode, playMs, jitterMs }) => {
         const pc = new RTCPeerConnection({ iceServers: [] });
         const slot0 = pc.addTransceiver('video', { direction: 'recvonly' });
@@ -101,12 +104,18 @@ for (const mode of ['b2b', 'switch'] as const) {
           return found;
         };
 
+        // The warm-up bind (epoch 0), on the camera that the first re-bind leaves.
+        const warmUpAt = performance.now();
+        dc.send(JSON.stringify({ t: 'bind', slot: 0, cam: 'sim-02', profile: 'sub', epoch: 0 }));
+        await sleep(playMs);
+        const warmUp = presented.find((frame) => frame.received !== null && frame.received >= warmUpAt);
+
         const binds: Bind[] = [];
         let before = await inbound();
         for (let epoch = 1; epoch <= count; epoch++) {
           const cam = epoch % 2 === 1 ? 'sim-01' : 'sim-02';
           const t0 = performance.now();
-          if (mode === 'b2b' && epoch > 1) dc.send(JSON.stringify({ t: 'unbind', slot: 0 }));
+          if (mode === 'b2b') dc.send(JSON.stringify({ t: 'unbind', slot: 0 }));
           dc.send(JSON.stringify({ t: 'bind', slot: 0, cam, profile: 'sub', epoch }));
           await sleep(playMs);
           const mine = presented.filter((frame) => frame.display >= t0 && frame.display < t0 + playMs);
@@ -130,7 +139,14 @@ for (const mode of ['b2b', 'switch'] as const) {
           before = after;
         }
         pc.close();
-        return { binds, hubErrors };
+        return {
+          warmUp:
+            warmUp === undefined || warmUp.received === null
+              ? null
+              : { ms: round(warmUp.display - warmUpAt), receivedMs: round(warmUp.received - warmUpAt) },
+          binds,
+          hubErrors,
+        };
       },
       { count: BINDS, mode, playMs: PLAY_MS, jitterMs: JITTER_MS },
     );
@@ -145,7 +161,8 @@ for (const mode of ['b2b', 'switch'] as const) {
     console.log(
       `e2e: re-binds ${mode}, jitter ${JITTER_MS} ms: ${binds.length - failed.length}/${binds.length} ok; ` +
         `first frame median ${median(firsts)} ms, max ${Math.max(...firsts)} ms; ` +
-        `arrival to display median ${median(holds)} ms, max ${Math.max(...holds)} ms`,
+        `arrival to display median ${median(holds)} ms, max ${Math.max(...holds)} ms; ` +
+        `warm-up bind: ${warmUp === null ? 'no frame' : `first frame ${warmUp.ms} ms, arrived ${warmUp.receivedMs} ms`}`,
     );
 
     expect(hubErrors, 'errors from the hub').toEqual([]);
