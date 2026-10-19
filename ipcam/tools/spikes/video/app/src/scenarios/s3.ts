@@ -164,7 +164,8 @@ type Decoder = Pick<TileStats, 'decoder' | 'powerEfficient'>;
 async function decoderWindow(run: Run, session: SpikeSession, tracks: string[]): Promise<Map<string, Decoder> | 'n/a'> {
   const { stage, t } = run.env;
   // The explanation stays on screen while the camera is held, that is while its light is on.
-  stage.say(t('mv4Explain'));
+  // Only on the phone does a refusal cost a verdict (MV4 is an AND-1 item).
+  stage.say(t(run.env.device.platform === 'android' ? 'mv4ExplainAndroid' : 'mv4Explain'));
   const release = await run.env.captureForDecoderInfo();
   if (release === 'n/a') {
     stage.say('');

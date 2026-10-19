@@ -125,6 +125,27 @@ describe('S5', () => {
     expect(result.interruption).toEqual({ kind: 'early-return', backgroundS: 45 });
   });
 
+  it('S5_keptSessionLostBeforeTheFirstLiveFrame_isASessionLossNotAnMV9Failure', async () => {
+    // R49: the session is kept at a return before 60 s and watched again; if it fails while
+    // the app waits for the first live frame, the run is interrupted, not a measured MV9
+    // failure («no frame within 30 s of the return»).
+    const t = quietAfterTheFirstBind();
+
+    const { running } = await startAndHide(t);
+    await vi.advanceTimersByTimeAsync(40_000);
+    t.doc.show();
+    await vi.advanceTimersByTimeAsync(100); // bound again on the kept session, no frame yet
+    expect(t.sessions).toHaveLength(1);
+    t.session().setState('failed');
+    const result = await finish(running);
+
+    expect(result.notes).toContain('session: kept');
+    expect(result.interrupted).toBe(true);
+    expect(result.interruption?.kind).toBe('session-lost');
+    expect(result.samples.resumeMs).toBeUndefined();
+    expect(result.notes).not.toContain('no frame within 30 s of the return');
+  });
+
   it('S5_disconnectedForLessThan1sAtTheReturn_keepsTheSessionWhenItRecovers', async () => {
     const t = setup({ fakePlayer: true, hub: { fps: () => 12 } });
 

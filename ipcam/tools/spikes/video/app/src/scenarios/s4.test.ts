@@ -93,6 +93,43 @@ describe('S4', () => {
     for (const bind of mainBound) expect(bind.slot).toBe(16);
   });
 
+  it('S4_16TilesOn16Sims_everyPageMovesEveryTileAndTheFullscreenToAnotherCamera', async () => {
+    // The hub's default is 16 sims: with 16 tiles, paging by the number of tiles would bind
+    // every slot to the same camera on every page, and the fullscreen always to sim-01.
+    const cameras = Array.from({ length: 16 }, (_, i) => ({
+      id: `sim-${String(i + 1).padStart(2, '0')}`,
+      camera: i + 1,
+      codec: 'H264',
+      profiles: ['sub', 'main'],
+    }));
+    const t = setup({ fakePlayer: true, overrides: { cameras, device: { platform: 'windows-tauri', ua: 'Mozilla/5.0' } } });
+
+    await finish(runScenario('S4', t.env));
+
+    // The pages, in order: 9 tiles, then 16, then 9 ...; slot -> camera on each.
+    const tilesBound = t.session().binds.filter((bind) => bind.profile === 'sub');
+    const pages: Map<number, string>[] = [];
+    let at = 0;
+    for (let page = 0; at < tilesBound.length; page += 1) {
+      const n = page % 2 === 0 ? 9 : 16;
+      pages.push(new Map(tilesBound.slice(at, at + n).map((bind) => [bind.slot, bind.cam])));
+      at += n;
+    }
+    expect(pages).toHaveLength(30);
+    for (let page = 1; page < pages.length; page += 1) {
+      for (const [slot, cam] of pages[page] ?? []) {
+        const before = pages[page - 1]?.get(slot);
+        if (before !== undefined) expect(cam, `slot ${slot} on page ${page}`).not.toBe(before);
+      }
+    }
+    // Every slot shows every camera in turn over the run, not a subset of them.
+    expect(new Set(pages.map((page) => page.get(0))).size).toBe(16);
+    // The fullscreen shows another camera each time it comes back.
+    const mainBound = t.session().binds.filter((bind) => bind.profile === 'main');
+    expect(mainBound.length).toBeGreaterThan(5);
+    for (let i = 1; i < mainBound.length; i += 1) expect(mainBound[i]?.cam).not.toBe(mainBound[i - 1]?.cam);
+  });
+
   it('S4_tauriShell_recordsTheWebView2ProcessesWithTheMemory', async () => {
     const t = setup({
       fakePlayer: true,

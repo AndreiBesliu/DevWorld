@@ -64,9 +64,25 @@ describe('i18n', () => {
     // The explanation is shown in every shell and browser, not only in Chrome; the camera runs for short windows only (R47).
     expect(t('mv4Explain')).not.toMatch(/Chrome/);
     expect(t('mv4Explain')).toMatch(/cel mult 10 secunde/);
-    // Refusing costs the phone's verdict, not only one measurement.
-    expect(t('mv4Explain')).toMatch(/Dacă refuzați, .*verdictul pentru telefon nu se poate da/);
     expect(t('mv4Explain')).not.toMatch(/cât durează testul/);
+  });
+
+  it('i18n_mv4Explain_namesThePhonesVerdictOnlyOnThePhone', () => {
+    // The capture windows run in every shell and browser, also on the PC, where MV4 decides no
+    // verdict: there a refusal costs one measurement of the report, never the phone's verdict.
+    for (const lang of ['ro', 'en'] as const) {
+      const { t } = createI18n({ lang });
+      expect(t('mv4Explain')).not.toMatch(/telefon|phone/i);
+      expect(t('mv4ExplainAndroid')).toMatch(lang === 'ro' ? /cel mult 10 secunde/ : /at most 10 seconds/);
+    }
+    const { t } = createI18n({ lang: 'ro' });
+    expect(t('mv4Explain')).toMatch(/cel mult 10 secunde/);
+    expect(t('mv4Explain').endsWith(' Dacă refuzați, această măsurătoare lipsește din raport.')).toBe(true);
+    // On the phone, refusing costs the phone's verdict, not only one measurement.
+    expect(t('mv4ExplainAndroid')).toMatch(/Dacă refuzați, .*verdictul pentru telefon nu se poate da/);
+    // Both start alike: the guide quotes their first sentence.
+    expect(t('mv4ExplainAndroid').startsWith('Lumina camerei se va aprinde pentru cel mult 10 secunde.')).toBe(true);
+    expect(t('mv4Explain').startsWith('Lumina camerei se va aprinde pentru cel mult 10 secunde.')).toBe(true);
   });
 
   it('minutesAndSeconds_readsLikeTheClock', () => {

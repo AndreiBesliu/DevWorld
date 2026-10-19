@@ -41,7 +41,14 @@ const ro = {
   s10Question: 'A apărut o cerere de permisiune (de exemplu pentru rețeaua locală)?',
   yes: 'Da',
   no: 'Nu',
+  // MV4's camera note: on the PC paths (browsers, ipcam-desktop) MV4 decides no verdict, so a
+  // refusal only leaves the measurement out; on the phone it leaves the phone without a verdict.
   mv4Explain:
+    'Lumina camerei se va aprinde pentru cel mult 10 secunde. Aplicația pornește camera la 1 pixel, ' +
+    'pentru că doar așa află dacă video-ul se decodează hardware. ' +
+    'Nimic nu se înregistrează și nimic nu se trimite. ' +
+    'Dacă refuzați, această măsurătoare lipsește din raport.',
+  mv4ExplainAndroid:
     'Lumina camerei se va aprinde pentru cel mult 10 secunde. Aplicația pornește camera la 1 pixel, ' +
     'pentru că doar așa află dacă video-ul se decodează hardware. ' +
     'Nimic nu se înregistrează și nimic nu se trimite. ' +
@@ -102,6 +109,11 @@ const en: Record<MessageKey, string> = {
   yes: 'Yes',
   no: 'No',
   mv4Explain:
+    'The camera light will turn on for at most 10 seconds. The app starts the camera at 1 pixel, ' +
+    'because only then can it tell whether video is decoded in hardware. ' +
+    'Nothing is recorded and nothing is sent. ' +
+    'If you refuse, this measurement is missing from the report.',
+  mv4ExplainAndroid:
     'The camera light will turn on for at most 10 seconds. The app starts the camera at 1 pixel, ' +
     'because only then can it tell whether video is decoded in hardware. ' +
     'Nothing is recorded and nothing is sent. ' +

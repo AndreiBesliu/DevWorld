@@ -81,6 +81,27 @@ describe('S3', () => {
     expect(result.interrupted).toBe(false);
   });
 
+  it.each([
+    ['android', 'mv4ExplainAndroid'],
+    ['windows-tauri', 'mv4Explain'],
+    ['chrome', 'mv4Explain'],
+  ] as const)('S3_mv4Explain_onlyThePhoneHearsAboutThePhonesVerdict (%s)', async (platform, key) => {
+    const t = setup({
+      fakePlayer: true,
+      hub: { stats: { fps: 12, decoder: 'ExternalDecoder', powerEfficient: true } },
+      native: { metrics: () => Promise.resolve({ thermal: 'NONE', batteryPct: 80, charging: false }) },
+      overrides: {
+        device: { platform, ua: 'Mozilla/5.0' },
+        captureForDecoderInfo: () => Promise.resolve(() => undefined),
+      },
+    });
+
+    await finish(runScenario('S3-4', t.env));
+
+    expect(t.stage.said).toContain(t.env.t(key));
+    expect(t.stage.said.filter((text) => /verdictul pentru telefon/.test(text))).toEqual(platform === 'android' ? [t.env.t(key), t.env.t(key)] : []);
+  });
+
   it('S3_mv4Capture_onlyInTwoShortWindowsOutsideTheMV5AndMV6Windows', async () => {
     // R47: the camera runs at most 10 s before the grid's measurement and at
     // most 10 s after the fullscreen one; battery, heat, CPU and fps are

@@ -125,7 +125,7 @@ Dacă fereastra arată o eroare și «Apăsați Enter pentru a închide.»<!--hu
 4. Apăsați «Verifică conexiunea»<!--app-->. Trebuie să apară «Conectat: …»<!--app-->.
 5. Rulați întâi S10: apăsați «Pornește»<!--app--> pe rândul lui. Aplicația întreabă «A apărut o cerere de permisiune (de exemplu pentru rețeaua locală)?»<!--app-->. Răspundeți «Da»<!--app--> dacă browserul v-a cerut o permisiune pentru această pagină. Altfel, răspundeți «Nu»<!--app-->.
 6. Apoi rulați pe rând, cu «Pornește»<!--app-->: S1, S2, S3-9, S3-16, S4, S7 și S9.
-7. La S3-9 și S3-16, aplicația scrie «Lumina camerei se va aprinde pentru cel mult 10 secunde.»<!--app-->, iar browserul poate cere acces la cameră. Dacă PC-ul are o cameră web, permiteți. Motivul e explicat la pasul 5, la S3. Dacă PC-ul nu are cameră, nu apare nicio cerere.
+7. La S3-9 și S3-16, aplicația scrie «Lumina camerei se va aprinde pentru cel mult 10 secunde.»<!--app-->, iar browserul poate cere acces la cameră. Dacă PC-ul are o cameră web, permiteți. Motivul e explicat la pasul 5, la S3. Pe PC, un refuz nu împiedică niciun verdict; aplicația scrie: «Dacă refuzați, această măsurătoare lipsește din raport.»<!--app--> Dacă PC-ul nu are cameră, nu apare nicio cerere.
 8. La S9 pot apărea «profil video nesuportat»<!--app--> sau «calitate redusă: H.265 nesuportat»<!--app-->. Nu e o greșeală: exact asta verifică S9.
 
 ### Edge

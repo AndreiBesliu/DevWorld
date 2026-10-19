@@ -1,8 +1,11 @@
 // S4, MV7: stability over 30 min. The grid pages between two layouts every
-// 60 s (each page binds its tiles to the next cameras): 4 and 9 substream
-// tiles on Android, 9 and 16 on the desktop paths (R45: G6 judges MV7 with 16
-// tiles on WIN-1). The main stream of the first tile's camera goes fullscreen
-// on the extra slot, or leaves it, every 90 s. Memory is read every 30 s. A
+// 60 s: 4 and 9 substream tiles on Android, 9 and 16 on the desktop paths
+// (R45: G6 judges MV7 with 16 tiles on WIN-1). Each page moves every tile to
+// another camera: the cameras advance by a step that is coprime with the
+// number of sims (pageStep), so this holds with 16 tiles on the hub's 16 sims
+// too, and over the pages each tile shows every sim. The main stream of the
+// first tile's camera of the current page goes fullscreen on the extra slot,
+// or leaves it, every 90 s. Memory is read every 30 s. A
 // player `error` while its tile is meant to play counts as unprovoked: the
 // scenario stops a player before it unbinds its slot, so it causes none itself.
 //
@@ -29,6 +32,25 @@ const FULLSCREEN_EVERY_MS = 90_000;
 const PHONE_LAYOUTS = [4, 9] as const;
 const DESKTOP_LAYOUTS = [9, 16] as const;
 
+function gcd(a: number, b: number): number {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+/**
+ * How many cameras a page moves each tile on: the number of tile slots (the
+ * next cameras, when there are more sims than tiles) or the first larger
+ * number that is coprime with `sims`. Coprime, so that a page change moves
+ * every tile to another camera and a tile goes through every sim over the
+ * pages: with 16 tiles on 16 sims, a step of 16 would bind each tile to the
+ * same camera on every page. With one sim there is no other camera.
+ */
+export function pageStep(tileSlots: number, sims: number): number {
+  if (sims <= 1) return 1;
+  let step = Math.max(1, tileSlots);
+  while (gcd(step, sims) !== 1) step += 1;
+  return step;
+}
+
 async function sampleMemory(run: Run, heap: number[]): Promise<void> {
   const heapMb = run.env.jsHeapMb();
   if (heapMb !== undefined) {
@@ -49,6 +71,7 @@ export const S4: ScenarioDefinition = {
     const sims = run.sims();
     const layouts = run.env.device.platform === 'android' ? PHONE_LAYOUTS : DESKTOP_LAYOUTS;
     const tileSlots = Math.max(...layouts);
+    const step = pageStep(tileSlots, sims.length);
     const session = await run.session(tileSlots);
     run.sample('tiles', tileSlots);
     if (!run.env.native) run.note('native metrics: n/a');
@@ -95,7 +118,7 @@ export const S4: ScenarioDefinition = {
       const videos = stage.grid(n);
       const starts = videos.map((video, slot) => {
         tilePlayers[slot] ??= track(run.player(video, session, slot));
-        const cam = sims[(page * tileSlots + slot) % sims.length];
+        const cam = sims[(page * step + slot) % sims.length];
         const player = tilePlayers[slot];
         return player && cam ? startSlot(player, slot, cam, 'sub') : Promise.resolve();
       });
@@ -109,7 +132,7 @@ export const S4: ScenarioDefinition = {
       }
       fullscreenPlayer ??= track(run.player(stage.fullscreen(), session, tileSlots));
       stage.fullscreen();
-      const cam = sims[(page * tileSlots) % sims.length];
+      const cam = sims[(page * step) % sims.length];
       if (cam) await startSlot(fullscreenPlayer, tileSlots, cam, 'main');
     };
 
