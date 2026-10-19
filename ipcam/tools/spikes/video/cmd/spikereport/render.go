@@ -213,9 +213,17 @@ func (r Report) gate(id string) Gate {
 func explain(g Gate) string {
 	switch g.Verdict {
 	case VerdictGOProvizoriu:
-		return "Toate cele 9 praguri critice trec (MV1, MV2, MV3 cu 4 plăci, MV4 pe ecran complet, MV9, MV10 și, cu 9 plăci, MV3, MV4, MV5). Verdictul e provizoriu: iOS se măsoară în Faza 0-bis."
+		return "Toate cele 9 praguri critice trec (MV1, MV2, MV3 cu 4 plăci, MV9, MV10 și, cu 9 plăci, MV3, MV4 pe plăci și pe ecranul complet, MV5). Verdictul e provizoriu: iOS se măsoară în Faza 0-bis."
 	case VerdictGOConditionat:
-		return fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar cu 9 plăci pică %s. Plafonul de 9 plăci pe telefon (A6) se schimbă doar cu aprobarea dvs.", labels(g.Failed, false))
+		tiles, fullscreen := splitFullscreen(g.Failed)
+		switch {
+		case !fullscreen:
+			return fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar cu 9 plăci pică %s. Plafonul de 9 plăci pe telefon (A6) se schimbă doar cu aprobarea dvs.", labels(tiles, false))
+		case len(tiles) == 0:
+			return fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar pică MV4/main: %s. Ce se face cu ecranul complet se decide împreună cu dvs. (R54).", fullscreenSoftware)
+		default:
+			return fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar cu 9 plăci pică %s. Plafonul de 9 plăci pe telefon (A6) se schimbă doar cu aprobarea dvs. Pică și MV4/main: %s (R54).", labels(tiles, false), fullscreenSoftware)
+		}
 	case VerdictNOGOMobil:
 		return fmt.Sprintf("%s. Regula A3: ambele aplicații mobile trec pe Flutter (T29).", fell(g.Failed, false))
 	case VerdictIncomplete:
@@ -259,7 +267,15 @@ func (r Report) summary(d *doc) {
 		d.text("- **Nemăsurat încă:** nimic din ce cere planul pe dispozitive (spec §16.3).")
 	}
 	if g5.Verdict == VerdictGOConditionat {
-		d.text("- **De decis de dvs.:** plafonul de plăci pe telefon (A6, acum 9), vezi G5 mai jos.")
+		var decide []string
+		tiles, fullscreen := splitFullscreen(g5.Failed)
+		if len(tiles) > 0 {
+			decide = append(decide, "plafonul de plăci pe telefon (A6, acum 9)")
+		}
+		if fullscreen {
+			decide = append(decide, "ce se face cu ecranul complet decodat software (MV4/main)")
+		}
+		d.printf("- **De decis de dvs.:** %s, vezi G5 mai jos.", joinAnd(decide))
 	}
 	if keys := r.earlierKeys(); len(keys) > 0 {
 		d.printf("- **Atenție:** pentru %s, o rulare anterioară a aceluiași scenariu a picat pragul; valoarea o dă cea mai nouă rulare, dar eșecul rămâne în tabele, lângă valoare (R40).", labels(keys, true))
@@ -417,7 +433,11 @@ func (r Report) devicesSection(d *doc) {
 		}
 		d.text("**Dispozitiv:** " + strings.Join(facts, " · "))
 		if len(ask) > 0 {
-			d.printf("De completat de proprietar: %s (nu apar în rezultate).", joinAnd(ask))
+			verb := "nu apar"
+			if len(ask) == 1 {
+				verb = "nu apare"
+			}
+			d.printf("De completat de proprietar: %s (%s în rezultate).", joinAnd(ask), verb)
 		}
 		d.blank()
 		r.table(d, device)
@@ -824,7 +844,7 @@ func (r Report) limits(d *doc) {
 	d.text("- Pe WIN-1, CPU-ul și memoria aplicației (MV6, MV7) se folosesc doar dacă fiecare citire a găsit cel puțin un proces WebView2 (`webview2Procs` ≥ 1, R52); altfel pragul rămâne nemăsurat, iar G6 fără verdict.")
 	d.text("- Pe AND-1, MV7 e memoria procesului aplicației (PSS), fără randerul WebView, care e alt proces, deci o scurgere în rander nu apare în MV7. Heap-ul JS e rotunjit de Chromium acolo (randerul Android WebView nu e legat de un site), așa că o rulare S4 cu nota `jsHeap: bucketed` se judecă doar pe `memMb` (R46). Pe PC (Chrome, Edge, WebView2) heap-ul JS e precis, iar MV7 judecă heap-ul JS și memoria procesului.")
 	d.text("- Pe PC (WIN-1 și browsere), MV7 se judecă doar pe o rulare S4 cu 16 plăci (`tiles` = 16; G6 cere MV7 cu 16 plăci, R45); o rulare S4 cu mai puține plăci e listată ca informativă și nu decide. Pe AND-1, S4 paginează între 4 și 9 plăci (plafonul A6).")
-	d.text("- MV4 are două părți: plăcile grilei (MV4/4, MV4/9, critic cu 9 plăci) și ecranul complet (MV4/main, critic), judecat pe toate rulările de grilă care au citit decodorul fluxului principal; fluxul principal e același la orice grilă, deci un decodor software pe ecran complet nu e excepția celor 9 plăci.")
+	d.text("- MV4 are două părți: plăcile grilei (MV4/4, MV4/9) și ecranul complet (MV4/main), judecat pe toate rulările de grilă care au citit decodorul fluxului principal. Specificația trece MV4 doar printre pragurile critice cu 9 plăci, deci amândouă părțile se judecă alături de acestea (R54). Pentru ecranul complet motivul e separat: fluxul principal e același la orice grilă, deci plafonul de plăci (A6) nu rezolvă o decodare software, iar ce se face se decide cu proprietarul, la analiza rezultatelor.")
 	d.text("- Pierderile (`rtpLost`, `nack`, `pli`, `framesDropped`: sumele pe rulare din statisticile `inbound-rtp`) apar lângă MV1 și MV3 doar ca informație, fără prag (R50). Hub-ul răspunde la NACK, dar nu la PLI: camerele simulate redau fișiere pre-codate cu un GOP de 1 s, deci o placă își revine la următorul cadru-cheie, în cel mult o secundă.")
 	d.text("- În spike nu există STUN sau TURN (nici în aplicație, nici în hub), deci perechile srflx și relay nu pot apărea: la MV12 și MV13, „trece” înseamnă că s-a format o pereche directă în LAN. O pereche care nu se formează oprește orice scenariu pe acel dispozitiv, nu doar S10.")
 	d.text("- O rulare S3 cu o citire la încărcător (`charging` sau `mainCharging` = 1) e invalidă (R48), iar o rulare întreruptă, din orice motiv (inclusiv pierderea sesiunii cu hub-ul, R49), nu e o măsurătoare; amândouă sunt listate la dispozitiv, sub «Rulări invalide».")

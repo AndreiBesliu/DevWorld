@@ -371,6 +371,16 @@ func TestWebView2Procs_MV6AndMV7NeedThem(t *testing.T) {
 		"MV7: a memory reading without WebView2": {"S4", "MV7", func(s map[string][]float64) { s["webview2Procs"][30] = 0 }, "absent"},
 		"MV7: no WebView2 count at all":          {"S4", "MV7", func(s map[string][]float64) { delete(s, "webview2Procs") }, "absent"},
 		"MV7: every reading with WebView2":       {"S4", "MV7", func(map[string][]float64) {}, "pass"},
+		// The fail-closed shell (R52): without a WebView2 process it leaves memMb out and
+		// counts 0 processes; the JS heap alone must not judge MV7 on WIN-1 (R46).
+		"MV7: the fail-closed shell dropped memMb": {"S4", "MV7", func(s map[string][]float64) {
+			delete(s, "memMb")
+			s["webview2Procs"] = rep(0, 61)
+		}, "absent"},
+		"MV7: neither memMb nor a WebView2 count": {"S4", "MV7", func(s map[string][]float64) {
+			delete(s, "memMb")
+			delete(s, "webview2Procs")
+		}, "absent"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := windowsGrid(16)
@@ -398,6 +408,51 @@ func TestWebView2Procs_MV6AndMV7NeedThem(t *testing.T) {
 			t.Errorf("G6 = %q, want %q", g.Verdict, VerdictIncomplete)
 		}
 	})
+	t.Run("WIN-1 MV7 needs the process memory, also with WebView2 found", func(t *testing.T) {
+		for name, mut := range map[string]func(s map[string][]float64){
+			"no memMb":    func(s map[string][]float64) { delete(s, "memMb") },
+			"empty memMb": func(s map[string][]float64) { s["memMb"] = nil },
+		} {
+			t.Run(name, func(t *testing.T) {
+				s := windowsStability()
+				mut(s)
+				f := newFixture(windowsModel)
+				f.add("S4", s)
+				rs := f.list()
+				if got := outcome(ComputeMV(rs), windowsDevice, "MV7"); got != "absent" {
+					t.Fatalf("MV7 = %s, want absent: the JS heap alone does not judge WIN-1 (R46)", got)
+				}
+				if why := evaluate(rs).reasonMissing(windowsDevice, "MV7"); !strings.Contains(why, "memorie: fără citiri de la shell") {
+					t.Errorf("why MV7 is missing = %q, want «memorie: fără citiri de la shell»", why)
+				}
+			})
+		}
+	})
+	for name, mut := range map[string]func(s map[string][]float64){
+		"G6 has no verdict when the fail-closed shell dropped memMb": func(s map[string][]float64) {
+			delete(s, "memMb")
+			s["webview2Procs"] = rep(0, 61)
+		},
+		"G6 has no verdict without memMb and without a WebView2 count": func(s map[string][]float64) {
+			delete(s, "memMb")
+			delete(s, "webview2Procs")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rs := allRuns()
+			mut(find(t, rs, windowsDevice, "S4").Samples)
+			mv := ComputeMV(rs)
+			if got := outcome(mv, windowsDevice, "MV6"); got != "pass" {
+				t.Fatalf("MV6 = %s, want pass: G6 must rest on MV7 alone here", got)
+			}
+			if got := outcome(mv, windowsDevice, "MV7"); got != "absent" {
+				t.Errorf("MV7 = %s, want absent", got)
+			}
+			if g := gateOf(t, rs, "G6"); g.Verdict != VerdictIncomplete {
+				t.Errorf("G6 = %q (%s), want %q", g.Verdict, g.Decision, VerdictIncomplete)
+			}
+		})
+	}
 	t.Run("only the Windows app counts WebView2 processes", func(t *testing.T) {
 		f := newFixture(browserDevice("chrome"))
 		f.add("S4", desktopStability())
@@ -555,8 +610,9 @@ func TestMV4_TheFullscreenDecoderIsItsOwnItem(t *testing.T) {
 	if got := outcome(mv, androidDevice, "MV4/main"); got != "fail" {
 		t.Errorf("MV4/main = %s, want fail", got)
 	}
-	if got := AndroidVerdict(mv); got == VerdictGOConditionat || got == VerdictGOProvizoriu {
-		t.Errorf("verdict = %q: a software fullscreen decoder is not the 9-tile exception", got)
+	// R54: the spec lists MV4 only among AND-1's 9-tile items, so alone it cannot give NO-GO.
+	if got := AndroidVerdict(mv); got != VerdictGOConditionat {
+		t.Errorf("verdict = %q, want %q (R54)", got, VerdictGOConditionat)
 	}
 	t.Run("hardware everywhere passes", func(t *testing.T) {
 		if v := mvOf(t, allRuns(), androidDevice, "MV4/main"); !v.Pass || !strings.Contains(v.Text, "hardware") {
@@ -577,6 +633,76 @@ func TestMV4_TheFullscreenDecoderIsItsOwnItem(t *testing.T) {
 		}
 		if got := AndroidVerdict(ComputeMV(rs)); got != VerdictIncomplete {
 			t.Errorf("verdict = %q, want %q", got, VerdictIncomplete)
+		}
+	})
+}
+
+// R54: a software decode of the fullscreen main stream fails MV4, which the spec lists only
+// among AND-1's extra 9-tile items. Alone it gives GO condiționat, with a reason of its own:
+// fewer tiles would not change the fullscreen decoder, so the A6 cap is not the remedy.
+func TestR54_ASoftwareFullscreenDecoderIsGOConditionatWithItsOwnReason(t *testing.T) {
+	const reason = "ecranul complet e decodat software; plafonul de plăci nu rezolvă asta"
+	software := func(t *testing.T, rs []Result) {
+		t.Helper()
+		for _, scenario := range []string{"S3-4", "S3-9"} {
+			find(t, rs, androidDevice, scenario).Samples["mainHardware"] = []float64{0}
+		}
+	}
+	summaryOf := func(t *testing.T, rs []Result) string {
+		t.Helper()
+		return section(t, render(t, rs), "## Rezumat pentru proprietar")
+	}
+	t.Run("alone", func(t *testing.T) {
+		rs := allRuns()
+		software(t, rs)
+		g := gateOf(t, rs, "G5")
+		if g.Verdict != VerdictGOConditionat {
+			t.Fatalf("G5 = %q, want %q", g.Verdict, VerdictGOConditionat)
+		}
+		if !strings.Contains(g.Decision, "MV4/main") || !strings.Contains(g.Decision, reason) {
+			t.Errorf("G5 decision %q, want MV4/main and «%s»", g.Decision, reason)
+		}
+		if strings.Contains(g.Decision, "cu 9 plăci pică") || strings.Contains(g.Decision, "snapshot") {
+			t.Errorf("G5 decision %q offers the tile cap as the remedy of a fullscreen decoder", g.Decision)
+		}
+		if !strings.Contains(g.Change, "de completat") {
+			t.Errorf("G5 change %q: the owner's answer must be a blank to fill in (PH0-30)", g.Change)
+		}
+		summary := summaryOf(t, rs)
+		if !anyLineHasAll(summary, "**GO condiționat**", "MV4/main", reason) {
+			t.Errorf("the summary does not give the fullscreen reason:\n%s", summary)
+		}
+		if anyLineHasAll(summary, "**GO condiționat**", "cu 9 plăci pică") {
+			t.Errorf("the summary says a 9-tile item failed:\n%s", summary)
+		}
+		if !anyLineHasAll(summary, "De decis de dvs.", "ecranul complet", "MV4/main") || anyLineHasAll(summary, "De decis de dvs.", "A6") {
+			t.Errorf("the summary asks the owner about the wrong decision:\n%s", summary)
+		}
+	})
+	t.Run("with a 9-tile failure", func(t *testing.T) {
+		rs := allRuns()
+		software(t, rs)
+		find(t, rs, androidDevice, "S3-9").Samples["tileFps"][5] = 6
+		g := gateOf(t, rs, "G5")
+		if g.Verdict != VerdictGOConditionat {
+			t.Fatalf("G5 = %q, want %q", g.Verdict, VerdictGOConditionat)
+		}
+		for _, want := range []string{"cu 9 plăci pică MV3/9", "A6", reason} {
+			if !strings.Contains(g.Decision, want) {
+				t.Errorf("G5 decision %q lacks %q", g.Decision, want)
+			}
+		}
+		summary := summaryOf(t, rs)
+		if !anyLineHasAll(summary, "**GO condiționat**", "MV3/9", reason) || !anyLineHasAll(summary, "De decis de dvs.", "A6", "ecranul complet") {
+			t.Errorf("the summary lacks one of the two decisions:\n%s", summary)
+		}
+	})
+	t.Run("a 4-tile failure still decides NO-GO mobil", func(t *testing.T) {
+		rs := allRuns()
+		software(t, rs)
+		find(t, rs, androidDevice, "S1").Samples["firstFrameMs"] = rep(5000, 20)
+		if g := gateOf(t, rs, "G5"); g.Verdict != VerdictNOGOMobil {
+			t.Errorf("G5 = %q, want %q", g.Verdict, VerdictNOGOMobil)
 		}
 	})
 }
@@ -714,6 +840,18 @@ func TestDevices_FactsComeFromTheResults(t *testing.T) {
 		phone := rowOf(t, deviceSection(t, md, "### AND-1"), "De completat")
 		if !strings.Contains(phone, "RAM") {
 			t.Errorf("AND-1 asks %q, want the RAM", phone)
+		}
+		// One missing fact takes the singular verb.
+		for device, line := range map[string]string{"WIN-1": ask, "AND-1": phone} {
+			if !strings.HasSuffix(line, "(nu apare în rezultate).") {
+				t.Errorf("%s asks %q, want one fact with «(nu apare în rezultate).»", device, line)
+			}
+		}
+	})
+	t.Run("several missing facts take the plural verb", func(t *testing.T) {
+		ask := rowOf(t, deviceSection(t, render(t, allRuns()), "### WIN-1"), "De completat")
+		if !strings.Contains(ask, " și ") || !strings.HasSuffix(ask, "(nu apar în rezultate).") {
+			t.Errorf("WIN-1 asks %q, want several facts with «(nu apar în rezultate).»", ask)
 		}
 	})
 }

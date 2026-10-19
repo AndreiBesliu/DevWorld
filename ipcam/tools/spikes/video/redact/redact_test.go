@@ -40,6 +40,11 @@ func TestScan_IPv4(t *testing.T) {
 		{"public 8.8.8.8.", "8.8.8.8"},
 		{"rtt to 0.0.0.0", "0.0.0.0"},
 		{"addr=255.255.255.255;", "255.255.255.255"},
+		{"_192.168.1.5_ in Markdown italics", "192.168.1.5"},
+		{"__10.0.0.7__ in bold", "10.0.0.7"},
+		{"hub/192.168.1.23", "192.168.1.23"}, // a path or a label, not a product's version
+		{"camera/10.0.0.5:554", "10.0.0.5"},
+		{"ip_10.1.2.3", "10.1.2.3"},
 	} {
 		expectOne(t, tc.text, IPv4, tc.want)
 	}
@@ -48,6 +53,9 @@ func TestScan_IPv4(t *testing.T) {
 		"an address of the form 192.168.x.x",   // the documented placeholder
 		"192.168.…",                            // an ellipsis form
 		"Chrome/141.0.0.0 and Edg/141.0.0.0",   // a browser version after its product token
+		"Chrome/141.0.7390.54 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.7390.122 Safari/537.36 Edg/141.0.3537.85",
+		"Firefox/144.0.2.1 and Gecko/20100101",
 		"com.google.android.webview 120.0.6099.230",
 		"Windows 10.0.26100.1",
 		"spec §16.2.3.1",         // a section number
@@ -68,6 +76,8 @@ func TestScan_IPv6(t *testing.T) {
 		{"link fe80::1%eth0 is up", "fe80::1%eth0"},
 		{"0:0:0:0:0:ffff:10.0.0.7", "0:0:0:0:0:ffff:10.0.0.7"},
 		{"remote ip:fe80::1 up", "fe80::1"}, // after a label and a colon
+		{"_fe80::1ff:fe23:4567:890a_ in italics", "fe80::1ff:fe23:4567:890a"},
+		{"addr_2001:db8::1_", "2001:db8::1"},
 	} {
 		expectOne(t, tc.text, IPv6, tc.want)
 	}
@@ -87,6 +97,14 @@ func TestScan_MAC(t *testing.T) {
 		{"mac aa:bb:cc:dd:ee:ff seen", "aa:bb:cc:dd:ee:ff"},
 		{"AA-BB-CC-DD-EE-01", "AA-BB-CC-DD-EE-01"},
 		{"cisco aabb.ccdd.ee01 form", "aabb.ccdd.ee01"},
+		// Right after a label and a colon or a dash.
+		{"MAC:aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff"},
+		{"mac:AA:BB:CC:DD:EE:FF seen", "AA:BB:CC:DD:EE:FF"},
+		{"wlan0:aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff"},
+		{"eth-AA-BB-CC-DD-EE-01", "AA-BB-CC-DD-EE-01"},
+		{"MAC-aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff"},
+		{"hub la 10.x și MAC:aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff"},
+		{"_aa:bb:cc:dd:ee:ff_", "aa:bb:cc:dd:ee:ff"},
 	} {
 		expectOne(t, tc.text, MAC, tc.want)
 	}
@@ -95,6 +113,10 @@ func TestScan_MAC(t *testing.T) {
 		"aa:bb:cc:dd:ee", // five groups
 		"10:20:30 is a time",
 		"aa:bb:cc:dd:ee:ff:00", // seven groups is not a MAC
+		"00:aa:bb:cc:dd:ee:ff", // seven groups, the first a hex pair: not a label
+		"aa-bb-cc-dd-ee-ff-01",
+		"MAC:aa:bb:cc:…",
+		"ab:aa:bb:cc:dd:ee:ff", // a hex label is a group, so seven groups
 	} {
 		expectNone(t, text)
 	}

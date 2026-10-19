@@ -6,12 +6,15 @@
 // Scan finds:
 //
 //   - IPv4 literals: four dotted numbers of at most 255, not part of a longer dotted
-//     number and not glued to a word; a version after its product token (Chrome/141.0.0.0)
-//     or a section number (§16.2.3.1) is not an address;
+//     number and not glued to a letter or a digit (an underscore is a boundary: Markdown
+//     emphasis, _192.168.1.5_); a version after a browser's product token (Chrome/141.0.0.0)
+//     or a section number (§16.2.3.1) is not an address, while one after any other word and a
+//     "/" is (hub/192.168.1.23);
 //   - IPv6 literals: full or compressed with ::, with an IPv4 tail or a zone, standing
-//     alone (std::string is a scope operator, not an address);
+//     alone (std::string is a scope operator, not an address; an underscore is a boundary);
 //   - MAC addresses: six pairs of hex digits joined by ":" or "-", or three groups of four
-//     joined by "." (aabb.ccdd.eeff);
+//     joined by "." (aabb.ccdd.eeff), also right after a label and its colon or dash
+//     (MAC:aa:bb:cc:dd:ee:ff, wlan0:…), but not as a part of a longer run of groups;
 //   - e-mail addresses;
 //   - rtsp:// and rtsps:// URLs, with or without credentials;
 //   - .local hostnames (mDNS names: a PC, a phone, a browser's candidate);
@@ -29,6 +32,7 @@ package redact
 
 import (
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -115,11 +119,13 @@ func Scan(text string) []Match {
 			add(IPv6, loc[0], loc[1])
 		}
 	}
-	for _, loc := range macPattern.FindAllStringIndex(text, -1) {
-		if standsAlone(text, loc[0], loc[1], "0123456789abcdefABCDEF:-.", "0123456789abcdefABCDEF:-") {
-			add(MAC, loc[0], loc[1])
+	eachMatch(macPattern, text, func(start, end int) bool {
+		if isMAC(text, start, end) {
+			add(MAC, start, end)
+			return true
 		}
-	}
+		return false
+	})
 	for _, loc := range emailPattern.FindAllStringSubmatchIndex(text, -1) {
 		if !isDocumentationDomain(text[loc[2]:loc[3]]) {
 			add(Email, loc[0], loc[1])
@@ -148,6 +154,48 @@ func Scan(text string) []Match {
 	return positioned(text, outermost(found))
 }
 
+// eachMatch calls keep with each match of re in text, left to right. After a match that keep
+// takes, the search goes on at its end; after one that it does not, at the next byte, so that
+// a rejected match does not hide one that overlaps it: in "MAC:aa:bb:cc:dd:ee:ff" the leftmost
+// match is "AC:aa:bb:cc:dd:ee", glued to a word, and the MAC starts three bytes later. The
+// patterns are ASCII, so a match never starts inside a multi-byte character.
+func eachMatch(re *regexp.Regexp, text string, keep func(start, end int) bool) {
+	for at := 0; at < len(text); {
+		loc := re.FindStringIndex(text[at:])
+		if loc == nil {
+			return
+		}
+		start, end := at+loc[0], at+loc[1]
+		if keep(start, end) {
+			at = end
+		} else {
+			at = start + 1
+		}
+	}
+}
+
+// versionTokens are the product tokens of the browsers' user agents that carry a version of
+// four dotted numbers that can look like an address (Chrome/141.0.0.0, Edg/141.0.0.0), lower
+// case. A dotted number after any other word and a "/" is a path or a label, and is reported.
+var versionTokens = []string{
+	"applewebkit", "chrome", "chromium", "crios", "edg", "edga", "edgios", "edge", "firefox", "fxios",
+	"gecko", "headlesschrome", "mozilla", "opr", "safari", "samsungbrowser", "version",
+}
+
+// isVersion says whether the dotted number at text[start:] follows a browser's product token
+// and a "/".
+func isVersion(text string, start int) bool {
+	if charBefore(text, start) != '/' {
+		return false
+	}
+	slash := start - 1
+	from := slash
+	for from > 0 && isASCIIAlnum(rune(text[from-1])) {
+		from--
+	}
+	return slices.Contains(versionTokens, strings.ToLower(text[from:slash]))
+}
+
 // isIPv4 says whether the dotted number at text[start:end] is an address to report.
 func isIPv4(text string, start, end int) bool {
 	for _, octet := range strings.Split(text[start:end], ".") {
@@ -159,14 +207,13 @@ func isIPv4(text string, start, end int) bool {
 		return false
 	}
 	before, after := charBefore(text, start), charAfter(text, end)
-	if isWordChar(before) || before == '.' || before == '§' {
+	if isAlnum(before) || before == '.' || before == '§' {
 		return false
 	}
-	// A version after its product token: Chrome/141.0.0.0, Edg/141.0.0.0.
-	if before == '/' && start >= 2 && isWordChar(rune(text[start-2])) {
+	if isVersion(text, start) {
 		return false
 	}
-	if isWordChar(after) {
+	if isAlnum(after) {
 		return false
 	}
 	// A longer dotted number (1.2.3.4.5) is a version.
@@ -185,16 +232,37 @@ func isIPv6(text string, start, end int) bool {
 	// A colon before the literal is a label's ("ip:fe80::1"); the literal itself never starts
 	// right after a group of its own, since the pattern would have taken that group in.
 	before, after := charBefore(text, start), charAfter(text, end)
-	return !isWordChar(before) && before != '.' && !isWordChar(after) && after != ':'
+	return !isAlnum(before) && before != '.' && !isAlnum(after) && after != ':'
 }
 
-// standsAlone: the characters right before and after text[start:end] are not in the given sets.
-func standsAlone(text string, start, end int, notBefore, notAfter string) bool {
-	before, after := charBefore(text, start), charAfter(text, end)
-	if before != 0 && (strings.ContainsRune(notBefore, before) || isWordChar(before)) {
+// isMAC says whether the match at text[start:end] is a whole MAC address: not glued to a
+// letter or a digit, and not a part of a longer run of hex groups. A ":" or "-" before it
+// belongs to a label (MAC:, wlan0:, eth-) unless what precedes it is a group of its own, two
+// hex digits ("00:aa:bb:cc:dd:ee:ff" is seven groups).
+func isMAC(text string, start, end int) bool {
+	switch before := charBefore(text, start); {
+	case before == ':' || before == '-':
+		from := start - 1
+		for from > 0 && isASCIIAlnum(rune(text[from-1])) {
+			from--
+		}
+		if label := text[from : start-1]; label == "" || len(label) == 2 && isHex(label) {
+			return false
+		}
+	case before == '.' || isAlnum(before):
 		return false
 	}
-	return after == 0 || !strings.ContainsRune(notAfter, after) && !isWordChar(after)
+	after := charAfter(text, end)
+	return !strings.ContainsRune(":-", after) && !isAlnum(after)
+}
+
+func isHex(s string) bool {
+	for _, c := range s {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return false
+		}
+	}
+	return true
 }
 
 func isDocumentationDomain(domain string) bool {
@@ -331,4 +399,8 @@ func isASCIIAlnum(c rune) bool {
 }
 
 // isWordChar: a letter (of any script), a digit or an underscore.
-func isWordChar(c rune) bool { return c == '_' || unicode.IsLetter(c) || unicode.IsDigit(c) }
+func isWordChar(c rune) bool { return c == '_' || isAlnum(c) }
+
+// isAlnum: a letter (of any script) or a digit. The address patterns take an underscore as a
+// boundary, because Markdown emphasis wraps a literal in it (_192.168.1.5_).
+func isAlnum(c rune) bool { return unicode.IsLetter(c) || unicode.IsDigit(c) }

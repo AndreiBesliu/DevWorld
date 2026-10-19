@@ -26,12 +26,14 @@ const (
 // The thresholds that the gates read. decisive derives from these lists, so a gate and the
 // list of failures outside the gates cannot go out of step.
 var (
-	// G5, the items of AND-1 that decide (Global Constraints): the LAN items with 4 tiles and the
-	// fullscreen decoder, and the 9-tile items. Failing one of the first is NO-GO; failing only
-	// 9-tile items is GO condiționat. The fullscreen part of MV4 is not a 9-tile item: the same
-	// main stream follows every grid, so fewer tiles would not fix it (report-7).
-	androidCritical4 = []string{"MV1", "MV2", "MV3/4", mv4MainCode, "MV9", "MV10"}
-	androidCritical9 = []string{"MV3/9", "MV4/9", "MV5/9"}
+	// G5, the items of AND-1 that decide (Global Constraints, spec §16.3): the LAN items with 4
+	// tiles, and the extra items "MV3, MV4 și MV5 cu 9 plăci". Failing one of the first is NO-GO;
+	// failing only extra items is GO condiționat. MV4 has a tile part and a fullscreen part
+	// (report-7); the spec lists MV4 only among the extra items, so its fullscreen part is one of
+	// them too, with a reason of its own: the same main stream follows every grid, so the A6
+	// tile cap does not fix a software decoder there (R54).
+	androidCritical4 = []string{"MV1", "MV2", "MV3/4", "MV9", "MV10"}
+	androidCritical9 = []string{"MV3/9", "MV4/9", mv4MainCode, "MV5/9"}
 	// G6, WIN-1: MV6 and MV7 with 16 tiles (spec §16.5 G6, R45); either failing is plan B.
 	windowsKeys = []string{mvKey(platformWindows, "MV6"), mvKey(platformWindows, "MV7")}
 	// G7, the web gate: MV13 on the three browsers, and MV12 in the two WebViews.
@@ -150,10 +152,11 @@ func assessWeb(mv map[string]MV, noMDNS []string) assessment {
 }
 
 // AndroidVerdict is the verdict of AND-1 in Phase 0 (LAN critical only, T41), from the map
-// of ComputeMV. Critical are MV1, MV2, MV3 with 4 tiles, MV9 and MV10, and MV3, MV4 and MV5
-// with 9 tiles. All pass: GO provizoriu (fără iOS). Only 9-tile items fail while the others
-// pass: GO condiționat. Any other failure: NO-GO mobil. A failed item decides even when
-// others were not measured; without a failure, a missing item leaves the verdict open.
+// of ComputeMV. Critical are MV1, MV2, MV3 with 4 tiles, MV9 and MV10, and MV3, MV4 (its
+// tiles and its fullscreen part, R54) and MV5 with 9 tiles. All pass: GO provizoriu (fără
+// iOS). Only 9-tile items fail while the others pass: GO condiționat. Any other failure:
+// NO-GO mobil. A failed item decides even when others were not measured; without a failure,
+// a missing item leaves the verdict open.
 func AndroidVerdict(mv map[string]MV) Verdict { return assessAndroid(mv).verdict }
 
 // WindowsVerdict is the verdict of WIN-1 (G6). Windows cannot cause NO-GO: when MV6 or MV7
@@ -271,6 +274,23 @@ func codeOfPair(platform string) string {
 	return "MV12"
 }
 
+// fullscreenSoftware is why a failed MV4/main gives GO condiționat without being about the
+// tile cap (R54): the fullscreen main stream is the same at every grid size.
+const fullscreenSoftware = "ecranul complet e decodat software; plafonul de plăci nu rezolvă asta"
+
+// splitFullscreen separates the fullscreen part of MV4 (MV4/main) from the 9-tile items among
+// the failed keys of G5: they lead to different decisions (R54).
+func splitFullscreen(failed []string) (tiles []string, fullscreen bool) {
+	for _, key := range failed {
+		if key == mvKey(platformAndroid, mv4MainCode) {
+			fullscreen = true
+			continue
+		}
+		tiles = append(tiles, key)
+	}
+	return tiles, fullscreen
+}
+
 func gateG5(mv map[string]MV) Gate {
 	a := assessAndroid(mv)
 	g := Gate{ID: "G5", Title: "Grila Android (AND-1)", Verdict: a.verdict, Result: string(a.verdict), Failed: a.failed, Missing: a.missing}
@@ -279,8 +299,22 @@ func gateG5(mv map[string]MV) Gate {
 		g.Decision = "Nicio decizie tehnică nouă. Shell-ul Android rămâne subțire (spike-ul și accesul pe LAN din Faza 1, T42), iar lucrul de interfață specific telefonului (pluginurile din §6.6 marcate cu Faza 4, ecrane sau gesturi doar pentru telefon) așteaptă verdictul iOS din Faza 0-bis."
 		g.Change = "Nimic în §2 sau în cerințe."
 	case VerdictGOConditionat:
-		g.Decision = fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar cu 9 plăci pică %s. Plafonul pe telefon (A6: maximum 9 plăci) se schimbă doar cu aprobarea dvs. Până la decizia dvs. plafonul rămâne 9, iar plăcile care nu pot decoda trec pe snapshot (§6.5).", labels(a.failed, false))
-		g.Change = "O schimbare aprobată se scrie în §2.1, ca modificare a lui A6, nu în §2.2. Decizia proprietarului asupra plafonului pe telefon: de completat de proprietar."
+		tiles, fullscreen := splitFullscreen(a.failed)
+		var decision, change []string
+		if len(tiles) > 0 {
+			decision = append(decision, fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar cu 9 plăci pică %s. Plafonul pe telefon (A6: maximum 9 plăci) se schimbă doar cu aprobarea dvs. Până la decizia dvs. plafonul rămâne 9, iar plăcile care nu pot decoda trec pe snapshot (§6.5).", labels(tiles, false)))
+			change = append(change, "O schimbare aprobată se scrie în §2.1, ca modificare a lui A6, nu în §2.2. Decizia proprietarului asupra plafonului pe telefon: de completat de proprietar.")
+		}
+		if fullscreen {
+			if len(tiles) > 0 {
+				decision = append(decision, fmt.Sprintf("Pică și MV4/main: %s, deci ce se face cu ecranul complet se decide separat, împreună cu dvs., la analiza rezultatelor, în PR-ul raportului (R54).", fullscreenSoftware))
+			} else {
+				decision = append(decision, fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar pică MV4/main: %s. Specificația trece MV4 doar printre pragurile critice cu 9 plăci, deci verdictul e GO condiționat, nu NO-GO mobil (R54). Ce se face cu ecranul complet se decide împreună cu dvs., la analiza rezultatelor, în PR-ul raportului.", fullscreenSoftware))
+			}
+			change = append(change, "Decizia proprietarului asupra ecranului complet decodat software (MV4/main): de completat de proprietar. O decizie tehnică ce rezultă de aici se scrie în §2.2, cu trimitere la G5.")
+		}
+		g.Decision = strings.Join(decision, " ")
+		g.Change = strings.Join(change, " ")
 	case VerdictNOGOMobil:
 		g.Decision = fmt.Sprintf("%s. Conform regulii A3, se aplică T29: ambele aplicații mobile trec împreună pe Flutter (opțiunea C), chiar dacă a picat o singură platformă; web-ul și Windows rămân pe opțiunea B. Flutter trebuie să treacă aceeași matrice înainte să fie adoptat.", fell(a.failed, false))
 		g.Change = "§2.2: Decizie tehnică (T29), cu trimitere la G5; un nou plan (brainstorming) pentru `apps/mobile-flutter`."

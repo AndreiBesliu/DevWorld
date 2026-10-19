@@ -419,9 +419,25 @@ func (e *evaluator) mv7() {
 	worst := math.Inf(-1)
 	haveSeries := false
 	bucketed := hasNote(r, bucketedHeapNote)
+	// WIN-1 judges the JS heap and the process memory (R46), so its MV7 always needs the
+	// process memory. The fail-closed shell (R52) leaves memMb out when it finds no WebView2
+	// process: the process count is checked first and on its own, and a missing memMb series
+	// is a missing reading, never a pass on the JS heap alone.
+	windowsMemory := true
+	if e.platform == platformWindows {
+		haveSeries = true
+		if problem := webview2Problem(r.Samples["webview2Procs"]); problem != "" {
+			checks = append(checks, lacking("memorie: "+problem))
+			windowsMemory = false
+		}
+		if len(r.Samples["memMb"]) == 0 {
+			checks = append(checks, lacking("memorie: fără citiri de la shell"))
+			windowsMemory = false
+		}
+	}
 	for _, s := range []struct{ key, name string }{{"memMb", "memorie"}, {"jsHeapMb", "heap JS"}} {
 		series := r.Samples[s.key]
-		if len(series) == 0 {
+		if len(series) == 0 || s.key == "memMb" && !windowsMemory {
 			continue
 		}
 		if s.key == "jsHeapMb" && bucketed {
@@ -429,13 +445,6 @@ func (e *evaluator) mv7() {
 			// process memory alone is judged.
 			checks = append(checks, notApplying("heap JS rotunjit de Chromium (jsHeap: bucketed), nu se judecă (R46)"))
 			continue
-		}
-		if s.key == "memMb" && e.platform == platformWindows {
-			if problem := webview2Problem(r.Samples["webview2Procs"]); problem != "" {
-				haveSeries = true
-				checks = append(checks, lacking("memorie: "+problem))
-				continue
-			}
 		}
 		haveSeries = true
 		growth, ok := memoryGrowth(series)

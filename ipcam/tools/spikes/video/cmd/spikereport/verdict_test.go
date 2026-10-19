@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-var androidCritical = []string{"MV1", "MV2", "MV3/4", "MV4/main", "MV9", "MV10", "MV3/9", "MV4/9", "MV5/9"}
+var androidCritical = []string{"MV1", "MV2", "MV3/4", "MV9", "MV10", "MV3/9", "MV4/9", "MV4/main", "MV5/9"}
 
 func androidKeys(codes ...string) []string {
 	out := make([]string, len(codes))
@@ -26,7 +26,8 @@ func TestAndroidVerdict_AllPass_GOProvizoriu(t *testing.T) {
 }
 
 func TestAndroidVerdict_Only9TileFails_GOConditionat(t *testing.T) {
-	for _, failing := range []string{"MV3/9", "MV4/9", "MV5/9"} {
+	// R54: the fullscreen decoder (MV4/main) is part of MV4, one of the 9-tile items.
+	for _, failing := range []string{"MV3/9", "MV4/9", "MV5/9", "MV4/main"} {
 		t.Run(failing, func(t *testing.T) {
 			mv := mvSet(androidKeys(androidCritical...), androidKeys(failing), nil)
 			if got := AndroidVerdict(mv); got != VerdictGOConditionat {
@@ -43,7 +44,7 @@ func TestAndroidVerdict_Only9TileFails_GOConditionat(t *testing.T) {
 }
 
 func TestAndroidVerdict_MV9Fails_NOGO(t *testing.T) {
-	for _, failing := range []string{"MV9", "MV1", "MV2", "MV3/4", "MV4/main", "MV10"} {
+	for _, failing := range []string{"MV9", "MV1", "MV2", "MV3/4", "MV10"} {
 		t.Run(failing, func(t *testing.T) {
 			mv := mvSet(androidKeys(androidCritical...), androidKeys(failing), nil)
 			if got := AndroidVerdict(mv); got != VerdictNOGOMobil {
@@ -53,6 +54,12 @@ func TestAndroidVerdict_MV9Fails_NOGO(t *testing.T) {
 	}
 	t.Run("a 4-tile failure with a 9-tile failure is still NO-GO", func(t *testing.T) {
 		mv := mvSet(androidKeys(androidCritical...), androidKeys("MV3/4", "MV3/9"), nil)
+		if got := AndroidVerdict(mv); got != VerdictNOGOMobil {
+			t.Errorf("verdict = %q, want %q", got, VerdictNOGOMobil)
+		}
+	})
+	t.Run("a 4-tile failure with a software fullscreen decoder is still NO-GO", func(t *testing.T) {
+		mv := mvSet(androidKeys(androidCritical...), androidKeys("MV10", "MV4/main"), nil)
 		if got := AndroidVerdict(mv); got != VerdictNOGOMobil {
 			t.Errorf("verdict = %q, want %q", got, VerdictNOGOMobil)
 		}
