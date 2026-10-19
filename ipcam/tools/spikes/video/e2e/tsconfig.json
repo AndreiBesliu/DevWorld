@@ -1,0 +1,10 @@
+{
+  // The Playwright config and tests run in Node; the functions they hand to
+  // page.evaluate and addInitScript run in the browser, hence both Node's types
+  // and the base's DOM lib.
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["*.ts"]
+}

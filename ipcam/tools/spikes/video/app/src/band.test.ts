@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { decodeBits, readBand } from './band';
+import { decodeBits, exposeBandReader, readBand, type BandReaderTarget } from './band';
 
 interface Vector {
   note: string;
@@ -267,5 +267,20 @@ describe('readBand', () => {
 
     expect(second).toEqual({ camera: 1, frame: 1, loop: 1 });
     expect(canvas.contextCalls[0]).toEqual(['2d', { willReadFrequently: true }]);
+  });
+});
+
+describe('the band reader test hook', () => {
+  it('exposeBandReader_readsTheShownFrameWithReadBandOnItsOwnCanvas', () => {
+    const target: BandReaderTarget = {};
+    const canvas = new FakeCanvas();
+    const v = sample(1, 719);
+    const { fake, element } = video(640, 360, bandedFrame(v, 360));
+
+    exposeBandReader(target, canvas.element);
+
+    expect(target.__spikeReadBand?.(element)).toEqual({ camera: v.camera, frame: v.frame, loop: v.loop });
+    expect(canvas.drawCalls).toEqual([{ source: fake, args: [0, 0, 384, 16, 0, 0, 384, 16] }]);
+    expect(target.__spikeReadBand?.(video(1920, 1080, () => gray(120)).element)).toBeNull();
   });
 });

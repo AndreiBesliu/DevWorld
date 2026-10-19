@@ -99,3 +99,17 @@ export function readBand(video: HTMLVideoElement, canvas: OffscreenCanvas | HTML
   const { data } = context.getImageData(0, 0, bandWidth, bandHeight);
   return decodeBits(readRow(data, bandWidth, side, 0), readRow(data, bandWidth, side, side));
 }
+
+/** The test hook of the browser end-to-end tests (Task 12): `window.__spikeReadBand(video)`. */
+export interface BandReaderTarget {
+  __spikeReadBand?: (video: HTMLVideoElement) => BandCode | null;
+}
+
+/**
+ * Exposes readBand, on a canvas of its own, to the end-to-end tests, which
+ * check that the band survives the real hub, the browser's decoder and the
+ * canvas, as S2's latency samples need.
+ */
+export function exposeBandReader(target: BandReaderTarget, canvas: OffscreenCanvas | HTMLCanvasElement): void {
+  target.__spikeReadBand = (video) => readBand(video, canvas);
+}

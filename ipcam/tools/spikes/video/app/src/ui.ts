@@ -4,7 +4,7 @@
 // which the scenarios show their video. Romanian by default, English one tap away.
 import { createPlayer } from '@ipcam/player';
 import { autorun, type AutorunRequest, type ErrorsTarget } from './autorun';
-import { readBand } from './band';
+import { exposeBandReader, readBand, type BandReaderTarget } from './band';
 import { fetchCameras, simCameras } from './cameras';
 import { captureForDecoderInfo } from './decoderinfo';
 import { detectDevice, type DeviceInfo, type Platform } from './device';
@@ -167,6 +167,7 @@ export function startApp(root: HTMLElement): App {
   let deviceLine = describeDevice(device);
   (globalThis as { __spikeResults?: ScenarioResult[] }).__spikeResults ??= [];
   (globalThis as ErrorsTarget).__spikeErrors ??= [];
+  exposeBandReader(globalThis as BandReaderTarget, el('canvas'));
   const clock: Clock = {
     now: () => performance.now(),
     setTimer: (fn, ms) => {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
@@ -144,6 +145,55 @@ func TestMediagen_ManifestMatchesSpec(t *testing.T) {
 		}
 		checkHLSFolder(t, out)
 	})
+}
+
+// TestMediagen_BandDecodesAtGOPStarts reads the band back from the encoded
+// files in MEDIAGEN_DIR: the first frame of every GOP of each of the four
+// streams must carry the file's id as its camera, its own index as its frame
+// and a CRC that checks out (band.Decode). ffmpeg decodes only the key frames
+// (-skip_frame nokey) and hands each one over once (-fps_mode passthrough; at
+// the rate it guesses for a raw .h264 file it would duplicate frames). It skips
+// without MEDIAGEN_DIR, since generating the media takes minutes; CI's media
+// job runs it on the files it uploads.
+func TestMediagen_BandDecodesAtGOPStarts(t *testing.T) {
+	requireFFmpeg(t)
+	out := os.Getenv("MEDIAGEN_DIR")
+	if out == "" {
+		t.Skip("MEDIAGEN_DIR is not set")
+	}
+	// Global Constraints, "Simulated media" and "Band": GOP = fps; 16 px blocks
+	// from 1080 lines up, else 8 px. Camera is the media file id (R1).
+	for _, s := range []struct {
+		file                 string
+		camera, side, gop, n int // n: the number of GOPs
+	}{
+		{"sub.h264", 1, 8, 12, 60},
+		{"main.h264", 2, 16, 20, 60},
+		{"main-high51.h264", 3, 16, 20, 20},
+		{"main-h265.h265", 4, 16, 20, 60},
+	} {
+		t.Run(s.file, func(t *testing.T) {
+			width, height := 48*s.side, 2*s.side
+			raw, err := exec.Command("ffmpeg", "-v", "error", "-skip_frame", "nokey", //nolint:gosec // out is a test directory
+				"-i", filepath.Join(out, s.file), "-fps_mode", "passthrough",
+				"-vf", fmt.Sprintf("crop=%d:%d:0:0,format=gray", width, height),
+				"-f", "rawvideo", "pipe:1").Output()
+			if err != nil {
+				t.Fatalf("ffmpeg: %v", err)
+			}
+			if got := len(raw) / (width * height); got != s.n || len(raw)%(width*height) != 0 {
+				t.Fatalf("ffmpeg gave %d bytes, %d key frames of %dx%d; want %d", len(raw), got, width, height, s.n)
+			}
+			for k := range s.n {
+				luma := raw[k*width*height : (k+1)*width*height]
+				got, ok := band.Decode(bandRow(luma, width, 0, s.side), bandRow(luma, width, 1, s.side))
+				want := band.Code{Camera: uint8(s.camera), Frame: uint16(k * s.gop)} //nolint:gosec // small constants
+				if !ok || got != want {
+					t.Errorf("key frame %d: band decodes to %+v (valid %v), want %+v", k, got, ok, want)
+				}
+			}
+		})
+	}
 }
 
 // checkHLSFolder reads the playlist and the media back independently of the

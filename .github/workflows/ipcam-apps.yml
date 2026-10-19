@@ -5,6 +5,8 @@ on:
     paths:
       - 'ipcam/apps/**'
       - 'ipcam/tools/spikes/video/app/**'
+      # The spike's Playwright tests are typechecked and linted here, and run in ipcam-spikes.
+      - 'ipcam/tools/spikes/video/e2e/**'
       # The spike app's band tests read the shared test vectors.
       - 'ipcam/tools/spikes/video/band/vectors.json'
       # The Android metrics plugin's TypeScript is typechecked and linted here.
@@ -21,6 +23,8 @@ on:
     paths:
       - 'ipcam/apps/**'
       - 'ipcam/tools/spikes/video/app/**'
+      # The spike's Playwright tests are typechecked and linted here, and run in ipcam-spikes.
+      - 'ipcam/tools/spikes/video/e2e/**'
       # The spike app's band tests read the shared test vectors.
       - 'ipcam/tools/spikes/video/band/vectors.json'
       # The Android metrics plugin's TypeScript is typechecked and linted here.
