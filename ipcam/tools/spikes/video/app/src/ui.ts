@@ -13,7 +13,7 @@ import { createI18n, type MessageKey, type Translate } from './i18n';
 import { sampleStats } from './metrics';
 import { readNativeMetrics, spikeNative } from './native';
 import { publish, ResultsQueue, SCENARIO_IDS, type KeyValueStore, type ScenarioId, type ScenarioResult } from './results';
-import type { Clock, ScenarioEnv, Stage } from './scenarios/context';
+import type { Clock, IntersectionWatch, ScenarioEnv, Stage } from './scenarios/context';
 import { runScenario } from './scenarios/index';
 import { openSession } from './session';
 import { holdWakeLock, type ScreenWakeLock } from './wakelock';
@@ -66,9 +66,15 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text 
   return node;
 }
 
-/** The video area: a grid of tiles, a fullscreen element over it, a line of text, a yes/no question. */
+/**
+ * The video area. While a run lasts it covers the viewport above the start
+ * page (the `active` class, index.html): the status line, the text and the
+ * yes/no question on top, the grid of tiles in the rest, the fullscreen element
+ * over all of it.
+ */
 class DomStage implements Stage {
   readonly root = el('section', 'stage');
+  private readonly status = el('p', 'status');
   private readonly gridEl = el('div', 'grid');
   private readonly fullEl = el('div', 'full');
   private readonly message = el('p', 'message');
@@ -77,8 +83,13 @@ class DomStage implements Stage {
   private big: HTMLVideoElement | undefined;
 
   constructor() {
-    this.root.append(this.message, this.question, this.gridEl, this.fullEl);
+    this.root.append(this.status, this.message, this.question, this.gridEl, this.fullEl);
     this.reset();
+  }
+
+  open(status: string): void {
+    this.status.textContent = status;
+    this.root.classList.add('active');
   }
 
   private video(): HTMLVideoElement {
@@ -92,7 +103,9 @@ class DomStage implements Stage {
     while (this.pool.length < n) this.pool.push(this.video());
     const shown = this.pool.slice(0, n);
     this.gridEl.replaceChildren(...shown);
-    this.gridEl.style.setProperty('--columns', String(Math.max(1, Math.ceil(Math.sqrt(n)))));
+    const columns = Math.max(1, Math.ceil(Math.sqrt(n)));
+    this.gridEl.style.setProperty('--columns', String(columns));
+    this.gridEl.style.setProperty('--rows', String(Math.max(1, Math.ceil(n / columns))));
     this.gridEl.hidden = n === 0;
     return shown;
   }
@@ -135,7 +148,29 @@ class DomStage implements Stage {
     this.say('');
     this.question.replaceChildren();
     this.question.hidden = true;
+    this.status.textContent = '';
+    this.root.classList.remove('active');
   }
+}
+
+/** How much of `element` is inside the viewport, from an IntersectionObserver; n/a where there is none. */
+function watchIntersection(element: HTMLElement): IntersectionWatch | 'n/a' {
+  if (typeof IntersectionObserver !== 'function') return 'n/a';
+  let ratio = 0;
+  const observer = new IntersectionObserver(
+    (entries) => {
+      const last = entries.at(-1);
+      if (last) ratio = last.isIntersecting ? last.intersectionRatio : 0;
+    },
+    { threshold: [0, 0.25, 0.5, 0.75, 1] },
+  );
+  observer.observe(element);
+  return {
+    ratio: () => ratio,
+    stop: () => {
+      observer.disconnect();
+    },
+  };
 }
 
 type Status = { kind: 'idle' } | { kind: 'running' } | { kind: 'done'; result: ScenarioResult } | { kind: 'failed'; detail: string };
@@ -198,6 +233,7 @@ export function startApp(root: HTMLElement): App {
       createPlayer,
       readBand: (video) => readBand(video, canvas),
       sampleStats,
+      watchIntersection,
       captureForDecoderInfo: () => captureForDecoderInfo(),
       holdWakeLock: () => holdWakeLock({ ...withWakeLock(wakeLock()), ...(native ? { native } : {}), doc: document }),
       jsHeapMb: () => {

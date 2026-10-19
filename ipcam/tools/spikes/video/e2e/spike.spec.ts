@@ -58,6 +58,34 @@ function recordPeers(): void {
   });
 }
 
+interface Box {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** Where the stage and its tiles are, in CSS pixels of the viewport. */
+function stageLayout(page: Page): Promise<{ position: string; stage: Box; tiles: Box[]; viewport: { width: number; height: number } }> {
+  return page.evaluate(() => {
+    const box = (element: Element): Box => {
+      const { left, top, right, bottom } = element.getBoundingClientRect();
+      return { left: Math.round(left), top: Math.round(top), right: Math.round(right), bottom: Math.round(bottom) };
+    };
+    const stage = document.querySelector('.stage');
+    if (!stage) throw new Error('the page has no stage');
+    return {
+      position: getComputedStyle(stage).position,
+      stage: box(stage),
+      tiles: [...document.querySelectorAll('.grid video')].map(box),
+      viewport: { width: innerWidth, height: innerHeight },
+    };
+  });
+}
+
+const insideViewport = (box: Box, viewport: { width: number; height: number }): boolean =>
+  box.left >= 0 && box.top >= 0 && box.right <= viewport.width && box.bottom <= viewport.height && box.right > box.left && box.bottom > box.top;
+
 /** What the page says when a scenario gives no result: the errors hook and the connection panel. */
 async function whyNoResult(page: Page): Promise<string> {
   const { errors, panel } = await page.evaluate(() => ({
@@ -210,6 +238,14 @@ test('4-tile grid 60 s: fps ≥ 90 % of 12 and dropped ≤ 2 %', { tag: '@chrome
       () => false,
     );
   if (!playing) throw new Error(`the 4 tiles did not all play within 60 s: ${await whyNoResult(page)}`);
+  // client-stage-offscreen: while the run lasts, the stage covers the page and every tile is on screen,
+  // so the compositor draws what MV3/MV5/MV6 measure.
+  const layout = await stageLayout(page);
+  console.log(`e2e: S3-4 stage ${JSON.stringify(layout)}`);
+  expect(layout.position).toBe('fixed');
+  expect(layout.stage).toEqual({ left: 0, top: 0, right: layout.viewport.width, bottom: layout.viewport.height });
+  expect(layout.tiles).toHaveLength(4);
+  for (const tile of layout.tiles) expect(insideViewport(tile, layout.viewport), JSON.stringify(tile)).toBe(true);
   await page.waitForTimeout(2000); // past the cached GOP that each tile starts with
 
   const counters = () =>
@@ -293,4 +329,6 @@ test('S10: selected pair is host or prflx', { tag: ['@chrome', '@firefox'] }, as
   console.log(`e2e: S10 ${browserOf(page)}: ${pair ?? 'no pair note'}`);
 
   expect(pair, describeResult(result)).toMatch(/^pair: (host|prflx)\/(host|prflx)$/);
+  // The run is over: the stage is off the page (an empty stage in the page's flow would only look hidden).
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector('.stage') ?? document.body).display)).toBe('none');
 });

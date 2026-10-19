@@ -61,17 +61,50 @@
       .scenario.failed .status {
         color: #c62828;
       }
+      /*
+       * The stage: nothing outside a run; during one, an opaque layer over the
+       * whole viewport, above the start page, so that the tiles, S5's
+       * instruction and S10's question are on screen (client-stage-offscreen)
+       * and the compositor draws what MV3, MV5 and MV6 measure.
+       */
+      .stage {
+        display: none;
+      }
+      .stage.active {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        box-sizing: border-box;
+        padding: 8px;
+        background: Canvas;
+        color: CanvasText;
+      }
+      .stage .status {
+        margin: 0;
+        font-size: 0.9rem;
+        opacity: 0.8;
+      }
+      /* The grid takes the height that is left, and each tile shows its whole frame inside its cell. */
       .stage .grid {
+        flex: 1;
+        min-height: 0;
         display: grid;
-        grid-template-columns: repeat(var(--columns, 1), 1fr);
+        grid-template-columns: repeat(var(--columns, 1), minmax(0, 1fr));
+        grid-template-rows: repeat(var(--rows, 1), minmax(0, 1fr));
         gap: 2px;
       }
       .stage video {
         width: 100%;
-        aspect-ratio: 16 / 9;
+        height: 100%;
+        min-height: 0;
+        object-fit: contain;
         background: #000;
         display: block;
       }
+      /* Over everything, and the only thing a picture-in-picture window shows (S6). */
       .stage .full {
         position: fixed;
         inset: 0;
@@ -85,8 +118,20 @@
       }
       .stage .message {
         font-weight: bold;
+        margin: 0;
         padding: 8px;
         border: 2px solid currentColor;
+      }
+      .stage .question {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+      .stage .question p {
+        flex-basis: 100%;
+        margin: 0;
+        font-weight: bold;
       }
       /* Over the fullscreen video, at the top: S3's MV4 explanation stays readable while the camera is held. */
       .stage:has(> .full:not([hidden])) .message {

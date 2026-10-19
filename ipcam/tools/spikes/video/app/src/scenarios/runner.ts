@@ -1,7 +1,8 @@
 // Runs one scenario and turns what it measured into a ScenarioResult. The
-// runner owns what every scenario shares: the wake lock, the visibility rule
-// (Review Focus 2), the hub's jitter reports (R28), the clean-up of sessions and
-// players, and keeping addresses out of the notes (PH0-22).
+// runner owns what every scenario shares: the wake lock, the stage over the
+// page, the visibility rule (Review Focus 2), the hub's jitter reports (R28),
+// the clean-up of sessions and players, and keeping addresses out of the notes
+// (PH0-22).
 import type { MediaLink, Player } from '@ipcam/player';
 import { simCameras, type HubCamera } from '../cameras';
 import { ConnectError } from '../hubhttp';
@@ -44,7 +45,11 @@ export interface Run {
 }
 
 export interface ScenarioDefinition {
-  /** S5 and S6 send the app to the background or into PiP on purpose: a hidden page does not interrupt them. */
+  /**
+   * S5 and S6 send the app to the background or into PiP on purpose: a hidden
+   * page does not interrupt them, and the stage's status line does not ask to
+   * keep the screen on.
+   */
   readonly backgroundsOnPurpose?: boolean;
   run(run: Run): Promise<void>;
 }
@@ -62,8 +67,8 @@ function linkFor(session: SpikeSession | undefined): MediaLink {
 }
 
 /**
- * Runs `definition` and returns its result. A page that becomes hidden
- * interrupts the run (unless the scenario backgrounds on purpose): the run
+ * Runs `definition` and returns its result. The stage covers the page while it
+ * runs. A page that becomes hidden interrupts the run (unless the scenario backgrounds on purpose): the run
  * stops, keeps what it measured and is marked `interrupted`. A ConnectError
  * (the hub cannot be reached) is thrown, for the start page to explain; any
  * other failure ends the run with a note.
@@ -185,6 +190,7 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
         };
       }
     }
+    env.stage.open(`${id}: ${env.t(definition.backgroundsOnPurpose ? 'statusRunningShort' : 'statusRunning')}`);
     await definition.run(run);
   } catch (error) {
     if (!interrupted) {

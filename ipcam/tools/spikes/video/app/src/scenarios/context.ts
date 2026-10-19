@@ -18,8 +18,15 @@ export interface Clock {
   setTimer(fn: () => void, ms: number): () => void;
 }
 
-/** Where the video elements of a scenario are shown. Elements come muted and inline. */
+/**
+ * Where the video elements of a scenario are shown. Elements come muted and
+ * inline. During a run the stage covers the whole viewport, above the start
+ * page: its status line, text and question on top, the grid filling the rest,
+ * the fullscreen element over everything (client-stage-offscreen).
+ */
 export interface Stage {
+  /** Shows the stage over the page, with `status` on its top line, until reset(). */
+  open(status: string): void;
   /** Shows `n` tiles in a grid (0 hides the grid) and returns their elements, the first ones reused. */
   grid(n: number): HTMLVideoElement[];
   /** Shows the fullscreen element over the grid and returns it. */
@@ -27,8 +34,15 @@ export interface Stage {
   exitFullscreen(): void;
   /** A line of text over the video: guidance or a label. An empty text clears it. */
   say(text: string): void;
-  /** Hides every element and the text. */
+  /** Hides every element and the text, and takes the stage off the page. */
   reset(): void;
+}
+
+/** How much of an element is inside the viewport, as an IntersectionObserver last reported it. */
+export interface IntersectionWatch {
+  /** 0 (none) to 1 (all of it). */
+  ratio(): number;
+  stop(): void;
 }
 
 export interface ScenarioEnv {
@@ -47,6 +61,8 @@ export interface ScenarioEnv {
   createPlayer(opts: PlayerOptions): Player;
   readBand(video: HTMLVideoElement): BandCode | null;
   sampleStats(pc: RTCPeerConnection): Promise<Map<string, TileStats>>;
+  /** Follows how much of `element` is inside the viewport; `n/a` without IntersectionObserver. */
+  watchIntersection(element: HTMLElement): IntersectionWatch | 'n/a';
   captureForDecoderInfo(): Promise<(() => void) | 'n/a'>;
   holdWakeLock(): Promise<WakeLock>;
   /** The JS heap in MB where the browser reports it (Chromium), else undefined. */

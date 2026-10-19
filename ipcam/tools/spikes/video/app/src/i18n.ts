@@ -25,6 +25,7 @@ const ro = {
   repeat: 'Repetă',
   statusIdle: 'neînceput',
   statusRunning: 'rulează… nu închideți ecranul',
+  statusRunningShort: 'rulează…',
   statusDone: 'gata în {seconds} s',
   statusInterrupted:
     'întrerupt: ecranul s-a stins sau aplicația a trecut în fundal, deci rezultatul nu intră în verdict. Repetați scenariul.',
@@ -78,6 +79,7 @@ const en: Record<MessageKey, string> = {
   repeat: 'Repeat',
   statusIdle: 'not started',
   statusRunning: 'running… keep the screen on',
+  statusRunningShort: 'running…',
   statusDone: 'done in {seconds} s',
   statusInterrupted:
     'interrupted: the screen turned off or the app went to the background, so the result is left out of the verdict. Repeat the scenario.',

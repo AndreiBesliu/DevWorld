@@ -44,7 +44,10 @@ describe('S6', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(entered).toBe(1);
     t.doc.hide(); // whatever the WebView reports in PiP, S6 is not interrupted by it
-    const video = t.stage.all[0] as FakeVideo;
+    // critic-2: the stream plays in the fixed fullscreen element, which fills the PiP window.
+    const video = t.stage.big as FakeVideo;
+    expect(video).toBeDefined();
+    expect(t.stage.tiles).toEqual([]);
     // 5 min of frames every 100 ms, with one gap of 2.5 s after the first minute.
     for (let ms = 0; ms < 300_000; ms += 100) {
       await vi.advanceTimersByTimeAsync(100);
@@ -56,6 +59,32 @@ describe('S6', () => {
     expect(result.samples.pipMaxGapMs).toEqual([2500]);
     expect(result.samples.pipFrames?.[0]).toBeGreaterThan(2900);
     expect(result.samples.pipS).toEqual([300]);
+    expect(result.notes).toContain('pipVisible: 300/300 s');
+  });
+
+  it('S6_recordsHowLongTheVideoWasInsideThePipWindow', async () => {
+    // MV8 is 'the window appears and the video advances': frames alone do not say it was seen.
+    let onPip: ((on: boolean) => void) | undefined;
+    let pipAt = 0;
+    const t = setup({
+      fakePlayer: true,
+      native: {
+        metrics: () => Promise.resolve({}),
+        enterPip: () => {
+          pipAt = performance.now();
+          onPip?.(true);
+          return Promise.resolve();
+        },
+        onPip: (cb) => {
+          onPip = cb;
+        },
+      },
+      intersection: () => (performance.now() - pipAt < 100_500 ? 1 : 0),
+    });
+
+    const result = await finish(runScenario('S6', t.env));
+
+    expect(result.notes).toContain('pipVisible: 100/300 s');
   });
 
   it('S6_leavingPip_endsTheMeasurementAndCountsTheSilenceBeforeIt', async () => {
@@ -76,7 +105,7 @@ describe('S6', () => {
 
     const running = runScenario('S6', t.env);
     await vi.advanceTimersByTimeAsync(1000);
-    const video = t.stage.all[0] as FakeVideo;
+    const video = t.stage.big as FakeVideo;
     for (let ms = 0; ms < 50_000; ms += 100) {
       await vi.advanceTimersByTimeAsync(100);
       video.present();

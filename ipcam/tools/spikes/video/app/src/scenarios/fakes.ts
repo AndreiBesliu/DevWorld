@@ -190,6 +190,11 @@ export class FakeStage implements Stage {
   readonly all: FakeVideo[] = [];
   rvfc = true;
 
+  /** Whether the stage is shown over the page (open() until reset()). */
+  active = false;
+  /** The status line of each open(), in order. */
+  readonly statuses: string[] = [];
+
   constructor(readonly doc: FakeDocument) {}
 
   reportsReceiveTime = true;
@@ -222,9 +227,15 @@ export class FakeStage implements Stage {
     this.said.push(text);
   }
 
+  open(status: string): void {
+    this.active = true;
+    this.statuses.push(status);
+  }
+
   reset(): void {
     this.tiles = [];
     this.big = undefined;
+    this.active = false;
   }
 }
 
@@ -555,6 +566,11 @@ export interface SetupOptions {
   replaysLastFrame?: boolean;
   /** Extra options for the real player (an hls.js stand-in, for example). */
   playerOptions?: PlayerOptions;
+  /**
+   * The share of `video` inside the viewport, as an IntersectionObserver
+   * reports it. Default: 1 for an element the stage shows, else 0.
+   */
+  intersection?: (video: FakeVideo) => number;
   overrides?: Partial<ScenarioEnv>;
 }
 
@@ -606,6 +622,12 @@ export function setup(options: SetupOptions = {}): TestSetup {
     },
     readBand: (video) => (video as unknown as FakeVideo).band,
     sampleStats: () => Promise.resolve(sessions.at(-1)?.stats() ?? new Map()),
+    watchIntersection: (element) => {
+      const video = element as unknown as FakeVideo;
+      const shown = (): number => (video === stage.big || stage.tiles.includes(video) ? 1 : 0);
+      const ratio = options.intersection ?? shown;
+      return { ratio: () => ratio(video), stop: () => undefined };
+    },
     captureForDecoderInfo: () => Promise.resolve('n/a'),
     holdWakeLock: () => wakeLock.hold(),
     jsHeapMb: () => undefined,
