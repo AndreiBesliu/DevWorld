@@ -70,6 +70,13 @@ func (r Report) FileName() string { return r.date + "-phase0b-results.md" }
 
 var statusWord = map[RunStatus]string{RunUsed: "used", RunSuperseded: "superseded", RunInterrupted: "interrupted", RunFailed: "failed"}
 
+// The CSV files go to <out>/phase0-data/ and are named phase0b-<device>.csv.
+const (
+	csvDir    = "phase0-data"
+	csvPrefix = "phase0b-"
+	csvSuffix = ".csv"
+)
+
 // csvName is the path of the CSV file of a device, relative to the output folder.
 func csvName(platform string) string {
 	slug := strings.Map(func(c rune) rune {
@@ -78,7 +85,7 @@ func csvName(platform string) string {
 		}
 		return '-'
 	}, strings.ToLower(platform))
-	return "phase0-data/phase0b-" + slug + ".csv"
+	return csvDir + "/" + csvPrefix + slug + csvSuffix
 }
 
 // CSVs are the raw samples, one file per device and one row per sample, keyed by the path
@@ -238,6 +245,9 @@ func (r Report) summary(d *doc) {
 	if g5.Verdict == VerdictGOConditionat {
 		d.text("- **De decis de dvs.:** plafonul de plăci pe telefon (A6, acum 9), vezi G5 mai jos.")
 	}
+	if keys := r.earlierKeys(); len(keys) > 0 {
+		d.printf("- **Atenție:** pentru %s, o rulare anterioară a aceluiași scenariu a picat pragul; valoarea o dă cea mai nouă rulare, dar eșecul rămâne în tabele, lângă valoare (R40).", labels(keys, true))
+	}
 	if others := otherFailures(r.ev.MV); len(others) > 0 {
 		keys := make([]string, len(others))
 		for i, v := range others {
@@ -249,6 +259,17 @@ func (r Report) summary(d *doc) {
 		d.printf("- **Atenție:** rulări cu jitter al hub-ului peste 20 ms: %d (vezi Avertismente); cifrele lor pot fi mai proaste decât în realitate.", len(flags))
 	}
 	d.blank()
+}
+
+// earlierKeys are the thresholds that some earlier valid run failed (R40).
+func (r Report) earlierKeys() []string {
+	var keys []string
+	for key, list := range r.ev.Earlier {
+		if len(list) > 0 {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 // results are the results behind the report, in the order of the report.
@@ -293,6 +314,18 @@ func (r Report) describe(platform string, field func(Device) string) string {
 }
 
 func modelOf(dev Device) string { return dev.Model }
+
+// machineOf is the model with the OS: what tells two machines of one platform apart. A browser
+// result carries no model, so Chrome on the phone and Chrome on the PC differ only in the OS.
+func machineOf(dev Device) string {
+	var parts []string
+	for _, p := range []string{dev.Model, dev.OS} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, " · ")
+}
 
 var deviceTitle = map[string]string{
 	platformAndroid: "AND-1: Android (Capacitor)",
@@ -355,6 +388,13 @@ func (r Report) table(d *doc, device string) {
 			codes[v.Code] = true
 		}
 	}
+	for _, list := range r.ev.Earlier { // a failure of an earlier run needs its row, whatever the newest run says
+		for _, earlier := range list {
+			if earlier.MV.Device == device {
+				codes[earlier.MV.Code] = true
+			}
+		}
+	}
 	ordered := make([]string, 0, len(codes))
 	for code := range codes {
 		ordered = append(ordered, code)
@@ -364,20 +404,17 @@ func (r Report) table(d *doc, device string) {
 	d.header("Cod", "Valoare", "Prag", "Trece")
 	var notes []string
 	for _, code := range ordered {
+		earlier := r.earlierWarning(device, code)
 		v, ok := r.ev.MV[mvKey(device, code)]
 		if !ok {
-			d.row(code, "nemăsurat: "+r.ev.reasonMissing(device, code), thresholdOf(code), "—")
+			d.row(code, withWarning("nemăsurat: "+r.ev.reasonMissing(device, code), earlier), thresholdOf(code), "—")
 			continue
 		}
 		pass := "Nu"
 		if v.Pass {
 			pass = "Da"
 		}
-		text := v.Text
-		if text == "" {
-			text = number(v.Value, 1) + " " + v.Unit
-		}
-		d.row(code, text, v.Threshold, pass)
+		d.row(code, withWarning(v.cell(), earlier), v.Threshold, pass)
 		for _, n := range v.Notes {
 			notes = append(notes, fmt.Sprintf("- **%s:** %s", code, n))
 		}
@@ -391,6 +428,23 @@ func (r Report) table(d *doc, device string) {
 		}
 		d.blank()
 	}
+}
+
+// earlierWarning is the text beside the value of a threshold that earlier valid runs of its
+// scenario failed (R40), one warning for each such run, with the value that run had.
+func (r Report) earlierWarning(device, code string) string {
+	var warnings []string
+	for _, earlier := range r.ev.Earlier[mvKey(device, code)] {
+		warnings = append(warnings, fmt.Sprintf("**atenție:** o rulare anterioară a picat pragul (`%s`): %s", earlier.File, earlier.MV.cell()))
+	}
+	return strings.Join(warnings, "; ")
+}
+
+func withWarning(cell, warning string) string {
+	if warning == "" {
+		return cell
+	}
+	return cell + "; " + warning
 }
 
 func (r Report) runsTable(d *doc, device string) {
@@ -456,8 +510,8 @@ func (r Report) warnings(d *doc) {
 		d.printf("- Rulări eșuate: %d (scenariul s-a oprit cu o eroare, deci citirile sunt incomplete). Nu intră în praguri: %s.", len(failed), codeList(failed))
 	}
 	for _, device := range r.devices {
-		if models := r.distinct(device, modelOf); len(models) > 1 {
-			d.printf("- Mai multe modele sub platforma %s (%s): rezultatele lor sunt tratate ca un singur dispozitiv. Dacă sunt dispozitive diferite, puneți-le în dosare separate și rulați raportul pentru fiecare.", deviceName(device), strings.Join(models, " / "))
+		if machines := r.distinct(device, machineOf); len(machines) > 1 {
+			d.printf("- Mai multe modele sau sisteme de operare sub platforma %s (%s): rezultatele lor sunt tratate ca un singur dispozitiv. Dacă sunt dispozitive diferite, puneți-le în dosare separate și rulați raportul pentru fiecare.", deviceName(device), strings.Join(machines, " / "))
 		}
 	}
 	var noMDNS []string
@@ -532,10 +586,16 @@ func (r Report) leftovers(d *doc) {
 func (r Report) limits(d *doc) {
 	d.text("## Limitări ale măsurătorilor")
 	d.blank()
-	d.text("- MV2 se calculează cu offsetul dintre ceasul dispozitivului și al hub-ului (ping pe canalul de date), nu cu ceasul dispozitivului; mostrele exclud cadrele din GOP-ul păstrat în cache la legarea unei camere, care au vârsta cache-ului în loc de întârzierea transportului (R26).")
 	d.text("- Jitterul hub-ului (R28) e p99 al abaterii de trimitere pe ferestre de 10 s; o rulare e marcată când o fereastră depășește 20 ms.")
-	d.text("- Dintre rulările valide ale aceluiași scenariu pe același dispozitiv contează cea mai nouă (după ceasul dispozitivului). Rulările întrerupte și cele eșuate sunt listate, dar nu intră în praguri.")
-	d.text("- Specificația nu dă un percentil pentru MV10 (este un prag critic al AND-1): se cere ca toate cele 20 de porniri și toate cele 20 de salturi să fie în prag, ca la MV15 (toate cele 10 rulări ≤ 3 s); nicio pornire sau salt nu poate expira. MV1 folosește p90 din 20, cum cere specificația. O pornire, un salt sau o rulare care nu s-a terminat (MV1, MV10, MV15) se numără ca infinit de lent.")
+	d.text("- Dintre rulările valide ale aceluiași scenariu pe același dispozitiv, valoarea o dă cea mai nouă (după ceasul dispozitivului). O rulare anterioară care a picat pragul nu dispare: e arătată lângă valoare, cu avertisment (R40), ca repetarea până la o trecere să nu ascundă un eșec. Rulările întrerupte și cele eșuate sunt listate, dar nu intră în praguri.")
+	d.text("- MV2 se calculează cu offsetul dintre ceasul dispozitivului și al hub-ului (ping pe canalul de date), nu cu ceasul dispozitivului; mostrele exclud cadrele din GOP-ul păstrat în cache la legarea unei camere, care au vârsta cache-ului în loc de întârzierea transportului (R26).")
+	d.text("- MV2 păstrează mostrele cu ceas nesigur (RTT > 50 ms sau offset mutat cu > 20 ms) și le raportează în notele pragului, fără să le excludă: eroarea offsetului e cel mult jumătate din RTT-ul ceasului.")
+	d.text("- Specificația nu dă un percentil pentru MV10 (este un prag critic al AND-1), așa că MV10 și MV15 judecă fiecare citire: toate cele 20 de porniri (≤ 2 s) și toate cele 20 de salturi (≤ 1,5 s) la MV10, toate cele 10 rulări (≤ 3 s) la MV15; nicio pornire, salt sau rulare nu poate expira. MV1 folosește p90 din 20, cum cere specificația. O pornire, un salt sau o rulare care nu s-a terminat (MV1, MV10, MV15) se numără ca infinit de lent.")
+	d.text("- MV5 judecă fps-ul pe media ultimelor 2 minute din `gridFps` (60 de ferestre de 2 s), nu pe toată rularea: o scădere din cauza căldurii se vede la sfârșit.")
+	d.text("- MV5 calculează ritmul bateriei din prima și ultima citire, raportat la durata măsurată a grilei (ferestrele de 2 s din `gridFps`), nu la numărul de citiri: o citire a shell-ului care a expirat nu îl umflă. Procentul bateriei e întreg, deci rezoluția ritmului e de circa 6 %/h (1 % în circa 10 min): două puncte dau circa 12 %/h (trece), trei circa 18 %/h (pică), iar pragul de 15 %/h cade între aceste trepte.")
+	d.text("- MV6 judecă media lui `cpuPctApp` (procesul aplicației și procesele WebView2, ca pondere din tot PC-ul), nu maximul și nu `cpuPctTotal`, care include și hub-ul de pe același PC; fluxul principal se judecă pe media lui `mainCpuPctApp`, de la prima rulare a grilei care l-a măsurat.")
+	d.text("- MV8: specificația cere 5 min în PiP cu video care avansează; raportul cere 300 s în PiP, cel puțin un cadru și nicio pauză între cadre de peste 2 s. Pragul de 2 s pentru pauză e alegerea raportului, nu a specificației.")
+	d.text("- Pe WIN-1, `memMb` (MV7) e memorie privată (private bytes, R37) a aplicației și a proceselor WebView2: nu include secțiunile partajate și memoria GPU, unde Chromium ține cadrele decodate, deci o scurgere acolo nu apare în MV7.")
 	d.text("- MV14 (linii Kotlin pentru PiP și rețeaua locală) nu apare în rezultate: îl numără `tools/scripts/count-native-lines.sh` în CI.")
 	d.blank()
 }

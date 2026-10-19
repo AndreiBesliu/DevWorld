@@ -180,6 +180,70 @@ func TestRun_NeedsAnInputWithResults(t *testing.T) {
 	})
 }
 
+// Writing into a folder that an earlier run used: a CSV of a device that the input no
+// longer has would disagree with the report's list of raw data.
+func TestRun_RemovesCSVsThatTheInputNoLongerProduces(t *testing.T) {
+	out := t.TempDir()
+	data := filepath.Join(out, "phase0-data")
+	if err := os.MkdirAll(filepath.Join(data, "phase0b-folder.csv"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(data, "phase0b-oldphone.csv")
+	write(t, data, "phase0b-oldphone.csv", "device,scenario,run,status,key,index,value\n")
+	keep := []string{"notes.csv", "phase0b-readme.txt", "other-phase0b-android.csv"}
+	for _, name := range keep {
+		write(t, data, name, "not ours")
+	}
+	write(t, out, "phase0b-top.csv", "not in phase0-data")
+
+	code, stdout, stderr := runMain(t, "-in", filepath.Join("testdata", "golden-set"), "-out", out, "-date", "2026-10-19")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the CSV of a device that is no longer in the input is still there (%v)", err)
+	}
+	if !strings.Contains(stdout, "removed") || !strings.Contains(stdout, "phase0b-oldphone.csv") {
+		t.Errorf("stdout %q does not say that the stale CSV was removed", stdout)
+	}
+	for _, name := range keep {
+		if _, err := os.Stat(filepath.Join(data, name)); err != nil {
+			t.Errorf("%s was removed, but it is not a CSV of this tool: %v", name, err)
+		}
+	}
+	if info, err := os.Stat(filepath.Join(data, "phase0b-folder.csv")); err != nil || !info.IsDir() {
+		t.Errorf("a folder with a CSV name was removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "phase0b-top.csv")); err != nil {
+		t.Errorf("a file outside phase0-data was removed: %v", err)
+	}
+	for _, name := range []string{"phase0b-android.csv", "phase0b-windows-tauri.csv", "phase0b-chrome.csv"} {
+		if _, err := os.Stat(filepath.Join(data, name)); err != nil {
+			t.Errorf("the CSV of the input, %s, is missing: %v", name, err)
+		}
+	}
+	// A second run has nothing left to remove.
+	_, again, _ := runMain(t, "-in", filepath.Join("testdata", "golden-set"), "-out", out, "-date", "2026-10-19")
+	if strings.Contains(again, "removed") {
+		t.Errorf("the second run removed something: %q", again)
+	}
+}
+
+func TestRun_KeepsTheOldCSVsWhenThereIsNothingToReport(t *testing.T) {
+	out := t.TempDir()
+	data := filepath.Join(out, "phase0-data")
+	if err := os.MkdirAll(data, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	write(t, data, "phase0b-android.csv", "an earlier run")
+	if code, _, _ := runMain(t, "-in", t.TempDir(), "-out", out); code == 0 {
+		t.Fatal("an empty input is not an error")
+	}
+	if got := readText(t, filepath.Join(data, "phase0b-android.csv")); got != "an earlier run" {
+		t.Errorf("a run without results changed the earlier CSV: %q", got)
+	}
+}
+
 func TestRun_ReportsSkippedFiles(t *testing.T) {
 	in := t.TempDir()
 	write(t, in, "good-20261018-100000-s1.json", storedS1)

@@ -5,7 +5,8 @@
 //
 //	spikereport [-in results] [-out docs/research] [-date YYYY-MM-DD]
 //
-// It writes <out>/<date>-phase0b-results.md and <out>/phase0-data/phase0b-<device>.csv.
+// It writes <out>/<date>-phase0b-results.md and <out>/phase0-data/phase0b-<device>.csv, and
+// removes the phase0b-*.csv files of an earlier run that the current input no longer produces.
 // The date is the day of the newest run, on the devices' clocks, unless -date gives it.
 // The output depends only on the input files: running it twice gives the same bytes.
 //
@@ -20,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,15 +41,30 @@ const dateLayout = "2006-01-02"
 // digits and hyphens. It names a CSV file, so nothing else is accepted.
 var platformName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}$`)
 
+// The parts of an address pattern: a group of an IPv6 literal, and four dotted numbers.
+const (
+	hextet     = `[0-9a-f]{1,4}`
+	dottedQuad = `\d{1,3}(?:\.\d{1,3}){3}`
+)
+
 var (
 	ssidPattern   = regexp.MustCompile(`(?i)(\bssid\s*[:=]\s*).*`)
 	serialPattern = regexp.MustCompile(`(?i)(\bserial(?:[ _-]?(?:number|no))?\s*[:=]\s*)\S+`)
 	urlPattern    = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://\S+`)
 	emailPattern  = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
 	macPattern    = regexp.MustCompile(`(?i)\b[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}\b`)
-	// An IPv6 literal: with `::`, or eight groups in full; with a zone, and in brackets with a port.
-	ipv6Pattern = regexp.MustCompile(`(?i)\[?(?:(?:[0-9a-f]{1,4}:)*[0-9a-f]{0,4}::(?:[0-9a-f]{0,4}(?::[0-9a-f]{1,4})*)|(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4})(?:%[\w.]+)?(?:\](?::\d{1,5})?)?`)
-	ipv4Pattern = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b`)
+	// An IPv6 literal: compressed with `::`, or in full (eight groups); the last 32 bits may be
+	// an IPv4 address (::ffff:192.168.1.20), which is part of the literal and goes with it;
+	// with a zone (%eth0), and in brackets with a port.
+	ipv6Pattern = regexp.MustCompile(`(?i)\[?(?:` +
+		`(?:` + hextet + `:)*(?:` + hextet + `)?::` +
+		// After `::`: groups that end in an IPv4 address (tried first, or the greedy groups would
+		// stop before its first dot), or just groups.
+		`(?:(?:` + hextet + `(?::` + hextet + `)*:)?` + dottedQuad + `|(?:` + hextet + `)?(?::` + hextet + `)*)` +
+		`|(?:` + hextet + `:){7}` + hextet +
+		`|(?:` + hextet + `:){6}` + dottedQuad +
+		`)(?:%[\w.]+)?(?:\](?::\d{1,5})?)?`)
+	ipv4Pattern = regexp.MustCompile(`\b` + dottedQuad + `(?::\d{1,5})?\b`)
 	// A dotted version of four numbers, as a browser or WebView reports it: 141.0.0.0.
 	versionPattern = regexp.MustCompile(`(/?)(\d+)\.(\d+)\.(\d+)\.(\d+)`)
 )
@@ -237,7 +254,40 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		say(stdout, "wrote %s", path)
 	}
+	if err := removeStaleCSVs(*out, files, stdout); err != nil {
+		say(stderr, "spikereport: %v", err)
+		return 1
+	}
 	return 0
+}
+
+// removeStaleCSVs deletes the phase0b-*.csv files in <out>/phase0-data that this run did not
+// write. The CSV of a device that the input no longer has would disagree with the report's list
+// of raw data. It touches no other file, and no folder.
+func removeStaleCSVs(out string, written map[string]string, stdout io.Writer) error {
+	dir := filepath.Join(out, csvDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, csvPrefix) || !strings.HasSuffix(name, csvSuffix) {
+			continue
+		}
+		if _, kept := written[csvDir+"/"+name]; kept {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		say(stdout, "removed %s", path)
+	}
+	return nil
 }
 
 // say writes a line to w. A message that cannot be written has nowhere else to go.

@@ -236,3 +236,15 @@ func readText(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// rowOf is the first line of the Markdown report that starts with prefix, for example "| MV1 |".
+func rowOf(t *testing.T, md, prefix string) string {
+	t.Helper()
+	for _, line := range strings.Split(md, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	t.Fatalf("the report has no line that starts with %q", prefix)
+	return ""
+}

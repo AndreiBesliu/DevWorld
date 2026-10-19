@@ -8,10 +8,11 @@ Textele din rezultate trec printr-un filtru care scoate adrese, URL-uri, adrese 
 - **Android (AND-1, samsung SM-A245F):** **GO condiționat**. Cu 4 plăci trece tot ce e critic, dar cu 9 plăci pică MV3/9, MV4/9. Plafonul de 9 plăci pe telefon (A6) se schimbă doar cu aprobarea dvs.
 - **Windows (WIN-1):** **plan B: grilă desktop 9**. MV6 pică: grila desktop coboară la 9 plăci (APP-30). Windows nu poate da NO-GO.
 - **Web (Chrome, Edge, Firefox):** **GO**. Perechile ICE din Chrome, Edge, Firefox și din cele două WebView-uri nu trec prin relay.
-- **Argon2id (G19, MV15):** trece: max 2566 ms (mediana 2336 ms, min 2150 ms; 10 rulări).
+- **Argon2id (G19, MV15):** trece: rulări max 2566 ms (mediana 2336 ms; 10 din 10).
 - **Codecuri (G9):** AND-1: mx-h265: fallback; mx-high51: ok · Firefox: mx-h265: fallback; mx-high51: unsupported-profile.
 - **Nemăsurat încă:** Chrome: MV3/16, MV7, MV10, G9; Edge: MV2, MV3/9, G9; Firefox: MV1, MV2, MV3/9 (motivele sunt în tabele).
 - **De decis de dvs.:** plafonul de plăci pe telefon (A6, acum 9), vezi G5 mai jos.
+- **Atenție:** pentru MV5/9 (AND-1), o rulare anterioară a aceluiași scenariu a picat pragul; valoarea o dă cea mai nouă rulare, dar eșecul rămâne în tabele, lângă valoare (R40).
 - **Atenție:** rulări cu jitter al hub-ului peste 20 ms: 1 (vezi Avertismente); cifrele lor pot fi mai proaste decât în realitate.
 
 ## Rezultate pe dispozitiv
@@ -30,13 +31,13 @@ De completat de proprietar: memoria RAM a telefonului (nu apare în rezultate).
 | MV4/4 | plăci hardware: 4 din 4; ecran complet: hardware | ecran complet hardware; toate plăcile grilei hardware | Da |
 | MV4/9 | plăci hardware: 8 din 9; ecran complet: hardware | ecran complet hardware; toate plăcile grilei hardware | Nu |
 | MV5/4 | termic max LIGHT; fps în ultimele 2 min 11,95; baterie 0 %/h | termic ≤ MODERATE; fps final ≥ 10,8; baterie ≤ 15 %/h | Da |
-| MV5/9 | termic max MODERATE; fps în ultimele 2 min 11,95; baterie 12,2 %/h | termic ≤ MODERATE; fps final ≥ 10,8; baterie ≤ 15 %/h | Da |
+| MV5/9 | termic max MODERATE; fps în ultimele 2 min 11,95; baterie 12 %/h; **atenție:** o rulare anterioară a picat pragul (`android-samsung-sm-a245f-20261018-102500-s3-9.json`): termic max SEVERE; fps în ultimele 2 min 11,95; baterie 12 %/h | termic ≤ MODERATE; fps final ≥ 10,8; baterie ≤ 15 %/h | Da |
 | MV7 | memorie +2,1 %; heap JS +3,9 %; reporniri neprovocate: 0 | creștere memorie ≤ 10 %; 0 reporniri neprovocate | Da |
 | MV8 | 300 s în PiP; pauză maximă între cadre 210 ms; 2995 cadre | 5 min în PiP fără pauze de peste 2 s | Da |
 | MV9 | reluare în 1480 ms după 123 s în fundal | live reluat în ≤ 3 s după 2 min în fundal | Da |
 | MV10 | pornire max 1080 ms (mediana 803 ms; 20 din 20); salt max 846 ms (mediana 623 ms; 20 din 20) | pornire ≤ 2 s; salt ≤ 1,5 s (toate cele 20) | Da |
 | MV12 | pereche host/host; cerere de permisiune: nu | perechea ICE aleasă nu e relay | Da |
-| MV15 | max 2566 ms (mediana 2336 ms, min 2150 ms; 10 rulări) | ≤ 3 s pe AND-1 (10 rulări) | Da |
+| MV15 | rulări max 2566 ms (mediana 2336 ms; 10 din 10) | ≤ 3 s pe AND-1 (10 rulări) | Da |
 | G9 | mx-h265: fallback; mx-high51: ok | fiecare cale: ok sau retragere pe substream etichetată; fără fallback-failed | Da |
 
 **Note la praguri:**
@@ -243,7 +244,7 @@ De completat de proprietar: GPU-ul și memoria RAM ale PC-ului (nu apar în rezu
 | G6: Windows WebView2 (WIN-1) | plan B: grilă desktop 9 |
 | G7: Chrome LNA și mDNS (web) | GO |
 | G9: Matricea de codecuri | AND-1: mx-h265: fallback; mx-high51: ok · Firefox: mx-h265: fallback; mx-high51: unsupported-profile |
-| G19: Argon2id pe Android mediu (MV15) | trece: max 2566 ms (mediana 2336 ms, min 2150 ms; 10 rulări) |
+| G19: Argon2id pe Android mediu (MV15) | trece: rulări max 2566 ms (mediana 2336 ms; 10 din 10) |
 
 ### G5: Grila Android (AND-1)
 
@@ -271,7 +272,7 @@ De completat de proprietar: GPU-ul și memoria RAM ale PC-ului (nu apar în rezu
 
 ### G19: Argon2id pe Android mediu (MV15)
 
-- **Rezultat:** trece: max 2566 ms (mediana 2336 ms, min 2150 ms; 10 rulări)
+- **Rezultat:** trece: rulări max 2566 ms (mediana 2336 ms; 10 din 10)
 - **Decizie declanșată:** Nicio decizie: parametrii impliciți Argon2id rămân cei din §10.3 (m=64 MiB, t=3, p=4).
 - **Ce se schimbă în §2 sau în cerințe:** Nimic în §2 sau în cerințe.
 
@@ -288,10 +289,16 @@ Fiecare element pornește când aprobați bugetul pentru el (OPN-09, OPN-16; pâ
 
 ## Limitări ale măsurătorilor
 
-- MV2 se calculează cu offsetul dintre ceasul dispozitivului și al hub-ului (ping pe canalul de date), nu cu ceasul dispozitivului; mostrele exclud cadrele din GOP-ul păstrat în cache la legarea unei camere, care au vârsta cache-ului în loc de întârzierea transportului (R26).
 - Jitterul hub-ului (R28) e p99 al abaterii de trimitere pe ferestre de 10 s; o rulare e marcată când o fereastră depășește 20 ms.
-- Dintre rulările valide ale aceluiași scenariu pe același dispozitiv contează cea mai nouă (după ceasul dispozitivului). Rulările întrerupte și cele eșuate sunt listate, dar nu intră în praguri.
-- Specificația nu dă un percentil pentru MV10 (este un prag critic al AND-1): se cere ca toate cele 20 de porniri și toate cele 20 de salturi să fie în prag, ca la MV15 (toate cele 10 rulări ≤ 3 s); nicio pornire sau salt nu poate expira. MV1 folosește p90 din 20, cum cere specificația. O pornire, un salt sau o rulare care nu s-a terminat (MV1, MV10, MV15) se numără ca infinit de lent.
+- Dintre rulările valide ale aceluiași scenariu pe același dispozitiv, valoarea o dă cea mai nouă (după ceasul dispozitivului). O rulare anterioară care a picat pragul nu dispare: e arătată lângă valoare, cu avertisment (R40), ca repetarea până la o trecere să nu ascundă un eșec. Rulările întrerupte și cele eșuate sunt listate, dar nu intră în praguri.
+- MV2 se calculează cu offsetul dintre ceasul dispozitivului și al hub-ului (ping pe canalul de date), nu cu ceasul dispozitivului; mostrele exclud cadrele din GOP-ul păstrat în cache la legarea unei camere, care au vârsta cache-ului în loc de întârzierea transportului (R26).
+- MV2 păstrează mostrele cu ceas nesigur (RTT > 50 ms sau offset mutat cu > 20 ms) și le raportează în notele pragului, fără să le excludă: eroarea offsetului e cel mult jumătate din RTT-ul ceasului.
+- Specificația nu dă un percentil pentru MV10 (este un prag critic al AND-1), așa că MV10 și MV15 judecă fiecare citire: toate cele 20 de porniri (≤ 2 s) și toate cele 20 de salturi (≤ 1,5 s) la MV10, toate cele 10 rulări (≤ 3 s) la MV15; nicio pornire, salt sau rulare nu poate expira. MV1 folosește p90 din 20, cum cere specificația. O pornire, un salt sau o rulare care nu s-a terminat (MV1, MV10, MV15) se numără ca infinit de lent.
+- MV5 judecă fps-ul pe media ultimelor 2 minute din `gridFps` (60 de ferestre de 2 s), nu pe toată rularea: o scădere din cauza căldurii se vede la sfârșit.
+- MV5 calculează ritmul bateriei din prima și ultima citire, raportat la durata măsurată a grilei (ferestrele de 2 s din `gridFps`), nu la numărul de citiri: o citire a shell-ului care a expirat nu îl umflă. Procentul bateriei e întreg, deci rezoluția ritmului e de circa 6 %/h (1 % în circa 10 min): două puncte dau circa 12 %/h (trece), trei circa 18 %/h (pică), iar pragul de 15 %/h cade între aceste trepte.
+- MV6 judecă media lui `cpuPctApp` (procesul aplicației și procesele WebView2, ca pondere din tot PC-ul), nu maximul și nu `cpuPctTotal`, care include și hub-ul de pe același PC; fluxul principal se judecă pe media lui `mainCpuPctApp`, de la prima rulare a grilei care l-a măsurat.
+- MV8: specificația cere 5 min în PiP cu video care avansează; raportul cere 300 s în PiP, cel puțin un cadru și nicio pauză între cadre de peste 2 s. Pragul de 2 s pentru pauză e alegerea raportului, nu a specificației.
+- Pe WIN-1, `memMb` (MV7) e memorie privată (private bytes, R37) a aplicației și a proceselor WebView2: nu include secțiunile partajate și memoria GPU, unde Chromium ține cadrele decodate, deci o scurgere acolo nu apare în MV7.
 - MV14 (linii Kotlin pentru PiP și rețeaua locală) nu apare în rezultate: îl numără `tools/scripts/count-native-lines.sh` în CI.
 
 ## Date brute

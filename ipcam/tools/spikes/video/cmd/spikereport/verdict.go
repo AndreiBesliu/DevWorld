@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -22,18 +23,28 @@ const (
 	VerdictIncomplete    Verdict = "fără verdict: lipsesc măsurători"
 )
 
-// The items of AND-1 that decide (Global Constraints): the LAN items with 4 tiles, and the
-// 9-tile items. Failing one of the first is NO-GO; failing only 9-tile items is GO condiționat.
+// The thresholds that the gates read. decisive derives from these lists, so a gate and the
+// list of failures without a plan B cannot go out of step.
 var (
+	// G5, the items of AND-1 that decide (Global Constraints): the LAN items with 4 tiles, and the
+	// 9-tile items. Failing one of the first is NO-GO; failing only 9-tile items is GO condiționat.
 	androidCritical4 = []string{"MV1", "MV2", "MV3/4", "MV9", "MV10"}
 	androidCritical9 = []string{"MV3/9", "MV4/9", "MV5/9"}
-	// The web gate (G7): MV13 on the three browsers, and MV12 in the two WebViews.
+	// G6, WIN-1: MV6 decides.
+	windowsKeys = []string{mvKey(platformWindows, "MV6")}
+	// G7, the web gate: MV13 on the three browsers, and MV12 in the two WebViews.
 	// The Chrome part of MV12 needs a public origin and waits for Faza 0-bis.
 	webKeys = []string{
 		mvKey("chrome", "MV13"), mvKey("edge", "MV13"), mvKey("firefox", "MV13"),
 		mvKey(platformAndroid, "MV12"), mvKey(platformWindows, "MV12"),
 	}
+	// G19, Argon2id on AND-1.
+	g19Key = mvKey(platformAndroid, "MV15")
 )
+
+// isG9 says whether key is the codec matrix (S9) of some device: gate G9 reads it on every
+// device that ran S9.
+func isG9(key string) bool { return strings.HasSuffix(key, "/G9") }
 
 // assessment is a verdict and the thresholds behind it.
 type assessment struct {
@@ -87,7 +98,7 @@ func assessAndroid(mv map[string]MV) assessment {
 }
 
 func assessWindows(mv map[string]MV) assessment {
-	failedKeys, missingKeys := scan(mv, []string{mvKey(platformWindows, "MV6")})
+	failedKeys, missingKeys := scan(mv, windowsKeys)
 	a := assessment{failed: failedKeys, missing: missingKeys}
 	switch {
 	case len(failedKeys) > 0:
@@ -264,7 +275,7 @@ func gateG9(mv map[string]MV) Gate {
 	var lines []string
 	var devices []string
 	for key := range mv {
-		if strings.HasSuffix(key, "/G9") {
+		if isG9(key) {
 			devices = append(devices, key)
 		}
 	}
@@ -296,7 +307,7 @@ func gateG9(mv map[string]MV) Gate {
 
 func gateG19(mv map[string]MV) Gate {
 	g := Gate{ID: "G19", Title: "Argon2id pe Android mediu (MV15)"}
-	key := mvKey(platformAndroid, "MV15")
+	key := g19Key
 	v, ok := mv[key]
 	switch {
 	case !ok:
@@ -317,21 +328,18 @@ func gateG19(mv map[string]MV) Gate {
 	return g
 }
 
-// decisive are the thresholds that a gate above already turns into a decision.
+// decisive says whether a gate above already turns the threshold into a decision: it is one of
+// the keys the gates G5, G6, G7 and G19 read, or the codec matrix that G9 reads.
 func decisive(key string) bool {
-	device, code, _ := strings.Cut(key, "/")
-	switch device {
-	case platformAndroid:
-		for _, c := range append(append([]string(nil), androidCritical4...), androidCritical9...) {
-			if c == code {
-				return true
-			}
-		}
-		return code == "MV15" || code == "MV12" || code == "G9"
-	case platformWindows:
-		return code == "MV6" || code == "MV12"
+	if isG9(key) || key == g19Key {
+		return true
 	}
-	return code == "MV13" || code == "G9"
+	for _, keys := range [][]string{deviceKeys(platformAndroid, androidCritical4), deviceKeys(platformAndroid, androidCritical9), windowsKeys, webKeys} {
+		if slices.Contains(keys, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // otherFailures are the thresholds that failed without a verdict rule behind them: they

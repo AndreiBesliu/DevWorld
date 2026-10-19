@@ -273,6 +273,18 @@ func TestComputeMV_MV5(t *testing.T) {
 	hot := func(level float64) func(map[string][]float64) {
 		return func(s map[string][]float64) { s["thermal"] = append(rep(1, 50), rep(level, 10)...) }
 	}
+	// batteryDrop is a grid of `windows` windows of 2 s with `readings` battery readings that
+	// drop by `drop` points half way.
+	batteryDrop := func(windows, readings int, drop float64) func(map[string][]float64) {
+		return func(s map[string][]float64) {
+			s["gridFps"] = rep(11.95, windows)
+			b := rep(80, readings)
+			for i := readings / 2; i < readings; i++ {
+				b[i] = 80 - drop
+			}
+			s["batteryPct"] = b
+		}
+	}
 	tests := []struct {
 		name string
 		mut  func(s map[string][]float64)
@@ -287,22 +299,16 @@ func TestComputeMV_MV5(t *testing.T) {
 		}, "pass"},
 		{"fps in the last 2 minutes exactly 90 % of 12", func(s map[string][]float64) { s["gridFps"] = rep(10.8, 300) }, "pass"},
 		{"fps in the last 2 minutes just under", func(s map[string][]float64) { s["gridFps"] = rep(10.79, 300) }, "fail"},
-		{"12 % an hour", func(s map[string][]float64) { s["batteryPct"] = battery(80, 2) }, "pass"},
-		{"exactly 15 % an hour (3 points in 72 intervals of 10 s)", func(s map[string][]float64) {
-			b := rep(80, 73)
-			for i := 36; i < 73; i++ {
-				b[i] = 77
-			}
-			s["batteryPct"] = b
-		}, "pass"},
-		{"just over 15 % an hour (3 points in 70 intervals)", func(s map[string][]float64) {
-			b := rep(80, 71)
-			for i := 35; i < 71; i++ {
-				b[i] = 77
-			}
-			s["batteryPct"] = b
-		}, "fail"},
+		{"12 % an hour (2 points in the 10 min grid)", func(s map[string][]float64) { s["batteryPct"] = battery(80, 2) }, "pass"},
+		// The rate is the drop over the length of the grid (the 2 s windows of gridFps), not over
+		// the number of readings: 3 points in exactly 12 min are 15 %/h.
+		{"exactly 15 % an hour (3 points in a grid of 360 windows)", batteryDrop(360, 72, 3), "pass"},
+		{"just over 15 % an hour (3 points in a grid of 359 windows)", batteryDrop(359, 72, 3), "fail"},
+		// Native reads that timed out are dropped, so there are fewer readings than the 60 of
+		// a 10 min grid: that must not raise the rate (2 points in 10 min stay 12 %/h).
+		{"reads that timed out do not raise the rate", batteryDrop(300, 45, 2), "pass"},
 		{"18 % an hour", func(s map[string][]float64) { s["batteryPct"] = battery(80, 3) }, "fail"},
+		{"no grid windows, no duration to judge the rate on", func(s map[string][]float64) { s["gridFps"] = nil; s["batteryPct"] = battery(80, 3) }, "absent"},
 		{"charging is not a measurement", func(s map[string][]float64) { s["batteryPct"] = battery(70, -3) }, "absent"},
 		{"no shell metrics", func(s map[string][]float64) { delete(s, "thermal"); delete(s, "batteryPct") }, "absent"},
 		{"a hot phone fails even without a battery reading", func(s map[string][]float64) { hot(4)(s); delete(s, "batteryPct") }, "fail"},
@@ -320,6 +326,25 @@ func TestComputeMV_MV5(t *testing.T) {
 			t.Errorf("MV5/9 on Windows = %s, want absent", got)
 		}
 	})
+}
+
+// The rate is shown, on the duration of the grid: 2 points in 600 s are 12 %/h, whatever
+// the number of readings (the native reads that time out are missing).
+func TestComputeMV_MV5_BatteryRateIsOnTheDurationOfTheGrid(t *testing.T) {
+	for _, readings := range []int{60, 45, 7} {
+		f := newFixture(androidModel)
+		s := androidGrid(9)
+		b := rep(80, readings)
+		for i := readings / 2; i < readings; i++ {
+			b[i] = 78
+		}
+		s["batteryPct"] = b
+		f.add("S3-9", s)
+		v := ComputeMV(f.list())[mvKey(androidDevice, "MV5/9")]
+		if !v.Pass || v.Value != 12 || !strings.Contains(v.Text, "baterie 12 %/h") {
+			t.Errorf("%d readings: MV5/9 = %+v, want 12 %%/h on the 600 s of the grid", readings, v)
+		}
+	}
 }
 
 func TestComputeMV_MV6(t *testing.T) {
@@ -502,6 +527,11 @@ func TestComputeMV_MV9(t *testing.T) {
 		{"live frames that never steadied", run(map[string][]float64{"backgroundS": {125}}, "no steady live frames within 30 s of the return"), "fail"},
 		{"the player failed on return", run(map[string][]float64{"backgroundS": {125}}, "resume: STALLED"), "fail"},
 		{"fast, but the background was too short to count", run(map[string][]float64{"resumeMs": {500}, "backgroundS": {40}}, "background shorter than 2 min"), "absent"},
+		// S5 stores Math.round(seconds): 119.5 s becomes 120, but the app still wrote its note.
+		{"119.5 s is stored as 120, the app's note says it was short", run(map[string][]float64{"resumeMs": {500}, "backgroundS": {120}}, "background shorter than 2 min"), "absent"},
+		{"a slow return after a short background is not counted either", run(map[string][]float64{"resumeMs": {5000}, "backgroundS": {120}}, "background shorter than 2 min"), "absent"},
+		{"no live frame after a short background is not counted either", run(map[string][]float64{"backgroundS": {120}}, "background shorter than 2 min", "no frame within 30 s of the return"), "absent"},
+		{"120 s without the note counts", run(map[string][]float64{"resumeMs": {500}, "backgroundS": {120}}), "pass"},
 		{"no requestVideoFrameCallback", run(nil, "resume: n/a (no requestVideoFrameCallback)"), "absent"},
 		{"the person never pressed Home", run(nil, "the app did not go to the background within 10 min"), "absent"},
 		{"the stream did not start", run(nil, "start: no first frame"), "absent"},
@@ -512,6 +542,15 @@ func TestComputeMV_MV9(t *testing.T) {
 				t.Errorf("MV9 = %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestComputeMV_MV9_SaysWhyAShortBackgroundIsNotJudged(t *testing.T) {
+	f := newFixture(androidModel)
+	f.add("S5", map[string][]float64{"resumeMs": {500}, "backgroundS": {120}}, "background shorter than 2 min")
+	why := evaluate(f.list()).Missing[mvKey(androidDevice, "MV9")]
+	if !strings.Contains(why, "2 min") || !strings.Contains(why, "repetați S5") {
+		t.Errorf("reason = %q, want the 2 min and the advice to repeat S5", why)
 	}
 }
 
@@ -593,6 +632,57 @@ func TestComputeMV_MV10_ShowsTheWorstReading(t *testing.T) {
 	})
 }
 
+// The MV10 row says which check failed, the start or the seek, and its value is that check's.
+func TestComputeMV_MV10_NamesTheCheckThatFailed(t *testing.T) {
+	run := func(start, seek []float64) MV {
+		f := newFixture(androidModel)
+		f.add("S7", map[string][]float64{"startMs": start, "seekMs": seek})
+		return ComputeMV(f.list())[mvKey(androidDevice, "MV10")]
+	}
+	t.Run("the seek fails", func(t *testing.T) {
+		mv := run(rep(900, 20), append(rep(700, 19), 1501))
+		if mv.Pass || mv.Value != 1501 {
+			t.Fatalf("MV10 = %+v, want a failure with the slowest seek (1501 ms) as its value", mv)
+		}
+		if !strings.Contains(mv.Text, "salt max 1501 ms, peste pragul de 1500 ms") {
+			t.Errorf("text %q does not name the seek as the check over its limit", mv.Text)
+		}
+		if strings.Contains(mv.Text, "pragul de 2000 ms") {
+			t.Errorf("text %q blames the start, which passed", mv.Text)
+		}
+	})
+	t.Run("the start fails", func(t *testing.T) {
+		mv := run(append(rep(900, 19), 2001), rep(700, 20))
+		if mv.Pass || mv.Value != 2001 {
+			t.Fatalf("MV10 = %+v, want a failure with the slowest start (2001 ms) as its value", mv)
+		}
+		if !strings.Contains(mv.Text, "pornire max 2001 ms, peste pragul de 2000 ms") {
+			t.Errorf("text %q does not name the start as the check over its limit", mv.Text)
+		}
+		if strings.Contains(mv.Text, "pragul de 1500 ms") {
+			t.Errorf("text %q blames the seek, which passed", mv.Text)
+		}
+	})
+	t.Run("both fail: the start comes first", func(t *testing.T) {
+		mv := run(rep(2500, 20), rep(1800, 20))
+		if mv.Pass || mv.Value != 2500 || !strings.Contains(mv.Text, "pragul de 2000 ms") || !strings.Contains(mv.Text, "pragul de 1500 ms") {
+			t.Errorf("MV10 = %+v, want both checks named and the start as the value", mv)
+		}
+	})
+	t.Run("a seek that never finished", func(t *testing.T) {
+		mv := run(rep(900, 20), rep(700, 19))
+		if mv.Pass || !math.IsInf(mv.Value, 1) || !strings.Contains(mv.Text, "salt: doar 19 din 20 reușite") {
+			t.Errorf("MV10 = %+v, want the seek named with 19 of 20", mv)
+		}
+	})
+	t.Run("nothing over its limit is not blamed", func(t *testing.T) {
+		mv := run(rep(900, 20), rep(700, 20))
+		if !mv.Pass || strings.Contains(mv.Text, "peste pragul") {
+			t.Errorf("MV10 = %+v, want a pass that blames nothing", mv)
+		}
+	})
+}
+
 func TestComputeMV_MV12AndMV13(t *testing.T) {
 	run := func(platform, pair string) []Result {
 		f := newFixture(Device{Platform: platform})
@@ -662,6 +752,27 @@ func TestComputeMV_MV15(t *testing.T) {
 				t.Errorf("MV15 = %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// MV15 is judged like MV10, on every run, and says so in the same words.
+func TestComputeMV_MV15_Text(t *testing.T) {
+	run := func(samples []float64) MV {
+		f := newFixture(androidModel)
+		f.add("S8", map[string][]float64{"argon2idMs": samples})
+		return ComputeMV(f.list())[mvKey(androidDevice, "MV15")]
+	}
+	mv := run(append(rep(2100, 9), 2400))
+	if !mv.Pass || mv.Value != 2400 || !strings.Contains(mv.Text, "rulări max 2400 ms (mediana 2100 ms; 10 din 10)") {
+		t.Errorf("MV15 = %+v, want a pass on the slowest run (2400 ms)", mv)
+	}
+	mv = run(append(rep(2100, 9), 3001))
+	if mv.Pass || !strings.Contains(mv.Text, "rulări max 3001 ms, peste pragul de 3000 ms") {
+		t.Errorf("MV15 = %+v, want the slowest run named as over the limit", mv)
+	}
+	mv = run(rep(2100, 9))
+	if mv.Pass || !math.IsInf(mv.Value, 1) || !strings.Contains(mv.Text, "rulări: doar 9 din 10 reușite") {
+		t.Errorf("MV15 = %+v, want 9 of 10 runs named", mv)
 	}
 }
 

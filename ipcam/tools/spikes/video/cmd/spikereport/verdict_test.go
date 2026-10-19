@@ -246,6 +246,72 @@ func TestVerdicts_FromTheResults(t *testing.T) {
 	})
 }
 
+// otherFailures lists what failed without a gate behind it: a threshold that a gate reads
+// is already a decision and is not listed twice.
+func TestOtherFailures_ListOnlyWhatNoGateDecides(t *testing.T) {
+	gated := append(androidKeys(androidCritical...), androidKeys("MV15", "MV12", "G9")...)
+	gated = append(gated,
+		mvKey(windowsDevice, "MV6"), mvKey(windowsDevice, "MV12"),
+		mvKey("chrome", "MV13"), mvKey("edge", "MV13"), mvKey("firefox", "MV13"),
+		// G9 reads the codec matrix of every device that ran S9.
+		mvKey(windowsDevice, "G9"), mvKey("chrome", "G9"), mvKey("edge", "G9"), mvKey("firefox", "G9"))
+	notGated := append(androidKeys("MV7", "MV8", "MV3/16"),
+		mvKey(windowsDevice, "MV3/16"), mvKey(windowsDevice, "MV7"),
+		mvKey("chrome", "MV1"), mvKey("chrome", "MV2"), mvKey("chrome", "MV3/9"), mvKey("chrome", "MV7"), mvKey("chrome", "MV10"),
+		mvKey("firefox", "MV1"))
+	all := append(append([]string(nil), gated...), notGated...)
+	mv := map[string]MV{}
+	for _, key := range all {
+		device, code, _ := strings.Cut(key, "/")
+		mv[key] = MV{Code: code, Device: device, Pass: false}
+	}
+	listed := map[string]bool{}
+	for _, v := range otherFailures(mv) {
+		listed[mvKey(v.Device, v.Code)] = true
+	}
+	for _, key := range gated {
+		if listed[key] {
+			t.Errorf("%s is read by a gate, but it is also listed under the failures without a plan B", key)
+		}
+	}
+	for _, key := range notGated {
+		if !listed[key] {
+			t.Errorf("%s fails and no gate reads it, but it is not listed", key)
+		}
+	}
+	if passing := otherFailures(mvSet(all, nil, nil)); len(passing) != 0 {
+		t.Errorf("passing thresholds are listed: %+v", passing)
+	}
+}
+
+// decisive is not a second list of the gates' thresholds: a key that a gate starts to read
+// is decisive at once.
+func TestDecisive_FollowsTheGateDefinitions(t *testing.T) {
+	saved4, saved9, savedWeb := androidCritical4, androidCritical9, webKeys
+	t.Cleanup(func() { androidCritical4, androidCritical9, webKeys = saved4, saved9, savedWeb })
+	extra := "android/MV99"
+	for _, key := range []string{extra, "safari/MV13"} { // no gate reads MV13 of a browser it does not list
+		if decisive(key) {
+			t.Errorf("%s is decisive, but no gate reads it", key)
+		}
+	}
+	for name, add := range map[string]func(){
+		"the 4-tile critical items": func() { androidCritical4 = append(append([]string(nil), saved4...), "MV99") },
+		"the 9-tile critical items": func() { androidCritical9 = append(append([]string(nil), saved9...), "MV99") },
+		"the web gate":              func() { webKeys = append(append([]string(nil), savedWeb...), extra) },
+	} {
+		androidCritical4, androidCritical9, webKeys = saved4, saved9, savedWeb
+		add()
+		if !decisive(extra) {
+			t.Errorf("%s: a key added to the gate is not decisive", name)
+		}
+	}
+	androidCritical4, androidCritical9, webKeys = saved4, saved9, savedWeb
+	if decisive(extra) {
+		t.Error("the key stays decisive after the gate lost it")
+	}
+}
+
 func TestGates_TheDecisionOfEachVerdict(t *testing.T) {
 	gate := func(t *testing.T, rs []Result, id string) Gate {
 		t.Helper()

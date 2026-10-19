@@ -24,6 +24,11 @@ func render(t *testing.T, results []Result) string {
 var (
 	ipv4Literal = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
 	ipv6Literal = regexp.MustCompile(`(?i)(?:(?:[0-9a-f]{1,4}:)*[0-9a-f]{0,4}::(?:[0-9a-f]{0,4}(?::[0-9a-f]{1,4})*)|(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4})`)
+	// What is left of an address when only a part of it was replaced: three dotted numbers of
+	// up to three digits ("[ip].168.1.20" is what a scrub of the IPv6 part alone leaves of
+	// ::ffff:192.168.1.20), not glued to a word or a slash, which is how an engine version
+	// ("Chrome/141.0.0") looks.
+	ipv4Fragment = regexp.MustCompile(`(?:^|[^\w/])\.?\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
 )
 
 func TestReport_FlagsHubJitter(t *testing.T) {
@@ -69,6 +74,9 @@ func TestRender_NoIPOrSerialInOutput(t *testing.T) {
 		"serial: R58M12ABCDE",
 		"SSID: Casa Mea 5G",
 		"2001:db8:85a3:0:0:8a2e:370:7334 is the hub",
+		"cand ::ffff:192.168.1.20 typ host",
+		"relay [::ffff:10.0.0.1]:7080 refused",
+		"link fe80::1%eth0 is up",
 	}
 	android := find(t, rs, androidDevice, "S3-9")
 	android.Notes = append(android.Notes, dirt...)
@@ -89,12 +97,12 @@ func TestRender_NoIPOrSerialInOutput(t *testing.T) {
 		outputs[name] = csv
 	}
 	for name, out := range outputs {
-		for _, re := range []*regexp.Regexp{ipv4Literal, ipv6Literal} {
+		for _, re := range []*regexp.Regexp{ipv4Literal, ipv4Fragment, ipv6Literal} {
 			if m := re.FindString(out); m != "" {
 				t.Errorf("%s holds the address-like text %q", name, m)
 			}
 		}
-		for _, secret := range []string{"192.168", "hunter2", "R58M12ABCDE", "Casa Mea", "aa:bb:cc", "owner@example", "http://", "rtsp://", "fe80", "2001:db8"} {
+		for _, secret := range []string{"192.168", "168.1.20", "10.0.0.1", "ffff:", "hunter2", "R58M12ABCDE", "Casa Mea", "aa:bb:cc", "owner@example", "http://", "rtsp://", "fe80", "eth0", "2001:db8"} {
 			if strings.Contains(out, secret) {
 				t.Errorf("%s holds %q", name, secret)
 			}
@@ -114,6 +122,14 @@ func TestScrubText(t *testing.T) {
 		{"hub at http://192.168.1.20:7080/x failed", "hub at [url] failed"},
 		{"10.0.0.5:7080", "[ip]"},
 		{"from fe80::1ff:fe23:4567:890a and 2001:db8:85a3:0:0:8a2e:370:7334", "from [ip] and [ip]"},
+		// An IPv6 literal with a zone, and one that ends in an IPv4 address: all of it goes, not
+		// the IPv6 part alone (which would leave ".168.1.20").
+		{"fe80::1%eth0", "[ip]"},
+		{"cand ::ffff:192.168.1.20 typ host", "cand [ip] typ host"},
+		{"[::ffff:10.0.0.1]:7080", "[ip]"},
+		{"2001:db8::1:192.168.1.20", "[ip]"},
+		{"64:ff9b::10.1.2.3 and ::10.1.2.3", "[ip] and [ip]"},
+		{"0:0:0:0:0:ffff:10.0.0.7", "[ip]"},
 		{"aa:bb:cc:dd:ee:ff", "[mac]"},
 		{"AA-BB-CC-DD-EE-FF", "[mac]"},
 		{"write to owner@example.com now", "write to [email] now"},
@@ -342,6 +358,209 @@ func TestRender_WarnsOfSeveralModelsOfOnePlatform(t *testing.T) {
 	}
 	if quiet := section(t, render(t, androidRuns()), "## Avertismente"); strings.Contains(quiet, "Mai multe modele") {
 		t.Error("one model is warned about")
+	}
+}
+
+// A browser result carries no model, so the machine shows only in the OS: Chrome on the phone
+// and Chrome on the PC are two devices, and the report must not merge them without a word.
+func TestRender_WarnsWhenOnePlatformRunsOnTwoMachines(t *testing.T) {
+	chromeOn := func(os, webview, file string) Result {
+		f := newFixture(Device{Platform: "chrome", OS: os, WebView: webview})
+		r := f.add("S10", nil, "pair: host/host", "prompt: n/a")
+		r.File = file
+		return *r
+	}
+	warningsOf := func(rs ...Result) string { return section(t, render(t, rs), "## Avertismente") }
+
+	t.Run("Chrome on the phone and on the PC", func(t *testing.T) {
+		warnings := warningsOf(
+			chromeOn("Android 14", "Chrome/141.0.0.0", "chrome-phone-s10.json"),
+			chromeOn("Windows 11", "Chrome/141.0.0.0", "chrome-pc-s10.json"),
+		)
+		for _, want := range []string{"Mai multe modele", "Chrome", "Android 14", "Windows 11"} {
+			if !strings.Contains(warnings, want) {
+				t.Errorf("warnings lack %q:\n%s", want, warnings)
+			}
+		}
+	})
+	t.Run("one model on two versions of the OS", func(t *testing.T) {
+		old := newFixture(androidModel)
+		old.add("S1", map[string][]float64{"firstFrameMs": rep(500, 20)})
+		updated := androidModel
+		updated.OS = "Android 15 (API 35)"
+		next := newFixture(updated)
+		r := next.add("S2", nil)
+		r.File = "android-after-update-s2.json"
+		warnings := warningsOf(append(old.list(), *r)...)
+		if !strings.Contains(warnings, "Android 14 (API 34)") || !strings.Contains(warnings, "Android 15 (API 35)") {
+			t.Errorf("warnings do not name both OS versions:\n%s", warnings)
+		}
+	})
+	t.Run("the same machine with another browser build is one device", func(t *testing.T) {
+		warnings := warningsOf(
+			chromeOn("Windows 11", "Chrome/141.0.0.0", "chrome-a-s10.json"),
+			chromeOn("Windows 11", "Chrome/142.0.0.0", "chrome-b-s10.json"),
+		)
+		if strings.Contains(warnings, "Mai multe modele") {
+			t.Errorf("a browser update is warned about:\n%s", warnings)
+		}
+	})
+}
+
+// R40: the newest valid run decides, but re-running until a pass must not hide a failure.
+func TestRender_AnEarlierRunThatFailedStaysVisible(t *testing.T) {
+	const warning = "o rulare anterioară a picat pragul"
+	slow := map[string][]float64{"firstFrameMs": rep(2600, 20)} // p90 over 1.5 s: fails MV1
+	fast := map[string][]float64{"firstFrameMs": rep(800, 20)}
+
+	t.Run("the older run fails and the newer one passes", func(t *testing.T) {
+		f := newFixture(androidModel)
+		older := f.add("S1", slow)
+		f.add("S1", fast)
+		rs := f.list()
+		if v := ComputeMV(rs)[mvKey(androidDevice, "MV1")]; !v.Pass || v.Value != 800 {
+			t.Fatalf("MV1 = %+v, want the newer run's pass with p90 800 ms", v)
+		}
+		md := render(t, rs)
+		row := rowOf(t, md, "| MV1 |")
+		for _, want := range []string{"p90 800 ms", warning, "p90 2600 ms", older.File} {
+			if !strings.Contains(row, want) {
+				t.Errorf("the MV1 row lacks %q:\n%s", want, row)
+			}
+		}
+		if !strings.HasSuffix(row, "| Da |") {
+			t.Errorf("the newer run decides, so the row passes:\n%s", row)
+		}
+		summary := section(t, md, "## Rezumat pentru proprietar")
+		if !strings.Contains(summary, "anterioară") || !strings.Contains(summary, "MV1") {
+			t.Errorf("the summary does not point to the earlier failure:\n%s", summary)
+		}
+	})
+	t.Run("every earlier run that failed is shown", func(t *testing.T) {
+		f := newFixture(androidModel)
+		first := f.add("S1", map[string][]float64{"firstFrameMs": rep(3100, 20)})
+		second := f.add("S1", slow)
+		f.add("S1", fast)
+		row := rowOf(t, render(t, f.list()), "| MV1 |")
+		for _, want := range []string{"p90 3100 ms", first.File, "p90 2600 ms", second.File} {
+			if !strings.Contains(row, want) {
+				t.Errorf("the MV1 row lacks %q:\n%s", want, row)
+			}
+		}
+		if n := strings.Count(row, warning); n != 2 {
+			t.Errorf("the MV1 row warns %d times, want once for each earlier failure:\n%s", n, row)
+		}
+	})
+	t.Run("the newer run is unmeasured, the earlier failure still shows", func(t *testing.T) {
+		f := newFixture(androidModel)
+		older := f.add("S2", map[string][]float64{"subLatencyMs": rep(2000, 100), "mainLatencyMs": rep(300, 100)})
+		f.add("S2", map[string][]float64{"subLatencyMs": rep(300, 60), "mainLatencyMs": rep(300, 60)})
+		row := rowOf(t, render(t, f.list()), "| MV2 |")
+		for _, want := range []string{"nemăsurat", warning, older.File} {
+			if !strings.Contains(row, want) {
+				t.Errorf("the MV2 row lacks %q:\n%s", want, row)
+			}
+		}
+	})
+	// The guide does not ask Chrome for S3-4, so MV3/4 has no row of its own when the newest run
+	// gives no value: the earlier failure must bring the row, or it would not be shown at all.
+	t.Run("an earlier failure of a threshold outside the guide still gets its row", func(t *testing.T) {
+		f := newFixture(browserDevice("chrome"))
+		bad := gridSamples(4)
+		bad["tileFps"][1] = 3
+		older := f.add("S3-4", bad)
+		f.add("S3-4", map[string][]float64{"gridFps": rep(11.9, 300)}) // no per-tile numbers
+		row := rowOf(t, render(t, f.list()), "| MV3/4 |")
+		for _, want := range []string{"nemăsurat", warning, "fps minim 3", older.File} {
+			if !strings.Contains(row, want) {
+				t.Errorf("the MV3/4 row lacks %q:\n%s", want, row)
+			}
+		}
+	})
+	t.Run("an earlier run that passed is not a warning", func(t *testing.T) {
+		f := newFixture(androidModel)
+		f.add("S1", fast)
+		f.add("S1", slow) // the newer run fails and decides
+		md := render(t, f.list())
+		row := rowOf(t, md, "| MV1 |")
+		if strings.Contains(row, "anterioară") || strings.Contains(section(t, md, "## Rezumat pentru proprietar"), "anterioară") {
+			t.Errorf("an earlier pass is reported as a failure:\n%s", row)
+		}
+		if !strings.HasSuffix(row, "| Nu |") {
+			t.Errorf("the newer run fails, so the row fails:\n%s", row)
+		}
+	})
+	t.Run("an interrupted run is not an earlier valid run", func(t *testing.T) {
+		f := newFixture(androidModel)
+		f.add("S1", slow, "interrupted: the page was hidden 12 s into the run").Interrupted = true
+		f.add("S1", fast)
+		md := render(t, f.list())
+		if row := rowOf(t, md, "| MV1 |"); strings.Contains(row, "anterioară") || strings.Contains(section(t, md, "## Rezumat pentru proprietar"), "anterioară") {
+			t.Errorf("an interrupted run is reported as an earlier failure:\n%s", row)
+		}
+	})
+	// MV6 is judged on S3-16; its main-stream part takes the first grid run that has it, which
+	// is S3-16's. A reading of an earlier S3-9 run is not what the row's value is made of.
+	t.Run("a threshold that belongs to another scenario is not an earlier failure", func(t *testing.T) {
+		f := newFixture(windowsModel)
+		f.add("S3-16", windowsGrid(16))
+		bad := windowsGrid(9)
+		bad["mainCpuPctApp"] = rep(14, 12) // over 10 %
+		f.add("S3-9", bad)
+		f.add("S3-9", windowsGrid(9))
+		if row := rowOf(t, render(t, f.list()), "| MV6 |"); strings.Contains(row, warning) || !strings.HasSuffix(row, "| Da |") {
+			t.Errorf("the MV6 row blames a reading of another scenario's earlier run:\n%s", row)
+		}
+	})
+	t.Run("a threshold that the earlier run passed is not a warning", func(t *testing.T) {
+		f := newFixture(androidModel)
+		f.add("S3-9", androidGrid(9)) // passes
+		bad := androidGrid(9)
+		bad["tileFps"][3] = 4 // MV3/9 fails
+		older := f.add("S3-9", bad)
+		f.add("S3-9", androidGrid(9))
+		md := render(t, f.list())
+		if row := rowOf(t, md, "| MV3/9 |"); !strings.Contains(row, warning) || !strings.Contains(row, "fps minim 4") || !strings.Contains(row, older.File) {
+			t.Errorf("the MV3/9 row does not show the earlier failure:\n%s", row)
+		}
+		for _, code := range []string{"MV4/9", "MV5/9"} {
+			if row := rowOf(t, md, "| "+code+" |"); strings.Contains(row, warning) {
+				t.Errorf("the %s row warns, but that run passed it:\n%s", code, row)
+			}
+		}
+	})
+}
+
+// PH0-30 asks the owner to approve the numbers; so every choice of statistic where the spec
+// names none is written down in the limitations.
+func TestRender_LimitsNameEveryStatisticChoice(t *testing.T) {
+	limits := section(t, render(t, allRuns()), "## Limitări ale măsurătorilor")
+	for _, tc := range []struct {
+		choice string
+		words  []string
+	}{
+		{"MV10 and MV15 judge every reading", []string{"MV10 și MV15", "fiecare citire"}},
+		{"MV8 uses the 2 s gap rule", []string{"MV8", "pauză", "2 s"}},
+		{"MV6 uses the mean of cpuPctApp", []string{"MV6", "media", "cpuPctApp"}},
+		{"MV5 fps uses the last 2 minutes", []string{"MV5", "ultimelor 2 minute", "gridFps"}},
+		{"MV2 keeps unreliable-clock samples", []string{"MV2", "ceas nesigur", "le raportează"}},
+		{"the resolution of the MV5 battery rate", []string{"MV5", "baterie", "6 %/h", "durata măsurată a grilei"}},
+		{"WIN-1 memMb is private bytes", []string{"WIN-1", "memMb", "memorie privată", "R37", "memoria GPU"}},
+		{"an earlier failing run stays visible (R40)", []string{"R40", "rulare anterioară"}},
+	} {
+		t.Run(tc.choice, func(t *testing.T) {
+			// Every word must come in one bullet, so that the choice is one statement.
+			for _, line := range strings.Split(limits, "\n") {
+				ok := true
+				for _, w := range tc.words {
+					ok = ok && strings.Contains(line, w)
+				}
+				if ok {
+					return
+				}
+			}
+			t.Errorf("no limitation says all of %q in one bullet:\n%s", tc.words, limits)
+		})
 	}
 }
 
