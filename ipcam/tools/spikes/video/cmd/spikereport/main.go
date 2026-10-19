@@ -12,7 +12,10 @@
 //
 // Everything that reaches the output passes through scrubText first, so that an address,
 // a MAC, an e-mail, a serial number or an SSID in a note cannot reach the public
-// repository (PH0-22). See ipcam/docs/superpowers/plans/2026-10-18-phase0b-video-spike.md, Task 13.
+// repository (PH0-22). Then the redaction scanner (package redact, R51) reads every file
+// the run would write: when it finds anything, nothing is written and the run fails,
+// naming the file, the line and the kind of each match, never its text.
+// See ipcam/docs/superpowers/plans/2026-10-18-phase0b-video-spike.md, Task 13.
 package main
 
 import (
@@ -31,6 +34,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/redact"
 )
 
 // maxResultBytes is the largest results file that is read. The hub stores at most 2 MiB.
@@ -272,6 +277,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	if leaks := scanOutputs(names, files); len(leaks) > 0 {
+		say(stderr, "spikereport: nothing written: the redaction scanner (PH0-22, R51) found text that must not be published:")
+		for _, leak := range leaks {
+			say(stderr, "spikereport:   %s", leak)
+		}
+		say(stderr, "spikereport: remove it from the result files (a note or a device field) or pseudonymise it, then run again")
+		return 1
+	}
 	for _, name := range names {
 		path := filepath.Join(*out, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // documentation, meant to be committed and read
@@ -289,6 +302,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// scanOutputs runs the redaction scanner on every file the run would write, and lists each
+// match as <file>:<line>:<column>: <kind>, without the text it found.
+func scanOutputs(names []string, files map[string]string) []string {
+	var leaks []string
+	for _, name := range names {
+		for _, m := range redact.Scan(files[name]) {
+			leaks = append(leaks, fmt.Sprintf("%s:%d:%d: %s", name, m.Line, m.Column, m.Kind))
+		}
+	}
+	return leaks
 }
 
 // removeStaleCSVs deletes the phase0b-*.csv files in <out>/phase0-data that this run did not

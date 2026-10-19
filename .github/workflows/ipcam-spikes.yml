@@ -12,6 +12,9 @@ on:
       - 'ipcam/package.json'
       - 'ipcam/pnpm-*.yaml'
       - 'ipcam/tsconfig.base.json'
+      # PH0-22 (R51): the published Phase 0 reports and their raw data, which the redaction job scans.
+      - 'ipcam/docs/research/*phase0*-results.md'
+      - 'ipcam/docs/research/phase0-data/**'
       - '.github/workflows/ipcam-spikes.yml'
   pull_request:
     paths:
@@ -24,6 +27,9 @@ on:
       - 'ipcam/package.json'
       - 'ipcam/pnpm-*.yaml'
       - 'ipcam/tsconfig.base.json'
+      # PH0-22 (R51): the published Phase 0 reports and their raw data, which the redaction job scans.
+      - 'ipcam/docs/research/*phase0*-results.md'
+      - 'ipcam/docs/research/phase0-data/**'
       - '.github/workflows/ipcam-spikes.yml'
 
 permissions:
@@ -39,6 +45,48 @@ env:
   GOFLAGS: -mod=readonly
 
 jobs:
+  redaction:
+    # PH0-22 (spec §16.2.3, R51): the Phase 0 reports and their raw data are published in a
+    # public repository, so they must hold no IP address, MAC address, e-mail, rtsp URL, .local
+    # name, Windows user path or serial number. redactscan names each match by file, line and
+    # kind, never by its text; any match fails the run.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+      - name: Scan the Phase 0 reports and data
+        run: |
+          set -o pipefail
+          shopt -s nullglob
+          paths=(docs/research/*phase0*-results.md)
+          if [[ -d docs/research/phase0-data ]]; then
+            paths+=(docs/research/phase0-data)
+          fi
+          if (( ${#paths[@]} == 0 )); then
+            echo "No Phase 0 report or data yet: nothing to scan."
+            exit 0
+          fi
+          go run ./tools/spikes/video/cmd/redactscan "${paths[@]}" 2>&1 | tee "${RUNNER_TEMP}/redactscan.log"
+      - name: Show the matches as an annotation
+        # The lines name files, lines and kinds only, so they are safe to show.
+        if: failure()
+        run: |
+          if [[ -f "${RUNNER_TEMP}/redactscan.log" ]]; then
+            tools/scripts/annotate.sh 'PH0-22 redaction scan' 60 < "${RUNNER_TEMP}/redactscan.log"
+          fi
+
   go:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

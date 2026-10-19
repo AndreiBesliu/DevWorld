@@ -319,6 +319,43 @@ func TestRun_RealChromeRun(t *testing.T) {
 	}
 }
 
+// PH0-22 (R51): spikereport scans what it would write and writes nothing when the scan
+// finds something; the message names the file, the line and the kind, never the value.
+func TestRun_RefusesToWriteWhatTheRedactionScanFinds(t *testing.T) {
+	for name, tc := range map[string]struct{ field, value, kind string }{
+		"a serial number in a note":     {"note", "phone R58M12ABCDE ready", "serial-like token"},
+		"a .local name in a note":       {"note", "hub andrei-pc.local refused", ".local hostname"},
+		"a Windows user path in a note": {"note", `log C:\\Users\\Andrei\\AppData`, "Windows user path"},
+		"a serial number as the model":  {"model", "Pixel 8 26071FDH2000JG", "serial-like token"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in, out := t.TempDir(), t.TempDir()
+			result := storedS1
+			if tc.field == "note" {
+				result = strings.Replace(result, `"notes":["sub: H264"]`, `"notes":["sub: H264","`+tc.value+`"]`, 1)
+			} else {
+				result = strings.Replace(result, `"model":"samsung SM-A245F"`, `"model":"`+tc.value+`"`, 1)
+			}
+			write(t, in, "android-20261018-100000-s1.json", result)
+			code, stdout, stderr := runMain(t, "-in", in, "-out", out, "-date", "2026-10-19")
+			if code == 0 {
+				t.Fatalf("exit 0: the report was written although it leaks (stdout %q)", stdout)
+			}
+			if entries, _ := os.ReadDir(out); len(entries) != 0 {
+				t.Errorf("wrote %d entries into the output folder", len(entries))
+			}
+			if !strings.Contains(stderr, "2026-10-19-phase0b-results.md:") || !strings.Contains(stderr, tc.kind) || !strings.Contains(stderr, "PH0-22") {
+				t.Errorf("stderr %q does not name the file, the line and the kind", stderr)
+			}
+			for _, secret := range []string{"R58M12ABCDE", "andrei-pc", "Andrei", "26071FDH2000JG"} {
+				if strings.Contains(stdout+stderr, secret) {
+					t.Errorf("the message repeats %q:\n%s", secret, stdout+stderr)
+				}
+			}
+		})
+	}
+}
+
 // report-10: a fresh -out never deletes or overwrites another folder's outputs.
 func TestRun_AFreshOutLeavesTheOtherFolderAlone(t *testing.T) {
 	first, second := t.TempDir(), t.TempDir()

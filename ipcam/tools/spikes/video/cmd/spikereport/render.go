@@ -171,7 +171,7 @@ func (r Report) Markdown() string {
 	used, excluded, superseded, informative := r.counts()
 	d.printf("Raport din %s, generat de `spikereport` din fișierele de rezultate ale spike-ului. Rulări citite: %d; folosite la praguri: %d; invalide, deci excluse (întrerupte, eșuate sau la încărcător): %d; înlocuite de o rulare mai nouă a aceluiași scenariu: %d; doar informative: %d. Cifrele brute sunt în fișierele CSV de la sfârșit (PH0-30).",
 		r.date, len(r.ev.Runs), used, excluded, superseded, informative)
-	d.text("Textele din rezultate trec printr-un filtru care scoate adrese, URL-uri, adrese MAC, e-mailuri și valorile etichetate `serial` și `ssid` (PH0-22); proprietarul citește raportul înainte de commit.")
+	d.text("Textele din rezultate trec printr-un filtru care scoate adrese, URL-uri, adrese MAC, e-mailuri și valorile etichetate `serial` și `ssid`, iar raportul se scrie doar dacă scanerul de redactare nu mai găsește nimic în el (PH0-22, R51); proprietarul îl citește înainte de commit.")
 	d.blank()
 	r.summary(&d)
 	r.devicesSection(&d)

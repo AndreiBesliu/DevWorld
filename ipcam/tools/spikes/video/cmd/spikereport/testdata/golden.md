@@ -1,7 +1,7 @@
 # Rezultatele Fazei 0 (b): spike-ul video
 
 Raport din 2026-10-19, generat de `spikereport` din fișierele de rezultate ale spike-ului. Rulări citite: 34; folosite la praguri: 28; invalide, deci excluse (întrerupte, eșuate sau la încărcător): 4; înlocuite de o rulare mai nouă a aceluiași scenariu: 1; doar informative: 1. Cifrele brute sunt în fișierele CSV de la sfârșit (PH0-30).
-Textele din rezultate trec printr-un filtru care scoate adrese, URL-uri, adrese MAC, e-mailuri și valorile etichetate `serial` și `ssid` (PH0-22); proprietarul citește raportul înainte de commit.
+Textele din rezultate trec printr-un filtru care scoate adrese, URL-uri, adrese MAC, e-mailuri și valorile etichetate `serial` și `ssid`, iar raportul se scrie doar dacă scanerul de redactare nu mai găsește nimic în el (PH0-22, R51); proprietarul îl citește înainte de commit.
 
 ## Rezumat pentru proprietar
 
