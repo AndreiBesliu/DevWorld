@@ -346,9 +346,11 @@ func TestRealURL_FailedConnectionNamesNoURL(t *testing.T) {
 		t.Errorf("the failure of real-1 is not reported in Romanian:\n%s", out)
 	}
 	assertNoSecrets(t, "the output", out, addr)
-	// After a failure the same camera is asked for again, so that a typo costs nothing.
-	if len(r.prompts) != 3 || !strings.Contains(r.prompts[0], "real-1") || !strings.Contains(r.prompts[1], "real-1") {
-		t.Errorf("prompts = %q, want real-1 asked for twice, then Enter", r.prompts)
+	// After a failure the same camera is asked for again, so that a typo costs nothing; an
+	// empty line there moves on to real-2, and an empty line at real-2 ends the probe.
+	if len(r.prompts) != 4 || !strings.Contains(r.prompts[0], "real-1") || !strings.Contains(r.prompts[1], "real-1") ||
+		!strings.Contains(r.prompts[2], "real-2") {
+		t.Errorf("prompts = %q, want real-1 asked for twice, then real-2, then Enter", r.prompts)
 	}
 	r.checkClosedBeforeEnter(t)
 }
@@ -482,6 +484,9 @@ func TestProbeRealCameras_ARetryKeepsTheName(t *testing.T) {
 	if len(*prompts) != 3 || !strings.Contains((*prompts)[1], "real-1") || !strings.Contains((*prompts)[2], "real-2") {
 		t.Errorf("prompts = %q", *prompts)
 	}
+	if !strings.Contains((*prompts)[1], "din nou") {
+		t.Errorf("the prompt after a failure = %q, want it to say the camera is asked for again", (*prompts)[1])
+	}
 	text := out.String()
 	if !strings.Contains(text, "Conectarea la camera real-1 a eșuat: rtsp real-1: connection refused.") || strings.Contains(text, "bad-url") {
 		t.Errorf("output = %q, want the failure of real-1 without the URL", text)
@@ -489,6 +494,67 @@ func TestProbeRealCameras_ARetryKeepsTheName(t *testing.T) {
 	// The summary has the outcome of the last attempt only.
 	if got := summary(t, text); len(got) != 1 || got[0] != "Camera real-1 este conectată: H264, profil 4d401f, 640x360." {
 		t.Errorf("summary = %q, want real-1 connected", got)
+	}
+}
+
+// An empty line after a failure moves on to the next camera, and the failure stays in the
+// summary: a camera that cannot be read (MJPEG only, a wrong password) is a fact to relay, and
+// the cameras after it are still asked for.
+func TestProbeRealCameras_EnterAfterAFailureMovesOnToTheNextCamera(t *testing.T) {
+	ask, prompts := answers("bad-url", "", "rtsp://a/2", "")
+	var urls []string
+	var out strings.Builder
+
+	if err := probeRealCameras(t.Context(), ask, &out, fakeConnect(&urls), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if len(*prompts) != 4 || !strings.Contains((*prompts)[1], "real-1") || !strings.Contains((*prompts)[2], "real-2") ||
+		!strings.Contains((*prompts)[3], "real-3") {
+		t.Fatalf("prompts = %q, want real-1 twice, then real-2 and real-3", *prompts)
+	}
+	// A fresh prompt ends the probe on an empty line; the prompt after a failure moves on.
+	for _, i := range []int{0, 2, 3} {
+		if !strings.Contains((*prompts)[i], "Enter gol = gata") {
+			t.Errorf("prompt %d = %q, want «Enter gol = gata»", i, (*prompts)[i])
+		}
+	}
+	if p := (*prompts)[1]; strings.Contains(p, "Enter gol = gata") || !strings.Contains(p, "Enter gol = camera următoare") {
+		t.Errorf("the prompt after a failure = %q, want «Enter gol = camera următoare»", p)
+	}
+	if len(urls) != 2 || urls[1] != "rtsp://a/2" {
+		t.Errorf("connected to %q, want bad-url then rtsp://a/2", urls)
+	}
+	text := out.String()
+	if !strings.Contains(text, "introduceți-o din nou sau apăsați Enter pentru camera următoare.\n") {
+		t.Errorf("the hint after the failure does not say that Enter moves on:\n%s", text)
+	}
+	want := []string{
+		"Conectarea la camera real-1 a eșuat: rtsp real-1: connection refused.",
+		"Camera real-2 este conectată: H264, profil 4d401f, 640x360.",
+	}
+	if got := summary(t, text); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("summary = %q, want %q", got, want)
+	}
+}
+
+// After the last camera there is no next one: the hint says that Enter ends the probe.
+func TestProbeRealCameras_AFailureOfTheLastCameraOffersToEnd(t *testing.T) {
+	ask, prompts := answers("rtsp://a/1", "rtsp://a/2", "rtsp://a/3", "silent-url", "")
+	var urls []string
+	var out strings.Builder
+
+	if err := probeRealCameras(t.Context(), ask, &out, fakeConnect(&urls), 50*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if len(*prompts) != 5 || !strings.Contains((*prompts)[4], "real-4") || !strings.Contains((*prompts)[4], "Enter gol = gata") {
+		t.Errorf("prompts = %q, want real-4 asked for again, with «Enter gol = gata»", *prompts)
+	}
+	text := out.String()
+	if !strings.Contains(text, "introduceți-o din nou sau apăsați Enter pentru a încheia.\n") || strings.Contains(text, "camera următoare") {
+		t.Errorf("the hint after the last camera:\n%s\nwant «… apăsați Enter pentru a încheia.»", text)
+	}
+	if got := summary(t, text); len(got) != 4 || !strings.HasPrefix(got[3], "Conectarea la camera real-4 a eșuat: ") {
+		t.Errorf("summary = %q, want 4 cameras, real-4 failed", got)
 	}
 }
 

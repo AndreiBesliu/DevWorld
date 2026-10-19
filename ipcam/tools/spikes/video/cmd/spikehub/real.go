@@ -120,14 +120,26 @@ func runRealProbe(ctx context.Context, e env) error {
 // probeRealCameras asks for the URLs of up to maxRealCameras cameras and probes
 // each, as real-1, real-2 and so on. It prints one line per attempt, then a
 // summary with one line per camera, which the owner sends to the developers.
-// An empty line ends the prompts. A camera that fails is asked for again under
-// the same name, so that a typo costs nothing; the summary keeps the outcome
-// of its last attempt.
+// An empty line at a camera's first prompt ends the prompts. A camera that
+// fails is asked for again under the same name, so that a typo costs nothing,
+// and an empty line there moves on to the next camera, so that a camera that
+// cannot be read does not end the probe. The summary keeps, per camera, the
+// outcome of its last attempt: a failure stays in it unless a retry succeeds.
 func probeRealCameras(ctx context.Context, ask askFunc, out io.Writer, connect connectFunc, frameTimeout time.Duration) error {
 	var lines []string // per camera, the outcome of its last attempt
+	retry := false     // the camera n failed and is asked for again
 	for n := 1; n <= maxRealCameras; {
 		id := fmt.Sprintf("real-%d", n)
-		typed, err := ask(fmt.Sprintf("Adresa RTSP a camerei %s (nu se afișează ce tastați; Enter gol = gata): ", id))
+		var prompt string
+		switch {
+		case !retry:
+			prompt = fmt.Sprintf("Adresa RTSP a camerei %s (nu se afișează ce tastați; Enter gol = gata): ", id)
+		case n < maxRealCameras:
+			prompt = fmt.Sprintf("Adresa RTSP a camerei %s, din nou (nu se afișează ce tastați; Enter gol = camera următoare): ", id)
+		default:
+			prompt = fmt.Sprintf("Adresa RTSP a camerei %s, din nou (nu se afișează ce tastați; Enter gol = gata): ", id)
+		}
+		typed, err := ask(prompt)
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -135,8 +147,14 @@ func probeRealCameras(ctx context.Context, ask askFunc, out io.Writer, connect c
 			return fmt.Errorf("citirea adresei camerei %s: %w", id, err)
 		}
 		rawURL := strings.TrimSpace(typed)
-		if rawURL == "" {
+		if rawURL == "" && !retry {
 			break
+		}
+		if rawURL == "" {
+			// The failure of camera n stays in the summary; on to the next camera.
+			retry = false
+			n++
+			continue
 		}
 		_, _ = fmt.Fprintf(out, "Verific camera %s…\n", id)
 		res, err := probeCamera(ctx, id, rawURL, connect, frameTimeout)
@@ -149,8 +167,13 @@ func probeRealCameras(ctx context.Context, ask askFunc, out io.Writer, connect c
 		} else {
 			lines[n-1] = res.line
 		}
-		if res.hint != "" {
-			_, _ = fmt.Fprintln(out, res.hint)
+		retry = res.check != ""
+		if retry {
+			next := retryNext
+			if n == maxRealCameras {
+				next = retryEnd
+			}
+			_, _ = fmt.Fprintln(out, res.check+next)
 			continue
 		}
 		n++
@@ -171,20 +194,22 @@ func probeRealCameras(ctx context.Context, ask askFunc, out io.Writer, connect c
 // probeResult is what the probe of one camera found: the line to send, and for
 // a camera that failed, what to check before trying again.
 type probeResult struct {
-	line string
-	hint string
+	line  string
+	check string
 }
 
-// The hints after a camera that failed.
+// The hint after a camera that failed is what to check, then what the next
+// prompt takes: the address again, or an empty line, which moves on to the
+// next camera, or ends the probe after the last one.
 const (
-	hintAddress = "Verificați adresa (utilizator, parolă, port, cale) și introduceți-o din nou, " +
-		"sau apăsați Enter pentru a încheia."
-	hintVideo = "Verificați că fluxul camerei este H.264 sau H.265 (nu MJPEG și nu doar audio) și că adresa " +
-		"indică fluxul video; introduceți-o din nou sau apăsați Enter pentru a încheia."
+	checkAddress = "Verificați adresa (utilizator, parolă, port, cale) și "
+	checkVideo   = "Verificați că fluxul camerei este H.264 sau H.265 (nu MJPEG și nu doar audio) și că adresa indică fluxul video; "
+	retryNext    = "introduceți-o din nou sau apăsați Enter pentru camera următoare."
+	retryEnd     = "introduceți-o din nou sau apăsați Enter pentru a încheia."
 )
 
-func failedProbe(id, reason, hint string) probeResult {
-	return probeResult{line: fmt.Sprintf("Conectarea la camera %s a eșuat: %s.", id, strings.TrimRight(reason, ". ")), hint: hint}
+func failedProbe(id, reason, check string) probeResult {
+	return probeResult{line: fmt.Sprintf("Conectarea la camera %s a eșuat: %s.", id, strings.TrimRight(reason, ". ")), check: check}
 }
 
 // probeCamera connects to one camera, waits up to frameTimeout for its first
@@ -198,7 +223,7 @@ func probeCamera(ctx context.Context, id, rawURL string, connect connectFunc, fr
 		if ctx.Err() != nil {
 			return probeResult{}, ctx.Err()
 		}
-		return failedProbe(id, err.Error(), hintAddress), nil // source scrubs its errors
+		return failedProbe(id, err.Error(), checkAddress), nil // source scrubs its errors
 	}
 	cached, live, unsubscribe := src.Subscribe()
 	defer unsubscribe()
@@ -220,10 +245,10 @@ func probeCamera(ctx context.Context, id, rawURL string, connect connectFunc, fr
 		return probeResult{line: fmt.Sprintf("Camera %s este conectată: %s, profil %s, %s.",
 			id, src.Codec(), profile, resolutionOf(src.Codec(), first))}, nil
 	case ended:
-		return failedProbe(id, "camera a închis conexiunea înainte de primul cadru video", hintAddress), nil
+		return failedProbe(id, "camera a închis conexiunea înainte de primul cadru video", checkAddress), nil
 	default:
 		return failedProbe(id, fmt.Sprintf("camera răspunde, dar nu a trimis niciun cadru video decodabil în %g secunde",
-			frameTimeout.Seconds()), hintVideo), nil
+			frameTimeout.Seconds()), checkVideo), nil
 	}
 }
 
