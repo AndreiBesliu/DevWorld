@@ -9,7 +9,7 @@
   "app": {
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:7080 http://*:7080"
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:7080 http://127.0.0.1:7080 http://*:7080"
     }
   },
   "bundle": {

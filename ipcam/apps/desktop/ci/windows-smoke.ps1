@@ -4,7 +4,7 @@
 # machine policy (below), which must never stay on a PC. It starts spikehub with
 # 4 simulated cameras, then starts the app from a new process several times:
 # each start runs scenario S1 by autorun (--autorun S1 --hub
-# http://localhost:7080, R5), and the hub must store its S1 result with 20
+# http://127.0.0.1:7080, R5), and the hub must store its S1 result with 20
 # samples within 5 min. Every start must pass: the script goes on after a start
 # that fails, to count how many do, and fails if any did. Nothing is retried.
 #
@@ -42,7 +42,10 @@ if ($env:GITHUB_ACTIONS -ne 'true') {
   throw 'windows-smoke.ps1 runs in GitHub Actions only: it opens a DevTools port for the app by a machine policy.'
 }
 
-$hubUrl = 'http://localhost:7080'
+# 127.0.0.1, not localhost: spikehub listens on IPv4 only (R38), and Windows
+# tries ::1 first for localhost, gets refused and retries before it falls back,
+# which made the 30 s readiness probe fail.
+$hubUrl = 'http://127.0.0.1:7080'
 $debugPort = 9222
 $argumentsPolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
 $pageState = Join-Path $PSScriptRoot 'page-state.ts'

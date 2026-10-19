@@ -164,7 +164,7 @@ jobs:
           nohup "${RUNNER_TEMP}/spikehub" -sims 4 -media "${RUNNER_TEMP}/spike-video-media" -results "${RUNNER_TEMP}/results" \
             > "${RUNNER_TEMP}/spikehub.log" 2>&1 &
           for _ in $(seq 30); do
-            curl -fsS -o /dev/null http://localhost:7080/spike/v1/cameras && exit 0
+            curl -fsS -o /dev/null http://127.0.0.1:7080/spike/v1/cameras && exit 0
             sleep 1
           done
           echo "::error title=spikehub::spikehub did not answer on port 7080 within 30 s"
