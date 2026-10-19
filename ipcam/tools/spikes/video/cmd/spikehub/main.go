@@ -94,8 +94,13 @@ type env struct {
 	// askSecret asks for the RTSP URLs of -real. The default reads the terminal,
 	// hidden.
 	askSecret askFunc
-	// listen opens the hub's port. The default listens on all interfaces, which
-	// a phone needs.
+	// listen opens the hub's port. The default listens on all IPv4 interfaces:
+	// a phone needs every interface, and IPv4 only matches the hub's ICE (R25).
+	// Listening dual-stack, Firefox at http://localhost reaches the hub over
+	// [::1]; without a camera permission it then gathers ICE candidates on its
+	// default IPv6 address only, and on a host without an IPv6 route it finds
+	// none and never connects (MV13). Refused on [::1], it falls back to
+	// 127.0.0.1 and gathers on its default IPv4 address.
 	listen func(port int) (net.Listener, error)
 	// lan lists the private addresses for the banner.
 	lan func() ([]lanAddr, error)
@@ -113,7 +118,7 @@ func (e env) withDefaults() env {
 		e.stderr = os.Stderr
 	}
 	if e.listen == nil {
-		e.listen = func(port int) (net.Listener, error) { return net.Listen("tcp", ":"+strconv.Itoa(port)) }
+		e.listen = func(port int) (net.Listener, error) { return net.Listen("tcp4", ":"+strconv.Itoa(port)) }
 	}
 	if e.lan == nil {
 		e.lan = lanAddrs
