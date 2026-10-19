@@ -151,9 +151,10 @@ fn refresh(system: &mut System) {
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
 }
 
-/// The names of the hardware display adapters (DXGI), comma-separated; empty
-/// when there is none. Software adapters such as the Microsoft Basic Render
-/// Driver are left out.
+/// The names of the display adapters (DXGI), comma-separated; empty when there
+/// is none. Adapters that DXGI flags as software, such as the Microsoft Basic
+/// Render Driver next to a GPU, are left out. On a machine without a GPU
+/// driver, such as the CI runner, that driver is not flagged and is named.
 #[cfg(windows)]
 fn gpu_names() -> String {
     use windows::Win32::Graphics::Dxgi::{

@@ -18,7 +18,10 @@ export interface TauriMetrics {
   webview2_procs: number;
   /** The CPU's brand string; empty when the shell cannot tell. */
   cpu_model: string;
-  /** The hardware display adapters; empty when the shell cannot tell. */
+  /**
+   * The display adapters, without those DXGI flags as software; "Microsoft Basic
+   * Render Driver" on a PC without a GPU driver. Empty when the shell cannot tell.
+   */
   gpu: string;
 }
 
