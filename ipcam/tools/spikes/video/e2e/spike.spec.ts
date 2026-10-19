@@ -155,6 +155,7 @@ function recordIce(): void {
   const add = (pcId: number, text: string): void => {
     log.push(`${((performance.now() - t0) / 1000).toFixed(2)} pc${pcId} ${text}`);
   };
+  add(-1, `navigator.onLine ${String(navigator.onLine)}; ${navigator.userAgent}`);
   let next = 0;
   const ids = new WeakMap<RTCPeerConnection, number>();
   const idOf = (pc: RTCPeerConnection): number => {
