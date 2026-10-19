@@ -1,7 +1,10 @@
 package session
 
 import (
+	"bytes"
 	"regexp"
+	"runtime"
+	"runtime/pprof"
 	"strings"
 	"testing"
 	"time"
@@ -185,5 +188,125 @@ func TestDone_ClosesWhenTheSessionCloses(t *testing.T) {
 	case <-s.Done():
 	default:
 		t.Fatal("Done is not closed after Close")
+	}
+}
+
+// discardSink is a sent-record sink that drops what it gets.
+type discardSink struct{}
+
+func (discardSink) addSent(source.Source, source.SentRecord) {}
+
+// steadyGoroutines returns the number of goroutines once it has not changed
+// for 100 ms, or after 5 s.
+func steadyGoroutines() int {
+	deadline := time.Now().Add(5 * time.Second)
+	n := runtime.NumGoroutine()
+	for time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		m := runtime.NumGoroutine()
+		if m == n {
+			break
+		}
+		n = m
+	}
+	return n
+}
+
+// settledGoroutines waits until no more than want goroutines run, for up to
+// 10 s, and returns the count it last saw.
+func settledGoroutines(want int) int {
+	deadline := time.Now().Add(10 * time.Second)
+	n := runtime.NumGoroutine()
+	for n > want && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		n = runtime.NumGoroutine()
+	}
+	return n
+}
+
+// S5 on the phone (R44): the app closes its session when it goes to the
+// background and opens a new one when it returns, at once. The new session
+// binds the same camera and gets its frames, the old one releases what it had
+// within a second, and the two leave no goroutine behind: no slot writer, no
+// RTCP reader, no fan-out subscription.
+func TestSession_AViewerThatReconnectsAtOnceGetsTheSameCameraAndLeavesNothingBehind(t *testing.T) {
+	sim := newTestSim(t, "sim-01", 1, "sub", h264AUs("4d401f", 1, 24, 12), 12)
+	sources := map[string]source.Source{"sim-01/sub": sim}
+	api := testAPI(t)
+	// The fan-out reads a simulator's sent log for as long as the simulator
+	// runs, which is the life of the hub (R22, R28): start that reader first.
+	fanout.subscribe(sim, discardSink{})
+	fanout.unsubscribe(sim, discardSink{})
+	before := steadyGoroutines()
+
+	first := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	s1 := connect(t, api, first, sources, testOptions(source.SystemClock{}, nil))
+	first.bind(t, 0, "sim-01", "sub", 1)
+	first.next(t, "bound")
+	sim.emit(t, 1)
+	if au := first.au(t, 0); au.camera != 1 || !au.idr {
+		t.Fatalf("first session got %v, want the keyframe of camera 1", au)
+	}
+
+	if err := first.pc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	left := time.Now()
+	released := make(chan time.Duration, 1) // how long after the viewer left
+	go func() {
+		for fanout.has(sim, s1) && time.Since(left) < 10*time.Second {
+			time.Sleep(time.Millisecond)
+		}
+		released <- time.Since(left)
+	}()
+	second := newClient(t, clientConfig{slots: 1, offer: chromeLike})
+	s2 := connect(t, api, second, sources, testOptions(source.SystemClock{}, nil))
+	second.bind(t, 0, "sim-01", "sub", 1)
+	second.next(t, "bound")
+	// The cached GOP comes first: the keyframe of the first session's frame.
+	if au := second.au(t, 0); au.camera != 1 || au.frame != 0 || !au.idr {
+		t.Fatalf("second session got %v first, want the cached keyframe of camera 1", au)
+	}
+	sim.emit(t, 2)
+	for want := 1; want <= 2; want++ {
+		if au := second.au(t, 0); au.camera != 1 || au.frame != want {
+			t.Fatalf("second session got %v, want frame %d of camera 1", au, want)
+		}
+	}
+
+	select {
+	case <-s1.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first session did not close after its viewer left")
+	}
+	took := <-released
+	if fanout.has(sim, s1) {
+		t.Fatal("the first session is still in the sent fan-out 10 s after its viewer left")
+	}
+	if took > time.Second {
+		t.Errorf("the first session released its camera %v after its viewer left, want within 1 s", took)
+	}
+	if !fanout.has(sim, s2) {
+		t.Error("the second session is not in the sent fan-out")
+	}
+
+	if err := second.pc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s2.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second session did not close after its viewer left")
+	}
+	if err := s2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if after := settledGoroutines(before); after > before {
+		var dump bytes.Buffer
+		_ = pprof.Lookup("goroutine").WriteTo(&dump, 1)
+		t.Errorf("%d goroutines after both sessions closed, %d before:\n%s", after, before, dump.String())
 	}
 }

@@ -20,8 +20,10 @@ import (
 // level, so these entries negotiate every level a client offers of them.
 var offeredH264 = []string{"42001f", "42e01f", "4d001f", "64001f", "640c1f", "f4001f"}
 
-// videoFeedback is the RTCP feedback the hub accepts: NACK, which the default
-// interceptors answer from their send buffer, and PLI.
+// videoFeedback is the RTCP feedback the hub negotiates: NACK, which Pion's
+// default NACK responder answers from its send buffer while the session reads
+// each sender's RTCP (Session.readRTCP, R50), and PLI, which the hub reads and
+// does not answer (see the package doc).
 var videoFeedback = []webrtc.RTCPFeedback{{Type: "nack"}, {Type: "nack", Parameter: "pli"}}
 
 // registerCodecs registers what the hub can send: H.264 in packetization

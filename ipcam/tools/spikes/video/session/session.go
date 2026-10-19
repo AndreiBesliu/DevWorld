@@ -65,6 +65,13 @@
 //
 //	{"t":"bound","slot":0,"epoch":8,"codec":"H264","profile":"4d401f","fallback":"42e01f"}
 //
+// The hub answers a viewer's NACK with the lost packet, from the send buffer of
+// Pion's NACK responder: the session reads the RTCP of every sender for as long
+// as the connection lasts, which is what drives that responder (R50, spec §6.3
+// step 10). It does not answer PLI: the simulators replay pre-encoded files
+// whose GOP is one second, so a keyframe cannot be made on demand, and a lost
+// keyframe costs a tile at most a second, until the next one.
+//
 // A bind that cannot switch the slot's track to the codec fails with
 // CODEC_UNSUPPORTED, whatever the reason; like any failed bind it leaves the
 // slot carrying what it carried, and the session reporting only that. A bind
@@ -125,7 +132,8 @@ func NewAPI(mdns bool) (api *webrtc.API, mdnsUnavailable bool, err error) {
 		}
 	}
 	// Without an interceptor registry, Pion registers its default
-	// interceptors: NACK responses, RTCP reports and TWCC.
+	// interceptors: the NACK responder, RTCP reports and TWCC. They act on a
+	// viewer's RTCP only while someone reads it: Session.readRTCP does.
 	return webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithSettingEngine(se)), mdnsUnavailable, nil
 }
 
@@ -161,8 +169,11 @@ type Session struct {
 	bound  map[source.Source]*boundSource
 	closed bool
 
-	done      chan struct{}
-	wg        sync.WaitGroup
+	done chan struct{}
+	wg   sync.WaitGroup
+	// readers are the RTCP readers of the senders, which end when the
+	// connection closes.
+	readers   sync.WaitGroup
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -202,7 +213,9 @@ func answer(api *webrtc.API, offerSDP string, sources map[string]source.Source, 
 	}
 	answerSDP, err := s.negotiate(offerSDP)
 	if err != nil {
-		return nil, "", errors.Join(err, pc.Close())
+		err = errors.Join(err, pc.Close())
+		s.readers.Wait()
+		return nil, "", err
 	}
 	s.start()
 	return s, answerSDP, nil
@@ -234,6 +247,7 @@ func (s *Session) negotiate(offerSDP string) (string, error) {
 		if sl.sender, err = s.pc.AddTrack(sl.track); err != nil {
 			return "", fmt.Errorf("slot %d: add track: %w", sl.index, err)
 		}
+		s.readRTCP(sl.sender)
 		if tr.Sender() != sl.sender {
 			return "", fmt.Errorf("slot %d: the track went to another m-line", sl.index)
 		}
@@ -255,6 +269,26 @@ func (s *Session) negotiate(offerSDP string) (string, error) {
 		return "", errors.New("ICE gathering did not complete")
 	}
 	return s.pc.LocalDescription().SDP, nil
+}
+
+// rtcpBufferSize holds one RTCP datagram: a viewer sends no larger one.
+const rtcpBufferSize = 1500
+
+// readRTCP reads the RTCP that the viewer sends about a sender's stream until
+// the connection closes. Reading is what runs Pion's interceptors on it: the
+// NACK responder sends a lost packet again from inside this read, and from
+// nowhere else (R50). The packets themselves are not used; PLI goes unanswered
+// (see the package doc). A slot keeps its sender when it switches tracks, so
+// one reader serves the slot for the whole session.
+func (s *Session) readRTCP(sender *webrtc.RTPSender) {
+	s.readers.Go(func() {
+		buf := make([]byte, rtcpBufferSize)
+		for {
+			if _, _, err := sender.Read(buf); err != nil {
+				return
+			}
+		}
+	})
 }
 
 // start runs the slot writers and the periodic reports.
@@ -290,6 +324,7 @@ func (s *Session) Close() error {
 		s.releaseAll()
 		s.rpcMu.Unlock()
 		s.closeErr = s.pc.Close()
+		s.readers.Wait()
 	})
 	return s.closeErr
 }

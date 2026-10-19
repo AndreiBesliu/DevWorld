@@ -15,6 +15,7 @@ import (
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
 	"github.com/pion/ice/v4"
+	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
 )
@@ -306,6 +307,9 @@ type testClient struct {
 	open  chan struct{}
 	msgs  chan rxMsg
 	aus   []chan rxAU
+	// rtp, for a NACK probe (clientConfig.nackProbe), receives every RTP packet
+	// of each slot as it arrived, instead of aus.
+	rtp []chan *rtp.Packet
 }
 
 type clientConfig struct {
@@ -313,6 +317,10 @@ type clientConfig struct {
 	offer codecOffer
 	// onlyIP, when set, is the one local address the client gathers on.
 	onlyIP net.IP
+	// nackProbe makes the client hand the test each RTP packet as it arrived
+	// (testClient.rtp), and turns its SRTP replay protection off, so that a
+	// packet that the hub sends again reaches the test.
+	nackProbe bool
 }
 
 func newClient(t *testing.T, cfg clientConfig) *testClient {
@@ -351,6 +359,9 @@ func newClient(t *testing.T, cfg clientConfig) *testClient {
 	if cfg.onlyIP != nil {
 		se.SetIPFilter(func(ip net.IP) bool { return ip.Equal(cfg.onlyIP) })
 	}
+	if cfg.nackProbe {
+		se.DisableSRTPReplayProtection(true)
+	}
 	pc, err := webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithSettingEngine(se)).NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
@@ -363,6 +374,9 @@ func newClient(t *testing.T, cfg clientConfig) *testClient {
 			t.Fatal(err)
 		}
 		c.aus = append(c.aus, make(chan rxAU, 1024))
+		if cfg.nackProbe {
+			c.rtp = append(c.rtp, make(chan *rtp.Packet, 1024))
+		}
 	}
 	pc.OnTrack(c.onTrack)
 
@@ -400,6 +414,18 @@ func (c *testClient) onTrack(track *webrtc.TrackRemote, receiver *webrtc.RTPRece
 		}
 	}
 	if slot < 0 || slot >= len(c.aus) {
+		return
+	}
+	if c.rtp != nil {
+		go func() {
+			for {
+				pkt, _, err := track.ReadRTP()
+				if err != nil {
+					return
+				}
+				c.rtp[slot] <- pkt
+			}
+		}()
 		return
 	}
 	mimes := map[uint8]string{}
