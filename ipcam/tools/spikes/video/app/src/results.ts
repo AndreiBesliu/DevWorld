@@ -21,6 +21,23 @@ export const SCENARIO_IDS: readonly ScenarioId[] = [
 ];
 
 /**
+ * Why a run ended as interrupted (left out of the verdicts, to be repeated):
+ * - `hidden`: the page was hidden `atS` s into the run (the screen turned off, the app went to the background);
+ * - `session-lost`: the hub session was lost `atS` s into the run, `how` says how (R49);
+ * - `charging`: the phone was on the charger at a reading `atS` s into an S3 run (R48);
+ * - `early-return`: S5's background lasted `backgroundS` s, less than the 2 min MV9 needs;
+ * - `pip-left`: S6's picture-in-picture lasted `pipS` s, less than the 5 min MV8 needs.
+ *
+ * The run's notes carry the same as an `interrupted: …` line.
+ */
+export type InterruptReason =
+  | { kind: 'hidden'; atS: number }
+  | { kind: 'session-lost'; atS: number; how: string }
+  | { kind: 'charging'; atS: number }
+  | { kind: 'early-return'; backgroundS: number }
+  | { kind: 'pip-left'; pipS: number };
+
+/**
  * One run of a scenario, as the hub stores it and the report reads it. The
  * sample keys and the notes of each scenario are documented in its file under
  * scenarios/. Nothing in it names an address, a network or a camera URL (PH0-22).
@@ -31,8 +48,10 @@ export interface ScenarioResult {
   /** ISO 8601, from the device's clock: it dates the run and measures nothing. */
   startedAt: string;
   durationS: number;
-  /** The page was hidden during the run (the screen turned off, the app went to the background): left out of the verdicts. */
+  /** The run ended before it measured what it should (see `interruption`): left out of the verdicts. */
   interrupted: boolean;
+  /** Why, when `interrupted`. Absent in results written before this field existed: read them as `hidden`. */
+  interruption?: InterruptReason;
   /** Every `jitter` report of the hub during the run: the p99 send deviation over the 10 s before it (R28). */
   hubJitterMs: number[];
   samples: Record<string, number[]>;

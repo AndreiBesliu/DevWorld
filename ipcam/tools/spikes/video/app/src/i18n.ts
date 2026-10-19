@@ -29,10 +29,14 @@ const ro = {
   statusDone: 'gata în {seconds} s',
   statusInterrupted:
     'întrerupt: ecranul s-a stins sau aplicația a trecut în fundal, deci rezultatul nu intră în verdict. Repetați scenariul.',
+  interruptedSessionLost: 'întrerupt: conexiunea cu hub-ul s-a pierdut. Verificați fereastra spikehub și apăsați «Repetă».',
+  interruptedCharging: 'întrerupt: telefonul e la încărcător. Scoateți-l din încărcător și apăsați «Repetă».',
+  interruptedEarlyReturn: 'întrerupt: v-ați întors după {time}; e nevoie de cel puțin 2 minute. Apăsați «Repetă».',
+  interruptedPipLeft: 'întrerupt: fereastra mică s-a închis după {time}; e nevoie de 5 minute. Apăsați «Repetă».',
   statusFailed: 'eșuat: {detail}',
   pendingResults: 'Rezultate netrimise: {n}. Se trimit din nou la fiecare pornire.',
   resend: 'Trimite acum',
-  s5Guide: 'Apăsați butonul Acasă, așteptați 2 minute, reveniți.',
+  s5Guide: 'Apăsați butonul Acasă și reveniți după ora {time} (cel puțin 2 minute).',
   s10Question: 'A apărut o cerere de permisiune (de exemplu pentru rețeaua locală)?',
   yes: 'Da',
   no: 'Nu',
@@ -83,10 +87,14 @@ const en: Record<MessageKey, string> = {
   statusDone: 'done in {seconds} s',
   statusInterrupted:
     'interrupted: the screen turned off or the app went to the background, so the result is left out of the verdict. Repeat the scenario.',
+  interruptedSessionLost: 'interrupted: the connection to the hub was lost. Check the spikehub window and press «Repeat».',
+  interruptedCharging: 'interrupted: the phone is on the charger. Unplug it and press «Repeat».',
+  interruptedEarlyReturn: 'interrupted: you came back after {time}; at least 2 minutes are needed. Press «Repeat».',
+  interruptedPipLeft: 'interrupted: the small window closed after {time}; 5 minutes are needed. Press «Repeat».',
   statusFailed: 'failed: {detail}',
   pendingResults: 'Results not sent yet: {n}. They are sent again at every start.',
   resend: 'Send now',
-  s5Guide: 'Press Home, wait 2 minutes, come back.',
+  s5Guide: 'Press Home and come back after {time} (at least 2 minutes).',
   s10Question: 'Did a permission prompt appear (for the local network, for example)?',
   yes: 'Yes',
   no: 'No',
@@ -130,6 +138,15 @@ function readLang(storage: KeyValueStore | undefined): Lang {
   } catch {
     return 'ro'; // storage blocked: the default
   }
+}
+
+/** A duration as the owner reads a clock: `45 s`, `1 min 40 s`, `2 min`. The same in both languages. */
+export function minutesAndSeconds(seconds: number): string {
+  const total = Math.round(seconds);
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  if (minutes === 0) return `${rest} s`;
+  return rest === 0 ? `${minutes} min` : `${minutes} min ${rest} s`;
 }
 
 /** Romanian unless `lang` says otherwise or `storage` remembers English. */

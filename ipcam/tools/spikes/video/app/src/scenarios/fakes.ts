@@ -287,6 +287,9 @@ export class FakeHubSession implements SpikeSession {
   readonly binds: { slot: number; cam: string; profile: Profile; at: number }[] = [];
   readonly unbinds: number[] = [];
   closed = false;
+  /** The connection's state, as connectionState() reports it; setState() changes it. */
+  state: RTCPeerConnectionState = 'connected';
+  private readonly stateListeners = new Set<(state: RTCPeerConnectionState) => void>();
   readonly pc: RTCPeerConnection;
   private nextEpoch = 1;
   private readonly feeds = new Map<number, Feed>();
@@ -380,10 +383,27 @@ export class FakeHubSession implements SpikeSession {
     return Promise.resolve({ c0, c1: c0, h: c0 + this.offsetMs });
   }
 
+  connectionState(): RTCPeerConnectionState {
+    return this.state;
+  }
+
+  onConnectionState(cb: (state: RTCPeerConnectionState) => void): () => void {
+    this.stateListeners.add(cb);
+    return () => this.stateListeners.delete(cb);
+  }
+
+  /** The connection changes state: the PeerConnection reports it, or the rpc channel closed (`closed`). */
+  setState(state: RTCPeerConnectionState): void {
+    if (this.state === state) return;
+    this.state = state;
+    for (const cb of [...this.stateListeners]) cb(state);
+  }
+
   close(): void {
     this.closed = true;
     clearInterval(this.flushTimer);
     for (const slot of [...this.feeds.keys()]) this.stopFeed(slot);
+    this.setState('closed');
   }
 
   /** The stats of every bound slot, keyed by its track, as sampleStats returns them. */

@@ -71,6 +71,7 @@ export interface FakePeerOptions {
 
 export const OFFER_BEFORE_GATHERING = 'v=0 offer without candidates';
 export const OFFER_AFTER_GATHERING = 'v=0 offer with candidates';
+export const OFFER_WITH_A_CANDIDATE = 'v=0 offer with the candidates gathered so far';
 
 /** The parts of RTCPeerConnection that openSession uses. */
 export class FakePeerConnection extends EventTarget {
@@ -139,6 +140,12 @@ export class FakePeerConnection extends EventTarget {
     return Promise.resolve();
   }
 
+  /** A host candidate is gathered: the local description carries it from now on. */
+  gatherCandidate(): void {
+    this.localDescription = { type: 'offer', sdp: OFFER_WITH_A_CANDIDATE };
+    this.dispatchEvent(Object.assign(new Event('icecandidate'), { candidate: { candidate: 'candidate:1 1 udp 2113937151 x.local 50000 typ host' } }));
+  }
+
   /** ICE gathering is complete: the local description now carries the candidates. */
   finishGathering(): void {
     this.localDescription = { type: 'offer', sdp: OFFER_AFTER_GATHERING };
@@ -152,6 +159,13 @@ export class FakePeerConnection extends EventTarget {
     return Promise.resolve();
   }
 
+  /** The connection changes state, with the event the browser fires. */
+  setConnectionState(state: RTCPeerConnectionState): void {
+    this.connectionState = state;
+    this.dispatchEvent(new Event('connectionstatechange'));
+  }
+
+  /** Like the browser's: no connectionstatechange event for a close() of the app's own. */
   close(): void {
     this.closeCalls += 1;
     this.connectionState = 'closed';

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   OFFER_AFTER_GATHERING,
   OFFER_BEFORE_GATHERING,
+  OFFER_WITH_A_CANDIDATE,
   stubPeerConnection,
   type FakePeerConnection,
   type FakePeerOptions,
@@ -97,6 +98,28 @@ describe('openSession', () => {
 
     expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(OFFER_BEFORE_GATHERING);
     expect(pcOf(instances).rpc.readyState).toBe('open');
+  });
+
+  it('openSession_candidatesStopComing_postsThemWithoutWaitingForComplete', async () => {
+    // Chrome may not report gathering complete for seconds after its host candidates
+    // (10 s in the batch C probe), and S5 times a reconnect (R44): the offer goes once
+    // no candidate has come for 250 ms. Without STUN servers, host candidates are all there is.
+    vi.useFakeTimers();
+    const instances = stubPeerConnection({ gathering: 'never' });
+    const fetchMock = stubFetch();
+
+    const opening = openSession(HUB, 1);
+    await vi.advanceTimersByTimeAsync(10);
+    pcOf(instances).gatherCandidate();
+    await vi.advanceTimersByTimeAsync(5);
+    pcOf(instances).gatherCandidate(); // another interface, a few ms later
+    await vi.advanceTimersByTimeAsync(249);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await opening;
+
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(OFFER_WITH_A_CANDIDATE);
   });
 
   it('openSession_gatheringAlreadyComplete_doesNotWaitForAnEvent', async () => {
@@ -547,5 +570,50 @@ describe('close', () => {
 
     await expect(bind).rejects.toThrow('SESSION_CLOSED');
     await expect(session.bind(1, 'sim-01', 'sub')).rejects.toThrow('SESSION_CLOSED');
+  });
+});
+
+describe('connection state', () => {
+  it('connectionState_followsThePeerConnectionAndEndsClosed', async () => {
+    // R49: the runner ends a run as interrupted when the hub session is lost, so it must see it.
+    const { session, pc } = await open();
+    const seen: string[] = [];
+    session.onConnectionState((state) => seen.push(state));
+    pc.setConnectionState('connected');
+
+    expect(session.connectionState()).toBe('connected');
+    pc.setConnectionState('disconnected');
+    pc.setConnectionState('connected');
+    pc.setConnectionState('failed');
+
+    expect(seen).toEqual(['connected', 'disconnected', 'connected', 'failed']);
+    expect(session.connectionState()).toBe('failed');
+  });
+
+  it('connectionState_rpcChannelClosedByTheHub_isClosed', async () => {
+    // The hub went away: the browser fires no connectionstatechange for the close that follows.
+    const { session, pc, rpc } = await open();
+    pc.setConnectionState('connected');
+    const seen: string[] = [];
+    const stop = session.onConnectionState((state) => seen.push(state));
+
+    rpc.close();
+
+    expect(session.connectionState()).toBe('closed');
+    expect(seen).toEqual(['closed']);
+    stop();
+  });
+
+  it('connectionState_closedByTheApp_isReportedOnce', async () => {
+    const { session, pc } = await open();
+    pc.setConnectionState('connected');
+    const seen: string[] = [];
+    const stop = session.onConnectionState((state) => seen.push(state));
+    session.close();
+    session.close();
+    stop();
+    pc.setConnectionState('closed');
+
+    expect(seen).toEqual(['closed']);
   });
 });

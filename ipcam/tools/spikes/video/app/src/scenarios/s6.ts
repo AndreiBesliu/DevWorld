@@ -6,8 +6,9 @@
 // Every second S6 also reads whether the element is inside the viewport (an
 // IntersectionObserver), so the report can tell "visible and advancing" from
 // "advancing". MV8 passes when no gap between frames exceeds 2 s; the report
-// decides that from `pipMaxGapMs`. Without the shell's PiP, S6 is n/a. PiP is
-// the point, so a hidden page does not interrupt S6.
+// decides that from `pipMaxGapMs`. PiP that ends before 5 min ends the run as
+// interrupted (integration-4). Without the shell's PiP, S6 is n/a. PiP is the
+// point, so a hidden page does not interrupt S6.
 //
 // Samples: `pipFrames`, `pipMaxGapMs` (from entering PiP to its end, the edges
 // included), `pipS` (how long it was measured).
@@ -82,6 +83,9 @@ export const S6: ScenarioDefinition = {
     run.sample('pipMaxGapMs', maxGap);
     run.sample('pipS', pipS);
     run.note(intersection === 'n/a' ? 'pipVisible: n/a' : `pipVisible: ${visibleS}/${sampledS} s`);
-    if (leftAt !== undefined) run.note(`left picture-in-picture after ${Math.round((leftAt - start) / 1000)} s`);
+    if (leftAt !== undefined) {
+      run.note(`left picture-in-picture after ${Math.round((leftAt - start) / 1000)} s`);
+      run.interrupt({ kind: 'pip-left', pipS });
+    }
   },
 };

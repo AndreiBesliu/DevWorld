@@ -118,6 +118,10 @@ describe('S6', () => {
     expect(result.samples.pipS?.[0]).toBeGreaterThanOrEqual(60);
     expect(result.samples.pipS?.[0]).toBeLessThan(62);
     expect(result.notes.some((note) => note.startsWith('left picture-in-picture after'))).toBe(true);
+    // integration-4: PiP ended before 5 min, so the run is repeated, not judged.
+    expect(result.interrupted).toBe(true);
+    expect(result.interruption).toEqual({ kind: 'pip-left', pipS: result.samples.pipS?.[0] });
+    expect(result.notes).toContain(`interrupted: picture-in-picture ended after ${result.samples.pipS?.[0] ?? 0} s, 300 s are needed`);
   });
 
   it('S6_withoutRequestVideoFrameCallback_isNa', async () => {

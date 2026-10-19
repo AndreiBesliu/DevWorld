@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createI18n, LANG_KEY, MESSAGES } from './i18n';
+import { createI18n, LANG_KEY, MESSAGES, minutesAndSeconds } from './i18n';
 
 class MemoryStore {
   readonly map = new Map<string, string>();
@@ -18,12 +18,12 @@ describe('i18n', () => {
 
     expect(i18n.lang()).toBe('ro');
     expect(i18n.t('start')).toBe('Pornește');
-    expect(i18n.t('s5Guide')).toBe('Apăsați butonul Acasă, așteptați 2 minute, reveniți.');
+    expect(i18n.t('s5Guide', { time: '14:32' })).toBe('Apăsați butonul Acasă și reveniți după ora 14:32 (cel puțin 2 minute).');
 
     i18n.setLang('en');
     expect(i18n.lang()).toBe('en');
     expect(i18n.t('start')).toBe('Start');
-    expect(i18n.t('s5Guide')).toBe('Press Home, wait 2 minutes, come back.');
+    expect(i18n.t('s5Guide', { time: '14:32' })).toBe('Press Home and come back after 14:32 (at least 2 minutes).');
     // The choice is remembered for the next launch.
     expect(storage.getItem(LANG_KEY)).toBe('en');
     expect(createI18n({ storage }).lang()).toBe('en');
@@ -54,5 +54,12 @@ describe('i18n', () => {
     storage.setItem(LANG_KEY, 'de');
 
     expect(createI18n({ storage }).lang()).toBe('ro');
+  });
+
+  it('minutesAndSeconds_readsLikeTheClock', () => {
+    expect(minutesAndSeconds(45)).toBe('45 s');
+    expect(minutesAndSeconds(100)).toBe('1 min 40 s');
+    expect(minutesAndSeconds(120)).toBe('2 min');
+    expect(minutesAndSeconds(290.4)).toBe('4 min 50 s');
   });
 });

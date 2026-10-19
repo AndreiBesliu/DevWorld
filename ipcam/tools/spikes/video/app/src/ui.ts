@@ -9,7 +9,7 @@ import { fetchCameras, simCameras } from './cameras';
 import { captureForDecoderInfo } from './decoderinfo';
 import { detectDevice, type DeviceInfo, type Platform } from './device';
 import { ConnectError } from './hubhttp';
-import { createI18n, type MessageKey, type Translate } from './i18n';
+import { createI18n, minutesAndSeconds, type MessageKey, type Translate } from './i18n';
 import { sampleStats } from './metrics';
 import { readNativeMetrics, spikeNative } from './native';
 import { publish, ResultsQueue, SCENARIO_IDS, type KeyValueStore, type ScenarioId, type ScenarioResult } from './results';
@@ -173,7 +173,8 @@ function watchIntersection(element: HTMLElement): IntersectionWatch | 'n/a' {
   };
 }
 
-type Status = { kind: 'idle' } | { kind: 'running' } | { kind: 'done'; result: ScenarioResult } | { kind: 'failed'; detail: string };
+/** A scenario's state on the start page. `failed`: it threw (the hub could not be reached, for example). */
+export type Status = { kind: 'idle' } | { kind: 'running' } | { kind: 'done'; result: ScenarioResult } | { kind: 'failed'; detail: string };
 
 export interface App {
   autorun(request: AutorunRequest): Promise<void>;
@@ -271,10 +272,10 @@ export function startApp(root: HTMLElement): App {
     list.append(el('h2', '', t('scenarios')));
     for (const id of SCENARIO_IDS) {
       const status = statuses.get(id) ?? { kind: 'idle' };
-      const row = el('div', `scenario ${status.kind}`);
+      // A run that failed or was interrupted is marked like a failure: it needs another try.
+      const row = el('div', `scenario ${offersRepeat(status) ? 'failed' : status.kind}`);
       row.dataset.scenario = id;
-      const repeat = status.kind === 'done' && status.result.interrupted;
-      const button = el('button', '', t(repeat ? 'repeat' : 'start'));
+      const button = el('button', '', t(offersRepeat(status) ? 'repeat' : 'start'));
       button.disabled = busy;
       button.addEventListener('click', () => {
         void runFromPage(id);
@@ -388,7 +389,39 @@ function describeDevice(device: DeviceInfo, metrics?: { model?: string; os?: str
     .join(', ');
 }
 
-function statusText(status: Status, t: Translate): string {
+/** The longest reason a «eșuat: …» status shows. */
+const FAILED_DETAIL_MAX = 120;
+
+/**
+ * The reason of a run that ended with a `failed: <Name>: <message>` note (the
+ * scenario threw, client-failed-shown-done): its message, shortened.
+ */
+function failedDetail(result: ScenarioResult): string | undefined {
+  const note = result.notes.find((text) => text.startsWith('failed: '));
+  if (note === undefined) return undefined;
+  const detail = note.slice('failed: '.length).replace(/^\w*Error: /, '');
+  return detail.length > FAILED_DETAIL_MAX ? `${detail.slice(0, FAILED_DETAIL_MAX - 1)}…` : detail;
+}
+
+/** Why a run was interrupted, in the person's language. */
+function interruptionText(result: ScenarioResult, t: Translate): string {
+  const reason = result.interruption;
+  switch (reason?.kind) {
+    case 'session-lost':
+      return t('interruptedSessionLost');
+    case 'charging':
+      return t('interruptedCharging');
+    case 'early-return':
+      return t('interruptedEarlyReturn', { time: minutesAndSeconds(reason.backgroundS) });
+    case 'pip-left':
+      return t('interruptedPipLeft', { time: minutesAndSeconds(reason.pipS) });
+    default:
+      return t('statusInterrupted');
+  }
+}
+
+/** The status line of a scenario on the start page. A run that failed or was interrupted never reads «gata». */
+export function statusText(status: Status, t: Translate): string {
   switch (status.kind) {
     case 'idle':
       return t('statusIdle');
@@ -396,7 +429,15 @@ function statusText(status: Status, t: Translate): string {
       return t('statusRunning');
     case 'failed':
       return t('statusFailed', { detail: status.detail });
-    case 'done':
-      return status.result.interrupted ? t('statusInterrupted') : t('statusDone', { seconds: Math.round(status.result.durationS) });
+    case 'done': {
+      if (status.result.interrupted) return interruptionText(status.result, t);
+      const failed = failedDetail(status.result);
+      return failed === undefined ? t('statusDone', { seconds: Math.round(status.result.durationS) }) : t('statusFailed', { detail: failed });
+    }
   }
+}
+
+/** Whether the scenario's button reads «Repetă»: its run was interrupted or failed. */
+export function offersRepeat(status: Status): boolean {
+  return status.kind === 'done' && (status.result.interrupted || failedDetail(status.result) !== undefined);
 }

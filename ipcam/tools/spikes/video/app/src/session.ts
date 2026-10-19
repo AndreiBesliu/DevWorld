@@ -69,6 +69,14 @@ export interface SpikeSession {
   pair(): Promise<Pair | 'n/a'>;
   /** One clock ping, for `ClockSync`. Rejects after 2 s without an answer. Pings must not overlap. */
   ping(): Promise<PingSample>;
+  /**
+   * The state of the connection to the hub: the PeerConnection's
+   * connectionState, and `closed` from the moment the session is closed (by
+   * close(), or because the hub closed the rpc channel).
+   */
+  connectionState(): RTCPeerConnectionState;
+  /** Calls `cb` with connectionState() at each change. Returns the function that stops the callback. */
+  onConnectionState(cb: (state: RTCPeerConnectionState) => void): () => void;
   /** Idempotent. Rejects whatever is pending with `SESSION_CLOSED`. */
   close(): void;
 }
@@ -90,6 +98,12 @@ export class BindError extends Error {
 
 /** How long the offer waits for ICE gathering, which on a LAN without STUN servers only lists the host's own addresses. */
 const GATHER_TIMEOUT_MS = 3000;
+/**
+ * The offer goes once no candidate has come for this long. Host candidates
+ * come within milliseconds of each other, while Chrome may report gathering
+ * complete only seconds later; S5 times a reconnect (R44).
+ */
+const GATHER_SETTLE_MS = 250;
 const OFFER_TIMEOUT_MS = 10_000;
 const RPC_OPEN_TIMEOUT_MS = 10_000;
 const PING_TIMEOUT_MS = 2000;
@@ -185,6 +199,8 @@ class HubSession implements SpikeSession {
   private latestPair: Pair | undefined;
   private readonly sentListeners = new Set<(cam: number, profile: Profile, recs: [number, number, number][]) => void>();
   private readonly jitterListeners = new Set<(ms: number) => void>();
+  private readonly stateListeners = new Set<(state: RTCPeerConnectionState) => void>();
+  private reportedState: RTCPeerConnectionState;
 
   constructor(slots: number, pc: RTCPeerConnection, transceivers: RTCRtpTransceiver[], rpc: RTCDataChannel) {
     this.slots = slots;
@@ -198,6 +214,29 @@ class HubSession implements SpikeSession {
     rpc.addEventListener('close', () => {
       this.close();
     });
+    this.reportedState = this.connectionState();
+    pc.addEventListener('connectionstatechange', () => {
+      this.reportState();
+    });
+  }
+
+  connectionState(): RTCPeerConnectionState {
+    // A browser without connectionState (none that Phase 0 measures) reads as `new`: only the rpc close is seen then.
+    return this.closed ? 'closed' : ((this.pc.connectionState as RTCPeerConnectionState | undefined) ?? 'new');
+  }
+
+  onConnectionState(cb: (state: RTCPeerConnectionState) => void): () => void {
+    this.stateListeners.add(cb);
+    return () => {
+      this.stateListeners.delete(cb);
+    };
+  }
+
+  private reportState(): void {
+    const state = this.connectionState();
+    if (state === this.reportedState) return;
+    this.reportedState = state;
+    for (const cb of [...this.stateListeners]) cb(state);
   }
 
   bind(slot: number, cam: string, profile: Profile): Promise<BindResult> {
@@ -309,6 +348,7 @@ class HubSession implements SpikeSession {
     this.pings.clear();
     for (const waiter of this.pairWaiters.splice(0)) waiter.reject(reason);
     this.pc.close();
+    this.reportState(); // the browser fires no connectionstatechange for close()
   }
 
   private send(message: object): void {
@@ -359,20 +399,32 @@ class HubSession implements SpikeSession {
   }
 }
 
-/** Resolves when ICE gathering is complete, or after GATHER_TIMEOUT_MS with the candidates found so far. */
+/**
+ * Resolves when ICE gathering is complete, or GATHER_SETTLE_MS after the
+ * latest candidate, or after GATHER_TIMEOUT_MS, with the candidates found so far.
+ */
 function iceGathered(pc: RTCPeerConnection): Promise<void> {
   if (pc.iceGatheringState === 'complete') return Promise.resolve();
   return new Promise<void>((resolve) => {
+    let settle: ReturnType<typeof setTimeout> | undefined;
     const finish = (): void => {
       clearTimeout(timer);
+      clearTimeout(settle);
       pc.removeEventListener('icegatheringstatechange', onChange);
+      pc.removeEventListener('icecandidate', onCandidate);
       resolve();
     };
     const onChange = (): void => {
       if (pc.iceGatheringState === 'complete') finish();
     };
+    const onCandidate = (event: Event): void => {
+      if ((event as RTCPeerConnectionIceEvent).candidate === null) return;
+      clearTimeout(settle);
+      settle = setTimeout(finish, GATHER_SETTLE_MS);
+    };
     const timer = setTimeout(finish, GATHER_TIMEOUT_MS);
     pc.addEventListener('icegatheringstatechange', onChange);
+    pc.addEventListener('icecandidate', onCandidate);
   });
 }
 
@@ -439,8 +491,9 @@ export async function openSession(hubUrl: string, slots: number): Promise<SpikeS
   const rpc = pc.createDataChannel('rpc');
   const session = new HubSession(slots, pc, transceivers, rpc);
   try {
+    const gathered = iceGathered(pc); // from before the first candidate, which can come as setLocalDescription resolves
     await pc.setLocalDescription(await pc.createOffer());
-    await iceGathered(pc);
+    await gathered;
     const offer = pc.localDescription?.sdp;
     if (offer === undefined) throw new Error('the PeerConnection has no local description');
     await pc.setRemoteDescription({ type: 'answer', sdp: await postOffer(url, offer) });
