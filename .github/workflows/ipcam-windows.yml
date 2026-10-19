@@ -144,6 +144,15 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ipcam/apps/desktop/src-tauri -> target
+      - name: Resource compiler for Clippy
+        # tauri-build's build script compiles the shell's Windows resources
+        # (icon, version info) for Clippy too. From Linux, embed-resource runs
+        # llvm-rc, which is not on the runner's PATH: without it the build
+        # script panics and Clippy checks nothing.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends llvm
+          command -v llvm-rc
       - name: Licenses (R35)
         run: |
           {
@@ -183,8 +192,13 @@ jobs:
         run: |
           log="${RUNNER_TEMP}/checks.log"
           [[ -f "${log}" ]] || exit 0
-          # Clippy's and cargo-deny's errors and rustfmt's diffs, else the end of the log.
-          lines="$({ grep -E -A12 '^error' "${log}" || true; grep -E -A10 '^Diff in ' "${log}" || true; })"
+          # Clippy's and cargo-deny's errors, build-script panics and rustfmt's
+          # diffs, else the end of the log.
+          lines="$({
+            grep -E -A12 '^error' "${log}" || true
+            grep -E -A2 'panicked at' "${log}" || true
+            grep -E -A10 '^Diff in ' "${log}" || true
+          })"
           [[ -n "${lines}" ]] || lines="$(tail -n 30 "${log}")"
           printf '%s\n' "${lines}" | tools/scripts/annotate.sh checks
 
