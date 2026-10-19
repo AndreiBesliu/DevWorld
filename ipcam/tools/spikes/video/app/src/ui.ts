@@ -10,11 +10,12 @@ import { captureForDecoderInfo } from './decoderinfo';
 import { detectDevice, type DeviceInfo, type Platform } from './device';
 import { ConnectError } from './hubhttp';
 import { createI18n, minutesAndSeconds, type MessageKey, type Translate } from './i18n';
-import { sampleStats } from './metrics';
+import { sampleLoss, sampleStats } from './metrics';
 import { readNativeMetrics, spikeNative } from './native';
 import { publish, ResultsQueue, SCENARIO_IDS, type KeyValueStore, type ScenarioId, type ScenarioResult } from './results';
 import type { Clock, IntersectionWatch, ScenarioEnv, Stage } from './scenarios/context';
 import { runScenario } from './scenarios/index';
+import { NotStarted } from './scenarios/runner';
 import { openSession } from './session';
 import { holdWakeLock, type ScreenWakeLock } from './wakelock';
 
@@ -173,8 +174,17 @@ function watchIntersection(element: HTMLElement): IntersectionWatch | 'n/a' {
   };
 }
 
-/** A scenario's state on the start page. `failed`: it threw (the hub could not be reached, for example). */
-export type Status = { kind: 'idle' } | { kind: 'running' } | { kind: 'done'; result: ScenarioResult } | { kind: 'failed'; detail: string };
+/**
+ * A scenario's state on the start page. `refused`: it did not start, `key`
+ * says why (S3 on the charger, R48); `failed`: it threw (the hub could not be
+ * reached, for example).
+ */
+export type Status =
+  | { kind: 'idle' }
+  | { kind: 'running' }
+  | { kind: 'done'; result: ScenarioResult }
+  | { kind: 'failed'; detail: string }
+  | { kind: 'refused'; key: MessageKey };
 
 export interface App {
   autorun(request: AutorunRequest): Promise<void>;
@@ -234,6 +244,7 @@ export function startApp(root: HTMLElement): App {
       createPlayer,
       readBand: (video) => readBand(video, canvas),
       sampleStats,
+      sampleLoss,
       watchIntersection,
       captureForDecoderInfo: () => captureForDecoderInfo(),
       holdWakeLock: () => holdWakeLock({ ...withWakeLock(wakeLock()), ...(native ? { native } : {}), doc: document }),
@@ -273,7 +284,7 @@ export function startApp(root: HTMLElement): App {
     for (const id of SCENARIO_IDS) {
       const status = statuses.get(id) ?? { kind: 'idle' };
       // A run that failed or was interrupted is marked like a failure: it needs another try.
-      const row = el('div', `scenario ${offersRepeat(status) ? 'failed' : status.kind}`);
+      const row = el('div', `scenario ${offersRepeat(status) || status.kind === 'refused' ? 'failed' : status.kind}`);
       row.dataset.scenario = id;
       const button = el('button', '', t(offersRepeat(status) ? 'repeat' : 'start'));
       button.disabled = busy;
@@ -333,9 +344,13 @@ export function startApp(root: HTMLElement): App {
     try {
       statuses.set(id, { kind: 'done', result: await go() });
     } catch (error) {
-      statuses.set(id, { kind: 'failed', detail: error instanceof ConnectError ? error.kind : String(error) });
-      connection = connectErrorLines(error, t);
-      connectionFailed = true;
+      if (error instanceof NotStarted) {
+        statuses.set(id, { kind: 'refused', key: error.key });
+      } else {
+        statuses.set(id, { kind: 'failed', detail: error instanceof ConnectError ? error.kind : String(error) });
+        connection = connectErrorLines(error, t);
+        connectionFailed = true;
+      }
     } finally {
       busy = false;
       render();
@@ -429,6 +444,8 @@ export function statusText(status: Status, t: Translate): string {
       return t('statusRunning');
     case 'failed':
       return t('statusFailed', { detail: status.detail });
+    case 'refused':
+      return t(status.key);
     case 'done': {
       if (status.result.interrupted) return interruptionText(status.result, t);
       const failed = failedDetail(status.result);

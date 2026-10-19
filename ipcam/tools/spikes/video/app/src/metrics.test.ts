@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sampleStats } from './metrics';
+import { sampleLoss, sampleStats } from './metrics';
 
 type Stat = Record<string, unknown>;
 
@@ -99,5 +99,35 @@ describe('sampleStats', () => {
 
   it('sampleStats_noStreams_isEmpty', async () => {
     expect((await sampleStats(fakePc({}))).size).toBe(0);
+  });
+});
+
+describe('sampleLoss', () => {
+  it('sampleLoss_sumsTheCountersOfEveryInboundVideoStream', async () => {
+    // R50: packetsLost, nackCount, pliCount and framesDropped over all of the run's streams.
+    const pc = fakePc({
+      in1: { type: 'inbound-rtp', kind: 'video', trackIdentifier: 'a', packetsLost: 4, nackCount: 9, pliCount: 1, framesDropped: 2 },
+      in2: { type: 'inbound-rtp', kind: 'video', mid: '1', packetsLost: 1, nackCount: 3, pliCount: 0, framesDropped: 0 },
+      // A stream that is not tied to a track still counts: the loss happened on the run's connection.
+      in3: { type: 'inbound-rtp', mediaType: 'video', packetsLost: 2, nackCount: 0, pliCount: 2, framesDropped: 1 },
+      audio: { type: 'inbound-rtp', kind: 'audio', packetsLost: 100 },
+      remote: { type: 'remote-inbound-rtp', kind: 'video', packetsLost: 50 },
+    });
+
+    expect(await sampleLoss(pc)).toStrictEqual({ rtpLost: 7, nack: 12, pli: 3, framesDropped: 3 });
+  });
+
+  it('sampleLoss_counterNoStreamReports_isLeftOut', async () => {
+    // Firefox, for example: what the browser does not report is n/a, not 0.
+    const pc = fakePc({
+      in1: { type: 'inbound-rtp', kind: 'video', packetsLost: 4, nackCount: 2 },
+      in2: { type: 'inbound-rtp', kind: 'video', packetsLost: 1 },
+    });
+
+    expect(await sampleLoss(pc)).toStrictEqual({ rtpLost: 5, nack: 2 });
+  });
+
+  it('sampleLoss_noVideoStream_isEmpty', async () => {
+    expect(await sampleLoss(fakePc({}))).toStrictEqual({});
   });
 });

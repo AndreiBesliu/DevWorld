@@ -56,3 +56,40 @@ export async function sampleStats(pc: RTCPeerConnection): Promise<Map<string, Ti
   });
   return tiles;
 }
+
+/**
+ * The loss counters of a run (R50), summed over every `inbound-rtp` video
+ * stream of its PeerConnection: `rtpLost` (packetsLost), `nack` (nackCount),
+ * `pli` (pliCount), `framesDropped`. A counter that no stream reports is left
+ * out (n/a), as in a browser that lacks it.
+ */
+export interface LossCounters {
+  rtpLost?: number;
+  nack?: number;
+  pli?: number;
+  framesDropped?: number;
+}
+
+export const LOSS_KEYS = ['rtpLost', 'nack', 'pli', 'framesDropped'] as const satisfies readonly (keyof LossCounters)[];
+
+const LOSS_FIELDS: Record<(typeof LOSS_KEYS)[number], string> = {
+  rtpLost: 'packetsLost',
+  nack: 'nackCount',
+  pli: 'pliCount',
+  framesDropped: 'framesDropped',
+};
+
+/** Reads the loss counters of `pc`; see LossCounters. */
+export async function sampleLoss(pc: RTCPeerConnection): Promise<LossCounters> {
+  const report = await pc.getStats();
+  const sums: LossCounters = {};
+  report.forEach((stat: unknown) => {
+    if (!isRecord(stat) || stat.type !== 'inbound-rtp') return;
+    if ((stat.kind ?? stat.mediaType) !== 'video') return;
+    for (const key of LOSS_KEYS) {
+      const value = stat[LOSS_FIELDS[key]];
+      if (typeof value === 'number') sums[key] = (sums[key] ?? 0) + value;
+    }
+  });
+  return sums;
+}

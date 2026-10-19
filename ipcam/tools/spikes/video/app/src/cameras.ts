@@ -2,7 +2,7 @@
 import { requestHub } from './hubhttp';
 
 export interface HubCamera {
-  /** `sim-01` to `sim-16`, `mx-h265`, `mx-high51`, `real-1` and so on. */
+  /** `sim-01` to `sim-16`, `mx-h265` or `mx-high51`; the hub never serves a real camera (R43). */
   id: string;
   /** The number that the hub's `sent` messages carry for this camera (R1, R3). */
   camera: number;

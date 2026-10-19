@@ -56,6 +56,19 @@ describe('i18n', () => {
     expect(createI18n({ storage }).lang()).toBe('ro');
   });
 
+  it('i18n_ownerWording_integration12', () => {
+    const { t } = createI18n({ lang: 'ro' });
+
+    // The term is «codecuri», as in the spec (§16.5) and the report.
+    expect(t('descS9')).toBe('Matricea de codecuri: H.265 și H.264 High 5.1 (G9)');
+    // The explanation is shown in every shell and browser, not only in Chrome; the camera runs for short windows only (R47).
+    expect(t('mv4Explain')).not.toMatch(/Chrome/);
+    expect(t('mv4Explain')).toMatch(/cel mult 10 secunde/);
+    // Refusing costs the phone's verdict, not only one measurement.
+    expect(t('mv4Explain')).toMatch(/Dacă refuzați, .*verdictul pentru telefon nu se poate da/);
+    expect(t('mv4Explain')).not.toMatch(/cât durează testul/);
+  });
+
   it('minutesAndSeconds_readsLikeTheClock', () => {
     expect(minutesAndSeconds(45)).toBe('45 s');
     expect(minutesAndSeconds(100)).toBe('1 min 40 s');

@@ -70,6 +70,18 @@ describe('S1', () => {
     expect(result.notes).toContain('sub: H264, fallback profile 42e01f');
     expect(result.samples.firstFrameMs).toHaveLength(20); // a fallback is no failure
   });
+
+  it('S1_recordsTheLossCountersOfTheRun', async () => {
+    // R50: the report shows them next to MV1, so a slow start on a lossy Wi-Fi can be told apart.
+    const t = setup({ hub: { loss: { rtpLost: 3, nack: 3, pli: 1, framesDropped: 0 } } });
+
+    const result = await finish(runScenario('S1', t.env));
+
+    expect(result.samples.rtpLost).toEqual([3]);
+    expect(result.samples.nack).toEqual([3]);
+    expect(result.samples.pli).toEqual([1]);
+    expect(result.samples.framesDropped).toEqual([0]);
+  });
 });
 
 describe('the run of a scenario', () => {

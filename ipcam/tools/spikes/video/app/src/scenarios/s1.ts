@@ -4,11 +4,13 @@
 // bind (frames.ts, isFrameOfStart). Each start plays for 1 s before the slot is
 // emptied (PLAY_BEFORE_STOP_MS).
 //
-// Samples: `firstFrameMs` (one per start that showed a frame).
+// Samples: `firstFrameMs` (one per start that showed a frame); the loss
+// counters of the run, `rtpLost`, `nack`, `pli`, `framesDropped` (recordLoss).
 // Notes: `sub: <codec>[, fallback profile <id>]` for the first bound start;
-// `start <n>: bind error <code>` or `start <n>: <player error | no first frame>`.
+// `start <n>: bind error <code>` or `start <n>: <player error | no first frame>`;
+// `<loss counter>: n/a`.
 import type { BandCode } from '../band';
-import { describeBound, describeFailure, PLAY_BEFORE_STOP_MS, startStream } from './frames';
+import { describeBound, describeFailure, PLAY_BEFORE_STOP_MS, recordLoss, startStream } from './frames';
 import type { ScenarioDefinition } from './runner';
 
 const STARTS = 20;
@@ -55,5 +57,6 @@ export const S1: ScenarioDefinition = {
       else if ('failure' in started.frame) run.note(`start ${i}: ${describeFailure(started.frame.failure)}`);
       else run.sample('firstFrameMs', started.frame.ms);
     }
+    await recordLoss(run, session);
   },
 };

@@ -103,4 +103,32 @@ describe('runner', () => {
     expect(result.interrupted).toBe(false);
     expect(result.interruption).toBeUndefined();
   });
+
+  it('runner_deviceFacts_ramAndGpuFromTheShell', async () => {
+    // native-5: the shells read the memory and the GPU; the report needs them.
+    const t = setup({
+      native: {
+        metrics: () =>
+          Promise.resolve({
+            model: 'AMD Ryzen 5 5600X 6-Core Processor',
+            os: 'Windows 11 Pro',
+            webview: 'WebView2 141.0.3537.71',
+            gpu: 'NVIDIA GeForce RTX 3060',
+            ramMb: 32_701,
+            webview2Procs: 6,
+          }),
+      },
+    });
+
+    const result = await finish(runScenario('S10', t.env));
+
+    expect(result.device).toEqual({
+      ...t.env.device,
+      model: 'AMD Ryzen 5 5600X 6-Core Processor',
+      os: 'Windows 11 Pro',
+      webview: 'WebView2 141.0.3537.71',
+      gpu: 'NVIDIA GeForce RTX 3060',
+      ramMb: 32_701,
+    });
+  });
 });

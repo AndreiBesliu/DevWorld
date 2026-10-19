@@ -44,7 +44,12 @@ export type InterruptReason =
  */
 export interface ScenarioResult {
   scenario: ScenarioId;
-  device: { platform: Platform; model?: string; os?: string; webview?: string; ua: string };
+  /**
+   * The device as the page and its shell tell it: `ramMb` is the physical
+   * memory in MiB and `gpu` the display adapters, both from the shell when it
+   * reports them (native-5).
+   */
+  device: { platform: Platform; model?: string; os?: string; webview?: string; ramMb?: number; gpu?: string; ua: string };
   /** ISO 8601, from the device's clock: it dates the run and measures nothing. */
   startedAt: string;
   durationS: number;

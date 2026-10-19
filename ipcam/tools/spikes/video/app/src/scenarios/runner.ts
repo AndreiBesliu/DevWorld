@@ -6,7 +6,8 @@
 import type { MediaLink, Player } from '@ipcam/player';
 import { simCameras, type HubCamera } from '../cameras';
 import { ConnectError } from '../hubhttp';
-import { readNativeMetrics } from '../native';
+import type { MessageKey } from '../i18n';
+import { readNativeMetrics, type NativeMetrics } from '../native';
 import { scrubText, type InterruptReason, type ScenarioId, type ScenarioResult } from '../results';
 import type { SpikeSession } from '../session';
 import type { ScenarioEnv } from './context';
@@ -19,6 +20,17 @@ export class Interrupted extends Error {
   constructor() {
     super('interrupted');
     this.name = 'Interrupted';
+  }
+}
+
+/** A scenario refused to start; `key` is the text that tells the person why (S3 on the charger, R48). */
+export class NotStarted extends Error {
+  readonly key: MessageKey;
+
+  constructor(key: MessageKey) {
+    super(`not started: ${key}`);
+    this.name = 'NotStarted';
+    this.key = key;
   }
 }
 
@@ -89,6 +101,12 @@ export interface ScenarioDefinition {
    * keep the screen on.
    */
   readonly backgroundsOnPurpose?: boolean;
+  /**
+   * Checked before the run, with the shell's metrics at its start: the text
+   * that says why the scenario must not start, if it must not (S3 on a phone
+   * on the charger, R48). runDefinition then throws NotStarted.
+   */
+  refuse?(env: ScenarioEnv, metrics: NativeMetrics | 'n/a'): MessageKey | undefined;
   run(run: Run): Promise<void>;
 }
 
@@ -109,9 +127,9 @@ function linkFor(session: SpikeSession | undefined): MediaLink {
  * runs. A page that becomes hidden interrupts the run (unless the scenario
  * backgrounds on purpose): the run stops, keeps what it measured and is marked
  * `interrupted`. A lost hub session interrupts it too, and then nothing it
- * measured is kept (R49). A ConnectError (the hub cannot be reached) is
- * thrown, for the start page to explain; any other failure ends the run with
- * a `failed: …` note.
+ * measured is kept (R49). A ConnectError (the hub cannot be reached) and
+ * NotStarted are thrown, for the start page to explain; any other failure
+ * ends the run with a `failed: …` note.
  */
 export async function runDefinition(id: ScenarioId, definition: ScenarioDefinition, env: ScenarioEnv): Promise<ScenarioResult> {
   const startedAt = new Date().toISOString();
@@ -276,8 +294,9 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
   let failure: unknown;
   let device: ScenarioResult['device'] = env.device;
   try {
+    let metrics: NativeMetrics | 'n/a' = 'n/a';
     if (env.native) {
-      const metrics = await guard(readNativeMetrics(env.native, env.clock.setTimer));
+      metrics = await guard(readNativeMetrics(env.native, env.clock.setTimer));
       if (metrics === 'n/a') {
         run.note('native metrics: n/a');
       } else {
@@ -286,13 +305,18 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
           ...(metrics.model ? { model: metrics.model } : {}),
           ...(metrics.os ? { os: metrics.os } : {}),
           ...(metrics.webview ? { webview: metrics.webview } : {}),
+          ...(metrics.ramMb !== undefined && metrics.ramMb > 0 ? { ramMb: metrics.ramMb } : {}),
+          ...(metrics.gpu ? { gpu: metrics.gpu } : {}),
         };
       }
     }
+    const refusal = definition.refuse?.(env, metrics);
+    if (refusal !== undefined) throw new NotStarted(refusal);
     env.stage.open(`${id}: ${env.t(definition.backgroundsOnPurpose ? 'statusRunningShort' : 'statusRunning')}`);
     await definition.run(run);
   } catch (error) {
-    if (interruption === undefined) {
+    if (error instanceof NotStarted) failure = error;
+    else if (interruption === undefined) {
       if (error instanceof ConnectError) failure = error;
       else run.note(`failed: ${describe(error)}`);
     }

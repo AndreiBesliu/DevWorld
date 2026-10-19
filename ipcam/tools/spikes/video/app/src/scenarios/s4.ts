@@ -1,41 +1,56 @@
-// S4, MV7: stability over 30 min. The grid pages between 4 and 9 substream
-// tiles every 60 s (each page binds its tiles to the next cameras), and the
-// main stream of the first tile's camera goes fullscreen on the extra slot, or
-// leaves it, every 90 s. Memory is read every 30 s. A player `error` while its
-// tile is meant to play counts as unprovoked: the scenario stops a player
-// before it unbinds its slot, so it causes none itself.
+// S4, MV7: stability over 30 min. The grid pages between two layouts every
+// 60 s (each page binds its tiles to the next cameras): 4 and 9 substream
+// tiles on Android, 9 and 16 on the desktop paths (R45: G6 judges MV7 with 16
+// tiles on WIN-1). The main stream of the first tile's camera goes fullscreen
+// on the extra slot, or leaves it, every 90 s. Memory is read every 30 s. A
+// player `error` while its tile is meant to play counts as unprovoked: the
+// scenario stops a player before it unbinds its slot, so it causes none itself.
 //
-// Samples: `jsHeapMb` (Chromium only), `memMb` (the shell's), every 30 s from
-// the start; `playerErrors`, `pageSwitches`, `fullscreenToggles` (one value each).
-// Notes: `player error: <reason>[ (hint: <cause>)]`, `bind error <code> on slot <n>`.
+// Samples: `jsHeapMb` (Chromium only), `memMb` and `webview2Procs` (the
+// shell's), every 30 s from the start; `tiles` (the largest layout, 9 or 16),
+// `playerErrors`, `pageSwitches`, `fullscreenToggles` (one value each); the
+// loss counters of the run, `rtpLost`, `nack`, `pli`, `framesDropped`.
+// Notes: `player error: <reason>[ (hint: <cause>)]`, `bind error <code> on slot <n>`,
+// `jsHeap: bucketed` (R46: Chromium rounded the JS heap to its buckets, as in
+// the Android WebView, so MV7 rests on memMb), `<loss counter>: n/a`.
 import type { Player } from '@ipcam/player';
 import type { HubCamera } from '../cameras';
+import { isBucketedHeap } from '../heap';
 import { readNativeMetrics } from '../native';
 import type { Profile } from '../session';
-import { bindFailure, describeFailure, liveSource, playerFailure } from './frames';
+import { bindFailure, describeFailure, liveSource, playerFailure, recordLoss } from './frames';
 import type { Run, ScenarioDefinition } from './runner';
 
 const RUN_MS = 30 * 60_000;
 const TICK_MS = 30_000;
 const PAGE_EVERY_MS = 60_000;
 const FULLSCREEN_EVERY_MS = 90_000;
-const LAYOUTS = [4, 9] as const;
-const TILE_SLOTS = 9;
+/** The phone's grid has at most 9 tiles (A6); every other path is a desktop one. */
+const PHONE_LAYOUTS = [4, 9] as const;
+const DESKTOP_LAYOUTS = [9, 16] as const;
 
-async function sampleMemory(run: Run): Promise<void> {
-  const heap = run.env.jsHeapMb();
-  if (heap !== undefined) run.sample('jsHeapMb', heap);
+async function sampleMemory(run: Run, heap: number[]): Promise<void> {
+  const heapMb = run.env.jsHeapMb();
+  if (heapMb !== undefined) {
+    heap.push(heapMb);
+    run.sample('jsHeapMb', heapMb);
+  }
   const native = run.env.native;
   if (!native) return;
   const metrics = await readNativeMetrics(native, run.env.clock.setTimer);
-  if (metrics !== 'n/a' && metrics.memMb !== undefined) run.sample('memMb', metrics.memMb);
+  if (metrics === 'n/a') return;
+  if (metrics.memMb !== undefined) run.sample('memMb', metrics.memMb);
+  if (metrics.webview2Procs !== undefined) run.sample('webview2Procs', metrics.webview2Procs);
 }
 
 export const S4: ScenarioDefinition = {
   async run(run) {
     const { stage } = run.env;
     const sims = run.sims();
-    const session = await run.session(TILE_SLOTS);
+    const layouts = run.env.device.platform === 'android' ? PHONE_LAYOUTS : DESKTOP_LAYOUTS;
+    const tileSlots = Math.max(...layouts);
+    const session = await run.session(tileSlots);
+    run.sample('tiles', tileSlots);
     if (!run.env.native) run.note('native metrics: n/a');
     const tilePlayers: Player[] = [];
     let fullscreenPlayer: Player | undefined;
@@ -73,14 +88,14 @@ export const S4: ScenarioDefinition = {
       }
     };
     const showPage = async (page: number): Promise<void> => {
-      const n = LAYOUTS[page % LAYOUTS.length] ?? 4;
+      const n = layouts[page % layouts.length] ?? 4;
       tilePlayers.forEach((player, slot) => {
         stopSlot(player, slot);
       });
       const videos = stage.grid(n);
       const starts = videos.map((video, slot) => {
         tilePlayers[slot] ??= track(run.player(video, session, slot));
-        const cam = sims[(page * TILE_SLOTS + slot) % sims.length];
+        const cam = sims[(page * tileSlots + slot) % sims.length];
         const player = tilePlayers[slot];
         return player && cam ? startSlot(player, slot, cam, 'sub') : Promise.resolve();
       });
@@ -88,24 +103,25 @@ export const S4: ScenarioDefinition = {
     };
     const setFullscreen = async (on: boolean, page: number): Promise<void> => {
       if (!on) {
-        stopSlot(fullscreenPlayer, TILE_SLOTS);
+        stopSlot(fullscreenPlayer, tileSlots);
         stage.exitFullscreen();
         return;
       }
-      fullscreenPlayer ??= track(run.player(stage.fullscreen(), session, TILE_SLOTS));
+      fullscreenPlayer ??= track(run.player(stage.fullscreen(), session, tileSlots));
       stage.fullscreen();
-      const cam = sims[(page * TILE_SLOTS) % sims.length];
-      if (cam) await startSlot(fullscreenPlayer, TILE_SLOTS, cam, 'main');
+      const cam = sims[(page * tileSlots) % sims.length];
+      if (cam) await startSlot(fullscreenPlayer, tileSlots, cam, 'main');
     };
 
     let page = 0;
     let fullscreen = false;
     let toggles = 0;
+    const heap: number[] = [];
     await showPage(page);
-    await sampleMemory(run);
+    await sampleMemory(run, heap);
     for (let elapsed = TICK_MS; elapsed <= RUN_MS; elapsed += TICK_MS) {
       await run.sleep(TICK_MS);
-      await sampleMemory(run);
+      await sampleMemory(run, heap);
       if (elapsed === RUN_MS) break;
       if (elapsed % PAGE_EVERY_MS === 0) {
         page += 1;
@@ -121,5 +137,7 @@ export const S4: ScenarioDefinition = {
     run.sample('playerErrors', errors);
     run.sample('pageSwitches', page);
     run.sample('fullscreenToggles', toggles);
+    if (isBucketedHeap(heap)) run.note('jsHeap: bucketed');
+    await recordLoss(run, session);
   },
 };

@@ -34,6 +34,7 @@ const ro = {
   interruptedEarlyReturn: 'întrerupt: v-ați întors după {time}; e nevoie de cel puțin 2 minute. Apăsați «Repetă».',
   interruptedPipLeft: 'întrerupt: fereastra mică s-a închis după {time}; e nevoie de 5 minute. Apăsați «Repetă».',
   statusFailed: 'eșuat: {detail}',
+  s3Charging: 'Scoateți telefonul din încărcător înainte de S3.',
   pendingResults: 'Rezultate netrimise: {n}. Se trimit din nou la fiecare pornire.',
   resend: 'Trimite acum',
   s5Guide: 'Apăsați butonul Acasă și reveniți după ora {time} (cel puțin 2 minute).',
@@ -41,9 +42,10 @@ const ro = {
   yes: 'Da',
   no: 'Nu',
   mv4Explain:
-    'Lumina camerei se va aprinde. Aplicația ține camera pornită la 1 pixel cât durează testul, ' +
-    'pentru că doar așa Chrome arată dacă video-ul se decodează hardware. ' +
-    'Nimic nu se înregistrează și nimic nu se trimite.',
+    'Lumina camerei se va aprinde pentru cel mult 10 secunde. Aplicația pornește camera la 1 pixel, ' +
+    'pentru că doar așa află dacă video-ul se decodează hardware. ' +
+    'Nimic nu se înregistrează și nimic nu se trimite. ' +
+    'Dacă refuzați, această măsurătoare lipsește, iar verdictul pentru telefon nu se poate da. Vă rugăm să permiteți.',
   unsupportedProfile: 'profil video nesuportat',
   h265Unsupported: 'calitate redusă: H.265 nesuportat',
   descS1: 'Pornire: primul cadru, 20 de porniri (MV1)',
@@ -56,7 +58,7 @@ const ro = {
   descS6: 'Picture-in-picture 5 minute, doar pe Android (MV8)',
   descS7: 'Înregistrare HLS: 20 de porniri și 20 de salturi (MV10)',
   descS8: 'Argon2id, 10 rulări (MV15)',
-  descS9: 'Matricea de coduri: H.265 și H.264 High 5.1 (G9)',
+  descS9: 'Matricea de codecuri: H.265 și H.264 High 5.1 (G9)',
   descS10: 'Perechea ICE și cererea de permisiune (MV12, MV13)',
 } as const;
 
@@ -92,6 +94,7 @@ const en: Record<MessageKey, string> = {
   interruptedEarlyReturn: 'interrupted: you came back after {time}; at least 2 minutes are needed. Press «Repeat».',
   interruptedPipLeft: 'interrupted: the small window closed after {time}; 5 minutes are needed. Press «Repeat».',
   statusFailed: 'failed: {detail}',
+  s3Charging: 'Unplug the phone from the charger before S3.',
   pendingResults: 'Results not sent yet: {n}. They are sent again at every start.',
   resend: 'Send now',
   s5Guide: 'Press Home and come back after {time} (at least 2 minutes).',
@@ -99,9 +102,10 @@ const en: Record<MessageKey, string> = {
   yes: 'Yes',
   no: 'No',
   mv4Explain:
-    'The camera light will turn on. The app holds the camera at 1 pixel while the test runs, ' +
-    'because only then does Chrome tell whether video is decoded in hardware. ' +
-    'Nothing is recorded and nothing is sent.',
+    'The camera light will turn on for at most 10 seconds. The app starts the camera at 1 pixel, ' +
+    'because only then can it tell whether video is decoded in hardware. ' +
+    'Nothing is recorded and nothing is sent. ' +
+    'If you refuse, this measurement is missing and the phone cannot get a verdict. Please allow it.',
   unsupportedProfile: 'unsupported video profile',
   h265Unsupported: 'reduced quality: H.265 not supported',
   descS1: 'Start: first frame, 20 starts (MV1)',

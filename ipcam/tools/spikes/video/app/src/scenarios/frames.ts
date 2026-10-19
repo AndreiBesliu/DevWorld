@@ -2,6 +2,7 @@
 // time its first frame, follow the presented frames.
 import type { Player, PlayerSource } from '@ipcam/player';
 import type { BandCode } from '../band';
+import { LOSS_KEYS } from '../metrics';
 import { BindError, type BindResult, type Profile, type SpikeSession } from '../session';
 import type { Run } from './runner';
 
@@ -210,4 +211,19 @@ export function onPresentedFrames(video: HTMLVideoElement, cb: (displayPerfMs: n
     stopped = true;
     cancelAnimationFrame(handle);
   };
+}
+
+/**
+ * Records the loss counters of `session` (R50) as one sample each, `rtpLost`,
+ * `nack`, `pli` and `framesDropped`, or the note `<key>: n/a` for a counter
+ * the browser does not report. Called at the end of a run, before the session
+ * closes: the counters add up over the whole session.
+ */
+export async function recordLoss(run: Run, session: SpikeSession): Promise<void> {
+  const counters = await run.env.sampleLoss(session.pc);
+  for (const key of LOSS_KEYS) {
+    const value = counters[key];
+    if (value === undefined) run.note(`${key}: n/a`);
+    else run.sample(key, value);
+  }
 }

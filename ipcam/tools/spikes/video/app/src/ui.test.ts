@@ -116,6 +116,14 @@ describe('the status of a scenario', () => {
     expect(statusText(status, t)).toBe(text);
     expect(offersRepeat(status)).toBe(true);
   });
+
+  it('statusText_notStarted_saysWhat', () => {
+    // R48: S3 on a phone on the charger does not start.
+    const status: Status = { kind: 'refused', key: 's3Charging' };
+
+    expect(statusText(status, t)).toBe('Scoateți telefonul din încărcător înainte de S3.');
+    expect(offersRepeat(status)).toBe(false);
+  });
 });
 
 describe('the stage on the page', () => {

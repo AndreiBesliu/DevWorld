@@ -6,7 +6,7 @@ import type { BandCode } from '../band';
 import type { HubCamera } from '../cameras';
 import type { DeviceInfo } from '../device';
 import type { Translate } from '../i18n';
-import type { TileStats } from '../metrics';
+import type { LossCounters, TileStats } from '../metrics';
 import type { SpikeNative } from '../native';
 import type { SpikeSession } from '../session';
 import type { VisibilitySource, WakeLock } from '../wakelock';
@@ -61,6 +61,8 @@ export interface ScenarioEnv {
   createPlayer(opts: PlayerOptions): Player;
   readBand(video: HTMLVideoElement): BandCode | null;
   sampleStats(pc: RTCPeerConnection): Promise<Map<string, TileStats>>;
+  /** The loss counters of `pc`, summed over its video streams (R50). */
+  sampleLoss(pc: RTCPeerConnection): Promise<LossCounters>;
   /** Follows how much of `element` is inside the viewport; `n/a` without IntersectionObserver. */
   watchIntersection(element: HTMLElement): IntersectionWatch | 'n/a';
   captureForDecoderInfo(): Promise<(() => void) | 'n/a'>;

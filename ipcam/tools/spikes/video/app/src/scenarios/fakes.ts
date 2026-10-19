@@ -7,7 +7,7 @@ import { vi } from 'vitest';
 import type { BandCode } from '../band';
 import type { HubCamera } from '../cameras';
 import { createI18n } from '../i18n';
-import type { TileStats } from '../metrics';
+import type { LossCounters, TileStats } from '../metrics';
 import type { SpikeNative } from '../native';
 import { BindError, type BindResult, type Pair, type Profile, type SpikeSession } from '../session';
 import type { WakeLock } from '../wakelock';
@@ -259,6 +259,8 @@ export interface FakeHubOptions {
   loopFrames?: number;
   /** What the stats say per bound slot. */
   stats?: Partial<TileStats> & { fps?: number };
+  /** The session's loss counters, summed over its streams (sampleLoss). Default: all four, 0. */
+  loss?: LossCounters;
   pair?: Pair;
 }
 
@@ -397,6 +399,11 @@ export class FakeHubSession implements SpikeSession {
     if (this.state === state) return;
     this.state = state;
     for (const cb of [...this.stateListeners]) cb(state);
+  }
+
+  /** What sampleLoss reads for this session. */
+  lossCounters(): LossCounters {
+    return this.options.loss ?? { rtpLost: 0, nack: 0, pli: 0, framesDropped: 0 };
   }
 
   close(): void {
@@ -642,6 +649,7 @@ export function setup(options: SetupOptions = {}): TestSetup {
     },
     readBand: (video) => (video as unknown as FakeVideo).band,
     sampleStats: () => Promise.resolve(sessions.at(-1)?.stats() ?? new Map()),
+    sampleLoss: (pc) => Promise.resolve(sessions.find((session) => session.pc === pc)?.lossCounters() ?? {}),
     watchIntersection: (element) => {
       const video = element as unknown as FakeVideo;
       const shown = (): number => (video === stage.big || stage.tiles.includes(video) ? 1 : 0);
