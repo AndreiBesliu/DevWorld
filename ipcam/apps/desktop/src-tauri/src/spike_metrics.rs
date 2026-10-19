@@ -1,13 +1,18 @@
-//! SPIKE-ONLY (plan 2026-10-18-phase0b-video-spike, Task 11), behind the cargo
-//! feature `spike-metrics`: the Tauri command `spike_metrics`, which the spike
-//! app reads as `window.spikeNative.metrics()` (native-tauri.ts) for MV6 (CPU)
-//! and MV7 (memory) on WIN-1.
+//! SPIKE-ONLY (plan 2026-10-18-phase0b-video-spike, Tasks 11 and 11b), behind
+//! the cargo feature `spike-metrics`: the Tauri command `spike_metrics`, which
+//! the spike app reads as `window.spikeNative.metrics()` (native-tauri.ts) for
+//! MV6 (CPU) and MV7 (memory) on WIN-1, with the OS and WebView2 versions.
 //!
 //! The app's share is the app process plus the `msedgewebview2.exe` processes
 //! under it: WebView2 decodes and renders in its own processes, so the app
 //! process alone would hide most of the cost. CPU percentages cover the time
-//! since the previous call (the first call: since the app started), and both
-//! are shares of the whole machine, 0–100, like Task Manager's.
+//! since the previous call, and both are shares of the whole machine, 0–100,
+//! like Task Manager's. sysinfo's first `cpu_usage()` of a process it has not
+//! seen before is not meaningful (there is no earlier sample), so neither is
+//! the first call's CPU: every WebView2 process starts after the sampler. The
+//! spike app's scenario runner makes that call before a scenario and discards
+//! its CPU. A WebView2 process that starts later is likewise off in the first
+//! call that sees it.
 
 use serde::Serialize;
 use std::sync::{Mutex, PoisonError};
@@ -35,10 +40,17 @@ fn spike_metrics(sampler: State<'_, Sampler>) -> SpikeMetrics {
 struct SpikeMetrics {
     cpu_pct_total: f32,
     cpu_pct_app: f32,
+    /// The working sets, in which a page that several processes share counts in each.
     rss_mb: f32,
+    /// Private bytes (commit charge), which the page records as memMb (R37).
+    private_mb: f32,
     webview2_procs: u32,
     cpu_model: String,
     gpu: String,
+    /// The long OS version, such as "Windows 11 Pro".
+    os: String,
+    /// The WebView2 Runtime version, such as "154.0.4258.62".
+    webview: String,
 }
 
 /// One process, as the sampler reads it from the system.
@@ -50,6 +62,7 @@ struct Proc {
     /// Percent of one logical CPU since the previous sample.
     cpu_pct: f32,
     rss_bytes: u64,
+    private_bytes: u64,
 }
 
 /// What the sampler reads about the machine besides its processes.
@@ -59,6 +72,8 @@ struct Machine {
     cpu_pct_total: f32,
     cpu_model: String,
     gpu: String,
+    os: String,
+    webview: String,
 }
 
 /// The metrics of the app process `app` and of the WebView2 processes under
@@ -81,17 +96,20 @@ fn sum(app: u32, procs: &[Proc], machine: &Machine) -> SpikeMetrics {
         }
         members.extend(found);
     }
-    let counted = procs.iter().filter(|p| members.contains(&p.pid));
-    let (cpu_pct, rss_bytes) = counted.fold((0.0, 0), |(cpu, rss), p| {
-        (cpu + p.cpu_pct, rss + p.rss_bytes)
-    });
+    let counted: Vec<&Proc> = procs.iter().filter(|p| members.contains(&p.pid)).collect();
+    let cpu_pct: f32 = counted.iter().map(|p| p.cpu_pct).sum();
+    let rss_bytes: u64 = counted.iter().map(|p| p.rss_bytes).sum();
+    let private_bytes: u64 = counted.iter().map(|p| p.private_bytes).sum();
     SpikeMetrics {
         cpu_pct_total: machine.cpu_pct_total,
         cpu_pct_app: cpu_pct / machine.cpus.max(1) as f32,
         rss_mb: rss_bytes as f32 / MIB,
+        private_mb: private_bytes as f32 / MIB,
         webview2_procs: u32::try_from(members.len() - 1).unwrap_or(u32::MAX),
         cpu_model: machine.cpu_model.clone(),
         gpu: machine.gpu.clone(),
+        os: machine.os.clone(),
+        webview: machine.webview.clone(),
     }
 }
 
@@ -100,8 +118,8 @@ fn sum(app: u32, procs: &[Proc], machine: &Machine) -> SpikeMetrics {
 struct Sampler {
     system: Mutex<System>,
     app: Pid,
-    cpu_model: String,
-    gpu: String,
+    /// The machine as read at start; each sample reads its CPU usage again.
+    machine: Machine,
 }
 
 impl Sampler {
@@ -113,11 +131,18 @@ impl Sampler {
             .cpus()
             .first()
             .map(|cpu| cpu.brand().trim().to_owned());
+        let machine = Machine {
+            cpus: system.cpus().len(),
+            cpu_pct_total: system.global_cpu_usage(),
+            cpu_model: cpu_model.unwrap_or_default(),
+            gpu: gpu_names(),
+            os: System::long_os_version().unwrap_or_default(),
+            webview: tauri::webview_version().unwrap_or_default(),
+        };
         Self {
             system: Mutex::new(system),
             app: Pid::from_u32(std::process::id()),
-            cpu_model: cpu_model.unwrap_or_default(),
-            gpu: gpu_names(),
+            machine,
         }
     }
 
@@ -133,13 +158,13 @@ impl Sampler {
                 name: p.name().to_string_lossy().into_owned(),
                 cpu_pct: p.cpu_usage(),
                 rss_bytes: p.memory(),
+                // On Windows, sysinfo reads PrivateUsage into virtual_memory().
+                private_bytes: p.virtual_memory(),
             })
             .collect();
         let machine = Machine {
-            cpus: system.cpus().len(),
             cpu_pct_total: system.global_cpu_usage(),
-            cpu_model: self.cpu_model.clone(),
-            gpu: self.gpu.clone(),
+            ..self.machine.clone()
         };
         sum(self.app.as_u32(), &procs, &machine)
     }
@@ -199,35 +224,45 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
 
-    fn proc(pid: u32, parent: Option<u32>, name: &str, cpu_pct: f32, rss_mib: u64) -> Proc {
+    fn proc(
+        pid: u32,
+        parent: Option<u32>,
+        name: &str,
+        cpu_pct: f32,
+        rss_mib: u64,
+        private_mib: u64,
+    ) -> Proc {
         Proc {
             pid,
             parent,
             name: name.to_owned(),
             cpu_pct,
             rss_bytes: rss_mib * MIB,
+            private_bytes: private_mib * MIB,
         }
     }
 
     #[test]
     fn spike_metrics_sums_children() {
         let procs = [
-            proc(4, None, "System", 3.0, 1),
-            proc(100, Some(40), "ipcam-desktop.exe", 5.0, 50),
+            proc(4, None, "System", 3.0, 1, 0),
+            proc(100, Some(40), "ipcam-desktop.exe", 5.0, 50, 30),
             // The WebView2 browser process is the app's child; its renderer,
             // GPU and utility processes are the browser's children.
-            proc(200, Some(100), "msedgewebview2.exe", 10.0, 100),
-            proc(300, Some(200), "msedgewebview2.exe", 20.0, 200),
-            proc(301, Some(200), "MSEdgeWebView2.exe", 4.0, 30),
+            proc(200, Some(100), "msedgewebview2.exe", 10.0, 100, 40),
+            proc(300, Some(200), "msedgewebview2.exe", 20.0, 200, 150),
+            proc(301, Some(200), "MSEdgeWebView2.exe", 4.0, 30, 10),
             // Another app's WebView2, and a child of the app that is not WebView2.
-            proc(400, Some(999), "msedgewebview2.exe", 50.0, 500),
-            proc(500, Some(100), "conhost.exe", 1.0, 5),
+            proc(400, Some(999), "msedgewebview2.exe", 50.0, 500, 400),
+            proc(500, Some(100), "conhost.exe", 1.0, 5, 2),
         ];
         let machine = Machine {
             cpus: 4,
             cpu_pct_total: 37.5,
             cpu_model: "Intel(R) Core(TM) i5-12400".to_owned(),
             gpu: "Intel(R) UHD Graphics 730".to_owned(),
+            os: "Windows 11 Pro".to_owned(),
+            webview: "154.0.4258.62".to_owned(),
         };
 
         let metrics = sum(100, &procs, &machine);
@@ -239,9 +274,13 @@ mod tests {
                 // (5 + 10 + 20 + 4) % of one CPU, over 4 CPUs.
                 cpu_pct_app: 9.75,
                 rss_mb: 380.0,
+                // 30 + 40 + 150 + 10 MiB.
+                private_mb: 230.0,
                 webview2_procs: 3,
                 cpu_model: "Intel(R) Core(TM) i5-12400".to_owned(),
                 gpu: "Intel(R) UHD Graphics 730".to_owned(),
+                os: "Windows 11 Pro".to_owned(),
+                webview: "154.0.4258.62".to_owned(),
             }
         );
     }

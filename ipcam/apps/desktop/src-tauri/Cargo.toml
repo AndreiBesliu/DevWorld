@@ -4,6 +4,8 @@ version = "0.0.0"
 edition = "2024"
 # A test build of Phase 0, never published (OPN-01).
 publish = false
+# In src/, so that the line budget of APP-01 (count-native-lines.sh) counts it.
+build = "src/build.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.7.1", features = [] }

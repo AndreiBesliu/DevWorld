@@ -7,8 +7,9 @@ on:
       - 'ipcam/apps/packages/**'
       - 'ipcam/tools/spikes/video/app/**'
       - 'ipcam/tools/spikes/video/android-metrics/**'
-      # The MV14 step runs the line counter.
+      # The MV14 step runs the line counter; failures become annotations.
       - 'ipcam/tools/scripts/count-native-lines.sh'
+      - 'ipcam/tools/scripts/annotate.sh'
       # The Capacitor and plugin versions come from the lockfile.
       - 'ipcam/pnpm-lock.yaml'
       - 'ipcam/package.json'
@@ -20,8 +21,9 @@ on:
       - 'ipcam/apps/packages/**'
       - 'ipcam/tools/spikes/video/app/**'
       - 'ipcam/tools/spikes/video/android-metrics/**'
-      # The MV14 step runs the line counter.
+      # The MV14 step runs the line counter; failures become annotations.
       - 'ipcam/tools/scripts/count-native-lines.sh'
+      - 'ipcam/tools/scripts/annotate.sh'
       # The Capacitor and plugin versions come from the lockfile.
       - 'ipcam/pnpm-lock.yaml'
       - 'ipcam/package.json'
@@ -101,14 +103,13 @@ jobs:
           log="${RUNNER_TEMP}/gradle.log"
           [[ -f "${log}" ]] || exit 0
           { grep -E -A12 '^\* What went wrong:' "${log}" || true; grep -E -A30 '^e: | FAILED$' "${log}" || true; } \
-            | head -150 | sed -e 's/%/%25/g' \
-            | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "::error title=gradle::") $0 } END { if (NR) print "\n" }'
+            | tools/scripts/annotate.sh gradle
       - name: Native line count (MV14)
         # MV14 counts the production plugins only: the spike metrics plugin is
         # SPIKE-ONLY, and local-network comes in Phase 4.
         run: |
           counts="$(tools/scripts/count-native-lines.sh 400 apps/mobile/plugins/*/android/src/main 2>&1)" || {
-            echo "::error title=MV14::${counts//$'\n'/%0A}"
+            printf '%s\n' "${counts}" | tools/scripts/annotate.sh MV14
             exit 1
           }
           summary="MV14 Kotlin per plugin (budget 400): ${counts//$'\n'/; }; local-network: not measured in Phase 0 (Phase 4); spike metrics plugin: SPIKE-ONLY, not counted"

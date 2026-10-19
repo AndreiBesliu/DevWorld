@@ -62,8 +62,7 @@ jobs:
         if: failure()
         run: |
           grep -E -- '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE|\s+\S+_test\.go:[0-9]+:)' "$RUNNER_TEMP/test.log" \
-            | head -60 | sed -e 's/%/%25/g' \
-            | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "::error title=go test::") $0 } END { if (NR) print "\n" }'
+            | tools/scripts/annotate.sh 'go test' 60
       - name: Vulnerabilities
         # govulncheck needs a directory that holds a go.mod.
         working-directory: ipcam/tools/spikes/video

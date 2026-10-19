@@ -6,12 +6,40 @@ on:
       - 'ipcam/apps/desktop/**'
       - 'ipcam/apps/packages/**'
       - 'ipcam/tools/spikes/video/**'
+      # The spike app imports the PiP plugin.
+      - 'ipcam/apps/mobile/plugins/pip/**'
+      # pnpm's version, the JS dependencies and the shared TypeScript settings.
+      - 'ipcam/pnpm-lock.yaml'
+      - 'ipcam/package.json'
+      - 'ipcam/pnpm-workspace.yaml'
+      - 'ipcam/tsconfig.base.json'
+      # spikehub's Go version and workspace.
+      - 'ipcam/go.work*'
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      # The line count (APP-01) and the failure annotations.
+      - 'ipcam/tools/scripts/count-native-lines.sh'
+      - 'ipcam/tools/scripts/annotate.sh'
       - '.github/workflows/ipcam-windows.yml'
   pull_request:
     paths:
       - 'ipcam/apps/desktop/**'
       - 'ipcam/apps/packages/**'
       - 'ipcam/tools/spikes/video/**'
+      # The spike app imports the PiP plugin.
+      - 'ipcam/apps/mobile/plugins/pip/**'
+      # pnpm's version, the JS dependencies and the shared TypeScript settings.
+      - 'ipcam/pnpm-lock.yaml'
+      - 'ipcam/package.json'
+      - 'ipcam/pnpm-workspace.yaml'
+      - 'ipcam/tsconfig.base.json'
+      # spikehub's Go version and workspace.
+      - 'ipcam/go.work*'
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      # The line count (APP-01) and the failure annotations.
+      - 'ipcam/tools/scripts/count-native-lines.sh'
+      - 'ipcam/tools/scripts/annotate.sh'
       - '.github/workflows/ipcam-windows.yml'
 
 permissions:
@@ -56,8 +84,7 @@ jobs:
         # Its few lines of output go into an annotation on a failure.
         run: |
           out="$(go run ./tools/spikes/video/cmd/mediagen -out "${RUNNER_TEMP}/spike-video-media" 2>&1)" || {
-            out="${out//%/%25}"
-            echo "::error title=mediagen::${out//$'\n'/%0A}"
+            printf '%s\n' "${out}" | tools/scripts/annotate.sh mediagen
             exit 1
           }
           echo "${out}"
@@ -89,9 +116,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Native line count (APP-01)
+        # All of the shell's Rust, its build script (src/build.rs) included.
         run: |
           counts="$(tools/scripts/count-native-lines.sh 299 apps/desktop/src-tauri/src 2>&1)" || {
-            echo "::error title=APP-01::${counts//$'\n'/%0A}"
+            printf '%s\n' "${counts}" | tools/scripts/annotate.sh APP-01
             exit 1
           }
           summary="APP-01 Rust of the Windows shell (under 300 lines): ${counts}"
@@ -122,15 +150,19 @@ jobs:
         # check runs even when one before it failed. Clippy only type-checks,
         # but tauri::generate_context! reads the frontendDist folder, which the
         # windows job fills with the spike app's build: an empty one stands in.
+        # From Linux, tauri-build's resource step (cc) warns "GNU compiler is
+        # not supported for this target" on every build; the windows job
+        # compiles the resources, so that line is left out here.
         run: |
           mkdir -p ../../../tools/spikes/video/app/dist
           log="${RUNNER_TEMP}/checks.log"
+          noise='/: GNU compiler is not supported for this target$/d'
           status=0
           cargo fmt --check -- --color never 2>&1 | tee -a "${log}" || status=1
           cargo clippy --color never --locked --target x86_64-pc-windows-msvc --all-targets --features spike-metrics -- -D warnings 2>&1 \
-            | tee -a "${log}" || status=1
+            | sed -e "${noise}" | tee -a "${log}" || status=1
           cargo clippy --color never --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings 2>&1 \
-            | tee -a "${log}" || status=1
+            | sed -e "${noise}" | tee -a "${log}" || status=1
           exit "${status}"
       - name: Show check failures as annotations
         # Job logs cannot be read from everywhere; check-run annotations can
@@ -142,14 +174,14 @@ jobs:
           # Clippy's and cargo-deny's errors and rustfmt's diffs, else the end of the log.
           lines="$({ grep -E -A12 '^error' "${log}" || true; grep -E -A10 '^Diff in ' "${log}" || true; })"
           [[ -n "${lines}" ]] || lines="$(tail -n 30 "${log}")"
-          printf '%s\n' "${lines}" | head -150 | sed -e 's/%/%25/g' \
-            | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "::error title=checks::") $0 } END { if (NR) print "\n" }'
+          printf '%s\n' "${lines}" | tools/scripts/annotate.sh checks
 
   windows:
     # WIN-2: the spike shell on Windows and WebView2, unsigned (code signing is
     # Faza 0-bis): the unit tests, the executable (tauri build --no-bundle) and
-    # the NSIS installer. Then S1 by autorun (R5) against spikehub with 4
-    # simulated cameras on the runner, from several starts of the app.
+    # the NSIS installer, zlib-compressed so that its stub carries no LZMA
+    # decoder (R36, tauri.conf.json). Then S1 by autorun (R5) against spikehub
+    # with 4 simulated cameras on the runner, from several starts of the app.
     needs: media
     runs-on: windows-latest
     timeout-minutes: 60
@@ -207,13 +239,11 @@ jobs:
           log="${RUNNER_TEMP}/build.log"
           [[ -f "${log}" ]] || exit 0
           { grep -E -A12 '^error' "${log}" || true; grep -E -B2 -A10 'panicked|FAILED|failed to bundle' "${log}" || true; } \
-            | tr -d '\r' | head -150 | sed -e 's/%/%25/g' \
-            | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "::error title=build::") $0 } END { if (NR) print "\n" }'
+            | tools/scripts/annotate.sh build
       - name: Build spikehub
         run: |
           out="$(go build -o "${RUNNER_TEMP}/spikehub.exe" ./tools/spikes/video/cmd/spikehub 2>&1)" || {
-            out="${out//%/%25}"
-            echo "::error title=spikehub build::${out//$'\n'/%0A}"
+            printf '%s\n' "${out}" | tools/scripts/annotate.sh 'spikehub build'
             exit 1
           }
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

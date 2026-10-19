@@ -1,5 +1,7 @@
 # WIN-2 smoke test of the spike shell (plan 2026-10-18-phase0b-video-spike,
-# Task 11), run by ipcam-windows.yml on windows-latest. It starts spikehub with
+# Tasks 11 and 11b), run by ipcam-windows.yml on windows-latest. CI-only: it
+# stops unless GITHUB_ACTIONS is true, because it opens a DevTools port by a
+# machine policy (below), which must never stay on a PC. It starts spikehub with
 # 4 simulated cameras, then starts the app from a new process several times:
 # each start runs scenario S1 by autorun (--autorun S1 --hub
 # http://localhost:7080, R5), and the hub must store its S1 result with 20
@@ -16,8 +18,9 @@
 # for the app's executable, which the script writes. The runner's processes are
 # elevated, and WebView2 Runtime 150 and later ignores the variable
 # WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS and per-user policies in an elevated
-# process (WebView2Feedback issue 5645). The runner is discarded after the job,
-# so the policy is not removed.
+# process (WebView2Feedback issue 5645). The script creates the policy's keys
+# only where they are missing, so an existing key keeps its values, and removes
+# its own value when it ends, also after an error.
 #
 # On failure it prints the cause as check annotations, which can be read where
 # the job log cannot.
@@ -35,6 +38,9 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($env:GITHUB_ACTIONS -ne 'true') {
+  throw 'windows-smoke.ps1 runs in GitHub Actions only: it opens a DevTools port for the app by a machine policy.'
+}
 
 $hubUrl = 'http://localhost:7080'
 $debugPort = 9222
@@ -117,7 +123,9 @@ function Get-MetricsProblem([string] $Page) {
   try { $metrics = Get-Field ($Page | ConvertFrom-Json) 'metrics' } catch { return "no page state: $Page" }
   if (Get-Field $metrics 'error') { return "spike_metrics failed: $(Get-Field $metrics 'error')" }
   if ((Get-Field $metrics 'webview2_procs') -lt 1) { return "spike_metrics counts no WebView2 process: $($metrics | ConvertTo-Json -Compress)" }
-  if ((Get-Field $metrics 'rss_mb') -le 0) { return "spike_metrics reports no memory: $($metrics | ConvertTo-Json -Compress)" }
+  if ((Get-Field $metrics 'rss_mb') -le 0 -or (Get-Field $metrics 'private_mb') -le 0) {
+    return "spike_metrics reports no memory: $($metrics | ConvertTo-Json -Compress)"
+  }
   $null
 }
 
@@ -211,14 +219,25 @@ while ($true) {
 }
 
 # Every WebView2 the app creates opens its DevTools port, which Read-Page asks.
-# The policy's value name is the executable's file name.
-$null = New-Item -Path $argumentsPolicy -Force
-$null = New-ItemProperty -LiteralPath $argumentsPolicy -Name (Split-Path -Leaf $App) -Value "--remote-debugging-port=$debugPort" -PropertyType String -Force
-$failures = 0
-for ($start = 1; $start -le $Starts; $start++) {
-  if (-not (Test-Start "start $start of $Starts" $start)) { $failures++ }
+# The policy's value name is the executable's file name. Each missing key of
+# the policy's path is created on its own, and an existing key is left as it is
+# (New-Item -Force would replace it and drop its values).
+$policyValue = Split-Path -Leaf $App
+$key = 'HKLM:'
+foreach ($name in $argumentsPolicy.Substring($key.Length + 1).Split('\')) {
+  $key = "$key\$name"
+  if (-not (Test-Path -LiteralPath $key)) { $null = New-Item -Path $key }
 }
-Stop-Process -Id $hubProcess.Id -ErrorAction SilentlyContinue
+$failures = 0
+try {
+  $null = New-ItemProperty -LiteralPath $argumentsPolicy -Name $policyValue -Value "--remote-debugging-port=$debugPort" -PropertyType String -Force
+  for ($start = 1; $start -le $Starts; $start++) {
+    if (-not (Test-Start "start $start of $Starts" $start)) { $failures++ }
+  }
+} finally {
+  Remove-ItemProperty -LiteralPath $argumentsPolicy -Name $policyValue -ErrorAction SilentlyContinue
+  Stop-Process -Id $hubProcess.Id -ErrorAction SilentlyContinue
+}
 
 $summary = if ($failures) { "$failures of $Starts starts failed" } else { "all $Starts starts stored S1 with 20 samples" }
 if ($env:GITHUB_STEP_SUMMARY) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Windows smoke test (WIN-2): $summary" }
