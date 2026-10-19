@@ -29,6 +29,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // maxResultBytes is the largest results file that is read. The hub stores at most 2 MiB.
@@ -79,8 +81,36 @@ func scrubText(s string) string {
 	s = urlPattern.ReplaceAllString(s, "[url]")
 	s = emailPattern.ReplaceAllString(s, "[email]")
 	s = macPattern.ReplaceAllString(s, "[mac]")
-	s = ipv6Pattern.ReplaceAllString(s, "[ip]")
+	s = replaceStandalone(ipv6Pattern, s, "[ip]")
 	return ipv4Pattern.ReplaceAllString(s, "[ip]")
+}
+
+// replaceStandalone replaces the matches of re that stand alone: not glued to a letter, a digit
+// or an underscore on either side, nor followed by a colon, so that a scope operator (std::string, Vec::new) is
+// not taken for an IPv6 literal (Task 13b). A match that holds no hex digit (a bare ::) stays.
+func replaceStandalone(re *regexp.Regexp, s, with string) string {
+	var b strings.Builder
+	last := 0
+	for _, loc := range re.FindAllStringIndex(s, -1) {
+		start, end := loc[0], loc[1]
+		if !strings.ContainsAny(s[start:end], "0123456789abcdefABCDEF") || glued(s, start, end) {
+			continue
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(with)
+		last = end
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// glued: the text right before or after s[start:end] continues a word, or an address after it.
+// A colon before the match is a label's ("ip:fe80::1"), not a part of the address.
+func glued(s string, start, end int) bool {
+	before, _ := utf8.DecodeLastRuneInString(s[:start])
+	after, _ := utf8.DecodeRuneInString(s[end:])
+	word := func(c rune) bool { return c == '_' || unicode.IsLetter(c) || unicode.IsDigit(c) }
+	return start > 0 && word(before) || end < len(s) && (word(after) || after == ':')
 }
 
 // shortVersions drops the fourth number of a four-number version (Chrome/141.0.0.0 becomes

@@ -9,11 +9,11 @@ import (
 func TestComputeMV_AllPassingSet(t *testing.T) {
 	mv := ComputeMV(allRuns())
 	want := map[string][]string{
-		androidDevice: {"MV1", "MV2", "MV3/4", "MV3/9", "MV4/9", "MV5/9", "MV7", "MV8", "MV9", "MV10", "MV12", "MV15", "G9"},
-		windowsDevice: {"MV3/16", "MV6", "MV7", "MV12"},
-		"chrome":      {"MV13"},
-		"edge":        {"MV13"},
-		"firefox":     {"MV13"},
+		androidDevice: {"MV1", "MV2", "MV3/4", "MV3/9", "MV4/9", "MV4/main", "MV5/9", "MV7", "MV8", "MV9", "MV10", "MV12", "MV15", "G9"},
+		windowsDevice: {"MV1", "MV2", "MV3/16", "MV6", "MV7", "MV10", "MV12", "G9"},
+		"chrome":      {"MV13", "G9"},
+		"edge":        {"MV13", "G9"},
+		"firefox":     {"MV13", "G9"},
 	}
 	for device, codes := range want {
 		for _, code := range codes {
@@ -240,23 +240,28 @@ func TestComputeMV_MV4(t *testing.T) {
 		f.add("S3-9", s, "decoders: c2.exynos.h264.decoder ×9")
 		return f.list()
 	}
+	// MV4/9 is the grid's tiles; the fullscreen part is MV4/main (report-7).
 	tests := []struct {
-		name string
-		mut  func(s map[string][]float64)
-		want string
+		name             string
+		mut              func(s map[string][]float64)
+		wantGrid, wantFS string
 	}{
-		{"all hardware", func(map[string][]float64) {}, "pass"},
-		{"one tile in software", func(s map[string][]float64) { s["tileHardware"][2] = 0 }, "fail"},
-		{"the main stream in software", func(s map[string][]float64) { s["mainHardware"][0] = 0 }, "fail"},
-		{"a software tile outweighs a missing main reading", func(s map[string][]float64) { s["tileHardware"][2] = 0; delete(s, "mainHardware") }, "fail"},
-		{"no decoder info", func(s map[string][]float64) { delete(s, "tileHardware"); delete(s, "mainHardware") }, "absent"},
-		{"tiles without the main stream", func(s map[string][]float64) { delete(s, "mainHardware") }, "absent"},
-		{"fewer tile readings than tiles", func(s map[string][]float64) { s["tileHardware"] = s["tileHardware"][:5] }, "absent"},
+		{"all hardware", func(map[string][]float64) {}, "pass", "pass"},
+		{"one tile in software", func(s map[string][]float64) { s["tileHardware"][2] = 0 }, "fail", "pass"},
+		{"the main stream in software", func(s map[string][]float64) { s["mainHardware"][0] = 0 }, "pass", "fail"},
+		{"a software tile and no main reading", func(s map[string][]float64) { s["tileHardware"][2] = 0; delete(s, "mainHardware") }, "fail", "absent"},
+		{"no decoder info", func(s map[string][]float64) { delete(s, "tileHardware"); delete(s, "mainHardware") }, "absent", "absent"},
+		{"tiles without the main stream", func(s map[string][]float64) { delete(s, "mainHardware") }, "pass", "absent"},
+		{"fewer tile readings than tiles", func(s map[string][]float64) { s["tileHardware"] = s["tileHardware"][:5] }, "absent", "pass"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := outcome(ComputeMV(run(tc.mut)), androidDevice, "MV4/9"); got != tc.want {
-				t.Errorf("MV4/9 = %s, want %s", got, tc.want)
+			mv := ComputeMV(run(tc.mut))
+			if got := outcome(mv, androidDevice, "MV4/9"); got != tc.wantGrid {
+				t.Errorf("MV4/9 = %s, want %s", got, tc.wantGrid)
+			}
+			if got := outcome(mv, androidDevice, "MV4/main"); got != tc.wantFS {
+				t.Errorf("MV4/main = %s, want %s", got, tc.wantFS)
 			}
 		})
 	}
@@ -459,20 +464,21 @@ func TestComputeMV_MV7(t *testing.T) {
 func TestComputeMV_MV7_SaysWhatTheMemoryNumberLeavesOut(t *testing.T) {
 	for _, tc := range []struct {
 		device Device
+		s4     map[string][]float64
 		want   string
 	}{
-		{windowsModel, "GPU"},
-		{androidModel, "WebView"},
+		{windowsModel, windowsStability(), "GPU"},
+		{androidModel, stability(), "WebView"},
 	} {
 		f := newFixture(tc.device)
-		f.add("S4", stability())
+		f.add("S4", tc.s4)
 		v := ComputeMV(f.list())[mvKey(tc.device.Platform, "MV7")]
 		if joined := strings.Join(v.Notes, "\n"); !strings.Contains(joined, tc.want) {
 			t.Errorf("%s MV7 notes = %q, want a note that names %s", tc.device.Platform, joined, tc.want)
 		}
 	}
 	f := newFixture(windowsModel)
-	f.add("S4", stability())
+	f.add("S4", windowsStability())
 	if joined := strings.Join(ComputeMV(f.list())[mvKey(windowsDevice, "MV7")].Notes, "\n"); !strings.Contains(joined, "privat") {
 		t.Errorf("Windows MV7 notes = %q, want private memory named (R37)", joined)
 	}

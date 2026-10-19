@@ -372,12 +372,27 @@ func TestRender_WarnsWhenOnePlatformRunsOnTwoMachines(t *testing.T) {
 	}
 	warningsOf := func(rs ...Result) string { return section(t, render(t, rs), "## Avertismente") }
 
+	// hub-4: the phone's Chrome is a device of its own, listed apart with a warning.
 	t.Run("Chrome on the phone and on the PC", func(t *testing.T) {
 		warnings := warningsOf(
-			chromeOn("Android 14", "Chrome/141.0.0.0", "chrome-phone-s10.json"),
-			chromeOn("Windows 11", "Chrome/141.0.0.0", "chrome-pc-s10.json"),
+			chromeOn("Android", "Chrome/141.0.0.0", "chrome-phone-s10.json"),
+			chromeOn("Windows", "Chrome/141.0.0.0", "chrome-pc-s10.json"),
 		)
-		for _, want := range []string{"Mai multe modele", "Chrome", "Android 14", "Windows 11"} {
+		for _, want := range []string{"Chrome pe Android", "nu intră în verdicte", "PC"} {
+			if !strings.Contains(warnings, want) {
+				t.Errorf("warnings lack %q:\n%s", want, warnings)
+			}
+		}
+		if strings.Contains(warnings, "Mai multe modele") {
+			t.Errorf("the phone and the PC are still merged into one device:\n%s", warnings)
+		}
+	})
+	t.Run("two versions of Windows under one browser", func(t *testing.T) {
+		warnings := warningsOf(
+			chromeOn("Windows 10", "Chrome/141.0.0.0", "chrome-a-s10.json"),
+			chromeOn("Windows 11", "Chrome/141.0.0.0", "chrome-b-s10.json"),
+		)
+		for _, want := range []string{"Mai multe modele", "Windows 10", "Windows 11"} {
 			if !strings.Contains(warnings, want) {
 				t.Errorf("warnings lack %q:\n%s", want, warnings)
 			}

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,52 @@ const (
 	platformWindows = "windows-tauri"
 )
 
+// webPlatforms are the browsers. The guide runs them on the owner's Windows PC (spec §16.3,
+// WEB), so a browser run on another OS family is a device of its own (deviceKey, hub-4).
+var webPlatforms = []string{"chrome", "edge", "firefox"}
+
+// expectedWebOS is the OS family of the browsers' runs that the verdicts read.
+const expectedWebOS = "windows"
+
+// osFamily is the OS family of a browser result in lower case ("windows", "android", "linux",
+// "macos"), as device.ts names it; empty when the result does not say. It names a CSV file, so
+// it keeps only letters and digits, and at most 16 of them.
+func osFamily(os string) string {
+	first, _, _ := strings.Cut(strings.TrimSpace(os), " ")
+	family := strings.Map(func(c rune) rune {
+		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
+			return c
+		}
+		return -1
+	}, strings.ToLower(first))
+	return family[:min(len(family), 16)]
+}
+
+// deviceKey is the device that a result belongs to in the report: its platform, except for a
+// browser on an OS family other than Windows, whose key adds the family ("chrome-android").
+// A run of Chrome on the phone then never replaces nor merges with the PC's Chrome (hub-4).
+// A browser result that names no OS stays with its platform.
+func deviceKey(d Device) string {
+	family := osFamily(d.OS)
+	if !slices.Contains(webPlatforms, d.Platform) || family == "" || family == expectedWebOS {
+		return d.Platform
+	}
+	return d.Platform + "-" + family
+}
+
+// basePlatform is the platform of a device key: "chrome" for "chrome-android".
+func basePlatform(key string) string {
+	for _, p := range webPlatforms {
+		if strings.HasPrefix(key, p+"-") {
+			return p
+		}
+	}
+	return key
+}
+
+// unexpectedOS says whether a device key is a browser on an OS that the guide does not use.
+func unexpectedOS(key string) bool { return basePlatform(key) != key }
+
 // Device is the device of a result. Nothing in it names an address, a network
 // or a serial number (PH0-22); the user agent is not read at all.
 type Device struct {
@@ -23,6 +70,21 @@ type Device struct {
 	Model    string `json:"model"`
 	OS       string `json:"os"`
 	WebView  string `json:"webview"`
+	// RAMMb is the physical memory that the shell reports, in MiB; 0 when it does not.
+	RAMMb float64 `json:"ramMb"`
+	// GPU names the display adapters (the Windows shell only).
+	GPU string `json:"gpu"`
+}
+
+// Interruption says why a run ended as interrupted (app/src/results.ts InterruptReason):
+// hidden (AtS), session-lost (AtS, How; R49), charging (AtS; R48), early-return
+// (BackgroundS) or pip-left (PipS). Results written before the field existed have none.
+type Interruption struct {
+	Kind        string  `json:"kind"`
+	AtS         float64 `json:"atS"`
+	How         string  `json:"how"`
+	BackgroundS float64 `json:"backgroundS"`
+	PipS        float64 `json:"pipS"`
 }
 
 // Result is one results file as spikehub stores it: the app's ScenarioResult
@@ -32,8 +94,10 @@ type Result struct {
 	Device    Device  `json:"device"`
 	StartedAt string  `json:"startedAt"`
 	DurationS float64 `json:"durationS"`
-	// Interrupted: the page was hidden during the run (Review Focus 2).
+	// Interrupted: the run ended before it measured what it should (Review Focus 2, R48, R49).
 	Interrupted bool `json:"interrupted"`
+	// Interruption says why, when Interrupted.
+	Interruption *Interruption `json:"interruption"`
 	// HubJitterMs holds the p99 send deviation of each 10 s window (R28).
 	HubJitterMs []float64            `json:"hubJitterMs"`
 	Samples     map[string][]float64 `json:"samples"`
@@ -53,7 +117,8 @@ type MV struct {
 	Unit      string
 	Threshold string
 	Pass      bool
-	// Device is the platform of the results: android, windows-tauri, chrome, edge, firefox.
+	// Device is the device key of the results (deviceKey): android, windows-tauri, chrome,
+	// edge, firefox, or a browser on an unexpected OS such as chrome-android.
 	Device string
 	// Text is the "Valoare" cell of the report; Value and Unit when empty.
 	Text string
@@ -81,10 +146,16 @@ const (
 	RunUsed RunStatus = iota
 	// RunSuperseded: valid, but a newer valid run of the same scenario exists.
 	RunSuperseded
-	// RunInterrupted: the page was hidden during the run (Review Focus 2).
+	// RunInterrupted: the app ended the run early, for any reason (Interruption).
 	RunInterrupted
 	// RunFailed: the scenario stopped with an error, so its readings are incomplete.
 	RunFailed
+	// RunInvalid: an S3 run that a reading shows on the charger (R48), although the app
+	// did not end it: battery and heat cannot be judged.
+	RunInvalid
+	// RunInformative: an S4 run of a desktop path that did not page 16 tiles (R45). It is
+	// listed with its values, but MV7 there is judged only on 16 tiles.
+	RunInformative
 )
 
 // Run is a result and what it counts for.
@@ -100,6 +171,31 @@ func (r Result) startedAt() time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+// onCharger: an S3 run with a reading that says the phone was charging (R48), in the grid
+// (`charging`) or in the fullscreen part (`mainCharging`).
+func (r Result) onCharger() bool {
+	if !strings.HasPrefix(r.Scenario, "S3-") {
+		return false
+	}
+	return slices.Contains(r.Samples["charging"], 1) || slices.Contains(r.Samples["mainCharging"], 1)
+}
+
+// desktopTiles is the number of tiles of an S4 run (its `tiles` sample), 0 when it has none.
+func (r Result) desktopTiles() int {
+	if t := r.Samples["tiles"]; len(t) > 0 {
+		return int(t[0])
+	}
+	return 0
+}
+
+// desktopGridTiles is the grid that MV7 needs on a desktop path (R45, spec G6).
+const desktopGridTiles = 16
+
+// informativeOnly: an S4 run of a desktop path that did not page 16 tiles (R45).
+func (r Result) informativeOnly() bool {
+	return r.Scenario == "S4" && basePlatform(r.Device.Platform) != platformAndroid && r.desktopTiles() != desktopGridTiles
 }
 
 // failed: the scenario ended with an error (runner.ts notes `failed: ...`).
@@ -134,12 +230,14 @@ func orderOf(order map[string]int, name string) int {
 }
 
 // classify sorts the results (device, scenario, start time) and says what each counts for:
-// interrupted and failed runs are left out, and of the valid runs of one scenario on one
-// device only the newest counts.
+// interrupted, failed and invalid runs are left out, a desktop S4 without 16 tiles is only
+// informative, and of the valid runs of one scenario on one device only the newest counts.
+// The device of a run is its deviceKey, which it keeps in Device.Platform from here on.
 func classify(results []Result) []Run {
 	runs := make([]Run, len(results))
 	for i, r := range results {
 		runs[i] = Run{Result: r}
+		runs[i].Device.Platform = deviceKey(r.Device)
 	}
 	sort.SliceStable(runs, func(i, j int) bool {
 		a, b := runs[i], runs[j]
@@ -167,6 +265,10 @@ func classify(results []Result) []Run {
 			runs[i].Status = RunInterrupted
 		case runs[i].failed():
 			runs[i].Status = RunFailed
+		case runs[i].onCharger():
+			runs[i].Status = RunInvalid
+		case runs[i].informativeOnly():
+			runs[i].Status = RunInformative
 		default:
 			key := runs[i].Device.Platform + "|" + runs[i].Scenario
 			if j, ok := newest[key]; ok {
@@ -202,8 +304,9 @@ func HubJitterFlags(results []Result) []JitterFlag {
 	return flags
 }
 
-// EarlierFailure is a valid run that a newer valid run of the same scenario replaced, and
-// that failed a threshold of its scenario (R40).
+// EarlierFailure is a run that does not decide a threshold, with what it said about it: a
+// valid run that a newer valid run of the same scenario replaced and that failed a threshold
+// of its scenario (R40), or an informative run (RunInformative).
 type EarlierFailure struct {
 	File string
 	// MV is what that run said on its own: its value, with the text of the "Valoare" cell.
@@ -221,6 +324,9 @@ type evaluation struct {
 	// They do not decide anything; the report shows them beside the value, so that running a
 	// scenario again until it passes cannot hide a failure (R40).
 	Earlier map[string][]EarlierFailure
+	// Informative holds, by mvKey, what the informative runs said (a desktop S4 without 16
+	// tiles, R45): listed beside the row, never deciding it.
+	Informative map[string][]EarlierFailure
 }
 
 // ComputeMV judges the thresholds of every device in `results`. The map is keyed by
@@ -232,7 +338,10 @@ type evaluation struct {
 func ComputeMV(results []Result) map[string]MV { return evaluate(results).MV }
 
 func evaluate(results []Result) evaluation {
-	ev := evaluation{Runs: classify(results), MV: map[string]MV{}, Missing: map[string]string{}, Earlier: map[string][]EarlierFailure{}}
+	ev := evaluation{
+		Runs: classify(results), MV: map[string]MV{}, Missing: map[string]string{},
+		Earlier: map[string][]EarlierFailure{}, Informative: map[string][]EarlierFailure{},
+	}
 	byDevice := map[string]map[string]*Run{}
 	for i := range ev.Runs {
 		r := &ev.Runs[i]
@@ -253,17 +362,22 @@ func evaluate(results []Result) evaluation {
 }
 
 // earlierFailures records, for every superseded run, the thresholds of its own scenario that it
-// failed. Each run is judged alone: R40 asks what that run said, whatever the newest one says.
+// failed, and for every informative run what it said. Each run is judged alone: R40 asks what
+// that run said, whatever the newest one says.
 func (ev *evaluation) earlierFailures() {
 	for i := range ev.Runs { // in the order of the report, so oldest first
 		r := &ev.Runs[i]
-		if r.Status != RunSuperseded {
+		if r.Status != RunSuperseded && r.Status != RunInformative {
 			continue
 		}
 		alone := evaluation{MV: map[string]MV{}, Missing: map[string]string{}}
 		(&evaluator{platform: r.Device.Platform, runs: map[string]*Run{r.Scenario: r}, ev: &alone}).all()
 		for key, v := range alone.MV {
-			if !v.Pass && scenarioOf(v.Code) == r.Scenario {
+			switch {
+			case !measures(v.Code, r.Scenario):
+			case r.Status == RunInformative:
+				ev.Informative[key] = append(ev.Informative[key], EarlierFailure{File: r.File, MV: v})
+			case !v.Pass:
 				ev.Earlier[key] = append(ev.Earlier[key], EarlierFailure{File: r.File, MV: v})
 			}
 		}
@@ -277,6 +391,9 @@ const (
 	unknown tri = iota
 	passed
 	failed
+	// notApplicable: a condition that does not apply on this device; its text is shown, and
+	// it neither passes nor fails the threshold.
+	notApplicable
 )
 
 // check is one condition of a threshold: what it says in the value cell, and whether it holds.
@@ -294,6 +411,8 @@ func holds(ok bool, text string) check {
 
 func lacking(why string) check { return check{unknown, why} }
 
+func notApplying(why string) check { return check{notApplicable, why} }
+
 // combine: failed when any condition failed (a missing reading cannot undo that), passed
 // when all passed, unknown otherwise.
 func combine(checks []check) tri {
@@ -304,7 +423,7 @@ func combine(checks []check) tri {
 			return failed
 		case unknown:
 			state = unknown
-		case passed:
+		case passed, notApplicable:
 		}
 	}
 	return state
@@ -463,29 +582,38 @@ func (ev evaluation) reasonMissing(platform, code string) string {
 		return why
 	}
 	scenario := scenarioOf(code)
-	excluded := 0
+	excluded, informative := 0, 0
 	for _, r := range ev.Runs {
 		if r.Device.Platform != platform || r.Scenario != scenario {
 			continue
 		}
 		switch r.Status {
-		case RunInterrupted, RunFailed:
+		case RunInterrupted, RunFailed, RunInvalid:
 			excluded++
+		case RunInformative:
+			informative++
 		case RunUsed, RunSuperseded:
 			return scenario + " nu are citirile așteptate"
 		}
 	}
-	if excluded > 0 {
-		return fmt.Sprintf("%s: toate rulările (%d) sunt întrerupte sau eșuate", scenario, excluded)
+	switch {
+	case informative > 0:
+		return fmt.Sprintf("%s a rulat fără 16 plăci; pe PC, MV7 se judecă doar pe o rulare S4 cu 16 plăci (G6, R45)", scenario)
+	case excluded > 0:
+		return fmt.Sprintf("%s: toate rulările (%d) sunt invalide (întrerupte, eșuate sau la încărcător; vezi «Rulări invalide»)", scenario, excluded)
 	}
 	return scenario + " nu a rulat"
 }
 
-// codeRank orders the codes of a device's table: MV1 to MV15, then G9; the grid sizes in order.
+// codeRank orders the codes of a device's table: MV1 to MV15, then G9; the grid sizes in order,
+// and a part that is not a grid size (MV4/main) after them.
 func codeRank(code string) (int, int) {
 	base, tiles, _ := strings.Cut(code, "/")
 	order := []string{"MV1", "MV2", "MV3", "MV4", "MV5", "MV6", "MV7", "MV8", "MV9", "MV10", "MV12", "MV13", "MV15", "G9"}
-	n, _ := strconv.Atoi(tiles)
+	n, err := strconv.Atoi(tiles)
+	if tiles != "" && err != nil {
+		n = math.MaxInt32
+	}
 	for i, c := range order {
 		if c == base {
 			return i, n

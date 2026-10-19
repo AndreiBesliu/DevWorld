@@ -24,14 +24,16 @@ const (
 )
 
 // The thresholds that the gates read. decisive derives from these lists, so a gate and the
-// list of failures without a plan B cannot go out of step.
+// list of failures outside the gates cannot go out of step.
 var (
-	// G5, the items of AND-1 that decide (Global Constraints): the LAN items with 4 tiles, and the
-	// 9-tile items. Failing one of the first is NO-GO; failing only 9-tile items is GO condiționat.
-	androidCritical4 = []string{"MV1", "MV2", "MV3/4", "MV9", "MV10"}
+	// G5, the items of AND-1 that decide (Global Constraints): the LAN items with 4 tiles and the
+	// fullscreen decoder, and the 9-tile items. Failing one of the first is NO-GO; failing only
+	// 9-tile items is GO condiționat. The fullscreen part of MV4 is not a 9-tile item: the same
+	// main stream follows every grid, so fewer tiles would not fix it (report-7).
+	androidCritical4 = []string{"MV1", "MV2", "MV3/4", mv4MainCode, "MV9", "MV10"}
 	androidCritical9 = []string{"MV3/9", "MV4/9", "MV5/9"}
-	// G6, WIN-1: MV6 decides.
-	windowsKeys = []string{mvKey(platformWindows, "MV6")}
+	// G6, WIN-1: MV6 and MV7 with 16 tiles (spec §16.5 G6, R45); either failing is plan B.
+	windowsKeys = []string{mvKey(platformWindows, "MV6"), mvKey(platformWindows, "MV7")}
 	// G7, the web gate: MV13 on the three browsers, and MV12 in the two WebViews.
 	// The Chrome part of MV12 needs a public origin and waits for Faza 0-bis.
 	webKeys = []string{
@@ -42,15 +44,30 @@ var (
 	g19Key = mvKey(platformAndroid, "MV15")
 )
 
-// isG9 says whether key is the codec matrix (S9) of some device: gate G9 reads it on every
-// device that ran S9.
-func isG9(key string) bool { return strings.HasSuffix(key, "/G9") }
+// g9Keys are the codec matrices (S9) that gate G9 reads: one on each client path that the plan
+// expects to run S9 (R45), in the order of the report. A browser on an unexpected OS is not one.
+func g9Keys() []string {
+	platforms := make([]string, 0, len(platformOrder))
+	for p := range platformOrder {
+		if slices.Contains(expectedCodes(p), "G9") {
+			platforms = append(platforms, p)
+		}
+	}
+	sort.Slice(platforms, func(i, j int) bool { return platformOrder[platforms[i]] < platformOrder[platforms[j]] })
+	keys := make([]string, len(platforms))
+	for i, p := range platforms {
+		keys[i] = mvKey(p, "G9")
+	}
+	return keys
+}
 
 // assessment is a verdict and the thresholds behind it.
 type assessment struct {
 	verdict Verdict
 	// failed and missing are keys of mvKey.
 	failed, missing []string
+	// lacking are conditions of the gate, in words, that the results do not show as met.
+	lacking []string
 }
 
 // scan sorts keys into those that failed and those that have no value.
@@ -111,13 +128,20 @@ func assessWindows(mv map[string]MV) assessment {
 	return a
 }
 
-func assessWeb(mv map[string]MV) assessment {
+// assessWeb is G7's verdict. Besides MV12 and MV13, spec G7 asks the hub to listen on 5353/udp
+// next to the Windows DNS client: noMDNS are the S10 runs that G7 reads in which the hub said it
+// could not (mdnsUnavailable). A measured relay pair still decides plan B; otherwise G7 has no
+// verdict until that condition holds (report-3).
+func assessWeb(mv map[string]MV, noMDNS []string) assessment {
 	failedKeys, missingKeys := scan(mv, webKeys)
 	a := assessment{failed: failedKeys, missing: missingKeys}
+	if len(noMDNS) > 0 {
+		a.lacking = append(a.lacking, fmt.Sprintf("hub-ul nu a putut asculta pe 5353/udp (mDNS) alături de clientul DNS din Windows în rulările S10 %s", codeList(noMDNS)))
+	}
 	switch {
 	case len(failedKeys) > 0:
 		a.verdict = VerdictPlanBRelay
-	case len(missingKeys) > 0:
+	case len(missingKeys) > 0 || len(a.lacking) > 0:
 		a.verdict = VerdictIncomplete
 	default:
 		a.verdict = VerdictGO
@@ -132,13 +156,13 @@ func assessWeb(mv map[string]MV) assessment {
 // others were not measured; without a failure, a missing item leaves the verdict open.
 func AndroidVerdict(mv map[string]MV) Verdict { return assessAndroid(mv).verdict }
 
-// WindowsVerdict is the verdict of WIN-1. Windows cannot cause NO-GO: when MV6 fails, the
-// desktop grid drops to 9 tiles.
+// WindowsVerdict is the verdict of WIN-1 (G6). Windows cannot cause NO-GO: when MV6 or MV7
+// with 16 tiles fails, the desktop grid drops to 9 tiles.
 func WindowsVerdict(mv map[string]MV) Verdict { return assessWindows(mv).verdict }
 
-// WebVerdict is the verdict of the web: when MV12 or MV13 fails, the web uses a relay on the
-// LAN and recommends the native app.
-func WebVerdict(mv map[string]MV) Verdict { return assessWeb(mv).verdict }
+// WebVerdict is the verdict of the web from MV12 and MV13: when one fails, the web uses a relay
+// on the LAN and recommends the native app. Gate G7 also reads the hub's mDNS (assessWeb).
+func WebVerdict(mv map[string]MV) Verdict { return assessWeb(mv, nil).verdict }
 
 // Gate is a gate of Phase 0 (spec 16.5) with the decision that its result triggers, in the
 // form of PH0-30: the verdict, the decision, and what changes in §2 or in the requirements.
@@ -151,8 +175,10 @@ type Gate struct {
 	Result string
 	// Failed and Missing are keys of mvKey.
 	Failed, Missing []string
-	Decision        string
-	Change          string
+	// Lacking are conditions of the gate, in words, that the results do not show as met.
+	Lacking  []string
+	Decision string
+	Change   string
 }
 
 // label writes a threshold key for people: the code, and the device when withDevice is set.
@@ -178,7 +204,18 @@ func deviceName(platform string) string {
 	case "firefox":
 		return "Firefox"
 	}
+	if unexpectedOS(platform) {
+		return deviceName(basePlatform(platform)) + " pe " + osName(platform)
+	}
 	return platform
+}
+
+// fell is the sentence part "A picat X" or "Au picat X, Y" for the failed keys.
+func fell(keys []string, withDevice bool) string {
+	if len(keys) == 1 {
+		return "A picat " + labels(keys, withDevice)
+	}
+	return "Au picat " + labels(keys, withDevice)
 }
 
 func labels(keys []string, withDevice bool) string {
@@ -209,8 +246,29 @@ func sortKeys(keys []string) {
 const waitsForMissing = "Fără decizie: verdictul așteaptă măsurătorile lipsă (%s). Rulați scenariile care le dau, în ghid, și repetați raportul."
 
 // buildGates gives, for the gates G5, G6, G7, G9 and G19, the verdict and the decision it triggers.
-func buildGates(mv map[string]MV) []Gate {
-	return []Gate{gateG5(mv), gateG6(mv), gateG7(mv), gateG9(mv), gateG19(mv)}
+func buildGates(ev evaluation) []Gate {
+	mv := ev.MV
+	return []Gate{gateG5(mv), gateG6(mv), gateG7(mv, ev.withoutMDNS()), gateG9(mv), gateG19(mv)}
+}
+
+// withoutMDNS are the S10 runs that G7 reads (the used ones of its devices) in which the hub
+// reported mdnsUnavailable.
+func (ev evaluation) withoutMDNS() []string {
+	var files []string
+	for _, r := range ev.Runs {
+		if r.Status == RunUsed && r.Scenario == "S10" && r.MDNSUnavailable && slices.Contains(webKeys, mvKey(r.Device.Platform, codeOfPair(r.Device.Platform))) {
+			files = append(files, r.File)
+		}
+	}
+	return files
+}
+
+// codeOfPair is the threshold that S10 measures on a device: MV12 in the shells, MV13 in a browser.
+func codeOfPair(platform string) string {
+	if slices.Contains(webPlatforms, basePlatform(platform)) {
+		return "MV13"
+	}
+	return "MV12"
 }
 
 func gateG5(mv map[string]MV) Gate {
@@ -224,7 +282,7 @@ func gateG5(mv map[string]MV) Gate {
 		g.Decision = fmt.Sprintf("Cu 4 plăci trece tot ce e critic, dar cu 9 plăci pică %s. Plafonul pe telefon (A6: maximum 9 plăci) se schimbă doar cu aprobarea dvs. Până la decizia dvs. plafonul rămâne 9, iar plăcile care nu pot decoda trec pe snapshot (§6.5).", labels(a.failed, false))
 		g.Change = "O schimbare aprobată se scrie în §2.1, ca modificare a lui A6, nu în §2.2. Decizia proprietarului asupra plafonului pe telefon: de completat de proprietar."
 	case VerdictNOGOMobil:
-		g.Decision = fmt.Sprintf("Au picat %s. Conform regulii A3, se aplică T29: ambele aplicații mobile trec împreună pe Flutter (opțiunea C), chiar dacă a picat o singură platformă; web-ul și Windows rămân pe opțiunea B. Flutter trebuie să treacă aceeași matrice înainte să fie adoptat.", labels(a.failed, false))
+		g.Decision = fmt.Sprintf("%s. Conform regulii A3, se aplică T29: ambele aplicații mobile trec împreună pe Flutter (opțiunea C), chiar dacă a picat o singură platformă; web-ul și Windows rămân pe opțiunea B. Flutter trebuie să treacă aceeași matrice înainte să fie adoptat.", fell(a.failed, false))
 		g.Change = "§2.2: Decizie tehnică (T29), cu trimitere la G5; un nou plan (brainstorming) pentru `apps/mobile-flutter`."
 	case VerdictIncomplete:
 		g.Decision = fmt.Sprintf(waitsForMissing, labels(a.missing, false))
@@ -239,10 +297,10 @@ func gateG6(mv map[string]MV) Gate {
 	g := Gate{ID: "G6", Title: "Windows WebView2 (WIN-1)", Verdict: a.verdict, Result: string(a.verdict), Failed: a.failed, Missing: a.missing}
 	switch a.verdict {
 	case VerdictGO:
-		g.Decision = "Nicio decizie: grila desktop rămâne la 16 plăci."
+		g.Decision = "Nicio decizie: MV6 și MV7 trec cu 16 plăci, deci grila desktop rămâne la 16 plăci."
 		g.Change = "Nimic în §2 sau în cerințe."
 	case VerdictPlanBGrid9:
-		g.Decision = "MV6 pică: grila desktop coboară la 9 plăci (APP-30). Windows nu poate da NO-GO."
+		g.Decision = fmt.Sprintf("%s: grila desktop coboară la 9 plăci (APP-30, planul B din G6). Windows nu poate da NO-GO.", fell(a.failed, false))
 		g.Change = "§2.2: Decizie tehnică „grilă desktop 9”, cu trimitere la G6."
 	case VerdictIncomplete:
 		g.Decision = fmt.Sprintf(waitsForMissing, labels(a.missing, false))
@@ -252,54 +310,69 @@ func gateG6(mv map[string]MV) Gate {
 	return g
 }
 
-func gateG7(mv map[string]MV) Gate {
-	a := assessWeb(mv)
-	g := Gate{ID: "G7", Title: "Chrome LNA și mDNS (web)", Verdict: a.verdict, Result: string(a.verdict), Failed: a.failed, Missing: a.missing}
+func gateG7(mv map[string]MV, noMDNS []string) Gate {
+	a := assessWeb(mv, noMDNS)
+	g := Gate{ID: "G7", Title: "Chrome LNA și mDNS (web)", Verdict: a.verdict, Result: string(a.verdict), Failed: a.failed, Missing: a.missing, Lacking: a.lacking}
 	switch a.verdict {
 	case VerdictGO:
 		g.Decision = "Nicio decizie: perechile ICE din Chrome, Edge, Firefox și din cele două WebView-uri nu trec prin relay. MV12 în Chrome, cu origine publică, rămâne pentru Faza 0-bis."
 		g.Change = "Nimic în §2 sau în cerințe."
 	case VerdictPlanBRelay:
-		g.Decision = fmt.Sprintf("Au picat %s: web-ul folosește relay în LAN și recomandă aplicația nativă (APP-32). Costul intră în §15.6.", labels(a.failed, true))
+		g.Decision = fmt.Sprintf("%s: web-ul folosește relay în LAN și recomandă aplicația nativă (APP-32). Costul intră în §15.6.", fell(a.failed, true))
 		g.Change = "§2.2: Decizie tehnică „relay în LAN pentru web”, cu trimitere la G7."
 	case VerdictIncomplete:
-		g.Decision = fmt.Sprintf(waitsForMissing, labels(a.missing, true))
+		var parts []string
+		if len(a.missing) > 0 {
+			parts = append(parts, fmt.Sprintf(waitsForMissing, labels(a.missing, true)))
+		}
+		if len(a.lacking) > 0 {
+			parts = append(parts, "Fără decizie: "+strings.Join(a.lacking, "; ")+", iar G7 cere și această condiție. Ce urmează (o corectură în hub sau planul B al lui G7) se decide în PR, cu aceste rulări.")
+		}
+		g.Decision = strings.Join(parts, " ")
 		g.Change = "Nimic până atunci."
 	case VerdictGOProvizoriu, VerdictGOConditionat, VerdictNOGOMobil, VerdictPlanBGrid9:
 	}
 	return g
 }
 
+// gateG9 reads the codec matrix of every client path that the plan expects to run S9 (spec G9:
+// „pe toate căile client”). A path that fails (fallback-failed) decides plan B at once; otherwise
+// G9 decides, and writes its §2.2 change, only once every expected path has run S9 (R39, report-5).
 func gateG9(mv map[string]MV) Gate {
 	g := Gate{ID: "G9", Title: "Matricea de codecuri"}
 	var lines []string
-	var devices []string
-	for key := range mv {
-		if isG9(key) {
-			devices = append(devices, key)
-		}
-	}
-	sortKeys(devices)
-	broken := false
-	for _, key := range devices {
-		v := mv[key]
-		lines = append(lines, deviceName(v.Device)+": "+v.Text)
-		if !v.Pass {
-			broken = true
+	for _, key := range g9Keys() {
+		v, ok := mv[key]
+		switch {
+		case !ok:
+			g.Missing = append(g.Missing, key)
+			continue
+		case !v.Pass:
 			g.Failed = append(g.Failed, key)
 		}
+		lines = append(lines, deviceName(v.Device)+": "+v.Text)
 	}
-	g.Result = strings.Join(lines, " · ")
+	measured := strings.Join(lines, " · ")
 	switch {
-	case len(devices) == 0:
-		g.Result = "nemăsurat"
-		g.Decision = "Fără decizie: S9 nu a dat rezultate."
-		g.Change = "Nimic până atunci."
-	case broken:
+	case len(g.Failed) > 0:
+		g.Result = measured
 		g.Decision = "O cale nu merge nici pe substream (fallback-failed). Plan B: onboarding-ul impune mai strict H.264 pe substream, iar pe ecran complet se folosește substream-ul când fluxul principal e H.265 nedecodabil."
 		g.Change = "§2.2: Decizie tehnică, cu trimitere la G9 și rezultatele de mai sus."
+	case len(g.Missing) > 0:
+		paths := make([]string, len(g.Missing))
+		for i, key := range g.Missing {
+			device, _, _ := strings.Cut(key, "/")
+			paths[i] = deviceName(device)
+		}
+		g.Result = fmt.Sprintf("%s (S9 pe %s)", VerdictIncomplete, joinAnd(paths))
+		if measured != "" {
+			g.Result += "; măsurat până acum: " + measured
+		}
+		g.Decision = fmt.Sprintf("Fără decizie: G9 cere matricea de codecuri pe toate căile client, iar S9 lipsește pe %s. Rulați S9 acolo, în ghid, și repetați raportul.", joinAnd(paths))
+		g.Change = "Nimic până atunci."
 	default:
-		g.Decision = "Regula SDP și primul cadru în 4 s aleg corect pe căile măsurate: H.265 cade pe substream cu eticheta „calitate redusă: H.265 nesuportat”, iar un profil H.264 nesuportat pe eticheta „profil video nesuportat”. Rezultatele pe cale se notează."
+		g.Result = measured
+		g.Decision = "Regula SDP și primul cadru în 4 s aleg corect pe toate căile client ale Fazei 0 (AND-1, WIN-1, Chrome, Edge, Firefox): H.265 cade pe substream cu eticheta „calitate redusă: H.265 nesuportat”, iar un profil H.264 nesuportat pe eticheta „profil video nesuportat”. Rezultatele pe cale se notează."
 		g.Change = "§2.2: Decizie tehnică cu rezultatele G9 de mai sus (căile iOS rămân pentru Faza 0-bis)."
 	}
 	return g
@@ -329,9 +402,9 @@ func gateG19(mv map[string]MV) Gate {
 }
 
 // decisive says whether a gate above already turns the threshold into a decision: it is one of
-// the keys the gates G5, G6, G7 and G19 read, or the codec matrix that G9 reads.
+// the keys the gates G5, G6, G7 and G19 read, or a codec matrix that G9 reads.
 func decisive(key string) bool {
-	if isG9(key) || key == g19Key {
+	if slices.Contains(g9Keys(), key) || key == g19Key {
 		return true
 	}
 	for _, keys := range [][]string{deviceKeys(platformAndroid, androidCritical4), deviceKeys(platformAndroid, androidCritical9), windowsKeys, webKeys} {
@@ -342,8 +415,8 @@ func decisive(key string) bool {
 	return false
 }
 
-// otherFailures are the thresholds that failed without a verdict rule behind them: they
-// change no verdict and have no written plan B, so the report lists them for the owner.
+// otherFailures are the thresholds that failed without a gate behind them (decisive): they
+// change no verdict, so the report lists them for the owner.
 func otherFailures(mv map[string]MV) []MV {
 	var out []MV
 	for key, v := range mv {

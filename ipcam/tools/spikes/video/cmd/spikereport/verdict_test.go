@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-var androidCritical = []string{"MV1", "MV2", "MV3/4", "MV9", "MV10", "MV3/9", "MV4/9", "MV5/9"}
+var androidCritical = []string{"MV1", "MV2", "MV3/4", "MV4/main", "MV9", "MV10", "MV3/9", "MV4/9", "MV5/9"}
 
 func androidKeys(codes ...string) []string {
 	out := make([]string, len(codes))
@@ -43,7 +43,7 @@ func TestAndroidVerdict_Only9TileFails_GOConditionat(t *testing.T) {
 }
 
 func TestAndroidVerdict_MV9Fails_NOGO(t *testing.T) {
-	for _, failing := range []string{"MV9", "MV1", "MV2", "MV3/4", "MV10"} {
+	for _, failing := range []string{"MV9", "MV1", "MV2", "MV3/4", "MV4/main", "MV10"} {
 		t.Run(failing, func(t *testing.T) {
 			mv := mvSet(androidKeys(androidCritical...), androidKeys(failing), nil)
 			if got := AndroidVerdict(mv); got != VerdictNOGOMobil {
@@ -123,24 +123,22 @@ func TestWindowsVerdict_MV6Fails_PlanB9(t *testing.T) {
 }
 
 func TestWindowsVerdict_OtherCases(t *testing.T) {
-	key := mvKey(windowsDevice, "MV6")
-	if got := WindowsVerdict(mvSet([]string{key}, nil, nil)); got != VerdictGO {
-		t.Errorf("MV6 passing: verdict = %q, want %q", got, VerdictGO)
+	keys := []string{mvKey(windowsDevice, "MV6"), mvKey(windowsDevice, "MV7")}
+	if got := WindowsVerdict(mvSet(keys, nil, nil)); got != VerdictGO {
+		t.Errorf("MV6 and MV7 passing: verdict = %q, want %q", got, VerdictGO)
 	}
 	if got := WindowsVerdict(map[string]MV{}); got != VerdictIncomplete {
-		t.Errorf("MV6 not measured: verdict = %q, want %q", got, VerdictIncomplete)
+		t.Errorf("nothing measured: verdict = %q, want %q", got, VerdictIncomplete)
 	}
 	// Windows cannot cause NO-GO: no input gives a mobile verdict.
-	for _, mv := range []map[string]MV{
-		mvSet([]string{key, mvKey(windowsDevice, "MV7")}, []string{key, mvKey(windowsDevice, "MV7")}, nil),
-		{},
-	} {
+	for _, mv := range []map[string]MV{mvSet(keys, keys, nil), {}} {
 		if got := WindowsVerdict(mv); got == VerdictNOGOMobil {
 			t.Errorf("Windows gave %q", got)
 		}
 	}
-	t.Run("MV7 is reported and does not change the verdict", func(t *testing.T) {
-		mv := mvSet([]string{key, mvKey(windowsDevice, "MV7")}, []string{mvKey(windowsDevice, "MV7")}, nil)
+	t.Run("the other thresholds of WIN-1 do not change the verdict", func(t *testing.T) {
+		others := []string{mvKey(windowsDevice, "MV1"), mvKey(windowsDevice, "MV3/16"), mvKey(windowsDevice, "MV10")}
+		mv := mvSet(append(append([]string(nil), keys...), others...), others, nil)
 		if got := WindowsVerdict(mv); got != VerdictGO {
 			t.Errorf("verdict = %q, want %q", got, VerdictGO)
 		}
@@ -251,12 +249,12 @@ func TestVerdicts_FromTheResults(t *testing.T) {
 func TestOtherFailures_ListOnlyWhatNoGateDecides(t *testing.T) {
 	gated := append(androidKeys(androidCritical...), androidKeys("MV15", "MV12", "G9")...)
 	gated = append(gated,
-		mvKey(windowsDevice, "MV6"), mvKey(windowsDevice, "MV12"),
+		mvKey(windowsDevice, "MV6"), mvKey(windowsDevice, "MV7"), mvKey(windowsDevice, "MV12"),
 		mvKey("chrome", "MV13"), mvKey("edge", "MV13"), mvKey("firefox", "MV13"),
 		// G9 reads the codec matrix of every device that ran S9.
 		mvKey(windowsDevice, "G9"), mvKey("chrome", "G9"), mvKey("edge", "G9"), mvKey("firefox", "G9"))
 	notGated := append(androidKeys("MV7", "MV8", "MV3/16"),
-		mvKey(windowsDevice, "MV3/16"), mvKey(windowsDevice, "MV7"),
+		mvKey(windowsDevice, "MV3/16"), mvKey(windowsDevice, "MV1"),
 		mvKey("chrome", "MV1"), mvKey("chrome", "MV2"), mvKey("chrome", "MV3/9"), mvKey("chrome", "MV7"), mvKey("chrome", "MV10"),
 		mvKey("firefox", "MV1"))
 	all := append(append([]string(nil), gated...), notGated...)
@@ -315,7 +313,7 @@ func TestDecisive_FollowsTheGateDefinitions(t *testing.T) {
 func TestGates_TheDecisionOfEachVerdict(t *testing.T) {
 	gate := func(t *testing.T, rs []Result, id string) Gate {
 		t.Helper()
-		for _, g := range buildGates(ComputeMV(rs)) {
+		for _, g := range buildGates(evaluate(rs)) {
 			if g.ID == id {
 				return g
 			}

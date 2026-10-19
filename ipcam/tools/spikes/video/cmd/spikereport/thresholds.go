@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -56,6 +57,7 @@ func (e *evaluator) all() {
 	for _, scenario := range []string{"S3-4", "S3-9", "S3-16"} {
 		e.grid(scenario)
 	}
+	e.mv4Main()
 	e.mv6()
 	e.mv7()
 	e.mv8()
@@ -85,7 +87,37 @@ func (e *evaluator) mv1() {
 	for _, n := range notesWithPrefix(r, "sub: ") {
 		notes = append(notes, "substream: "+describeCodec(strings.TrimPrefix(n, "sub: ")))
 	}
+	notes = append(notes, lossNote(r)...)
 	e.finish("MV1", p90, "ms", []check{holds(p90 <= mv1P90MaxMs, text)}, notes)
+}
+
+// lossCounters are the loss counters of a run (R50): the sums over the run of the inbound-rtp
+// packetsLost, nackCount, pliCount and framesDropped, with their names in the report.
+var lossCounters = []struct{ key, name string }{
+	{"rtpLost", "RTP pierdute"}, {"nack", "NACK"}, {"pli", "PLI"}, {"framesDropped", "cadre aruncate"},
+}
+
+// lossNote is the line of the loss counters of a run, information without a threshold (R50);
+// none for a run that recorded none of them (a result from before R50).
+func lossNote(r *Run) []string {
+	var parts []string
+	seen := false
+	for _, c := range lossCounters {
+		switch v := r.Samples[c.key]; {
+		case len(v) > 0:
+			seen = true
+			parts = append(parts, c.name+" "+number(v[0], 0))
+		case hasNote(r, c.key+": n/a"):
+			seen = true
+			parts = append(parts, c.name+" n/a")
+		default:
+			parts = append(parts, c.name+" —")
+		}
+	}
+	if !seen {
+		return nil
+	}
+	return []string{"pierderi în rulare (informativ, fără prag; R50): " + strings.Join(parts, ", ")}
 }
 
 // describeCodec turns the app's `H264, fallback profile 4d001f` into a sentence part.
@@ -107,6 +139,12 @@ func (e *evaluator) mv2() {
 	worst := math.Inf(-1)
 	for _, p := range []struct{ key, name string }{{"sub", "sub"}, {"main", "principal"}} {
 		got := r.Samples[p.key+"LatencyMs"]
+		if p.key == "main" && len(got) < mv2Samples && e.browserWithoutH264Main(r) {
+			// Firefox offers no H.264 Main (R20 keeps the main stream on its profile): the
+			// product falls back to the substream there (§6.3 step 7), so MV2 is the substream's.
+			checks = append(checks, notApplying(mv2NoMainText))
+			continue
+		}
 		if len(got) < mv2Samples {
 			checks = append(checks, lacking(fmt.Sprintf("%s: %d din %d mostre", p.name, len(got), mv2Samples)))
 			continue
@@ -125,6 +163,16 @@ func (e *evaluator) mv2() {
 		notes = append(notes, fmt.Sprintf("RTT al ceasului: max %s (eroarea offsetului e cel mult jumătate din el)", ms(maxOf(rtt))))
 	}
 	e.finish("MV2", worst, "ms", checks, notes)
+}
+
+// mv2NoMainText is the value cell's part for a browser that offers no H.264 Main (report-6).
+const mv2NoMainText = "principal: n/a, browserul nu oferă H.264 Main (în produs, retragere pe substream, §6.3 pasul 7)"
+
+// browserWithoutH264Main: a browser's S2 whose main stream could not bind because the browser
+// offers no H.264 Main. The phone and the Windows app keep both streams: there it is a failure
+// to show, not a property of the browser.
+func (e *evaluator) browserWithoutH264Main(r *Run) bool {
+	return slices.Contains(webPlatforms, basePlatform(e.platform)) && hasNote(r, "main: bind error CODEC_UNSUPPORTED")
 }
 
 func countValue(values []float64, v float64) int {
@@ -188,11 +236,12 @@ func (e *evaluator) mv3(r *Run, tiles int) {
 		}
 		notes = append(notes, line)
 	}
+	notes = append(notes, lossNote(r)...)
 	e.finish(tileCode("MV3", tiles), value, "fps", checks, notes)
 }
 
 func (e *evaluator) mv4(r *Run, tiles int) {
-	hw, main := r.Samples["tileHardware"], r.Samples["mainHardware"]
+	hw := r.Samples["tileHardware"]
 	var checks []check
 	ones := countValue(hw, 1)
 	value := math.NaN()
@@ -207,15 +256,41 @@ func (e *evaluator) mv4(r *Run, tiles int) {
 	if len(hw) > 0 {
 		value = 100 * float64(ones) / float64(len(hw))
 	}
-	switch {
-	case len(main) == 0:
-		checks = append(checks, lacking("ecran complet: fără informație despre decodor"))
-	case countValue(main, 1) == len(main):
-		checks = append(checks, holds(true, "ecran complet: hardware"))
-	default:
-		checks = append(checks, holds(false, "ecran complet: software"))
-	}
 	e.finish(tileCode("MV4", tiles), value, "%", checks, runNotes(r))
+}
+
+// mv4MainCode is the fullscreen part of MV4: the main stream always decoded in hardware. It
+// does not depend on the grid (the same 1080p stream follows every grid run), so it is an item
+// of its own, judged on every grid run that read the main stream's decoder (report-7).
+const mv4MainCode = "MV4/main"
+
+// gridScenarios are the grid runs, in the order of the report.
+var gridScenarios = []string{"S3-4", "S3-9", "S3-16"}
+
+func (e *evaluator) mv4Main() {
+	var hardware, software, without []string
+	for _, scenario := range gridScenarios {
+		r := e.runs[scenario]
+		if r == nil {
+			continue
+		}
+		switch main := r.Samples["mainHardware"]; {
+		case len(main) == 0:
+			without = append(without, scenario)
+		case countValue(main, 1) == len(main):
+			hardware = append(hardware, scenario)
+		default:
+			software = append(software, scenario)
+		}
+	}
+	switch {
+	case len(software) > 0:
+		e.finish(mv4MainCode, math.NaN(), "", []check{holds(false, "ecran complet: software în "+strings.Join(software, ", "))}, nil)
+	case len(hardware) > 0:
+		e.finish(mv4MainCode, math.NaN(), "", []check{holds(true, "ecran complet: hardware ("+strings.Join(hardware, ", ")+")")}, nil)
+	case len(without) > 0:
+		e.missing(mv4MainCode, "ecran complet: fără informație despre decodor în "+strings.Join(without, ", "))
+	}
 }
 
 func thermalName(index float64) string {
@@ -270,7 +345,9 @@ func (e *evaluator) mv6() {
 	value := math.NaN()
 	if r := e.runs["S3-16"]; r != nil {
 		notes = runNotes(r)
-		if cpu := r.Samples["cpuPctApp"]; len(cpu) > 0 {
+		if problem := webview2Problem(r.Samples["webview2Procs"]); problem != "" {
+			checks = append(checks, lacking("16 plăci: "+problem))
+		} else if cpu := r.Samples["cpuPctApp"]; len(cpu) > 0 {
 			value = mean(cpu)
 			checks = append(checks, holds(atMost(value, mv6GridMaxPct), fmt.Sprintf("16 plăci: %s %% (max %s %%)", number(value, 1), number(maxOf(cpu), 1))))
 			if total := r.Samples["cpuPctTotal"]; len(total) > 0 {
@@ -286,6 +363,10 @@ func (e *evaluator) mv6() {
 	main := lacking("flux principal: fără metrici de la shell")
 	for _, scenario := range []string{"S3-16", "S3-9", "S3-4"} {
 		if r := e.runs[scenario]; r != nil && len(r.Samples["mainCpuPctApp"]) > 0 {
+			if problem := webview2Problem(r.Samples["mainWebview2Procs"]); problem != "" {
+				main = lacking("flux principal: " + problem)
+				break
+			}
 			cpu := mean(r.Samples["mainCpuPctApp"])
 			main = holds(atMost(cpu, mv6MainMaxPct), "flux principal 1080p: "+number(cpu, 1)+" %")
 			break
@@ -293,6 +374,19 @@ func (e *evaluator) mv6() {
 	}
 	checks = append(checks, main)
 	e.finish("MV6", value, "%", checks, notes)
+}
+
+// webview2Problem says why the Windows app's CPU or memory readings cannot be used, or "" when
+// they can: every reading must have found at least one WebView2 process (R52). Without one, the
+// shell summed only its own process (a second instance, before R52) or nothing at all.
+func webview2Problem(procs []float64) string {
+	if len(procs) == 0 {
+		return "lipsește numărul proceselor WebView2 (webview2Procs), deci nu se știe dacă cifrele le includ (R52)"
+	}
+	if zeros := countValue(procs, 0); zeros > 0 {
+		return fmt.Sprintf("în %d din %d citiri shell-ul nu a găsit niciun proces WebView2 (webview2Procs = 0), deci CPU-ul și memoria aplicației lipsesc (R52)", zeros, len(procs))
+	}
+	return ""
 }
 
 // memoryGrowth is how much the mean of the last window is above the mean of the first
@@ -324,10 +418,24 @@ func (e *evaluator) mv7() {
 	var checks []check
 	worst := math.Inf(-1)
 	haveSeries := false
+	bucketed := hasNote(r, bucketedHeapNote)
 	for _, s := range []struct{ key, name string }{{"memMb", "memorie"}, {"jsHeapMb", "heap JS"}} {
 		series := r.Samples[s.key]
 		if len(series) == 0 {
 			continue
+		}
+		if s.key == "jsHeapMb" && bucketed {
+			// R46: Chromium rounded the heap to its buckets and refreshes it rarely; the
+			// process memory alone is judged.
+			checks = append(checks, notApplying("heap JS rotunjit de Chromium (jsHeap: bucketed), nu se judecă (R46)"))
+			continue
+		}
+		if s.key == "memMb" && e.platform == platformWindows {
+			if problem := webview2Problem(r.Samples["webview2Procs"]); problem != "" {
+				haveSeries = true
+				checks = append(checks, lacking("memorie: "+problem))
+				continue
+			}
 		}
 		haveSeries = true
 		growth, ok := memoryGrowth(series)
@@ -339,7 +447,7 @@ func (e *evaluator) mv7() {
 		checks = append(checks, holds(atMost(growth, mv7MaxGrowthPct), fmt.Sprintf("%s %s %%", s.name, signed(growth, 1))))
 	}
 	if !haveSeries {
-		checks = append(checks, lacking("fără citiri de memorie"))
+		checks = append(checks, lacking("fără citiri de memorie a procesului"))
 	}
 	if math.IsInf(worst, -1) {
 		worst = math.NaN()
@@ -350,17 +458,29 @@ func (e *evaluator) mv7() {
 		checks = append(checks, holds(errs[0] == 0, "reporniri neprovocate: "+number(errs[0], 0)))
 	}
 	notes := runNotes(r)
-	switch e.platform {
-	case platformWindows:
+	switch {
+	case e.platform == platformWindows:
 		notes = append(notes, "memMb = memorie privată (private bytes, R37) a aplicației și a proceselor WebView2; nu include secțiunile partajate și memoria GPU, unde Chromium ține cadrele decodate, deci o scurgere acolo nu apare în MV7")
-	case platformAndroid:
-		notes = append(notes, "memMb = PSS al procesului aplicației; randerul WebView e alt proces și nu e inclus, de aceea se citește și heap-ul JS")
+	case e.platform == platformAndroid && bucketed:
+		notes = append(notes, "memMb = PSS al procesului aplicației, fără randerul WebView, care e alt proces; heap-ul JS e rotunjit de Chromium în Android WebView, deci MV7 se judecă doar pe memMb (R46)")
+	case e.platform == platformAndroid:
+		notes = append(notes, "memMb = PSS al procesului aplicației, fără randerul WebView, care e alt proces; heap-ul JS a fost precis în această rulare și se judecă alături (R46)")
+	case bucketed:
+		notes = append(notes, "heap-ul JS e rotunjit de Chromium în această rulare și nu se judecă, iar memoria procesului browserului nu e măsurată (R46)")
 	default:
 		notes = append(notes, "memoria = heap-ul JS al paginii (Chromium); memoria procesului browserului nu e măsurată")
+	}
+	if basePlatform(e.platform) == platformAndroid {
+		notes = append(notes, "grila a paginat între 4 și 9 plăci (plafonul telefonului, A6)")
+	} else {
+		notes = append(notes, "grila a paginat între 9 și 16 plăci: pe PC, MV7 se judecă doar cu 16 plăci (G6, R45)")
 	}
 	notes = append(notes, "creștere = media ultimelor 6 min față de media a 6 min de după primul minut, ferestre care acoperă întregi ciclurile de paginare (2 min) și de ecran complet (3 min)")
 	e.finish("MV7", worst, "%", checks, notes)
 }
+
+// bucketedHeapNote is what S4 writes when Chromium rounded the JS heap to its buckets (R46).
+const bucketedHeapNote = "jsHeap: bucketed"
 
 // ---- MV8, MV9, MV10: Android behaviour and recordings ----
 
@@ -474,7 +594,7 @@ func (e *evaluator) pair() {
 		return
 	}
 	var code string
-	switch e.platform {
+	switch basePlatform(e.platform) {
 	case platformAndroid, platformWindows:
 		code = "MV12"
 	case "chrome", "edge", "firefox":
@@ -571,13 +691,15 @@ func (e *evaluator) g9() {
 
 // ---- the rows a device is expected to have ----
 
-// expectedCodes are the thresholds that the owner's guide has each device measure, in report order.
+// expectedCodes are the thresholds that each device measures in the plan of spec §16.3 (R45),
+// in report order. WIN-1 runs MV1–MV7 with 16 tiles, MV10 (hls.js on MSE) and G9: S1, S2,
+// S3-16, S4, S7, S9 and S10. A browser on an unexpected OS (deviceKey) is expected nothing.
 func expectedCodes(platform string) []string {
 	switch platform {
 	case platformAndroid:
-		return []string{"MV1", "MV2", "MV3/4", "MV3/9", "MV4/9", "MV5/9", "MV7", "MV8", "MV9", "MV10", "MV12", "MV15", "G9"}
+		return []string{"MV1", "MV2", "MV3/4", "MV3/9", "MV4/9", mv4MainCode, "MV5/9", "MV7", "MV8", "MV9", "MV10", "MV12", "MV15", "G9"}
 	case platformWindows:
-		return []string{"MV3/16", "MV6", "MV7", "MV12"}
+		return []string{"MV1", "MV2", "MV3/16", "MV6", "MV7", "MV10", "MV12", "G9"}
 	case "chrome":
 		return []string{"MV1", "MV2", "MV3/9", "MV3/16", "MV7", "MV10", "MV13", "G9"}
 	case "edge", "firefox":
@@ -586,16 +708,21 @@ func expectedCodes(platform string) []string {
 	return nil
 }
 
-// scenarioOf is the scenario that measures a threshold.
+// scenarioOf is the scenario that measures a threshold; for MV4/main, which every grid run
+// measures, the 9-tile grid of the phone's critical items.
 func scenarioOf(code string) string {
 	base, tiles, _ := strings.Cut(code, "/")
+	switch {
+	case code == mv4MainCode:
+		return "S3-9"
+	case base == "MV3", base == "MV4", base == "MV5":
+		return "S3-" + tiles
+	}
 	switch base {
 	case "MV1":
 		return "S1"
 	case "MV2":
 		return "S2"
-	case "MV3", "MV4", "MV5":
-		return "S3-" + tiles
 	case "MV6":
 		return "S3-16"
 	case "MV7":
@@ -616,8 +743,19 @@ func scenarioOf(code string) string {
 	return ""
 }
 
+// measures says whether a run of `scenario` measures `code`: MV4/main comes from every grid run.
+func measures(code, scenario string) bool {
+	if code == mv4MainCode {
+		return slices.Contains(gridScenarios, scenario)
+	}
+	return scenarioOf(code) == scenario
+}
+
 // thresholdOf is the threshold of a code as the report writes it (spec 16.3).
 func thresholdOf(code string) string {
+	if code == mv4MainCode {
+		return "ecranul complet (flux principal) mereu hardware"
+	}
 	base, _, _ := strings.Cut(code, "/")
 	switch base {
 	case "MV1":
@@ -627,7 +765,7 @@ func thresholdOf(code string) string {
 	case "MV3":
 		return "fps ≥ 90 % din sursă (≥ 10,8 la 12 fps); pierdute ≤ 2 %"
 	case "MV4":
-		return "ecran complet hardware; toate plăcile grilei hardware"
+		return "toate plăcile grilei hardware"
 	case "MV5":
 		return "termic ≤ MODERATE; fps final ≥ 10,8; baterie ≤ 15 %/h"
 	case "MV6":

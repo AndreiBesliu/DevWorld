@@ -104,25 +104,45 @@ func androidGrid(tiles int) map[string][]float64 {
 	return s
 }
 
-// windowsGrid is a passing S3 run on the PC: 18 % CPU for the grid, 6 % for the main stream.
+// windowsGrid is a passing S3 run on the PC: 18 % CPU for the grid, 6 % for the main stream,
+// each reading with the WebView2 processes in its sums (R52).
 func windowsGrid(tiles int) map[string][]float64 {
 	s := gridSamples(tiles)
 	s["cpuPctApp"] = rep(18, 60)
 	s["cpuPctTotal"] = rep(35, 60)
-	s["mainCpuPctApp"] = rep(6, 12)
 	s["memMb"] = rep(900, 60)
+	s["webview2Procs"] = rep(5, 60)
+	s["mainCpuPctApp"] = rep(6, 12)
+	s["mainWebview2Procs"] = rep(4, 12)
 	return s
 }
 
-// stability is a passing S4 run with 61 readings each of the shell's memory and the JS heap.
+// stability is a passing S4 run with 61 readings each of the shell's memory and the JS heap,
+// paging up to 9 tiles, as on the phone.
 func stability() map[string][]float64 {
 	return map[string][]float64{
 		"memMb":             rep(400, 61),
 		"jsHeapMb":          rep(30, 61),
+		"tiles":             {9},
 		"playerErrors":      {0},
 		"pageSwitches":      {29},
 		"fullscreenToggles": {20},
 	}
+}
+
+// desktopStability is a passing S4 run on a desktop path: 16 tiles (R45).
+func desktopStability() map[string][]float64 {
+	s := stability()
+	s["tiles"] = []float64{16}
+	return s
+}
+
+// windowsStability is a passing S4 run in the Windows app: 16 tiles, and every memory reading
+// with the WebView2 processes in it (R52).
+func windowsStability() map[string][]float64 {
+	s := desktopStability()
+	s["webview2Procs"] = rep(5, 61)
+	return s
 }
 
 func commonRuns(f *fixture) {
@@ -154,20 +174,24 @@ func androidRuns() []Result {
 	return f.list()
 }
 
-// windowsRuns is a passing Windows set.
+// windowsRuns is a passing Windows set: the Tauri path of R45 (S1, S2, S3-16, S4, S7, S9, S10).
 func windowsRuns() []Result {
 	f := newFixture(windowsModel)
+	commonRuns(f)
 	f.add("S3-16", windowsGrid(16))
-	f.add("S4", stability())
-	f.add("S10", nil, "pair: host/host", "prompt: no")
+	f.add("S4", windowsStability())
+	f.add("S7", map[string][]float64{"startMs": rep(600, 20), "seekMs": rep(400, 20)})
 	return f.list()
 }
 
-// webRuns is a passing set for Chrome, Edge and Firefox: S10 on each.
+// webRuns is a passing set for Chrome, Edge and Firefox: S9 and S10 on each.
 func webRuns() []Result {
 	var out []Result
 	for _, platform := range []string{"chrome", "edge", "firefox"} {
 		f := newFixture(browserDevice(platform))
+		f.add("S9", map[string][]float64{"mx-h265.subFirstFrameMs": {30}, "mx-high51.subFirstFrameMs": {35}},
+			"mx-h265/main: error CODEC_UNSUPPORTED", "mx-h265/sub: bound H264", "mx-h265: fallback",
+			"mx-high51/main: error CODEC_UNSUPPORTED", "mx-high51/sub: bound H264", "mx-high51: unsupported-profile")
 		f.add("S10", nil, "pair: host/prflx", "prompt: n/a")
 		out = append(out, f.list()...)
 	}

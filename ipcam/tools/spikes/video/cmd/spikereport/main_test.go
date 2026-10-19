@@ -271,13 +271,18 @@ func TestRun_RealChromeRun(t *testing.T) {
 	if err != nil || len(skipped) != 0 || len(results) != 7 {
 		t.Fatalf("results = %d, skipped = %+v, err = %v", len(results), skipped, err)
 	}
+	// The run was on Linux: the guide runs the browsers on the owner's Windows PC, so these
+	// runs are a device of their own, "chrome-linux", listed apart and outside the verdicts (hub-4).
 	mv := ComputeMV(results)
 	for _, code := range []string{"MV1", "MV2", "MV3/4", "MV10", "MV13", "MV15", "G9"} {
-		if got := outcome(mv, "chrome", code); got != "pass" {
-			t.Errorf("chrome %s = %s, want pass (%+v)", code, got, mv[mvKey("chrome", code)])
+		if got := outcome(mv, "chrome-linux", code); got != "pass" {
+			t.Errorf("chrome-linux %s = %s, want pass (%+v)", code, got, mv[mvKey("chrome-linux", code)])
+		}
+		if got := outcome(mv, "chrome", code); got != "absent" {
+			t.Errorf("chrome %s = %s: a Linux run took the place of the PC's Chrome", code, got)
 		}
 	}
-	if v := mv[mvKey("chrome", "MV1")]; v.Value < 1 || v.Value > 100 {
+	if v := mv[mvKey("chrome-linux", "MV1")]; v.Value < 1 || v.Value > 100 {
 		t.Errorf("MV1 p90 = %v ms: a local run starts in tens of milliseconds", v.Value)
 	}
 	if got := AndroidVerdict(mv); got != VerdictIncomplete {
@@ -293,7 +298,10 @@ func TestRun_RealChromeRun(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, stderr)
 	}
 	md := readText(t, filepath.Join(out, "2026-10-19-phase0b-results.md"))
-	csv := readText(t, filepath.Join(out, "phase0-data", "phase0b-chrome.csv"))
+	csv := readText(t, filepath.Join(out, "phase0-data", "phase0b-chrome-linux.csv"))
+	if !strings.Contains(md, "### Web: Chrome pe Linux") {
+		t.Error("the Linux runs are not listed as a device of their own")
+	}
 	for name, text := range map[string]string{"report": md, "csv": csv} {
 		for _, re := range []*regexp.Regexp{ipv4Literal, ipv6Literal} {
 			if m := re.FindString(text); m != "" {
@@ -306,7 +314,41 @@ func TestRun_RealChromeRun(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(csv, "chrome,S1,chrome-20261019-042329-s1.json,used,firstFrameMs,0,") {
+	if !strings.Contains(csv, "chrome-linux,S1,chrome-20261019-042329-s1.json,used,firstFrameMs,0,") {
 		t.Errorf("the CSV has no S1 row:\n%.300s", csv)
 	}
+}
+
+// report-10: a fresh -out never deletes or overwrites another folder's outputs.
+func TestRun_AFreshOutLeavesTheOtherFolderAlone(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	if code, _, stderr := runMain(t, "-in", filepath.Join("testdata", "golden-set"), "-out", first, "-date", "2026-10-19"); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	before := snapshot(t, first)
+	in := t.TempDir()
+	write(t, in, "android-20261018-100000-s1.json", storedS1)
+	if code, _, stderr := runMain(t, "-in", in, "-out", second, "-date", "2026-10-19"); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if after := snapshot(t, first); after != before {
+		t.Errorf("the run into another -out changed the first folder:\n%s\n---\n%s", before, after)
+	}
+}
+
+// snapshot lists every file under dir with its content.
+func snapshot(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		b.WriteString(path + "\n" + readText(t, path) + "\n")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
 }
