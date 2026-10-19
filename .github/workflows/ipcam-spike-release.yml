@@ -1,0 +1,482 @@
+name: ipcam-spike-release
+
+# The release of the Phase 0 (b) video spike (plan
+# ipcam/docs/superpowers/plans/2026-10-18-phase0b-video-spike.md, Task 14), for
+# the owner's guide ipcam/docs/spike-video.md:
+#   - spikehub-windows.zip: spikehub.exe with the spike app embedded and the
+#     media folder next to it, where its -media default (./media) looks;
+#   - spikehub-linux-arm64 and spikehub-linux-armv7 (GOARM=7), with the app
+#     embedded, and spike-video-media.zip, the same media for them;
+#   - ipcam-spike.apk (the spike flavour, debug-signed; never in a store);
+#   - ipcam-desktop-setup.exe (the Windows shell's NSIS installer, unsigned);
+#   - ipcam-spike-sbom.spdx.json (Syft) and SHA256SUMS.
+#
+# A spike-video-v* tag publishes them as a GitHub pre-release. A manual run
+# builds and checks every asset and keeps them as the workflow artifact
+# spike-video-release; with publish set, a manual run on such a tag publishes
+# them too (for a tag run that failed before it published). Every build here
+# starts without caches: a restored Go build cache or Rust target folder is not
+# verified, and these files go to the owner.
+
+on:
+  push:
+    tags:
+      - 'spike-video-v*'
+    # GitHub does not evaluate path filters for tag pushes: the tag pattern is
+    # what scopes this trigger to ipcam. The filter names what the release builds.
+    paths:
+      - 'ipcam/**'
+      - '.github/workflows/ipcam-spike-release.yml'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the GitHub pre-release (only on a spike-video-v* tag)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipcam-spike-release-${{ github.ref }}
+  # A run on a tag may be publishing: never cancel it.
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  # The Go version comes from go.work alone; never switch toolchains silently.
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+jobs:
+  media:
+    # The simulated cameras' files, checked against the spec (§16.3).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ipcam
+        # bash -eo pipefail: a "| tee" fails when the command before it fails.
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache: false
+      - name: Install ffmpeg
+        # ffmpeg with libx264 and libx265 only generates the media here. It is
+        # never shipped and never part of a release asset (Global Constraints, Licenses).
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+      - name: Generate media
+        run: |
+          out="$(go run ./tools/spikes/video/cmd/mediagen -out "${RUNNER_TEMP}/media" 2>&1)" || {
+            printf '%s\n' "${out}" | tools/scripts/annotate.sh mediagen
+            exit 1
+          }
+          echo "${out}"
+      - name: Check media against the spec
+        # A missing ffmpeg fails instead of skipping.
+        env:
+          MEDIAGEN_DIR: ${{ runner.temp }}/media
+          MEDIAGEN_REQUIRE_FFMPEG: '1'
+        run: |
+          go test -count=1 -v -run TestMediagen ./tools/spikes/video/cmd/mediagen/... 2>&1 | tee "${RUNNER_TEMP}/media-test.log"
+      - name: Show media check failures as annotations
+        # Job logs cannot be read from everywhere; check-run annotations can
+        # (gh api repos/<owner>/<repo>/check-runs/<job id>/annotations).
+        if: failure()
+        run: |
+          log="${RUNNER_TEMP}/media-test.log"
+          [[ -f "${log}" ]] || exit 0
+          lines="$(grep -E -- '^(--- FAIL|FAIL|panic:|\s+\S+_test\.go:[0-9]+:)' "${log}" || true)"
+          [[ -n "${lines}" ]] || lines="$(tail -n 40 "${log}")"
+          printf '%s\n' "${lines}" | tools/scripts/annotate.sh 'media check' 60
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-media
+          path: ${{ runner.temp }}/media
+          if-no-files-found: error
+          retention-days: 1
+          # H.264, H.265 and fMP4 do not compress further.
+          compression-level: 0
+
+  spikehub:
+    # spikehub with the spike app embedded: for the owner's PC (windows/amd64)
+    # and for Linux on ARM, such as a Raspberry Pi (arm64; arm with GOARM=7).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache: false
+      # The pnpm version comes from "packageManager" in ipcam/package.json alone.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ipcam/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build the spike app into spikehub
+        # The app's dist/ goes into cmd/spikehub/web for these builds only; it is never committed.
+        run: |
+          pnpm --filter spike-video-app build
+          cp -R tools/spikes/video/app/dist/. tools/spikes/video/cmd/spikehub/web/
+      - name: Build spikehub
+        # Pure Go: each target is cross-compiled here into one static binary.
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          out="${RUNNER_TEMP}/spikehub"
+          pkg=./tools/spikes/video/cmd/spikehub
+          log="$({
+            GOOS=windows GOARCH=amd64 go build -trimpath -o "${out}/spikehub-windows-amd64.exe" "${pkg}" &&
+              GOOS=linux GOARCH=arm64 go build -trimpath -o "${out}/spikehub-linux-arm64" "${pkg}" &&
+              GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -o "${out}/spikehub-linux-armv7" "${pkg}"
+          } 2>&1)" || {
+            printf '%s\n' "${log}" | tools/scripts/annotate.sh 'spikehub build'
+            exit 1
+          }
+          ls -l "${out}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-spikehub
+          path: ${{ runner.temp }}/spikehub
+          if-no-files-found: error
+          retention-days: 1
+
+  apk:
+    # The spike APK as ipcam-mobile builds it: the spike flavour, signed with
+    # the runner's debug key, never published in a store (OPN-01).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The wrapper jar is committed and runs as soon as ./gradlew does: check it
+      # against Gradle's published checksums before anything runs Gradle.
+      - uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ipcam/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Android SDK 36
+        run: |
+          # yes ends on SIGPIPE when sdkmanager stops reading; that is not a failure.
+          { yes || true; } | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install 'platforms;android-36' 'build-tools;36.0.0' >/dev/null
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build the spike app
+        run: pnpm --filter spike-video-app build
+      - name: Sync the Android project
+        # Copies the app's dist/ into the project and generates the plugin wiring.
+        run: pnpm --filter @ipcam/mobile run sync
+      - name: Build the APK
+        working-directory: ipcam/apps/mobile/android
+        run: |
+          ./gradlew --no-daemon --console=plain --warning-mode all assembleSpikeDebug 2>&1 | tee "${RUNNER_TEMP}/gradle.log"
+          mkdir -p "${RUNNER_TEMP}/apk"
+          cp app/build/outputs/apk/spike/debug/app-spike-debug.apk "${RUNNER_TEMP}/apk/ipcam-spike.apk"
+      - name: Show Gradle failures as annotations
+        if: failure()
+        run: |
+          log="${RUNNER_TEMP}/gradle.log"
+          [[ -f "${log}" ]] || exit 0
+          { grep -E -A12 '^\* What went wrong:' "${log}" || true; grep -E -A30 '^e: | FAILED$' "${log}" || true; } \
+            | tools/scripts/annotate.sh gradle
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-apk
+          path: ${{ runner.temp }}/apk
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop:
+    # The Windows shell's NSIS installer as ipcam-windows builds it: unsigned
+    # (code signing is Faza 0-bis), zlib-compressed (R36, tauri.conf.json),
+    # with the spike metrics, from the locked crates (bundle:spike).
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ipcam/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Rust toolchain
+        # The version and its components come from rust-toolchain.toml alone.
+        working-directory: ipcam/apps/desktop/src-tauri
+        run: rustup toolchain install
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build the spike app
+        # Tauri embeds its dist/ into the executable (frontendDist).
+        run: pnpm --filter spike-video-app build
+      - name: Build the installer
+        run: |
+          pnpm --filter @ipcam/desktop run bundle:spike 2>&1 | tee "${RUNNER_TEMP}/build.log"
+          installers=(apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if [[ ${#installers[@]} -ne 1 || ! -f "${installers[0]}" ]]; then
+            echo "want one NSIS installer, found: ${installers[*]}" | tee -a "${RUNNER_TEMP}/build.log"
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/desktop"
+          cp "${installers[0]}" "${RUNNER_TEMP}/desktop/ipcam-desktop-setup.exe"
+      - name: Show build failures as annotations
+        if: failure()
+        run: |
+          log="${RUNNER_TEMP}/build.log"
+          [[ -f "${log}" ]] || exit 0
+          lines="$({
+            grep -E -A12 '^error' "${log}" || true
+            grep -E -B2 -A10 'panicked|failed to bundle|want one NSIS installer' "${log}" || true
+          })"
+          [[ -n "${lines}" ]] || lines="$(tail -n 40 "${log}")"
+          printf '%s\n' "${lines}" | tools/scripts/annotate.sh build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-desktop
+          path: ${{ runner.temp }}/desktop
+          if-no-files-found: error
+          retention-days: 1
+
+  sbom:
+    # What the release is built from, by Syft, in a fresh checkout (no
+    # node_modules): the Go modules (go.mod), the JS packages (pnpm-lock.yaml),
+    # the Rust crates (Cargo.lock) and the Gradle wrapper under ipcam/.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Output folder
+        run: mkdir -p "${RUNNER_TEMP}/sbom"
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: ipcam
+          format: spdx-json
+          output-file: ${{ runner.temp }}/sbom/ipcam-spike-sbom.spdx.json
+          syft-version: v1.54.0
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-sbom
+          path: ${{ runner.temp }}/sbom
+          if-no-files-found: error
+          retention-days: 1
+
+  assets:
+    # Puts the release together, checks it, and keeps it as the workflow
+    # artifact spike-video-release.
+    needs: [media, spikehub, apk, desktop, sbom]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/in
+      - name: Assemble
+        run: |
+          in="${RUNNER_TEMP}/in"
+          out="${RUNNER_TEMP}/release"
+          win="${RUNNER_TEMP}/spikehub-windows"
+          linux="${RUNNER_TEMP}/spike-video-media"
+          mkdir -p "${out}" "${win}" "${linux}"
+          {
+            # The owner's PC: spikehub.exe with the media folder that its -media
+            # default (./media) expects, and spikehub-camere-reale.cmd, which
+            # starts it with -real (it asks for the owner's RTSP URLs, typed
+            # hidden, kept in memory only) with a double click.
+            cp "${in}/release-spikehub/spikehub-windows-amd64.exe" "${win}/spikehub.exe"
+            cp -R "${in}/release-media" "${win}/media"
+            printf '@echo off\r\ncd /d "%%~dp0"\r\nspikehub.exe -real\r\n' > "${win}/spikehub-camere-reale.cmd"
+            # H.264, H.265 and fMP4 do not compress further: zip stores them as they are.
+            (cd "${win}" && zip -q -r -n .h264:.h265:.m4s:.mp4 "${out}/spikehub-windows.zip" .)
+            # The same media for spikehub on Linux: unpacked next to it, it is ./media.
+            cp -R "${in}/release-media" "${linux}/media"
+            (cd "${linux}" && zip -q -r -n .h264:.h265:.m4s:.mp4 "${out}/spike-video-media.zip" media)
+            cp "${in}/release-spikehub/spikehub-linux-arm64" "${in}/release-spikehub/spikehub-linux-armv7" \
+              "${in}/release-apk/ipcam-spike.apk" "${in}/release-desktop/ipcam-desktop-setup.exe" \
+              "${in}/release-sbom/ipcam-spike-sbom.spdx.json" "${out}/"
+            (cd "${out}" && sha256sum -- * > SHA256SUMS)
+          } 2>&1 | tee "${RUNNER_TEMP}/assemble.log"
+      - name: Check the release
+        # Every asset is there and matches SHA256SUMS; each spikehub is built
+        # for its target and embeds the app; the archives hold what the guide
+        # names; and every text that the guide quotes between « » exists in
+        # the programs (tools/scripts/check-guide-labels.sh).
+        run: |
+          out="${RUNNER_TEMP}/release"
+          problems=()
+          want=(SHA256SUMS ipcam-desktop-setup.exe ipcam-spike-sbom.spdx.json ipcam-spike.apk
+            spike-video-media.zip spikehub-linux-arm64 spikehub-linux-armv7 spikehub-windows.zip)
+          have="$(find "${out}" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort | tr '\n' ' ')"
+          [[ "${have}" == "$(printf '%s\n' "${want[@]}" | LC_ALL=C sort | tr '\n' ' ')" ]] ||
+            problems+=("assets: have ${have}; want ${want[*]}")
+          for name in "${want[@]}"; do
+            [[ -s "${out}/${name}" ]] || problems+=("${name} is missing or empty")
+          done
+          sums="$(cd "${out}" && sha256sum --check --strict --quiet SHA256SUMS 2>&1)" || problems+=("SHA256SUMS: ${sums}")
+
+          app='Proba video ipcam (Faza 0 b)'
+          unzip -p "${out}/spikehub-windows.zip" spikehub.exe > "${RUNNER_TEMP}/spikehub.exe" ||
+            problems+=("spikehub-windows.zip: spikehub.exe cannot be read")
+          check_hub() { # <file> <what file(1) says about the target>
+            local kind
+            kind="$(file -b "$1")"
+            [[ "${kind}" == *"$2"* ]] || problems+=("$(basename "$1") is not $2: ${kind}")
+            grep -aqF -- "${app}" "$1" || problems+=("$(basename "$1") does not embed the spike app")
+          }
+          check_hub "${RUNNER_TEMP}/spikehub.exe" 'PE32+ executable (console) x86-64'
+          check_hub "${out}/spikehub-linux-arm64" 'ELF 64-bit LSB executable, ARM aarch64'
+          check_hub "${out}/spikehub-linux-armv7" 'ELF 32-bit LSB executable, ARM, EABI5'
+
+          media=(media/sub.h264 media/main.h264 media/main-high51.h264 media/main-h265.h265 media/hls/index.m3u8 media/hls/init.mp4)
+          check_zip() { # <zip> <entry>...
+            local zip="$1" listing
+            shift
+            unzip -tq "${zip}" > /dev/null || problems+=("$(basename "${zip}") fails its integrity test")
+            listing="$(unzip -Z1 "${zip}" || true)"
+            for entry in "$@"; do
+              grep -qxF -- "${entry}" <<< "${listing}" || problems+=("$(basename "${zip}") has no ${entry}")
+            done
+          }
+          check_zip "${out}/spikehub-windows.zip" spikehub.exe spikehub-camere-reale.cmd "${media[@]}"
+          check_zip "${out}/spike-video-media.zip" "${media[@]}"
+          # The APK carries the spike app (Capacitor's webDir).
+          check_zip "${out}/ipcam-spike.apk" AndroidManifest.xml classes.dex assets/public/index.html
+          kind="$(file -b "${out}/ipcam-desktop-setup.exe")"
+          [[ "${kind}" == *'Nullsoft Installer'* ]] || problems+=("ipcam-desktop-setup.exe is not an NSIS installer: ${kind}")
+          jq -e '(.spdxVersion | startswith("SPDX-")) and (.packages | length > 100)' "${out}/ipcam-spike-sbom.spdx.json" > /dev/null ||
+            problems+=("ipcam-spike-sbom.spdx.json is not an SPDX document with the release's packages")
+
+          # The owner's guide against the programs it describes: spikehub.exe
+          # (the app and the hub), the APK, and the Windows shell's names.
+          labels="$(tools/scripts/check-guide-labels.sh docs/spike-video.md "${RUNNER_TEMP}/spikehub.exe" "${out}/ipcam-spike.apk" \
+            apps/desktop/src-tauri/tauri.conf.json apps/desktop/src-tauri/src/main.rs 2>&1)" || problems+=("${labels}")
+
+          if [[ ${#problems[@]} -gt 0 ]]; then
+            printf '%s\n' "${problems[@]}" | tools/scripts/annotate.sh 'release check'
+            exit 1
+          fi
+          {
+            echo "${labels}"
+            cd "${out}"
+            for name in "${want[@]}"; do
+              printf '%s: %s bytes, sha256 %s\n' "${name}" "$(stat -c %s "${name}")" "$(sha256sum "${name}" | cut -c1-16)…"
+            done
+          } | tee -a "${GITHUB_STEP_SUMMARY}" | tools/scripts/annotate.sh 'release assets' 20 notice
+      - name: Show assembly failures as annotations
+        if: failure()
+        run: |
+          log="${RUNNER_TEMP}/assemble.log"
+          [[ -s "${log}" ]] || exit 0
+          tail -n 40 "${log}" | tools/scripts/annotate.sh assemble
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spike-video-release
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+          retention-days: 7
+          # The archives and binaries are compressed already, or nearly so.
+          compression-level: 0
+
+  publish:
+    # The GitHub pre-release of a spike-video-v* tag: on the tag push, or on a
+    # manual run on the tag with publish set. The tag is pushed only after the
+    # owner approves the release (R6).
+    if: github.event_name == 'push' || inputs.publish
+    needs: assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the ref
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" != tag || "${GITHUB_REF_NAME}" != spike-video-v* ]]; then
+            echo "::error title=publish::a release needs a spike-video-v* tag; this run is on the ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: ipcam/tools/scripts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-video-release
+          path: ${{ runner.temp }}/release
+      - name: Create the pre-release
+        # The notes are for the owner, in Romanian.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          (cd "${RUNNER_TEMP}/release" && sha256sum --check --strict SHA256SUMS)
+          notes="${RUNNER_TEMP}/notes.md"
+          {
+            echo "Proba video din Faza 0 (b). Ghidul pas cu pas: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${TAG}/ipcam/docs/spike-video.md"
+            echo
+            echo "Pe PC (Windows 11): spikehub-windows.zip și ipcam-desktop-setup.exe. Pe telefon (Galaxy A24): ipcam-spike.apk."
+            echo
+            echo "Celelalte fișiere nu vă trebuie: spikehub pentru Linux pe ARM (de exemplu un Raspberry Pi) cu spike-video-media.zip,"
+            echo "lista componentelor (SBOM) și sumele de control (SHA256SUMS)."
+            echo
+            echo "Sunt versiuni de test, nesemnate, doar pentru această probă."
+          } > "${notes}"
+          out="$(gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag --prerelease \
+            --title "Proba video ipcam, Faza 0 (b): ${TAG}" --notes-file "${notes}" "${RUNNER_TEMP}"/release/* 2>&1)" || {
+            printf '%s\n' "${out}" | ipcam/tools/scripts/annotate.sh publish
+            exit 1
+          }
+          echo "${out}"
