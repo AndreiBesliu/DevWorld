@@ -410,7 +410,7 @@ jobs:
             echo "${labels}"
             cd "${out}"
             for name in "${want[@]}"; do
-              printf '%s: %s bytes, sha256 %s\n' "${name}" "$(stat -c %s "${name}")" "$(sha256sum "${name}" | cut -c1-16)…"
+              printf '%s: %s bytes, sha256 %s\n' "${name}" "$(stat -c %s "${name}")" "$(sha256sum "${name}" | cut -d' ' -f1)"
             done
           } | tee -a "${GITHUB_STEP_SUMMARY}" | tools/scripts/annotate.sh 'release assets' 20 notice
       - name: Show assembly failures as annotations

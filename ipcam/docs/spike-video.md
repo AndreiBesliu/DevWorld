@@ -76,7 +76,7 @@ Puteți face pauză oricând între scenarii. Închideți fereastra spikehub; re
 
 1. Pe PC, deschideți pagina de release pe care v-o trimitem în chat. Ea se numește „spike-video-v0.1.0” (sau o versiune mai nouă) și se găsește și la <https://github.com/AndreiBesliu/DevWorld/releases>.
 2. Descărcați pe PC:
-   - `spikehub-windows.zip` (aproximativ 350 MB);
+   - `spikehub-windows.zip` (aproximativ 380 MB);
    - `ipcam-desktop-setup.exe`.
 3. Browserul poate spune că fișierul „nu este descărcat frecvent”. Alegeți „Păstrați” (eventual „Păstrați oricum”). Programele de test nu sunt semnate digital, pentru că semnătura costă bani; de aceea apar avertismentele.
 4. Fișierul `ipcam-spike.apk` îl descărcați direct pe telefon, la pasul 5. Restul fișierelor de pe pagină nu vă trebuie.
@@ -88,7 +88,7 @@ Puteți face pauză oricând între scenarii. Închideți fereastra spikehub; re
 3. Dublu clic pe `spikehub.exe`.
 4. Windows poate afișa „Windows a protejat PC-ul”. Apăsați „Mai multe informații”, apoi „Rulați oricum”. Dacă nu apare „Rulați oricum” (de exemplu, mesajul pomenește „Smart App Control”), opriți-vă aici și scrieți-ne în chat.
 5. La prima pornire, firewall-ul Windows întreabă dacă permite accesul. Bifați „Rețele private”, lăsați „Rețele publice” nebifat și apăsați „Permiteți accesul”. Fără acest pas, telefonul nu poate ajunge la PC.
-6. În fereastra spikehub apare «Adresele acestui calculator în rețeaua locală:», urmat de una sau mai multe adrese de forma `http://…:7080`. Notați adresa de pe rândul cu Wi-Fi sau Ethernet: o veți scrie în telefon. Dacă sunt mai multe astfel de rânduri, încercați-le pe rând.
+6. În fereastra spikehub apare «Adresele acestui calculator în rețeaua locală:», urmat de una sau mai multe adrese de forma `http://…:7080`. Notați adresa de pe rândul cu Wi-Fi sau Ethernet: o veți scrie în telefon. Dacă sunt mai multe astfel de rânduri, încercați-le pe rând. Dacă în loc de adrese apare «Nu am găsit nicio rețea privată activă pe acest calculator.», scrieți-ne în chat.
 7. Lăsați fereastra deschisă cât timp rulați scenarii. Rândul «Rezultatele se salvează în:» arată folderul `results`, de lângă `spikehub.exe`.
 8. Pentru oprire, închideți fereastra (sau apăsați Ctrl+C, ca în «Opriți cu Ctrl+C.»).
 
