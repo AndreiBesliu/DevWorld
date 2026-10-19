@@ -72,8 +72,11 @@ type bannerInfo struct {
 }
 
 // writeBanner prints the start banner, in Romanian: where the phone connects,
-// how, and what to check when it cannot. The addresses are the owner's own
-// screen only; they never go into a log or a results file (PH0-22).
+// how, and what to check when it cannot. The phone runs the scenarios in the
+// «Proba ipcam» app only: in the phone's browser they would count as the runs
+// of Chrome on the PC (hub-4). The PC's browsers and ipcam-desktop use the
+// loopback address (R38). The addresses are the owner's own screen only; they
+// never go into a log or a results file (PH0-22).
 func writeBanner(w io.Writer, b bannerInfo) {
 	p := func(format string, args ...any) { _, _ = fmt.Fprintf(w, format+"\n", args...) }
 
@@ -84,7 +87,7 @@ func writeBanner(w io.Writer, b bannerInfo) {
 	case b.lanErr != nil:
 		p("Nu pot citi interfețele de rețea ale acestui calculator: %v", b.lanErr)
 		p("Aflați adresa lui în rețeaua locală din setările de rețea (de exemplu cu ipconfig)")
-		p("și introduceți pe telefon http://<adresa>:%d.", b.port)
+		p("și scrieți-o pe telefon în aplicația «Proba ipcam», ca http://<adresa>:%d.", b.port)
 	case len(b.lan) == 0:
 		p("Nu am găsit nicio rețea privată activă pe acest calculator.")
 		p("Conectați-l la Wi-Fi sau la cablu și porniți din nou spikehub.")
@@ -95,8 +98,9 @@ func writeBanner(w io.Writer, b bannerInfo) {
 		}
 		p("")
 		p("Pe telefon: conectați-l la același Wi-Fi ca acest calculator, deschideți aplicația")
-		p("de test și introduceți una dintre adresele de mai sus (sau deschideți-o în browser).")
+		p("«Proba ipcam» și scrieți în ea una dintre adresele de mai sus (nu în browserul telefonului).")
 	}
+	p("Pe acest PC: în browsere și în ipcam-desktop folosiți adresa http://127.0.0.1:%d.", b.port)
 	p("")
 	p("Dacă telefonul nu se poate conecta:")
 	p("  - același Wi-Fi, nu rețeaua pentru oaspeți; permiteți spikehub în firewall la «Rețele private»;")

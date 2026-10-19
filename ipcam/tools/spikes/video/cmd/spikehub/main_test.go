@@ -290,6 +290,50 @@ func TestRun_ExplainsMissingMediaInRomanian(t *testing.T) {
 	}
 }
 
+// On Windows the owner starts spikehub.exe from the folder that «Extragere
+// totală» made of spikehub-windows.zip; the media archive of the Linux hubs is
+// no part of that download (hub-7).
+func TestMissingMedia_TellsTheWindowsOwnerToExtractTheZip(t *testing.T) {
+	cause := errors.New(`open media\sub.h264: the system cannot find the path specified`)
+	err := missingMediaError("windows", "./media", cause)
+	text := err.Error()
+	for _, want := range []string{
+		"nu pot citi fișierele media", // the guide quotes it
+		"spikehub-windows.zip",
+		"«Extragere totală»",
+		"porniți spikehub.exe din folderul extras",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("error %q lacks %q", text, want)
+		}
+	}
+	for _, not := range []string{"spike-video-media", "mediagen"} {
+		if strings.Contains(text, not) {
+			t.Errorf("error %q names %q, which the Windows owner does not have", text, not)
+		}
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("error %v does not wrap its cause", err)
+	}
+}
+
+func TestMissingMedia_KeepsTheWordingOfTheLinuxHubs(t *testing.T) {
+	cause := errors.New("open media/sub.h264: no such file or directory")
+	err := missingMediaError("linux", "./media", cause)
+	text := err.Error()
+	for _, want := range []string{"nu pot citi fișierele media", "cmd/mediagen", "spike-video-media", "folderul media stă lângă spikehub"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("error %q lacks %q", text, want)
+		}
+	}
+	if strings.Contains(text, "spikehub-windows.zip") {
+		t.Errorf("error %q names the Windows download", text)
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("error %v does not wrap its cause", err)
+	}
+}
+
 // spikehub keeps Windows from sleeping for as long as it serves (R49): the
 // phone part takes 1.5 h with nobody at the PC. The request is made once at
 // start and withdrawn at shutdown.

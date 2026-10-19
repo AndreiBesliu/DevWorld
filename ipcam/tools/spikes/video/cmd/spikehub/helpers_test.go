@@ -233,6 +233,8 @@ type testHub struct {
 	mediaDir   string
 	resultsDir string
 	logs       *syncBuffer
+	// console is the hub's window: the lines the owner reads.
+	console *syncBuffer
 }
 
 // newTestHub starts a hub with the given number of simulators. tweak may change
@@ -249,8 +251,9 @@ func newTestHub(t *testing.T, sims int, tweak ...func(*hubConfig)) *testHub {
 	if err != nil {
 		t.Fatal(err)
 	}
-	logs := &syncBuffer{}
+	logs, console := &syncBuffer{}, &syncBuffer{}
 	cfg := hubConfig{
+		console:    console,
 		cat:        cat,
 		api:        testAPI(t),
 		hlsDir:     filepath.Join(dir, "hls"),
@@ -266,7 +269,7 @@ func newTestHub(t *testing.T, sims int, tweak ...func(*hubConfig)) *testHub {
 	srv := httptest.NewServer(h.Handler())
 	t.Cleanup(h.Close)
 	t.Cleanup(srv.Close)
-	return &testHub{hub: h, srv: srv, mediaDir: dir, resultsDir: cfg.resultsDir, logs: logs}
+	return &testHub{hub: h, srv: srv, mediaDir: dir, resultsDir: cfg.resultsDir, logs: logs, console: console}
 }
 
 // do sends a request to the hub and returns the response with its body read.

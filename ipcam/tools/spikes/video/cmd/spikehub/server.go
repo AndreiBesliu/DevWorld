@@ -46,11 +46,18 @@ type hubConfig struct {
 	hlsDir string
 	// resultsDir is where the results files go.
 	resultsDir string
+	// resultsFileCap and resultsByteCap bound the results folder: its number
+	// of files and their total size. Zero takes the defaults (hub-8).
+	resultsFileCap int
+	resultsByteCap int64
 	// web is the spike app, as the files of its build; the root holds index.html
 	// and assets/.
 	web fs.FS
 	now func() time.Time
 	log *slog.Logger
+	// console is the hub's window, where the owner reads what to do; nil
+	// discards.
+	console io.Writer
 }
 
 // hub is the spike hub's HTTP side: the camera list, the WebRTC offers, the
@@ -61,9 +68,24 @@ type hub struct {
 	mu       sync.Mutex
 	sessions map[*session.Session]struct{}
 	closed   bool
+
+	// resultsMu makes the check of the results folder's caps and the write
+	// one step.
+	resultsMu sync.Mutex
+	// toldFull is set once the console has said that the folder is full.
+	toldFull bool
 }
 
 func newHub(cfg hubConfig) *hub {
+	if cfg.resultsFileCap == 0 {
+		cfg.resultsFileCap = defaultResultsFileCap
+	}
+	if cfg.resultsByteCap == 0 {
+		cfg.resultsByteCap = defaultResultsByteCap
+	}
+	if cfg.console == nil {
+		cfg.console = io.Discard
+	}
 	return &hub{hubConfig: cfg, sessions: map[*session.Session]struct{}{}}
 }
 
@@ -87,7 +109,9 @@ func (h *hub) Handler() http.Handler {
 // a results file or open a session. The app that the hub serves itself is not
 // another origin. The rule compares Origin with the Host header, both of which
 // a DNS-rebinding page controls, so it is no defence against DNS rebinding; on
-// a LAN spike that serves no secrets, that is accepted.
+// a LAN spike that serves no secrets, that is accepted: it serves simulated
+// cameras only, never a real one (R43), and the results folder has caps, so a
+// stray client cannot fill the disk (hub-8).
 func (h *hub) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Vary", "Origin")

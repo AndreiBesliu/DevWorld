@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -201,5 +202,113 @@ func TestResults_ReportsAFolderThatCannotBeWritten(t *testing.T) {
 	}
 	if !strings.Contains(hub.logs.String(), "level=ERROR") {
 		t.Errorf("the failure is not logged:\n%s", hub.logs.String())
+	}
+}
+
+// fullFolderLine is the start of the line that the hub window shows when the
+// results folder is full.
+const fullFolderLine = "Atenție: folderul de rezultate a atins limita"
+
+// checkFull fails unless a refused result got 507 with a JSON error.
+func checkFull(t *testing.T, resp *http.Response, body []byte) {
+	t.Helper()
+	if resp.StatusCode != http.StatusInsufficientStorage {
+		t.Fatalf("status %d: %s, want 507", resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content type %q, want application/json", ct)
+	}
+	var e struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &e); err != nil || e.Error == "" {
+		t.Errorf("body %s is not a JSON error (%v)", body, err)
+	}
+}
+
+// The results folder holds at most 5000 files and 500 MB (hub-8, privacy-2):
+// a LAN client cannot fill the PC's disk. A refused result is not written, the
+// app keeps it as «Rezultate netrimise», and the hub window says so once.
+func TestResults_RefusesAResultOverTheFileCap(t *testing.T) {
+	hub := newTestHub(t, 1, func(c *hubConfig) { c.resultsFileCap = 3 })
+	for i := range 3 {
+		if resp, body := hub.postResults(t, fmt.Sprintf(`{"device":"x","scenario":"S%d"}`, i+1)); resp.StatusCode != http.StatusCreated {
+			t.Fatalf("result %d: status %d: %s", i+1, resp.StatusCode, body)
+		}
+	}
+
+	for range 2 {
+		resp, body := hub.postResults(t, `{"device":"x","scenario":"S4"}`)
+		checkFull(t, resp, body)
+	}
+	if files := resultFiles(t, hub.resultsDir); len(files) != 3 {
+		t.Errorf("results folder holds %v, want the 3 files from before the cap", files)
+	}
+	console := hub.console.String()
+	if n := strings.Count(console, fullFolderLine); n != 1 {
+		t.Errorf("the hub window has %d lines about the full folder, want 1:\n%s", n, console)
+	}
+	if !strings.Contains(console, "3 fișiere sau 500 MB") {
+		t.Errorf("the hub window does not name the limits:\n%s", console)
+	}
+}
+
+func TestResults_RefusesAResultOverTheByteCap(t *testing.T) {
+	hub := newTestHub(t, 1, func(c *hubConfig) { c.resultsByteCap = 1000 })
+	pad := strings.Repeat("a", 500)
+	if resp, body := hub.postResults(t, `{"device":"x","scenario":"S1","pad":"`+pad+`"}`); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body := hub.postResults(t, `{"device":"x","scenario":"S2","pad":"`+pad+`"}`)
+	checkFull(t, resp, body)
+	if files := resultFiles(t, hub.resultsDir); len(files) != 1 {
+		t.Errorf("results folder holds %v, want the one file from before the cap", files)
+	}
+	// A small result still fits.
+	if resp, body := hub.postResults(t, `{"device":"x","scenario":"S3"}`); resp.StatusCode != http.StatusCreated {
+		t.Errorf("a result that fits: status %d: %s", resp.StatusCode, body)
+	}
+	if n := strings.Count(hub.console.String(), fullFolderLine); n != 1 {
+		t.Errorf("the hub window has %d lines about the full folder, want 1:\n%s", n, hub.console.String())
+	}
+}
+
+// The files of earlier runs count: the folder is the one next to spikehub.exe.
+func TestResults_CountsTheFilesAlreadyInTheFolder(t *testing.T) {
+	hub := newTestHub(t, 1, func(c *hubConfig) { c.resultsFileCap = 2 })
+	if err := os.MkdirAll(hub.resultsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"old-1.json", "old-2.json"} {
+		if err := os.WriteFile(filepath.Join(hub.resultsDir, name), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	resp, body := hub.postResults(t, `{"device":"x","scenario":"S1"}`)
+	checkFull(t, resp, body)
+}
+
+func TestResults_CapsAre5000FilesAnd500MB(t *testing.T) {
+	h := newHub(hubConfig{})
+	if h.resultsFileCap != 5000 || h.resultsByteCap != 500<<20 {
+		t.Errorf("caps = %d files and %d bytes, want 5000 and 500 MiB", h.resultsFileCap, h.resultsByteCap)
+	}
+}
+
+func TestRomanianCount(t *testing.T) {
+	for n, want := range map[int]string{
+		1:    "1 fișier",
+		3:    "3 fișiere",
+		19:   "19 fișiere",
+		20:   "20 de fișiere",
+		101:  "101 fișiere",
+		120:  "120 de fișiere",
+		5000: "5000 de fișiere",
+	} {
+		if got := romanianCount(n, "fișier", "fișiere"); got != want {
+			t.Errorf("romanianCount(%d) = %q, want %q", n, got, want)
+		}
 	}
 }

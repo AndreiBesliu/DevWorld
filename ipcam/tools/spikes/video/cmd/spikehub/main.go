@@ -169,6 +169,20 @@ func waitForEnter() {
 	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 }
 
+// missingMediaError explains in Romanian that the media folder cannot be read,
+// and what to do about it on the OS goos. The Windows owner has
+// spikehub-windows.zip, whose media folder is next to spikehub.exe once the
+// archive is extracted (hub-7); the Linux hubs have the spike-video-media
+// archive, or cmd/mediagen.
+func missingMediaError(goos, dir string, err error) error {
+	remedy := "rulați cmd/mediagen sau despachetați arhiva spike-video-media; folderul media stă lângă spikehub"
+	if goos == "windows" {
+		remedy = "extrageți toată arhiva spikehub-windows.zip, cu clic dreapta → «Extragere totală», " +
+			"și porniți spikehub.exe din folderul extras, unde stă și folderul media"
+	}
+	return fmt.Errorf("nu pot citi fișierele media din %q: %w (%s)", dir, err, remedy)
+}
+
 // run starts the hub and serves until ctx is done, or with -real probes the
 // real cameras and returns.
 func run(ctx context.Context, args []string, e env) error {
@@ -186,7 +200,7 @@ func run(ctx context.Context, args []string, e env) error {
 
 	m, err := loadMedia(cfg.media)
 	if err != nil {
-		return fmt.Errorf("nu pot citi fișierele media din %q: %w (rulați cmd/mediagen sau despachetați arhiva spike-video-media; folderul media stă lângă spikehub)", cfg.media, err)
+		return missingMediaError(runtime.GOOS, cfg.media, err)
 	}
 	api, mdnsUnavailable, err := e.newAPI(cfg.mdns)
 	if err != nil {
@@ -210,6 +224,7 @@ func run(ctx context.Context, args []string, e env) error {
 		web:             web,
 		now:             time.Now,
 		log:             log,
+		console:         e.stdout,
 	})
 	defer h.Close()
 

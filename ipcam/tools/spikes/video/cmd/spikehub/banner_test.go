@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"net"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -76,12 +77,40 @@ func TestBanner_WithoutAPrivateNetworkSaysSo(t *testing.T) {
 	if !strings.Contains(text, "Nu am găsit nicio rețea privată") {
 		t.Errorf("banner does not say that no private network was found:\n%s", text)
 	}
-	if strings.Contains(text, "http://") {
-		t.Errorf("banner lists a URL although there is no private network:\n%s", text)
+	// The PC's own address is the only one: there is no address for the phone.
+	for _, url := range lanURL.FindAllString(text, -1) {
+		if url != "http://127.0.0.1:7080" {
+			t.Errorf("banner lists %s although there is no private network:\n%s", url, text)
+		}
 	}
 	// The hint is still useful: the owner may connect the PC to Wi-Fi and look again.
 	if !strings.Contains(text, "Rețele private") {
 		t.Errorf("banner lacks the firewall hint:\n%s", text)
+	}
+}
+
+// lanURL matches the hub addresses that the banner lists.
+var lanURL = regexp.MustCompile(`http://[0-9.]+:[0-9]+`)
+
+// The phone runs the scenarios in the «Proba ipcam» app, never in its browser:
+// the browser's runs would count as the PC's Chrome runs (hub-4). The PC's
+// browsers and ipcam-desktop use the loopback address (R38).
+func TestBanner_SendsThePhoneToTheAppAndThePCToLoopback(t *testing.T) {
+	for _, info := range []bannerInfo{
+		{port: 7080, lan: []lanAddr{{Name: "Wi-Fi", IP: net.IPv4(192, 168, 1, 12)}}},
+		{port: 7080, lanErr: errors.New("route ip+net: netlinkrib: permission denied")},
+	} {
+		var out bytes.Buffer
+		writeBanner(&out, info)
+		text := out.String()
+		for _, want := range []string{"«Proba ipcam»", "Pe acest PC: în browsere și în ipcam-desktop folosiți adresa http://127.0.0.1:7080."} {
+			if !strings.Contains(text, want) {
+				t.Errorf("banner lacks %q:\n%s", want, text)
+			}
+		}
+		if strings.Contains(text, "deschideți-o în browser") {
+			t.Errorf("banner invites opening the hub in the phone's browser:\n%s", text)
+		}
 	}
 }
 
