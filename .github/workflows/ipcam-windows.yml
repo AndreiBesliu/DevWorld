@@ -205,7 +205,9 @@ jobs:
     # Faza 0-bis): the unit tests, the executable (tauri build --no-bundle) and
     # the NSIS installer, zlib-compressed so that its stub carries no LZMA
     # decoder (R36, tauri.conf.json). Then S1 by autorun (R5) against spikehub
-    # with 4 simulated cameras on the runner, from several starts of the app.
+    # with 4 simulated cameras on the runner, from several starts of the app,
+    # and a second start while the app runs, which must restore the first
+    # window and end (single instance, R52).
     needs: media
     runs-on: windows-latest
     timeout-minutes: 60
@@ -274,7 +276,7 @@ jobs:
         with:
           name: spike-video-media
           path: ${{ runner.temp }}/spike-video-media
-      - name: S1 by autorun (WIN-2)
+      - name: S1 by autorun and single instance (WIN-2)
         shell: pwsh
         run: >-
           ./apps/desktop/ci/windows-smoke.ps1

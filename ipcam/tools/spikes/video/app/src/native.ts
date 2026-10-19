@@ -14,6 +14,11 @@ export interface NativeMetrics {
   memMb?: number;
   cpuPctTotal?: number;
   cpuPctApp?: number;
+  /**
+   * Windows: how many WebView2 processes cpuPctApp and memMb include. With 0 the
+   * shell leaves those two out (n/a), since they would cover the app process alone (R52).
+   */
+  webview2Procs?: number;
   model?: string;
   os?: string;
   webview?: string;

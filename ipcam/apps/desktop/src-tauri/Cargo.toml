@@ -12,6 +12,8 @@ tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
 tauri = { version = "2.12.1", features = [] }
+# One instance at a time (R52, main.rs).
+tauri-plugin-single-instance = "2.5.2"
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"], optional = true }
 

@@ -13,6 +13,12 @@
 //! spike app's scenario runner makes that call before a scenario and discards
 //! its CPU. A WebView2 process that starts later is likewise off in the first
 //! call that sees it.
+//!
+//! The sums fail closed (R52): when no WebView2 process runs under the app,
+//! they would cover the app process alone, so they are `None` (null, n/a in the
+//! page), and `webview2_procs`, which the page records, is 0. The shell is
+//! single-instance (main.rs) because every instance shares the first one's
+//! WebView2 processes.
 
 use serde::Serialize;
 use std::sync::{Mutex, PoisonError};
@@ -35,15 +41,16 @@ fn spike_metrics(sampler: State<'_, Sampler>) -> SpikeMetrics {
     sampler.sample()
 }
 
-/// What `spike_metrics` answers. The page maps it to its NativeMetrics.
+/// What `spike_metrics` answers. The page maps it to its NativeMetrics. The
+/// app's sums are `None` when no WebView2 process is counted (R52).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct SpikeMetrics {
     cpu_pct_total: f32,
-    cpu_pct_app: f32,
+    cpu_pct_app: Option<f32>,
     /// The working sets, in which a page that several processes share counts in each.
-    rss_mb: f32,
+    rss_mb: Option<f32>,
     /// Private bytes (commit charge), which the page records as memMb (R37).
-    private_mb: f32,
+    private_mb: Option<f32>,
     webview2_procs: u32,
     cpu_model: String,
     gpu: String,
@@ -66,7 +73,7 @@ struct Proc {
 }
 
 /// What the sampler reads about the machine besides its processes.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct Machine {
     cpus: usize,
     cpu_pct_total: f32,
@@ -78,33 +85,26 @@ struct Machine {
 
 /// The metrics of the app process `app` and of the WebView2 processes under
 /// it: the browser process is the app's child, and its renderer, GPU and
-/// utility processes are the browser's children.
+/// utility processes are the browser's children. Without any, the app's sums
+/// are `None` (R52).
 fn sum(app: u32, procs: &[Proc], machine: &Machine) -> SpikeMetrics {
+    let joins = |p: &Proc, members: &[u32]| {
+        !members.contains(&p.pid)
+            && p.name.eq_ignore_ascii_case(WEBVIEW2)
+            && p.parent.is_some_and(|parent| members.contains(&parent))
+    };
     let mut members = vec![app];
-    loop {
-        let found: Vec<u32> = procs
-            .iter()
-            .filter(|p| {
-                !members.contains(&p.pid)
-                    && p.name.eq_ignore_ascii_case(WEBVIEW2)
-                    && p.parent.is_some_and(|parent| members.contains(&parent))
-            })
-            .map(|p| p.pid)
-            .collect();
-        if found.is_empty() {
-            break;
-        }
-        members.extend(found);
+    while let Some(p) = procs.iter().find(|p| joins(p, &members)) {
+        members.push(p.pid);
     }
     let counted: Vec<&Proc> = procs.iter().filter(|p| members.contains(&p.pid)).collect();
-    let cpu_pct: f32 = counted.iter().map(|p| p.cpu_pct).sum();
-    let rss_bytes: u64 = counted.iter().map(|p| p.rss_bytes).sum();
-    let private_bytes: u64 = counted.iter().map(|p| p.private_bytes).sum();
+    let found = members.len() > 1;
+    let total = |f: fn(&Proc) -> f32| found.then(|| counted.iter().copied().map(f).sum::<f32>());
     SpikeMetrics {
         cpu_pct_total: machine.cpu_pct_total,
-        cpu_pct_app: cpu_pct / machine.cpus.max(1) as f32,
-        rss_mb: rss_bytes as f32 / MIB,
-        private_mb: private_bytes as f32 / MIB,
+        cpu_pct_app: total(|p| p.cpu_pct).map(|cpu| cpu / machine.cpus.max(1) as f32),
+        rss_mb: total(|p| p.rss_bytes as f32 / MIB),
+        private_mb: total(|p| p.private_bytes as f32 / MIB),
         webview2_procs: u32::try_from(members.len() - 1).unwrap_or(u32::MAX),
         cpu_model: machine.cpu_model.clone(),
         gpu: machine.gpu.clone(),
@@ -127,14 +127,13 @@ impl Sampler {
         let cpus = CpuRefreshKind::nothing().with_cpu_usage();
         let mut system = System::new_with_specifics(RefreshKind::nothing().with_cpu(cpus));
         refresh(&mut system);
-        let cpu_model = system
-            .cpus()
-            .first()
-            .map(|cpu| cpu.brand().trim().to_owned());
         let machine = Machine {
             cpus: system.cpus().len(),
             cpu_pct_total: system.global_cpu_usage(),
-            cpu_model: cpu_model.unwrap_or_default(),
+            cpu_model: system
+                .cpus()
+                .first()
+                .map_or(String::new(), |c| c.brand().trim().to_owned()),
             gpu: gpu_names(),
             os: System::long_os_version().unwrap_or_default(),
             webview: tauri::webview_version().unwrap_or_default(),
@@ -203,12 +202,9 @@ fn gpu_names() -> String {
         if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0.cast_unsigned() != 0 {
             continue;
         }
-        let end = desc
-            .Description
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(desc.Description.len());
-        names.push(String::from_utf16_lossy(&desc.Description[..end]));
+        // The name ends at the first NUL.
+        let name = desc.Description.split(|&c| c == 0).next();
+        names.push(String::from_utf16_lossy(name.unwrap_or_default()));
     }
     names.join(", ")
 }
@@ -272,10 +268,10 @@ mod tests {
             SpikeMetrics {
                 cpu_pct_total: 37.5,
                 // (5 + 10 + 20 + 4) % of one CPU, over 4 CPUs.
-                cpu_pct_app: 9.75,
-                rss_mb: 380.0,
+                cpu_pct_app: Some(9.75),
+                rss_mb: Some(380.0),
                 // 30 + 40 + 150 + 10 MiB.
-                private_mb: 230.0,
+                private_mb: Some(230.0),
                 webview2_procs: 3,
                 cpu_model: "Intel(R) Core(TM) i5-12400".to_owned(),
                 gpu: "Intel(R) UHD Graphics 730".to_owned(),
@@ -283,5 +279,15 @@ mod tests {
                 webview: "154.0.4258.62".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn without_webview2_the_app_sums_are_na() {
+        // A second instance: the WebView2 processes run under the first one (R52).
+        let app = proc(100, Some(40), "ipcam-desktop.exe", 5.0, 50, 30);
+        let first = proc(200, Some(90), "msedgewebview2.exe", 10.0, 100, 40);
+        let metrics = sum(100, &[app, first], &Machine::default());
+        let sums = (metrics.cpu_pct_app, metrics.rss_mb, metrics.private_mb);
+        assert_eq!((sums, metrics.webview2_procs), ((None, None, None), 0));
     }
 }

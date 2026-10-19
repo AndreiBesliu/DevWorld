@@ -10,13 +10,16 @@ import type { NativeMetrics, SpikeNative } from './native';
 export interface TauriMetrics {
   /** The whole machine, 0–100. */
   cpu_pct_total: number;
-  /** The app process and its WebView2 processes, as a share of the whole machine, 0–100. */
-  cpu_pct_app: number;
+  /**
+   * The app process and its WebView2 processes, as a share of the whole machine, 0–100. This and the
+   * other two sums are null when the shell finds no WebView2 process under the app (R52).
+   */
+  cpu_pct_app: number | null;
   /** Their resident memory (working sets), MiB, in which a page that several processes share counts in each. */
-  rss_mb: number;
+  rss_mb: number | null;
   /** Their private bytes (commit charge), MiB: the page's memMb (R37). */
-  private_mb: number;
-  /** How many WebView2 processes the sums include. The page has no field for it. */
+  private_mb: number | null;
+  /** How many WebView2 processes the sums include: the page's webview2Procs. */
   webview2_procs: number;
   /** The CPU's brand string; empty when the shell cannot tell. */
   cpu_model: string;
@@ -41,14 +44,15 @@ export interface TauriInstallDeps {
 /**
  * The command's answer as NativeMetrics: memory is the private bytes, the CPU
  * brand is the model of the PC, the runtime version reads "WebView2 <version>",
- * and an empty name is left out.
+ * a null sum (no WebView2 process, R52) and an empty name are left out (n/a).
  */
 function toNativeMetrics(answer: TauriMetrics): NativeMetrics {
-  const { cpu_pct_total, cpu_pct_app, private_mb, cpu_model, gpu, os, webview } = answer;
+  const { cpu_pct_total, cpu_pct_app, private_mb, webview2_procs, cpu_model, gpu, os, webview } = answer;
   return {
     cpuPctTotal: cpu_pct_total,
-    cpuPctApp: cpu_pct_app,
-    memMb: private_mb,
+    ...(cpu_pct_app === null ? {} : { cpuPctApp: cpu_pct_app }),
+    ...(private_mb === null ? {} : { memMb: private_mb }),
+    webview2Procs: webview2_procs,
     ...(cpu_model ? { model: cpu_model } : {}),
     ...(gpu ? { gpu } : {}),
     ...(os ? { os } : {}),

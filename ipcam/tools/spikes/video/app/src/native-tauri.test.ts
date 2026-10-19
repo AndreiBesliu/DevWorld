@@ -29,6 +29,7 @@ describe('installTauriNative', () => {
       cpuPctApp: 4.25,
       // Private bytes, not the working sets (R37).
       memMb: 301.25,
+      webview2Procs: 5,
       model: 'Intel(R) Core(TM) i5-12400',
       gpu: 'Intel(R) UHD Graphics 730',
       os: 'Windows 11 Pro',
@@ -51,7 +52,32 @@ describe('installTauriNative', () => {
 
     installTauriNative({ tauri: true, invoke, target });
 
-    await expect(target.spikeNative?.metrics()).resolves.toEqual({ cpuPctTotal: 12.5, cpuPctApp: 4.25, memMb: 301.25 });
+    await expect(target.spikeNative?.metrics()).resolves.toEqual({
+      cpuPctTotal: 12.5,
+      cpuPctApp: 4.25,
+      memMb: 301.25,
+      webview2Procs: 5,
+    });
+  });
+
+  it('nativeTauri_noWebView2Process_appSumsAreNa', async () => {
+    // R52: without a WebView2 process the shell's sums would cover the app process alone, so it sends null
+    // (n/a) for them, and the page records no cpuPctApp or memMb, only that it counted 0 WebView2 processes.
+    const invoke = vi.fn<TauriInstallDeps['invoke']>(() =>
+      Promise.resolve({ ...WIN1, cpu_pct_app: null, rss_mb: null, private_mb: null, webview2_procs: 0 }),
+    );
+    const target: { spikeNative?: SpikeNative } = {};
+
+    installTauriNative({ tauri: true, invoke, target });
+
+    await expect(target.spikeNative?.metrics()).resolves.toEqual({
+      cpuPctTotal: 12.5,
+      webview2Procs: 0,
+      model: 'Intel(R) Core(TM) i5-12400',
+      gpu: 'Intel(R) UHD Graphics 730',
+      os: 'Windows 11 Pro',
+      webview: 'WebView2 154.0.4258.62',
+    });
   });
 
   it('nativeTauri_outsideTauri_installsNothing', () => {

@@ -12,7 +12,13 @@
 # not interrupted, comes from platform windows-tauri, has 20 first-frame
 # samples and names the CPU (the model comes from the shell's spike_metrics
 # command), and when that command, asked through WebView2's DevTools port,
-# counts at least one WebView2 process.
+# counts at least one WebView2 process, reports the app's memory and names the
+# OS and the WebView2 Runtime.
+#
+# Then it checks that the app is single-instance (R52): it starts the app,
+# minimizes its window and starts it again. After 5 s the second start must
+# have ended with exit code 0, the first must be the only app process, and its
+# window must no longer be minimized (the first instance restored it).
 #
 # The DevTools port is opened by the machine policy AdditionalBrowserArguments
 # for the app's executable, which the script writes. The runner's processes are
@@ -20,7 +26,8 @@
 # WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS and per-user policies in an elevated
 # process (WebView2Feedback issue 5645). The script creates the policy's keys
 # only where they are missing, so an existing key keeps its values, and removes
-# its own value when it ends, also after an error.
+# its own value when it ends, also after an error, and warns when the value is
+# still there afterwards.
 #
 # On failure it prints the cause as check annotations, which can be read where
 # the job log cannot.
@@ -57,6 +64,9 @@ $Work = (New-Item -ItemType Directory -Force -Path $Work).FullName
 $results = (New-Item -ItemType Directory -Force -Path (Join-Path $Work 'results')).FullName
 $hubOut = Join-Path $Work 'spikehub.out.log'
 $hubLog = Join-Path $Work 'spikehub.log'
+# The app's process name and the title of its window (main.rs).
+$appName = [IO.Path]::GetFileNameWithoutExtension($App)
+$windowTitle = 'Proba ipcam'
 
 # Prints $Text as one annotation of level $Level (error, notice) titled $Title.
 # GitHub shows about 4000 characters of an annotation: keep the first 3300.
@@ -121,14 +131,16 @@ function Get-ResultProblem($Result) {
   $null
 }
 
-# What is wrong with the shell's metrics in the page state, or $null.
+# What is wrong with the shell's metrics in the page state, or $null. A field
+# that is missing or null (n/a) fails like a 0 or an empty name.
 function Get-MetricsProblem([string] $Page) {
   try { $metrics = Get-Field ($Page | ConvertFrom-Json) 'metrics' } catch { return "no page state: $Page" }
   if (Get-Field $metrics 'error') { return "spike_metrics failed: $(Get-Field $metrics 'error')" }
-  if ((Get-Field $metrics 'webview2_procs') -lt 1) { return "spike_metrics counts no WebView2 process: $($metrics | ConvertTo-Json -Compress)" }
-  if ((Get-Field $metrics 'rss_mb') -le 0 -or (Get-Field $metrics 'private_mb') -le 0) {
-    return "spike_metrics reports no memory: $($metrics | ConvertTo-Json -Compress)"
-  }
+  $json = $metrics | ConvertTo-Json -Compress
+  if ((Get-Field $metrics 'webview2_procs') -lt 1) { return "spike_metrics counts no WebView2 process: $json" }
+  if ((Get-Field $metrics 'rss_mb') -le 0 -or (Get-Field $metrics 'private_mb') -le 0) { return "spike_metrics reports no memory: $json" }
+  if (-not (Get-Field $metrics 'os')) { return "spike_metrics names no OS: $json" }
+  if (-not (Get-Field $metrics 'webview')) { return "spike_metrics names no WebView2 Runtime: $json" }
   $null
 }
 
@@ -139,6 +151,12 @@ function Stop-App($Process) {
   if (-not $Process.HasExited) {
     $closing = $Process.CloseMainWindow()
     if (-not ($closing -and $Process.WaitForExit(15000))) {
+      # The single-instance plugin keeps a hidden window of its own: name the window that was closed.
+      $why = if (-not $closing) { 'has no main window to close' } else {
+        $title = try { $Process.MainWindowTitle } catch { '?' }
+        "did not end within 15 s of closing its main window «$title»"
+      }
+      Write-Annotation warning 'windows app close' "the app (pid $($Process.Id)) $why, so it was killed"
       $Process.Kill($true)
       $null = $Process.WaitForExit(10000)
     }
@@ -205,6 +223,58 @@ function Test-Start([string] $Label, [int] $Index) {
   $true
 }
 
+# R52: starts the app, minimizes its window, starts the app again and checks,
+# 5 s later, that the second start ended with exit code 0, that the first is
+# the only app process left, and that its window is no longer minimized.
+# Returns $null, or what is wrong and a diagnosis.
+function Test-SingleInstance {
+  Add-Type -Namespace IpcamSmoke -Name User32 -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string className, string windowName);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
+'@
+  $logs = @('first', 'second' | ForEach-Object { Join-Path $Work "app-single-$_.err.log" })
+  $first = Start-Process -FilePath $App -RedirectStandardOutput (Join-Path $Work 'app-single-first.out.log') `
+    -RedirectStandardError $logs[0] -PassThru
+  $null = $first.Handle
+  $second = $null
+  try {
+    # The first instance's window, found by its title and owned by its process.
+    $deadline = (Get-Date).AddSeconds(60)
+    $window = [IntPtr]::Zero
+    while ($window -eq [IntPtr]::Zero) {
+      if ($first.HasExited) { return "the first start ended with exit code $($first.ExitCode) before its window opened" }
+      if ((Get-Date) -ge $deadline) { return "the first start opened no window «$windowTitle» within 60 s" }
+      Start-Sleep -Seconds 1
+      # [NullString]: PowerShell would pass $null to a string parameter as "".
+      $found = [IpcamSmoke.User32]::FindWindow([NullString]::Value, $windowTitle)
+      $owner = [uint32] 0
+      $null = [IpcamSmoke.User32]::GetWindowThreadProcessId($found, [ref] $owner)
+      if ($found -ne [IntPtr]::Zero -and $owner -eq $first.Id) { $window = $found }
+    }
+    $null = [IpcamSmoke.User32]::ShowWindow($window, 6) # SW_MINIMIZE
+    if (-not [IpcamSmoke.User32]::IsIconic($window)) { return 'the window of the first start could not be minimized' }
+    $second = Start-Process -FilePath $App -RedirectStandardOutput (Join-Path $Work 'app-single-second.out.log') `
+      -RedirectStandardError $logs[1] -PassThru
+    $null = $second.Handle
+    Start-Sleep -Seconds 5
+    $running = @(Get-Process -Name $appName -ErrorAction SilentlyContinue | ForEach-Object Id)
+    $state = "app processes after 5 s: $(if ($running) { $running -join ', ' } else { 'none' }) (first $($first.Id), second $($second.Id))"
+    $problem = if (-not $second.HasExited) { "the second start still runs; $state" }
+    elseif ($second.ExitCode -ne 0) { "the second start ended with exit code $($second.ExitCode); $state" }
+    elseif ($running.Count -ne 1 -or $running[0] -ne $first.Id) { "the first start is not the only app process; $state" }
+    elseif ([IpcamSmoke.User32]::IsIconic($window)) { "the first start's window is still minimized: the second start did not restore it; $state" }
+    if ($problem) { return "$problem`napp stderr, first start:`n$(Get-Tail $logs[0] 8)`napp stderr, second start:`n$(Get-Tail $logs[1] 8)" }
+    Write-Annotation notice 'windows single instance' "the second start ended with exit code 0 and restored the first start's window; $state"
+    $null
+  } finally {
+    # Stop-App also waits for the WebView2 processes, which a second start that ended does not have.
+    if ($second -and -not $second.HasExited) { Stop-App $second }
+    Stop-App $first
+  }
+}
+
 $hubProcess = Start-Process -FilePath $Hub -ArgumentList '-sims', '4', '-media', $Media, '-results', $results `
   -RedirectStandardOutput $hubOut -RedirectStandardError $hubLog -PassThru
 $hubDeadline = (Get-Date).AddSeconds(30)
@@ -239,13 +309,19 @@ try {
   }
 } finally {
   Remove-ItemProperty -LiteralPath $argumentsPolicy -Name $policyValue -ErrorAction SilentlyContinue
+  # The value opens a DevTools port for the app: say so if it is still there.
+  if ($null -ne (Get-ItemProperty -LiteralPath $argumentsPolicy -Name $policyValue -ErrorAction SilentlyContinue)) {
+    Write-Annotation warning 'windows policy' "the policy value $policyValue is still set under $argumentsPolicy after Remove-ItemProperty"
+  }
   Stop-Process -Id $hubProcess.Id -ErrorAction SilentlyContinue
 }
+try { $singleProblem = Test-SingleInstance } catch { $singleProblem = "the check could not run: $_" }
 
 $summary = if ($failures) { "$failures of $Starts starts failed" } else { "all $Starts starts stored S1 with 20 samples" }
-if ($env:GITHUB_STEP_SUMMARY) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Windows smoke test (WIN-2): $summary" }
-if ($failures) {
-  Write-Annotation error 'windows S1' $summary
-  exit 1
+$single = if ($singleProblem) { 'failed' } else { 'a second start restored the first window and ended' }
+if ($env:GITHUB_STEP_SUMMARY) {
+  Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Windows smoke test (WIN-2): $summary; single instance (R52): $single"
 }
-Write-Annotation notice 'windows S1' $summary
+if ($singleProblem) { Write-Annotation error 'windows single instance' $singleProblem }
+Write-Annotation $(if ($failures) { 'error' } else { 'notice' }) 'windows S1' $summary
+if ($failures -or $singleProblem) { exit 1 }
