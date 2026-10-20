@@ -278,6 +278,91 @@ func TestReconcile_NewestFinalFileTorn_RepairedLikePart(t *testing.T) {
 	}
 }
 
+// TestReconcile_StalePartOlderThanAFinalSegment_GapEndsThere (G07): a .part
+// that an earlier MediaMTX left behind, older than a final segment of the
+// same stream, is repaired, and its restart gap ends where that segment
+// starts, when recording had resumed, not at the first part after this
+// start. Only the newest .part's gap stays open.
+func TestReconcile_StalePartOlderThanAFinalSegment_GapEndsThere(t *testing.T) {
+	recDir, cat := t.TempDir(), openCatalog(t)
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000, 1000}})
+	stale := segPath(recDir, "cam1", "main", t0, ".part")
+	writeFile(t, stale, f.data[:f.partStart[3]+10])
+	later := t0.Add(5 * time.Minute)
+	writeFile(t, segPath(recDir, "cam1", "main", later, ""), f.data)
+	newest := t0.Add(10 * time.Minute)
+	writeFile(t, segPath(recDir, "cam1", "main", newest, ".part"), f.data[:f.sampleEnd[1][9]])
+
+	report, err := Reconcile(t.Context(), recDir, nil, cat)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if report != (ReconcileReport{Finalized: 2, Truncated: 2, LostTails: 2, GapsWritten: 2}) {
+		t.Errorf("report %+v", report)
+	}
+	final := strings.TrimSuffix(stale, ".part")
+	requireMissing(t, stale)
+	requireParts(t, parseRecording(t, readFile(t, final)), f, []int{20, 20, 20})
+	requireRow(t, cat, relSeg("cam1", "main", t0, ""), t0.UnixMilli(), t0.UnixMilli()+3000, false, final)
+	requireGaps(t, cat, []catalog.Gap{
+		{Cam: "cam1", Profile: "main", StartMs: t0.UnixMilli() + 3000, EndMs: later.UnixMilli(), Reason: catalog.GapRestart},
+		{Cam: "cam1", Profile: "main", StartMs: newest.UnixMilli() + 1500, Reason: catalog.GapRestart},
+	})
+}
+
+// TestReconcile_CompleteNewestAgeIsNotReadAtStartup (§4.5, MI2): the newest
+// final .mp4.age of a stream that ends in its final chunk is complete, so the
+// startup reconcile, which runs before MediaMTX starts, reads no more of it
+// than OpenTorn's scan authenticates. A chunk in its middle that does not
+// authenticate is neither read nor reported: walking its parts would decrypt
+// a chunk per part (about 20 MB per 5-min segment) on the resume path, and
+// would count the file as lost toward HUB-09's abort. The background
+// verification reads it whole and reports it.
+func TestReconcile_CompleteNewestAgeIsNotReadAtStartup(t *testing.T) {
+	recDir, cat := t.TempDir(), openCatalog(t)
+	scope, riG, _ := newTestScope(t)
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}, align: true})
+	file := encryptFMP4(t, f.data, scope, nil, false)
+	if f.partStart[1] != crypto.ChunkSize || len(f.data) != 3*crypto.ChunkSize {
+		t.Fatalf("the test recording's layout moved: part 1 at %d, %d bytes", f.partStart[1], len(f.data))
+	}
+	// A byte of chunk 1, which holds part 1's moof, flipped.
+	file[len(headerOf(t, file))+16+crypto.ChunkSize+16+100] ^= 0xff
+	final := segPath(recDir, "cam1", "main", t0, ".age")
+	writeFile(t, final, file)
+	// Its hook gave it its row, as it gives every segment that closed.
+	rel, start := relSeg("cam1", "main", t0, ".age"), t0.UnixMilli()
+	if err := cat.PutSegment(t.Context(), catalog.Segment{Cam: "cam1", Profile: "main", Path: rel, StartMs: start, EndMs: start + 3000,
+		Bytes: int64(len(file)), Encrypted: true, State: catalog.StateComplete}); err != nil {
+		t.Fatal(err)
+	}
+	row := rowByPath(t, cat)[rel]
+
+	report, err := Reconcile(t.Context(), recDir, crypto.NewTailSealer(riG), cat)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if report != (ReconcileReport{}) {
+		t.Errorf("report %+v, want nothing: a complete file is not read at startup", report)
+	}
+	if !bytes.Equal(readFile(t, final), file) {
+		t.Error("reconcile changed a complete file")
+	}
+	if got := rowByPath(t, cat)[rel]; got != row {
+		t.Errorf("row %+v after reconcile, want %+v", got, row)
+	}
+	requireGaps(t, cat, nil)
+
+	v := &verifier{recDir: recDir, cat: cat, recording: crypto.NewRecording(riG), obs: &testObserver{}}
+	vr, err := v.pass(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vr.Unreadable != 1 || vr.TornParts != 0 || vr.CatalogMismatches != 0 {
+		t.Errorf("verification %+v, want the corrupt chunk found: 1 unreadable", vr)
+	}
+}
+
 // TestReconcile_OverHalfLost_Aborts (HUB-09): when more than half of the
 // segments would be lost, here 3 unreadable .part files of 5, reconcile
 // changes nothing and reports Aborted.
@@ -685,4 +770,130 @@ func TestReconcile_AfterTheHubIsKilled(t *testing.T) {
 		t.Errorf("gaps %+v, want one restart gap per stream", gaps)
 	}
 	t.Logf("reconcile %+v", report)
+}
+
+// killChild kills the recorder's MediaMTX child.
+func killChild(t *testing.T, r *rec) {
+	t.Helper()
+	pid := r.childPID()
+	if pid == 0 {
+		t.Fatal("no child runs")
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Kill(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func reportNow(r *rec) ReconcileReport {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.report
+}
+
+// TestRecorder_RepairsTheDeadChildsPartsWhileTheHubRuns (§4.5, G07): when
+// the MediaMTX child dies while the hub runs, the .part files it left are
+// repaired in the background once it is gone, as reconcile repairs them at
+// startup (final name, catalog row, restart gap), without waiting for the
+// next hub start. The gap ends where recording resumed, at the restarted
+// child's first part. A .part that the startup reconcile could not read is
+// left as it is and not counted again.
+func TestRecorder_RepairsTheDeadChildsPartsWhileTheHubRuns(t *testing.T) {
+	recDir := filepath.Join(t.TempDir(), "rec")
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000, 1000}})
+	writeFile(t, segPath(recDir, "cam2", "main", t0, ""), f.data)
+	garbage := bytes.Repeat([]byte("not an fMP4 file "), 300)
+	unreadable := segPath(recDir, "cam3", "main", t0, ".part")
+	writeFile(t, unreadable, garbage)
+	obs := &testObserver{}
+	r, cfg := startFake(t, "sleep", Config{RecDir: recDir, Observer: obs})
+	if rep := reportNow(r); rep != (ReconcileReport{Unreadable: 1}) {
+		t.Fatalf("startup report %+v, want 1 unreadable", rep)
+	}
+	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The child writes a segment and dies in its fourth part.
+	deadStart := time.Now().Add(-10 * time.Second)
+	dead := segPath(recDir, "cam1", "main", deadStart, ".part")
+	writeFile(t, dead, f.data[:f.partStart[3]+10])
+	killChild(t, r)
+	waitFor(t, 10*time.Second, "the child was not started again", func() bool { return len(obs.snapshot().restarts) >= 1 })
+	// The new child starts a segment.
+	nextStart := time.Now()
+	next := segPath(recDir, "cam1", "main", nextStart, ".part")
+	writeFile(t, next, make([]byte, 100))
+
+	deadMs := deadStart.UnixMilli()
+	want := []catalog.Gap{{Cam: "cam1", Profile: "main", StartMs: deadMs + 3000, EndMs: nextStart.UnixMilli(), Reason: catalog.GapRestart}}
+	waitFor(t, 10*time.Second, "the dead child's .part has no restart gap that ends at the new segment", func() bool {
+		gaps, err := cfg.Catalog.Gaps(t.Context())
+		return err == nil && slices.Equal(gaps, want)
+	})
+	final := strings.TrimSuffix(dead, ".part")
+	requireMissing(t, dead)
+	requireParts(t, parseRecording(t, readFile(t, final)), f, []int{20, 20, 20})
+	requireRow(t, cfg.Catalog, relSeg("cam1", "main", deadStart, ""), deadMs, deadMs+3000, false, final)
+	if !bytes.Equal(readFile(t, unreadable), garbage) {
+		t.Error("the unreadable .part was changed")
+	}
+	if got := readFile(t, next); len(got) != 100 {
+		t.Errorf("the new child's .part has %d bytes, want its 100", len(got))
+	}
+	waitFor(t, 10*time.Second, "no report after the repair", func() bool { return len(obs.snapshot().reports) >= 1 })
+	wantReport := ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 1, GapsWritten: 1, Unreadable: 1}
+	if reps := obs.snapshot().reports; reps[len(reps)-1] != wantReport {
+		t.Errorf("report after the repair %+v, want %+v", reps[len(reps)-1], wantReport)
+	}
+}
+
+// TestRecorder_RepairsAPartLeftBehindWhileTheChildRuns (MTX-1, C1-R9): when
+// a write or an fsync fails, MediaMTX's recorder closes the segment under its
+// .part name and starts again, in the same process, with a new segment. Once
+// that newer .part is there, the older one is no longer written: it is
+// repaired while the child runs, its restart gap ends where the newer
+// segment starts, and a salvage that needs a rewrite gets it. The newer
+// .part is left alone, and the child is not restarted.
+func TestRecorder_RepairsAPartLeftBehindWhileTheChildRuns(t *testing.T) {
+	scope, riG, rk := newTestScope(t)
+	obs := &testObserver{}
+	r, cfg := startFake(t, "sleep", Config{Tail: crypto.NewTailSealer(riG), Recording: crypto.NewRecording(riG), Observer: obs})
+	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", &scope)}); err != nil {
+		t.Fatal(err)
+	}
+
+	f, file := bigTorn(t, scope)
+	leftStart := time.Now().Add(-10 * time.Second)
+	left := segPath(cfg.RecDir, "cam1", "main", leftStart, ".age.part")
+	writeFile(t, left, file)
+	waitFor(t, 10*time.Second, "the .part was not seen", func() bool { return len(obs.snapshot().firsts) >= 1 })
+	newerStart := time.Now()
+	newer := segPath(cfg.RecDir, "cam1", "main", newerStart, ".age.part")
+	newerBytes := []byte("the segment that MediaMTX writes now")
+	writeFile(t, newer, newerBytes)
+
+	waitFor(t, 10*time.Second, "no report after the rewrite", func() bool {
+		reps := obs.snapshot().reports
+		return len(reps) > 0 && reps[len(reps)-1].Rewritten == 1
+	})
+	final := strings.TrimSuffix(left, ".part")
+	leftMs := leftStart.UnixMilli()
+	requireMissing(t, left)
+	requireParts(t, parseRecording(t, decryptAll(t, readFile(t, final), rk)), f, []int{20, 20, 13})
+	requireRow(t, cfg.Catalog, relSeg("cam1", "main", leftStart, ".age"), leftMs, leftMs+2650, true, final)
+	requireGaps(t, cfg.Catalog, []catalog.Gap{{Cam: "cam1", Profile: "main", StartMs: leftMs + 2650, EndMs: newerStart.UnixMilli(), Reason: catalog.GapRestart}})
+	if !bytes.Equal(readFile(t, newer), newerBytes) {
+		t.Error("the .part that MediaMTX writes was changed")
+	}
+	wantReport := ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 1, GapsWritten: 1, Rewritten: 1}
+	if reps := obs.snapshot().reports; reps[len(reps)-1] != wantReport {
+		t.Errorf("report after the rewrite %+v, want %+v", reps[len(reps)-1], wantReport)
+	}
+	if n := len(obs.snapshot().restarts); n != 0 {
+		t.Errorf("the child was started again %d times", n)
+	}
 }

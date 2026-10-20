@@ -147,7 +147,9 @@ func (rp *repair) needed() bool {
 //     its last complete part, and New rewrites the salvage in the background
 //     (C1-R9; Reconcile alone leaves the cut file). A file with its final
 //     chunk is never resealed or rewritten;
-//   - each lost tail is an open restart gap;
+//   - each lost tail is a restart gap, which ends where the stream's next
+//     segment starts, or stays open when there is none: the first part
+//     after the start closes it;
 //   - the catalog is made to match the files.
 //
 // When more than half of the segments would be lost, it changes nothing
@@ -207,7 +209,10 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 		}
 		durations[rp.seg.final()] = durationMs
 		if rp.seg.part || rp.salvage.cut {
-			g := catalog.Gap{Cam: string(rp.seg.key.cam), Profile: string(rp.seg.key.profile), StartMs: rp.seg.start.UnixMilli() + durationMs, Reason: catalog.GapRestart}
+			// A .part that an earlier MediaMTX left, older than other
+			// segments of its stream, has a gap that ended when the next
+			// one started.
+			g := restartGap(rp.seg, durationMs, nextStartMs(segs, rp.seg))
 			if err := cat.PutGap(ctx, g); err != nil {
 				return report, nil, nil, err
 			}
@@ -221,6 +226,32 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 		return report, nil, nil, err
 	}
 	return report, pending, gaps, nil
+}
+
+// restartGap is the gap after the lost tail of s, whose file now holds
+// durationMs: it ends at nextMs, where the stream's next segment starts, or
+// stays open when nextMs is 0 (the first part after a restart closes it).
+func restartGap(s segFile, durationMs, nextMs int64) catalog.Gap {
+	g := catalog.Gap{Cam: string(s.key.cam), Profile: string(s.key.profile), StartMs: s.start.UnixMilli() + durationMs, Reason: catalog.GapRestart}
+	if nextMs != 0 {
+		g.EndMs = max(nextMs, g.StartMs)
+	}
+	return g
+}
+
+// nextStartMs returns the start, in ms, of the first of segs that belongs
+// to the stream of s and starts after it, or 0 when there is none.
+func nextStartMs(segs []segFile, s segFile) int64 {
+	var next time.Time
+	for _, o := range segs {
+		if o.key == s.key && o.start.After(s.start) && (next.IsZero() || o.start.Before(next)) {
+			next = o.start
+		}
+	}
+	if next.IsZero() {
+		return 0
+	}
+	return next.UnixMilli()
 }
 
 // planRepairs opens and reads, without changing them, every .part and the
@@ -277,6 +308,15 @@ func planRepair(ctx context.Context, s segFile, tail crypto.TailSealer) (*repair
 			return rp, nil
 		}
 		rp.torn, rp.complete = torn, torn.Complete()
+		if rp.complete && !s.part {
+			// A final file that ends in its final chunk needs no repair, and
+			// is read no further than OpenTorn's scan, which authenticated
+			// that chunk: walking its parts would decrypt a chunk per part on
+			// the synchronous path before MediaMTX starts. The background
+			// verification reads it whole. A complete .part is still walked:
+			// its duration is its row's end and its restart gap's start.
+			return rp, nil
+		}
 		data, size = torn, torn.DurableSize()
 	}
 	rec, err := walk(data, size)
@@ -392,6 +432,163 @@ func (rp *repair) apply(ctx context.Context, report *ReconcileReport) (int64, *p
 		report.Finalized++
 	}
 	return durationMs, pending, nil
+}
+
+// leftParts lists the .part files in the three newest date directories of
+// every stream under recDir. Once the child has exited, none of them is
+// written.
+func leftParts(recDir string) []string {
+	cams, err := os.ReadDir(recDir)
+	if err != nil {
+		return nil
+	}
+	var parts []string
+	for _, cam := range cams {
+		if !cam.IsDir() {
+			continue
+		}
+		for _, p := range []Profile{ProfileMain, ProfileSub} {
+			parts = append(parts, partFiles(filepath.Join(recDir, cam.Name(), string(p)))...)
+		}
+	}
+	return parts
+}
+
+// streamSegments lists the segment files in the three newest date
+// directories of the stream k.
+func streamSegments(recDir string, k streamKey) []segFile {
+	var segs []segFile
+	for _, path := range recentFiles(filepath.Join(recDir, string(k.cam), string(k.profile))) {
+		if rel, err := filepath.Rel(recDir, path); err == nil {
+			if s, ok := parseSegment(recDir, rel); ok {
+				segs = append(segs, s)
+			}
+		}
+	}
+	return segs
+}
+
+// repairParts repairs, while the hub runs, the .part files that MediaMTX
+// left and no longer writes: those of a child that exited, and one that a
+// recorder left when a failed write or fsync made it start again in the
+// same process (MTX-1). Each is repaired as Reconcile repairs a .part at
+// startup, without its abort, which judges a start (HUB-09): it keeps its
+// complete parts and the whole samples of a torn last one, gets its final
+// name, a catalog row and a restart gap that ends where the stream's next
+// segment starts, and a salvage that changes bytes before its last kept
+// chunk gets the background rewrite (C1-R9). Without this, such a file
+// would wait for the next hub start, outside the catalog, and its gap
+// would then be closed by the first part after that start. The report
+// adds what was done and goes to ReconcileObserver; verification follows.
+func (r *rec) repairParts(ctx context.Context, paths []string) {
+	var segs []segFile
+	for _, path := range paths {
+		if rel, err := filepath.Rel(r.cfg.RecDir, path); err == nil {
+			if s, ok := parseSegment(r.cfg.RecDir, rel); ok && s.part {
+				segs = append(segs, s)
+			}
+		}
+	}
+	// The oldest first, so that the next segment, where a gap ends, is still
+	// there under the name it started with.
+	slices.SortFunc(segs, func(a, b segFile) int { return a.start.Compare(b.start) })
+	var report ReconcileReport
+	var pending []*pendingRewrite
+	for _, s := range segs {
+		if ctx.Err() != nil {
+			break
+		}
+		if _, err := os.Lstat(s.abs); errors.Is(err, fs.ErrNotExist) {
+			r.forgetPart(s.abs) // repaired already
+			continue
+		}
+		// A repair that has begun is finished, also when the hub stops: a
+		// file renamed without its row and gap would lose the gap.
+		p, err := r.repairPart(context.WithoutCancel(ctx), s, &report)
+		if p != nil {
+			pending = append(pending, p)
+		}
+		if err != nil {
+			r.notifyError(fmt.Errorf("recorder: repair %s: %w", s.rel, err))
+		}
+		if _, err := os.Lstat(s.abs); errors.Is(err, fs.ErrNotExist) {
+			// It has its final name, or was empty: no listing gives it again.
+			// One that is still there stays tried, until the next start.
+			r.forgetPart(s.abs)
+		}
+	}
+	if report == (ReconcileReport{}) && pending == nil {
+		return
+	}
+	r.mu.Lock()
+	r.report.Finalized += report.Finalized
+	r.report.Truncated += report.Truncated
+	r.report.LostTails += report.LostTails
+	r.report.GapsWritten += report.GapsWritten
+	r.report.Unreadable += report.Unreadable
+	r.pending = append(r.pending, pending...)
+	full := r.report
+	r.mu.Unlock()
+	if o, ok := r.obs.(ReconcileObserver); ok {
+		o.Reconciled(full)
+	}
+	r.kickVerify()
+	select {
+	case r.jobsKick <- struct{}{}:
+	default:
+	}
+}
+
+// repairPart repairs one .part for repairParts, and returns the rewrite
+// that its salvage still needs.
+func (r *rec) repairPart(ctx context.Context, s segFile, report *ReconcileReport) (*pendingRewrite, error) {
+	rel := s.finalRel()
+	r.setBusy(rel, true) // verification leaves it until its row is there
+	defer r.setBusy(rel, false)
+	rp, err := planRepair(ctx, s, r.cfg.Tail)
+	if rp != nil {
+		defer func() {
+			if rp.f != nil {
+				_ = rp.f.Close()
+			}
+		}()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if rp.unreadable {
+		report.Unreadable++
+		return nil, nil
+	}
+	durationMs, pending, err := rp.apply(ctx, report)
+	if err != nil {
+		return nil, err
+	}
+	if removed := !rp.complete && rp.salvage.empty; !removed {
+		info, err := os.Stat(s.final())
+		if err != nil {
+			return pending, err
+		}
+		start, k := s.start.UnixMilli(), s.key
+		if err := r.cfg.Catalog.PutSegment(ctx, catalog.Segment{Cam: string(k.cam), Profile: string(k.profile), Path: rel,
+			StartMs: start, EndMs: start + durationMs, Bytes: info.Size(), Encrypted: s.encrypted, State: catalog.StateComplete}); err != nil {
+			return pending, err
+		}
+	}
+	// The gap ends where the stream's next segment starts when that segment
+	// is there; otherwise the stream's first part closes it. gapMu keeps that
+	// first part from closing the stream's gaps between the two steps.
+	r.gapMu.Lock()
+	g := restartGap(s, durationMs, nextStartMs(streamSegments(r.cfg.RecDir, s.key), s))
+	err = r.cfg.Catalog.PutGap(ctx, g)
+	r.gapMu.Unlock()
+	if err != nil {
+		return pending, err
+	}
+	r.notifyGap(g)
+	report.LostTails++
+	report.GapsWritten++
+	return pending, nil
 }
 
 // reconcileCatalog makes the catalog's rows match the final files (G07):

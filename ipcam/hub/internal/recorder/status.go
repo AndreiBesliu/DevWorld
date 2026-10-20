@@ -21,6 +21,7 @@ type partWatcher struct {
 
 	mu      sync.Mutex
 	streams map[streamKey]*partState
+	polls   uint64 // the polls so far
 }
 
 type partState struct {
@@ -32,6 +33,14 @@ type partState struct {
 	// a dead child's, which do not grow.
 	baseline map[string]bool
 	reported bool // FirstPart was reported since the child started
+	// seen holds the poll that first saw each other .part, which this child
+	// created, and left those that poll reported as left behind.
+	seen map[string]uint64
+	left map[string]bool
+}
+
+func newPartState(baseline map[string]bool) *partState {
+	return &partState{baseline: baseline, seen: map[string]uint64{}, left: map[string]bool{}}
 }
 
 // firstPart is the first growth of a new .part after the child started.
@@ -54,7 +63,7 @@ func (w *partWatcher) setStreams(keys []streamKey) {
 	for _, k := range keys {
 		keep[k] = true
 		if _, ok := w.streams[k]; !ok {
-			w.streams[k] = &partState{baseline: w.partSet(k)}
+			w.streams[k] = newPartState(w.partSet(k))
 		}
 	}
 	for k := range w.streams {
@@ -65,12 +74,15 @@ func (w *partWatcher) setStreams(keys []streamKey) {
 }
 
 // childStarted takes the .part files there now as every stream's
-// baseline: the next new one to grow is the stream's first part.
+// baseline: the next new one to grow is the stream's first part. The
+// supervisor calls it just before it starts a child, so every file in the
+// baseline is one that no child writes.
 func (w *partWatcher) childStarted(time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for k, s := range w.streams {
 		s.baseline, s.reported = w.partSet(k), false
+		s.seen, s.left = map[string]uint64{}, map[string]bool{}
 	}
 }
 
@@ -83,13 +95,16 @@ func (w *partWatcher) segmentClosed(k streamKey, at time.Time) {
 }
 
 // poll reads the size of each stream's newest .part and returns the
-// streams whose first part this is.
-func (w *partWatcher) poll(now time.Time) []firstPart {
+// streams whose first part this is, and the .part files that a newer one
+// left behind (leftBehind).
+func (w *partWatcher) poll(now time.Time) (firsts []firstPart, left []string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	var firsts []firstPart
+	w.polls++
 	for k, s := range w.streams {
-		path, size, ok := newestPart(w.streamDir(k))
+		parts := partFiles(w.streamDir(k))
+		left = append(left, s.leftBehind(parts, w.polls)...)
+		path, size, ok := newestOf(parts)
 		if !ok {
 			continue
 		}
@@ -108,7 +123,50 @@ func (w *partWatcher) poll(now time.Time) []firstPart {
 			firsts = append(firsts, f)
 		}
 	}
-	return firsts
+	return firsts, left
+}
+
+// leftBehind notes poll n as the first that saw each of parts, the stream's
+// .part files now, and returns, once each, those that this child created
+// and that a newer one left behind: one that a later poll saw first and
+// whose path (date directory and start) sorts later. MediaMTX closes a
+// stream's segment before it creates the stream's next one, also when a
+// failed write or fsync makes its recorder start again in the same process,
+// which leaves the .part (MTX-1), so such a file is no longer written. The
+// names alone would not do: a clock set back names the next segment
+// earlier. Nor would the order of the polls alone: when a newer date
+// directory goes, an older one comes into the three that are listed, and
+// its .part files are seen only then.
+func (s *partState) leftBehind(parts []string, n uint64) []string {
+	listed := map[string]bool{}
+	for _, p := range parts {
+		listed[p] = true
+		if _, ok := s.seen[p]; !ok && !s.baseline[p] {
+			s.seen[p] = n
+		}
+	}
+	var left []string
+	for p, first := range s.seen {
+		if !listed[p] {
+			if _, err := os.Lstat(p); errors.Is(err, fs.ErrNotExist) {
+				delete(s.seen, p) // renamed or removed
+				delete(s.left, p)
+			}
+			continue
+		}
+		if s.left[p] {
+			continue
+		}
+		for q, later := range s.seen {
+			if later > first && listed[q] && q > p {
+				s.left[p] = true
+				left = append(left, p)
+				break
+			}
+		}
+	}
+	slices.Sort(left)
+	return left
 }
 
 // status is the stream's RecStatus at now; Running is the caller's.
@@ -144,11 +202,23 @@ func (w *partWatcher) partSet(k streamKey) map[string]bool {
 // a stream: a segment open at midnight is still in yesterday's, and the
 // recorder creates tomorrow's ahead of time.
 func partFiles(streamDir string) []string {
+	var parts []string
+	for _, path := range recentFiles(streamDir) {
+		if strings.HasSuffix(path, suffixPart) {
+			parts = append(parts, path)
+		}
+	}
+	return parts
+}
+
+// recentFiles lists the entries of the three newest date directories of a
+// stream.
+func recentFiles(streamDir string) []string {
 	days, err := os.ReadDir(streamDir)
 	if err != nil {
 		return nil
 	}
-	var parts []string
+	var files []string
 	for _, day := range days[max(0, len(days)-3):] {
 		if !day.IsDir() {
 			continue
@@ -158,17 +228,19 @@ func partFiles(streamDir string) []string {
 			continue
 		}
 		for _, e := range entries {
-			if strings.HasSuffix(e.Name(), suffixPart) {
-				parts = append(parts, filepath.Join(streamDir, day.Name(), e.Name()))
-			}
+			files = append(files, filepath.Join(streamDir, day.Name(), e.Name()))
 		}
 	}
-	return parts
+	return files
 }
 
 // newestPart returns the stream's newest .part and its size.
 func newestPart(streamDir string) (path string, size int64, ok bool) {
-	parts := partFiles(streamDir)
+	return newestOf(partFiles(streamDir))
+}
+
+// newestOf returns the newest of a stream's .part files and its size.
+func newestOf(parts []string) (path string, size int64, ok bool) {
 	if len(parts) == 0 {
 		return "", 0, false
 	}

@@ -241,10 +241,12 @@ func (db *DB) CloseGap(ctx context.Context, cam, profile string, endMs int64) er
 
 // MoveGapStart moves the start of the stream's gaps that start at fromMs to
 // toMs: reconcile's background rewrite recovers more of a lost tail than
-// its interim file kept (C1-R9).
+// its interim file kept (C1-R9). A closed gap ends no earlier than its new
+// start; an open gap stays open.
 func (db *DB) MoveGapStart(ctx context.Context, cam, profile string, fromMs, toMs int64) error {
-	if _, err := db.sql.ExecContext(ctx, "UPDATE gaps SET start_ms = ? WHERE camera_id = ? AND profile = ? AND start_ms = ?",
-		toMs, cam, profile, fromMs); err != nil {
+	if _, err := db.sql.ExecContext(ctx,
+		"UPDATE gaps SET start_ms = ?, end_ms = CASE WHEN end_ms = 0 THEN 0 ELSE max(end_ms, ?) END WHERE camera_id = ? AND profile = ? AND start_ms = ?",
+		toMs, toMs, cam, profile, fromMs); err != nil {
 		return fmt.Errorf("catalog: move a gap of %s/%s: %w", cam, profile, err)
 	}
 	return nil

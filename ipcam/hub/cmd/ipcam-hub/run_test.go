@@ -161,10 +161,32 @@ func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 	h.next(t, 30*time.Second, "ready event", ofType("ready"))
 	recording := map[string]bool{}
 	closed := map[string]string{} // path → stream
+	// The background verification reports from its own goroutine: a
+	// segment_verified can come before the other stream's first
+	// segment_closed, or before its own, so it is noted whenever it comes.
+	// A verification that finds an unreadable file or a torn part fails the
+	// test at once.
+	verified := map[string]bool{}
+	verification := func(e map[string]any) bool {
+		switch e["type"] {
+		case "segment_verified":
+			verified[e["path"].(string)] = true
+		case "verify":
+			if e["unreadable"] != float64(0) || e["tornParts"] != float64(0) {
+				t.Fatalf("the background verification reported %v", e)
+			}
+		default:
+			return false
+		}
+		return true
+	}
 	for len(closed) < 2 {
 		e := h.next(t, 40*time.Second, "recording and segment_closed events", func(e map[string]any) bool {
-			return e["type"] == "recording" || e["type"] == "segment_closed"
+			return e["type"] == "recording" || e["type"] == "segment_closed" || e["type"] == "segment_verified" || e["type"] == "verify"
 		})
+		if verification(e) {
+			continue
+		}
 		stream := e["cam"].(string) + "/" + e["profile"].(string)
 		switch e["type"] {
 		case "recording":
@@ -179,11 +201,13 @@ func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 			}
 		}
 	}
-	verified := map[string]bool{}
-	for len(verified) < 2 {
-		e := h.next(t, 20*time.Second, "segment_verified events", ofType("segment_verified"))
-		if _, ok := closed[e["path"].(string)]; ok {
-			verified[e["path"].(string)] = true
+	// Later segments keep closing and passing, so the wait has one deadline.
+	deadline := time.Now().Add(30 * time.Second)
+	for path := range closed {
+		for !verified[path] {
+			verification(h.next(t, time.Until(deadline), "segment_verified event of "+path, func(e map[string]any) bool {
+				return e["type"] == "segment_verified" || e["type"] == "verify"
+			}))
 		}
 	}
 	for path, stream := range closed {

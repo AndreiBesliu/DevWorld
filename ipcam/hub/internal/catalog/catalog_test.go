@@ -210,6 +210,24 @@ func TestCatalog_GapsOpenAndClose(t *testing.T) {
 	if !slices.Equal(gaps, want) {
 		t.Errorf("Gaps = %+v, want %+v", gaps, want)
 	}
+	// Moving the start of a closed gap past its end ends it there too; an
+	// open gap stays open.
+	if err := db.MoveGapStart(ctx, "c1", "main", 120, 950); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MoveGapStart(ctx, "c1", "sub", 150, 160); err != nil {
+		t.Fatal(err)
+	}
+	if gaps, err = db.Gaps(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want = []Gap{
+		{Cam: "c1", Profile: "main", StartMs: 950, EndMs: 950, Reason: GapRestart},
+		{Cam: "c1", Profile: "sub", StartMs: 160, EndMs: 0, Reason: GapCard},
+	}
+	if !slices.Equal(gaps, want) {
+		t.Errorf("after the moves, Gaps = %+v, want %+v", gaps, want)
+	}
 	if err := db.PutGap(ctx, Gap{Cam: "c1", Profile: "main", StartMs: 1, Reason: "power"}); err == nil {
 		t.Error("PutGap accepted an unknown reason")
 	}

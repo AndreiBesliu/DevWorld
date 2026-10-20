@@ -87,8 +87,10 @@ type RecStatus struct {
 	Running          bool  // the stream is applied and MediaMTX runs
 }
 
-// ReconcileReport is what reconcile did at startup, or what a background
-// verification found.
+// ReconcileReport is what reconcile did at startup, with what the
+// background rewrites and the repairs of the .part files that MediaMTX
+// left while the hub runs added since (ReconcileObserver), or what a
+// background verification found.
 type ReconcileReport struct {
 	Finalized   int // .part files given their final name
 	Truncated   int // files cut back to their durable end, their last part salvaged
@@ -123,8 +125,9 @@ type (
 	// SegmentVerifiedObserver is told of each segment that the background
 	// verification passed, by its absolute path.
 	SegmentVerifiedObserver interface{ SegmentVerified(path string) }
-	// ReconcileObserver gets the reconcile report again when a background
-	// rewrite has changed it.
+	// ReconcileObserver gets the reconcile report again, whole, when a
+	// background rewrite or a repair of the .part files that MediaMTX left
+	// while the hub runs has added to it: the latest report holds them all.
 	ReconcileObserver interface{ Reconciled(r ReconcileReport) }
 )
 
