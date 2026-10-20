@@ -6,10 +6,11 @@ Aplicație comercială pentru camere IP. Un utilizator își leagă mai multe ca
 
 ## Stare
 
-**Faza de design.** Cerințele sunt confirmate ([`docs/brief.md`](docs/brief.md)). Urmează alegerea arhitecturii și specificația. Nu scriem cod de produs până nu e aprobată specificația.
+**Faza de design.** Cerințele și arhitectura sunt confirmate ([`docs/brief.md`](docs/brief.md)). Specificația de design e în review. Nu scriem cod de produs până nu e aprobată specificația și nu există un plan de implementare.
 
 ## Documente
 
 - [`docs/brief.md`](docs/brief.md): cerințele confirmate, ipotezele și criteriile de succes
-- `docs/superpowers/specs/`: specificațiile de design (urmează)
+- [`docs/superpowers/specs/`](docs/superpowers/specs/): specificațiile de design
+- [`docs/research/`](docs/research/): cercetarea tehnică din 2026-10-17 (sinteză, verificarea afirmațiilor, comparația stack-urilor client)
 - `docs/superpowers/plans/`: planurile de implementare (urmează)
