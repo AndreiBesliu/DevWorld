@@ -201,6 +201,37 @@ func TestWriter_CloseWithNothingBuffered_ReturnsErrEmptyFinalChunk(t *testing.T)
 	}
 }
 
+// TestWriter_CloseSealsFullFinalChunk: a plaintext of exactly n chunks,
+// written without Flush, ends with a full chunk, which Write holds and Close
+// seals as the final chunk.
+func TestWriter_CloseSealsFullFinalChunk(t *testing.T) {
+	scope, _, rk := newScope(t)
+	for n := 1; n <= 3; n++ {
+		t.Run(fmt.Sprintf("chunks=%d", n), func(t *testing.T) {
+			var dst bytes.Buffer
+			w, err := crypto.NewWriter(&dst, scope)
+			if err != nil {
+				t.Fatalf("NewWriter: %v", err)
+			}
+			prefix := len(header(t, dst.Bytes())) + 16
+			plaintext := randomBytes(n*crypto.ChunkSize, uint64(10+n)) //nolint:gosec // n is a small positive count
+			mustWrite(t, w, plaintext)
+			if w.Buffered() != crypto.ChunkSize {
+				t.Errorf("before Close, Buffered() = %d, want %d", w.Buffered(), crypto.ChunkSize)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			if got, want := dst.Len(), prefix+n*encChunkSize; got != want {
+				t.Errorf("the file has %d bytes, want len(header) + 16 + %d·65552 = %d", got, n, want)
+			}
+			if got := decryptStream(t, dst.Bytes(), rk); !bytes.Equal(got, plaintext) {
+				t.Error("the file does not decrypt to the plaintext")
+			}
+		})
+	}
+}
+
 func TestWriter_CloseWithEmptyPlaintext_WritesEmptyFile(t *testing.T) {
 	scope, _, rk := newScope(t)
 	var dst bytes.Buffer

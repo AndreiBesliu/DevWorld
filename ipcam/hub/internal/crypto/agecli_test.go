@@ -140,13 +140,22 @@ func TestRecording_DecryptsWithAgeCLIAndRage(t *testing.T) {
 		}
 	}
 
-	result, err := json.Marshal(enc06Result{Code: "ENC-06", Tools: names, Files: len(checks), Pass: !t.Failed()})
+	// The length is checked on the line with "pass":false, the longer one,
+	// before pass is computed, so that pass covers this check too.
+	result := enc06Result{Code: "ENC-06", Tools: names, Files: len(checks)}
+	if n := annotationLength(enc06Line(t, result)); n > maxAnnotationLength {
+		t.Errorf("the enc06 line is %d bytes once escaped, over %d", n, maxAnnotationLength)
+	}
+	result.Pass = !t.Failed()
+	fmt.Println(enc06Line(t, result))
+}
+
+// enc06Line is the line that the ENC-06 step turns into a notice.
+func enc06Line(t *testing.T, result enc06Result) string {
+	t.Helper()
+	b, err := json.Marshal(result)
 	if err != nil {
 		t.Fatal(err)
 	}
-	line := "enc06: " + string(result)
-	if n := annotationLength(line); n > maxAnnotationLength {
-		t.Errorf("the enc06 line is %d bytes once escaped, over %d", n, maxAnnotationLength)
-	}
-	fmt.Println(line)
+	return "enc06: " + string(b)
 }

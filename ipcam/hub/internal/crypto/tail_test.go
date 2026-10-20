@@ -2,13 +2,14 @@ package crypto_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"filippo.io/age"
@@ -184,7 +185,8 @@ func TestTornAge_PatchIsApplied(t *testing.T) {
 	before := readFile(t, torn.path)
 
 	keep := int64(tornChunks*crypto.ChunkSize - 1000)
-	patch := crypto.Patch{Off: keep - 200<<10, Data: []byte("patched by TestTornAge_PatchIsApplied")}
+	// Inside the last kept chunk, chunk tornChunks-1 (C1-R7).
+	patch := crypto.Patch{Off: keep - 500, Data: []byte("patched by TestTornAge_PatchIsApplied")}
 	if _, err := openTorn(t, torn.path, riG).Reseal(t.Context(), keep, []crypto.Patch{patch}); err != nil {
 		t.Fatalf("Reseal: %v", err)
 	}
@@ -195,11 +197,118 @@ func TestTornAge_PatchIsApplied(t *testing.T) {
 	if got := decryptStream(t, after, rk); !bytes.Equal(got, want) {
 		t.Error("the resealed file does not hold the kept plaintext with the patch")
 	}
-	firstPatched := int(patch.Off / crypto.ChunkSize)
-	for i := range firstPatched {
+	for i := range tornChunks - 1 {
 		if !bytes.Equal(chunkAt(after, torn.prefix, i), chunkAt(before, torn.prefix, i)) {
-			t.Errorf("chunk %d, before the patch, changed", i)
+			t.Errorf("chunk %d, before the last kept one, changed", i)
 		}
+	}
+}
+
+// TestTornAge_RefusesPatchBeforeLastChunk is C1-R7: a patch before the last
+// kept chunk would seal an earlier chunk again under its old nonce, so Reseal
+// refuses it before it touches the file, and the TornAge stays usable.
+func TestTornAge_RefusesPatchBeforeLastChunk(t *testing.T) {
+	scope, riG, rk := newScope(t)
+	torn := writeTorn(t, t.TempDir(), "torn.mp4.age.part", scope)
+	before := readFile(t, torn.path)
+	ta := openTorn(t, torn.path, riG)
+
+	keep := int64(tornChunks*crypto.ChunkSize - 1000)
+	lastStart := int64((tornChunks - 1) * crypto.ChunkSize) // where the last kept chunk starts
+	inLast := crypto.Patch{Off: keep - 500, Data: []byte("in the last kept chunk")}
+	for _, tc := range []struct {
+		name    string
+		patches []crypto.Patch
+	}{
+		{"200 KiB before keep", []crypto.Patch{{Off: keep - 200<<10, Data: []byte("200 KiB before keep")}}},
+		{"across into the last kept chunk", []crypto.Patch{{Off: lastStart - 3, Data: []byte("across")}}},
+		{"after a patch in the last kept chunk", []crypto.Patch{inLast, {Off: 100, Data: []byte("in chunk 0")}}},
+	} {
+		if _, err := ta.Reseal(t.Context(), keep, tc.patches); !errors.Is(err, crypto.ErrPatchBeforeFinalChunk) {
+			t.Errorf("%s: Reseal = %v, want ErrPatchBeforeFinalChunk", tc.name, err)
+		}
+		if !bytes.Equal(readFile(t, torn.path), before) {
+			t.Fatalf("%s: the refused Reseal changed the file", tc.name)
+		}
+	}
+
+	if ta.DurableSize() != tornChunks*crypto.ChunkSize || ta.Complete() {
+		t.Fatalf("after the refusals, DurableSize() = %d and Complete() = %v", ta.DurableSize(), ta.Complete())
+	}
+	if _, err := ta.Reseal(t.Context(), keep, []crypto.Patch{inLast}); err != nil {
+		t.Fatalf("Reseal with a patch in the last kept chunk: %v", err)
+	}
+	want := bytes.Clone(torn.plaintext[:keep])
+	copy(want[inLast.Off:], inLast.Data)
+	if got := decryptStream(t, readFile(t, torn.path), rk); !bytes.Equal(got, want) {
+		t.Error("the resealed file does not hold the kept plaintext with the patch")
+	}
+}
+
+// TestTornAge_EarlierChunksByteIdentical is C1-R7: Reseal seals only the last
+// kept chunk, so the header, the payload nonce and every chunk before it stay
+// byte-identical on disk, and the file decrypts with age, the age CLIs and
+// rage.
+func TestTornAge_EarlierChunksByteIdentical(t *testing.T) {
+	scope, riG, rk := newScope(t)
+	dir := t.TempDir()
+	torn := writeTorn(t, dir, "torn.mp4.age.part", scope)
+	original := readFile(t, torn.path)
+	tools := ageTools(t)
+	identityFile := writeIdentityFile(t, rk)
+
+	for i, tc := range []struct {
+		name  string
+		keep  int64
+		patch bool
+	}{
+		{"mid-chunk", tornChunks*crypto.ChunkSize - 1000, false},
+		{"mid-chunk, with a patch", tornChunks*crypto.ChunkSize - 1000, true},
+		{"on a chunk boundary", 3 * crypto.ChunkSize, false},
+		{"on a chunk boundary, with a patch", 3 * crypto.ChunkSize, true},
+		{"one byte into a chunk, with a patch", 2*crypto.ChunkSize + 1, true},
+		{"in the first chunk, with a patch", 1000, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, fmt.Sprintf("copy-%d.mp4.age.part", i))
+			if err := os.WriteFile(path, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			last := int((tc.keep - 1) / crypto.ChunkSize)
+			want := bytes.Clone(torn.plaintext[:tc.keep])
+			var patches []crypto.Patch
+			if tc.patch {
+				// A patch that ends at keep, inside the last kept chunk.
+				data := []byte("patched in the last kept chunk")
+				data = data[:min(int64(len(data)), tc.keep-int64(last*crypto.ChunkSize))]
+				patches = []crypto.Patch{{Off: tc.keep - int64(len(data)), Data: data}}
+				copy(want[patches[0].Off:], data)
+			}
+			if _, err := openTorn(t, path, riG).Reseal(t.Context(), tc.keep, patches); err != nil {
+				t.Fatalf("Reseal(%d): %v", tc.keep, err)
+			}
+
+			after := readFile(t, path)
+			if !bytes.Equal(after[:torn.prefix], original[:torn.prefix]) {
+				t.Error("the header or the payload nonce changed")
+			}
+			for c := range last {
+				if !bytes.Equal(chunkAt(after, torn.prefix, c), chunkAt(original, torn.prefix, c)) {
+					t.Errorf("chunk %d, before the last kept chunk %d, changed", c, last)
+				}
+			}
+			if got := decryptStream(t, after, rk); !bytes.Equal(got, want) {
+				t.Errorf("age.Decrypt gives %d bytes that differ from the %d kept", len(got), len(want))
+			}
+			for _, tool := range tools {
+				got, err := decryptWithTool(t, tool, identityFile, path)
+				if err != nil {
+					t.Errorf("%s: %v", tool.name, err)
+				} else if !bytes.Equal(got, want) {
+					t.Errorf("%s gives %d bytes that differ from the %d kept", tool.name, len(got), len(want))
+				}
+			}
+		})
 	}
 }
 
@@ -229,16 +338,16 @@ func TestTornAge_ResealRejectsBadArguments(t *testing.T) {
 	}
 }
 
-// TestTornAge_EmptyPatchChangesNothing: a patch with no data is accepted
-// anywhere in [0, keep], below the first re-sealed chunk too, and the file
-// comes out byte-equal to the same Reseal without it.
+// TestTornAge_EmptyPatchChangesNothing: a patch with no data changes no byte,
+// so it is accepted anywhere in [0, keep], before the last kept chunk too,
+// and the file comes out byte-equal to the same Reseal without it.
 func TestTornAge_EmptyPatchChangesNothing(t *testing.T) {
 	scope, riG, rk := newScope(t)
 	dir := t.TempDir()
 	torn := writeTorn(t, dir, "torn.mp4.age.part", scope)
 	original := readFile(t, torn.path)
 	keep := int64(tornChunks*crypto.ChunkSize - 1000)
-	patch := crypto.Patch{Off: keep - 200<<10, Data: []byte("patched by TestTornAge_EmptyPatchChangesNothing")}
+	patch := crypto.Patch{Off: keep - 500, Data: []byte("patched by TestTornAge_EmptyPatchChangesNothing")}
 
 	// resealCopy reseals a new copy of the torn file, which has the same
 	// file key and payload nonce, so equal plaintext gives equal bytes.
@@ -308,7 +417,7 @@ func TestTornAge_ResealNeverChangesAFinalChunk(t *testing.T) {
 
 	t.Run("complete file", func(t *testing.T) {
 		plaintext := randomBytes(2*crypto.ChunkSize+5000, 5)
-		path, original, prefix := writeClosed(t, dir, "complete.mp4.age", scope, plaintext)
+		path, original, _ := writeClosed(t, dir, "complete.mp4.age", scope, plaintext)
 		ta := openTorn(t, path, riG)
 		durable := ta.DurableSize()
 		if !ta.Complete() || durable != int64(len(plaintext)) {
@@ -318,22 +427,24 @@ func TestTornAge_ResealNeverChangesAFinalChunk(t *testing.T) {
 		same := crypto.Patch{Off: finalStart + 100, Data: bytes.Clone(plaintext[finalStart+100 : finalStart+200])}
 		changed := crypto.Patch{Off: finalStart + 100, Data: []byte("changed")}
 		across := crypto.Patch{Off: finalStart - 3, Data: []byte("across the boundary")}
+		early := crypto.Patch{Off: 100, Data: []byte("early")}
 
 		for _, tc := range []struct {
 			name    string
 			keep    int64
 			patches []crypto.Patch
+			want    error
 		}{
-			{"keep inside the final chunk", durable - 1000, nil},
-			{"keep one byte less", durable - 1, nil},
-			{"a patch that changes the final chunk", durable, []crypto.Patch{changed}},
-			{"a patch across into the final chunk", durable, []crypto.Patch{across}},
-			{"an unchanging patch, then a changing one", durable, []crypto.Patch{same, changed}},
+			{"keep inside the final chunk", durable - 1000, nil, crypto.ErrFinalChunkChanged},
+			{"keep one byte less", durable - 1, nil, crypto.ErrFinalChunkChanged},
+			{"a patch that changes the final chunk", durable, []crypto.Patch{changed}, crypto.ErrFinalChunkChanged},
+			{"an unchanging patch, then a changing one", durable, []crypto.Patch{same, changed}, crypto.ErrFinalChunkChanged},
+			// Patches before the final chunk would seal a non-final chunk again.
+			{"a patch across into the final chunk", durable, []crypto.Patch{across}, crypto.ErrPatchBeforeFinalChunk},
+			{"a patch in chunk 0", durable, []crypto.Patch{early}, crypto.ErrPatchBeforeFinalChunk},
 		} {
-			if _, err := ta.Reseal(t.Context(), tc.keep, tc.patches); err == nil {
-				t.Errorf("%s: Reseal accepted it", tc.name)
-			} else if !strings.Contains(err.Error(), "already final") {
-				t.Errorf("%s: Reseal refused it for another reason: %v", tc.name, err)
+			if _, err := ta.Reseal(t.Context(), tc.keep, tc.patches); !errors.Is(err, tc.want) {
+				t.Errorf("%s: Reseal = %v, want %v", tc.name, err, tc.want)
 			}
 			if !bytes.Equal(readFile(t, path), original) {
 				t.Fatalf("%s: a refused Reseal changed the file", tc.name)
@@ -351,21 +462,6 @@ func TestTornAge_ResealNeverChangesAFinalChunk(t *testing.T) {
 			}
 		}
 
-		// A patch in a non-final chunk, with the final chunk unchanged.
-		early := crypto.Patch{Off: 100, Data: []byte("early")}
-		if _, err := ta.Reseal(t.Context(), durable, []crypto.Patch{early}); err != nil {
-			t.Fatalf("Reseal with a patch in chunk 0: %v", err)
-		}
-		want := bytes.Clone(plaintext)
-		copy(want[early.Off:], early.Data)
-		after := readFile(t, path)
-		if got := decryptStream(t, after, rk); !bytes.Equal(got, want) {
-			t.Error("the file does not hold the patch in chunk 0")
-		}
-		if !bytes.Equal(after[prefix+2*encChunkSize:], original[prefix+2*encChunkSize:]) {
-			t.Error("the final chunk changed")
-		}
-
 		// A keep in an earlier chunk cuts the final chunk off; chunk 1 becomes
 		// the final chunk under a nonce it never had.
 		ta = openTorn(t, path, riG)
@@ -373,7 +469,7 @@ func TestTornAge_ResealNeverChangesAFinalChunk(t *testing.T) {
 		if _, err := ta.Reseal(t.Context(), keep, nil); err != nil {
 			t.Fatalf("Reseal(%d): %v", keep, err)
 		}
-		if got := decryptStream(t, readFile(t, path), rk); !bytes.Equal(got, want[:keep]) {
+		if got := decryptStream(t, readFile(t, path), rk); !bytes.Equal(got, plaintext[:keep]) {
 			t.Error("the file cut in chunk 1 does not decrypt to the kept plaintext")
 		}
 	})
@@ -395,10 +491,8 @@ func TestTornAge_ResealNeverChangesAFinalChunk(t *testing.T) {
 		if ta.Complete() || durable != int64(len(plaintext)) {
 			t.Fatalf("Complete() = %v, DurableSize() = %d; want false and %d", ta.Complete(), durable, len(plaintext))
 		}
-		if _, err := ta.Reseal(t.Context(), durable-1000, nil); err == nil {
-			t.Error("Reseal accepted a keep inside the final chunk")
-		} else if !strings.Contains(err.Error(), "already final") {
-			t.Errorf("Reseal refused a keep inside the final chunk for another reason: %v", err)
+		if _, err := ta.Reseal(t.Context(), durable-1000, nil); !errors.Is(err, crypto.ErrFinalChunkChanged) {
+			t.Errorf("Reseal of a keep inside the final chunk = %v, want ErrFinalChunkChanged", err)
 		}
 		if !bytes.Equal(readFile(t, path), withTrailing) {
 			t.Fatal("a refused Reseal changed the file")
@@ -464,6 +558,81 @@ func TestTornAge_EmptyFinalChunkAfterOthers_IsNotComplete(t *testing.T) {
 	}
 	if got := decryptStream(t, readFile(t, path), rk); !bytes.Equal(got, plaintext) {
 		t.Error("the resealed file does not decrypt to the full chunk")
+	}
+}
+
+// cancelAfter is a context whose Err reports context.Canceled once it has
+// been called n times, as if the context were canceled while OpenTorn runs.
+type cancelAfter struct {
+	context.Context
+	n int
+}
+
+func (c *cancelAfter) Err() error {
+	if c.n == 0 {
+		return context.Canceled
+	}
+	c.n--
+	return nil
+}
+
+// TestTornAge_ScanStopsWhenContextIsCanceled: OpenTorn's backward scan checks
+// ctx at every chunk, so a long run of bytes at the end of a file that do not
+// authenticate does not hold it up after a cancel.
+func TestTornAge_ScanStopsWhenContextIsCanceled(t *testing.T) {
+	scope, riG, _ := newScope(t)
+	path := filepath.Join(t.TempDir(), "garbage-tail.mp4.age.part")
+	var dst bytes.Buffer
+	w, err := crypto.NewWriter(&dst, scope)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	mustWrite(t, w, randomBytes(crypto.ChunkSize, 8))
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	const garbageChunks = 20
+	if err := os.WriteFile(path, append(dst.Bytes(), randomBytes(garbageChunks*encChunkSize, 9)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without a cancel, the scan walks back over the garbage to chunk 0.
+	if ta := openTorn(t, path, riG); ta.DurableSize() != crypto.ChunkSize || ta.Complete() {
+		t.Fatalf("DurableSize() = %d, Complete() = %v; want %d and false", ta.DurableSize(), ta.Complete(), crypto.ChunkSize)
+	}
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0) //nolint:gosec // path is in the test's directory
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	// OpenTorn's own check and the first chunk's pass; the second chunk's does not.
+	ctx := &cancelAfter{Context: t.Context(), n: 2}
+	if _, err := crypto.NewTailSealer(riG).OpenTorn(ctx, f); !errors.Is(err, context.Canceled) {
+		t.Errorf("OpenTorn with a context canceled during the scan = %v, want context.Canceled", err)
+	}
+}
+
+// TestTornAge_ReadAtPastEnd_ReturnsEOF: ReadAt follows io.ReaderAt at and
+// past DurableSize, with io.EOF after the bytes that are there.
+func TestTornAge_ReadAtPastEnd_ReturnsEOF(t *testing.T) {
+	scope, riG, _ := newScope(t)
+	torn := writeTorn(t, t.TempDir(), "torn.mp4.age.part", scope)
+	ta := openTorn(t, torn.path, riG)
+	size := ta.DurableSize()
+	buf := make([]byte, 10)
+
+	for _, off := range []int64{size, size + 1, size + crypto.ChunkSize} {
+		if n, err := ta.ReadAt(buf, off); n != 0 || !errors.Is(err, io.EOF) {
+			t.Errorf("ReadAt(10 bytes, %d) = %d, %v; want 0, io.EOF", off, n, err)
+		}
+	}
+	n, err := ta.ReadAt(buf, size-4)
+	if n != 4 || !errors.Is(err, io.EOF) || !bytes.Equal(buf[:4], torn.plaintext[size-4:size]) {
+		t.Errorf("ReadAt(10 bytes, DurableSize - 4) = %d, %v; want the last 4 bytes and io.EOF", n, err)
+	}
+	if _, err := ta.ReadAt(buf, -1); err == nil || errors.Is(err, io.EOF) {
+		t.Errorf("ReadAt(10 bytes, -1) = %v, want an error other than io.EOF", err)
 	}
 }
 

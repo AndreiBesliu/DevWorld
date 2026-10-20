@@ -135,6 +135,12 @@ jobs:
     needs: media
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      # The crypto tests that need the age tools fail instead of skipping. The
+      # tools' paths depend on RUNNER_TEMP, which a job's env cannot read, so the
+      # age-tools step exports RECSPIKE_AGE_BINS and RECSPIKE_RAGE_BIN to the
+      # steps after it.
+      RECSPIKE_REQUIRE_AGE_TOOLS: '1'
     defaults:
       run:
         working-directory: ipcam
@@ -183,6 +189,11 @@ jobs:
               "${tools}/age-v1.3.2/age" --version &&
               "${tools}/rage-v0.12.1/rage" --version
           } 2>&1 | tee "${RUNNER_TEMP}/age-tools.log"
+          # For the Test and ENC-06 steps (agecli_test.go reads them).
+          {
+            echo "RECSPIKE_AGE_BINS=${tools}/age-v1.0.0/age:${tools}/age-v1.3.2/age"
+            echo "RECSPIKE_RAGE_BIN=${tools}/rage-v0.12.1/rage"
+          } >> "${GITHUB_ENV}"
       - name: Build
         id: build
         run: |
@@ -215,29 +226,24 @@ jobs:
           tools/scripts/check-video-build-list.sh 2>&1 | tee "${RUNNER_TEMP}/build-list.log"
       - name: Test
         # -count=1: a result restored from the Go build cache would hide a flaky test. The
-        # variables make the tests that need the fork, the media or the age tools fail
-        # instead of skipping.
+        # variables make the tests that need the fork or the media fail instead of skipping;
+        # the job's env and the age-tools step do the same for the age tools.
         id: test
         env:
           MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx
           RECSPIKE_REQUIRE_MEDIAMTX: '1'
           MEDIAGEN_DIR: ${{ runner.temp }}/media
           SPIKE_REQUIRE_MEDIA: '1'
-          RECSPIKE_AGE_BINS: ${{ runner.temp }}/age-tools/age-v1.0.0/age:${{ runner.temp }}/age-tools/age-v1.3.2/age
-          RECSPIKE_RAGE_BIN: ${{ runner.temp }}/age-tools/rage-v0.12.1/rage
-          RECSPIKE_REQUIRE_AGE_TOOLS: '1'
         run: |
           set -o pipefail
           go test -count=1 -race ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${RUNNER_TEMP}/test.log"
       - name: ENC-06
         # The golden files and a resealed torn file decrypt with each age CLI and with rage,
         # using only the recovery key (ENC-06). The test prints one "enc06: <json>" line,
-        # pass true or false, which goes out as a notice either way (C32).
+        # pass true or false, which goes out as a notice either way (C32). It runs whenever
+        # the age tools are installed, so that a failure in another step does not hide it.
         id: enc06
-        env:
-          RECSPIKE_AGE_BINS: ${{ runner.temp }}/age-tools/age-v1.0.0/age:${{ runner.temp }}/age-tools/age-v1.3.2/age
-          RECSPIKE_RAGE_BIN: ${{ runner.temp }}/age-tools/rage-v0.12.1/rage
-          RECSPIKE_REQUIRE_AGE_TOOLS: '1'
+        if: ${{ !cancelled() && steps.age-tools.outcome == 'success' }}
         run: |
           set -o pipefail
           log="${RUNNER_TEMP}/enc06.log"

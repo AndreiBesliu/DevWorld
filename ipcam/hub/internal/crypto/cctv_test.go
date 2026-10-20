@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -149,7 +150,10 @@ func parseCCTVIdentity(s string) (age.Identity, error) {
 
 // checkCCTVVector opens the vector with OpenReaderAt and reads all of it. An
 // armored vector is first decoded with filippo.io/age/armor, because
-// recordings are binary age files (§10.2).
+// recordings are binary age files (§10.2). A failure must be of the class
+// that the vector expects (cctvFailureClass). A header, HMAC or no-match
+// failure must come from OpenReaderAt; a payload failure may come from
+// OpenReaderAt, which authenticates the final chunk, or from a read.
 func checkCCTVVector(t *testing.T, v cctvVector) {
 	t.Helper()
 	switch v.expect {
@@ -163,6 +167,9 @@ func checkCCTVVector(t *testing.T, v cctvVector) {
 		if v.expect == "armor failure" {
 			if err == nil {
 				t.Fatal("expected an armor failure, the armor decoded")
+			}
+			if got := cctvFailureClass(err); got != v.expect {
+				t.Fatalf("expected an armor failure, the armor decoder failed with %q: %v", got, err)
 			}
 			t.Log(err)
 			return
@@ -187,15 +194,42 @@ func checkCCTVVector(t *testing.T, v cctvVector) {
 		}
 		return
 	}
-	if err != nil {
-		t.Logf("expected %s, OpenReaderAt: %v", v.expect, err)
-		return
+	stage := "OpenReaderAt"
+	if err == nil && v.expect == "payload failure" {
+		stage = "read"
+		_, err = io.ReadAll(io.NewSectionReader(r, 0, size))
 	}
-	if _, err := io.ReadAll(io.NewSectionReader(r, 0, size)); err == nil {
-		t.Fatalf("expected %s, OpenReaderAt and every read succeeded", v.expect)
-	} else {
-		t.Logf("expected %s, read: %v", v.expect, err)
+	if err == nil {
+		t.Fatalf("expected %s, %s succeeded", v.expect, stage)
 	}
+	want := v.expect
+	if want == "header failure" || want == "payload failure" {
+		want = "" // any error of no other class, as in age's testkit
+	}
+	if got := cctvFailureClass(err); got != want {
+		t.Fatalf("expected %s, %s failed with a %q error: %v", v.expect, stage, got, err)
+	}
+	t.Logf("expected %s, %s: %v", v.expect, stage, err)
+}
+
+// cctvFailureClass names the class of a failure the way filippo.io/age
+// v1.3.2's testkit_test.go tells them apart: an *age.NoIdentityMatchError is
+// "no match", age's "bad header MAC" message is "HMAC failure" (age exports
+// no error value for it, and its testkit matches the same suffix), an
+// *armor.Error is "armor failure", and any other error is "". age exports
+// nothing that tells a header failure from a payload failure.
+func cctvFailureClass(err error) string {
+	var noMatch *age.NoIdentityMatchError
+	var armorErr *armor.Error
+	switch {
+	case errors.As(err, &noMatch):
+		return "no match"
+	case strings.HasSuffix(err.Error(), "bad header MAC"):
+		return "HMAC failure"
+	case errors.As(err, &armorErr):
+		return "armor failure"
+	}
+	return ""
 }
 
 // cctvSource is the content of testdata/cctv/SOURCE.

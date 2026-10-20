@@ -264,8 +264,8 @@ func parseStanzas(t *testing.T, hdr []byte) []*age.Stanza {
 	return stanzas
 }
 
-// testParseKeyScope checks that ParseKeyScope takes exactly two X25519
-// recipients, and that its errors never echo what it rejects.
+// testParseKeyScope checks that ParseKeyScope takes exactly two different
+// X25519 recipients, and that its errors never echo what it rejects.
 func testParseKeyScope(t *testing.T) {
 	riG := generateIdentity(t)
 	rk := generateIdentity(t)
@@ -280,8 +280,8 @@ func testParseKeyScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseKeyScope(RI_g, RK): %v", err)
 	}
-	if got := scope.Strings(); got != [2]string{riGs, rks} {
-		t.Errorf("Strings() = %q, want RI_g then RK", got)
+	if got, err := scope.Strings(); err != nil || got != [2]string{riGs, rks} {
+		t.Errorf("Strings() = %q, %v; want RI_g then RK", got, err)
 	}
 
 	for _, tc := range []struct{ name, riG, rk string }{
@@ -292,6 +292,8 @@ func testParseKeyScope(t *testing.T) {
 		{"a hybrid recipient", riGs, hybrid.Recipient().String()},
 		{"a secret key", riG.String(), rks},
 		{"a secret key as RK", riGs, rk.String()},
+		// §10's two-key separation: RK must not be the recording key.
+		{"RI_g as RK", riGs, riGs},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := crypto.ParseKeyScope(tc.riG, tc.rk)
@@ -307,6 +309,24 @@ func testParseKeyScope(t *testing.T) {
 				t.Errorf("the error contains secret key material: %v", err)
 			}
 		})
+	}
+}
+
+// TestKeyScope_StringsWithoutBothKeys_ReturnsError: a KeyScope that did not
+// come from ParseKeyScope, such as the zero value, gives an error, not a panic.
+func TestKeyScope_StringsWithoutBothKeys_ReturnsError(t *testing.T) {
+	scope, _, _ := newScope(t)
+	for _, tc := range []struct {
+		name  string
+		scope crypto.KeyScope
+	}{
+		{"zero value", crypto.KeyScope{}},
+		{"RI_g only", crypto.KeyScope{RecordingIdentity: scope.RecordingIdentity}},
+		{"RK only", crypto.KeyScope{Recovery: scope.Recovery}},
+	} {
+		if got, err := tc.scope.Strings(); err == nil {
+			t.Errorf("%s: Strings() = %q, want an error", tc.name, got)
+		}
 	}
 }
 
