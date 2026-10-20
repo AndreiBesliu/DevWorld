@@ -249,11 +249,13 @@ type Path struct {
 	RecordSegmentDuration Duration     `json:"recordSegmentDuration"`
 	RecordDeleteAfter     Duration     `json:"recordDeleteAfter"`
 	// MTX-2 (hub/third_party/PATCHES.md): RI_g and RK, the two age1 X25519
-	// recipients that fMP4 segments are encrypted to; empty records in clear
-	// (Load turns an absent list into an empty one). They are kept as strings:
-	// Clone copies settable fields only, and would drop the key bytes inside a
-	// parsed recipient.
-	RecordAgeRecipients []string `json:"recordAgeRecipients"`
+	// recipients that fMP4 segments are encrypted to. Nil when the key is
+	// absent: the path records in clear. A value that is present must be
+	// exactly two recipients; an empty list or null fails the load. A
+	// pointer, since Load turns a nil slice into an empty one and the two must
+	// differ. Strings, since Clone copies settable fields only and would drop
+	// the key bytes inside a parsed recipient.
+	RecordAgeRecipients *AgeRecipients `json:"recordAgeRecipients,omitempty"`
 	// MTX-2: whether an encrypted part smaller than one age chunk is always
 	// padded to the chunk boundary (the per-camera setting O17, on by default).
 	RecordAgePadLowBitrate bool `json:"recordAgePadLowBitrate"`
@@ -725,7 +727,7 @@ func (pconf *Path) validate(
 	if _, err := pconf.RecordAgeScope(); err != nil {
 		return err
 	}
-	if len(pconf.RecordAgeRecipients) != 0 && pconf.RecordFormat != RecordFormatFMP4 {
+	if pconf.RecordAgeRecipients != nil && pconf.RecordFormat != RecordFormatFMP4 {
 		return fmt.Errorf("'recordAgeRecipients' needs 'recordFormat: fmp4': MPEG-TS segments are not encrypted")
 	}
 
@@ -827,19 +829,21 @@ func (pconf *Path) validate(
 }
 
 // RecordAgeScope returns the recipients that the path's fMP4 segments are
-// encrypted to (MTX-2), or nil when the list is empty and the path records in
-// clear. A list must hold exactly RI_g and RK, two different age1 X25519
-// recipients. Its errors never quote it: an entry may be a secret key pasted
-// in the wrong place.
+// encrypted to (MTX-2), or nil when recordAgeRecipients is absent and the path
+// records in clear. A value that is present must hold exactly RI_g and RK, two
+// different age1 X25519 recipients; an empty list is an error, not clear. Its
+// errors never quote it: an entry may be a secret key pasted in the wrong
+// place.
 func (pconf *Path) RecordAgeScope() (*crypto.KeyScope, error) {
-	if len(pconf.RecordAgeRecipients) == 0 {
+	if pconf.RecordAgeRecipients == nil {
 		return nil, nil
 	}
-	if len(pconf.RecordAgeRecipients) != 2 {
+	recipients := *pconf.RecordAgeRecipients
+	if len(recipients) != 2 {
 		return nil, fmt.Errorf("'recordAgeRecipients' must hold exactly two age1 X25519 recipients, RI_g and RK, not %d",
-			len(pconf.RecordAgeRecipients))
+			len(recipients))
 	}
-	scope, err := crypto.ParseKeyScope(pconf.RecordAgeRecipients[0], pconf.RecordAgeRecipients[1])
+	scope, err := crypto.ParseKeyScope(recipients[0], recipients[1])
 	if err != nil {
 		return nil, fmt.Errorf("invalid 'recordAgeRecipients': %w", err)
 	}

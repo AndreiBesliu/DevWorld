@@ -14,6 +14,14 @@ import (
 // - JSON cannot contain unknown fields
 // - existing elements of slices are never used, fixing https://github.com/golang/go/issues/21092
 // - slices cannot be set to nil
+// - a NullRejecter cannot be set to null, even behind a pointer (MTX-2)
+
+// NullRejecter is implemented by a type for which JSON null is an error, even
+// behind a pointer, where null otherwise sets the pointer to nil as if the key
+// were absent (MTX-2, hub/third_party/PATCHES.md).
+type NullRejecter interface {
+	RejectsJSONNull()
+}
 
 func jsonFieldKey(f reflect.StructField) string {
 	tag := f.Tag.Get("json")
@@ -22,6 +30,8 @@ func jsonFieldKey(f reflect.StructField) string {
 	}
 	return strings.Split(tag, ",")[0]
 }
+
+var nullRejecterType = reflect.TypeFor[NullRejecter]()
 
 func isJSONNull(raw json.RawMessage) bool {
 	return string(bytes.TrimSpace(raw)) == "null"
@@ -49,6 +59,9 @@ func checkForUnknownFields(rawMap map[string]json.RawMessage, known map[string]i
 func decode(v reflect.Value, raw json.RawMessage, path string) error {
 	for v.Kind() == reflect.Pointer {
 		if isJSONNull(raw) {
+			if v.Type().Implements(nullRejecterType) { // MTX-2
+				return fmt.Errorf("cannot set %q to null", path)
+			}
 			v.Set(reflect.Zero(v.Type()))
 			return nil
 		}
