@@ -34,7 +34,9 @@ type TornAge interface {
 	Complete() bool
 	// Reseal keeps the first keep plaintext bytes, with patches applied, and
 	// ends the file there with a final chunk, in place (G08). It returns the
-	// new size of the file.
+	// new size of the file. It refuses to change a chunk that is already
+	// final, which would reuse that chunk's nonce; patched chunks before the
+	// last do reuse theirs (see tornAge.Reseal).
 	Reseal(ctx context.Context, keep int64, patches []Patch) (cipherSize int64, err error)
 }
 
@@ -222,20 +224,43 @@ func (t *tornAge) chunk(i int64) ([]byte, error) {
 // the final chunk, which is never empty. It truncates the file and syncs it
 // before it writes those chunks back in place, and syncs again; it never
 // writes a temporary file (G08). The plaintext of those chunks is decrypted
-// and authenticated before the file changes.
+// and authenticated before the file changes. A patch with no data changes
+// nothing, wherever it lies in [0, keep].
 //
-// A patched chunk other than the last is sealed again under its old nonce:
-// whoever holds both the old and the new ciphertext of that chunk learns the
-// XOR of the two plaintexts, and can forge that chunk.
+// Nonce reuse. A chunk i that Reseal seals again under the STREAM nonce it
+// had before, (i, final), with the same file key and payload nonce, but with
+// other plaintext, gives whoever holds both the old and the new ciphertext
+// the XOR of the two plaintexts and that nonce's Poly1305 key, so they can
+// forge that chunk. Old ciphertext can survive in old disk blocks, in
+// wear-levelled flash, or in a copy uploaded before the repair. Two kinds of
+// chunk would be sealed again under their old nonce:
+//
+//   - A patched chunk before the last kept one: it was non-final and stays
+//     non-final. Reseal allows it, because patching in place (R01's salvage
+//     of a torn part's boxes) needs it. Avoiding it would take a new file key,
+//     which needs RK's public key, not held here, or a new payload nonce,
+//     which means rewriting the whole file.
+//   - The last kept chunk, when it is the file's last durable chunk and that
+//     chunk is already final: a Complete file, or a final chunk followed by
+//     trailing bytes. Reseal refuses to change it. It may keep that chunk
+//     whole and unchanged (keep = DurableSize, with patches that leave its
+//     bytes as they are), which writes the same ciphertext again, or cut it
+//     off with a keep in an earlier chunk.
+//
+// In every other case the last kept chunk was non-final (a torn file has no
+// durable final chunk), so sealing it as final gives it a nonce it never had.
 //
 // A cut during Reseal leaves a file that OpenTorn reads again, with at most
 // the last kept chunk lost, unless it tears a chunk being written. After an
-// error the file may have changed, so it must be opened again.
+// error the file may have changed, so it must be opened again; a refused
+// call (bad arguments, a final chunk changed) leaves the file and t as they
+// were.
 func (t *tornAge) Reseal(ctx context.Context, keep int64, patches []Patch) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if durable := t.DurableSize(); keep < 1 || keep > durable {
+	durable := t.DurableSize()
+	if keep < 1 || keep > durable {
 		return 0, fmt.Errorf("crypto: cannot keep %d bytes of %d durable ones: the final chunk would be empty or not durable", keep, durable)
 	}
 	last := (keep - 1) / ChunkSize
@@ -248,13 +273,29 @@ func (t *tornAge) Reseal(ctx context.Context, keep int64, patches []Patch) (int6
 			first = min(first, p.Off/ChunkSize)
 		}
 	}
+	// finalKept: the last kept chunk is already sealed under (last, true).
+	finalKept := t.lastFinal && last == t.chunks-1
+	if finalKept && keep != durable {
+		return 0, errFinalChunkChanged(last)
+	}
 	start := first * ChunkSize
 	plaintext := make([]byte, keep-start)
 	if _, err := t.ReadAt(plaintext, start); err != nil {
 		return 0, err
 	}
+	lastStart := last*ChunkSize - start // where chunk last starts in plaintext
+	var finalBefore []byte
+	if finalKept {
+		finalBefore = bytes.Clone(plaintext[lastStart:])
+	}
 	for _, p := range patches {
+		if len(p.Data) == 0 {
+			continue // it may lie below start
+		}
 		copy(plaintext[p.Off-start:], p.Data)
+	}
+	if finalKept && !bytes.Equal(plaintext[lastStart:], finalBefore) {
+		return 0, errFinalChunkChanged(last)
 	}
 
 	// Truncating first means a cut can never leave the new final chunk with
@@ -280,6 +321,12 @@ func (t *tornAge) Reseal(ctx context.Context, keep int64, patches []Patch) (int6
 	}
 	t.setEnd(last+1, keep-last*ChunkSize, true, true)
 	return cipherSize, nil
+}
+
+// errFinalChunkChanged is Reseal's refusal to seal a final chunk again with
+// other plaintext.
+func errFinalChunkChanged(i int64) error {
+	return fmt.Errorf("crypto: age chunk %d is already final; sealing it again with other plaintext would reuse its nonce", i)
 }
 
 // readFullAt reads len(buf) bytes at off.
