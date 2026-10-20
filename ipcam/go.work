@@ -1,6 +1,8 @@
 go 1.27.2
 
 use (
+	./hub
 	./tools
+	./tools/spikes/recording
 	./tools/spikes/video
 )
