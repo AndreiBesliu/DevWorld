@@ -22,6 +22,8 @@ on:
       - 'ipcam/tools/licenses/**'
       - 'ipcam/go.work'
       - 'ipcam/go.work.sum'
+      # The line endings of the checkout on the windows job (the fork's files are -text).
+      - 'ipcam/.gitattributes'
       - '.github/workflows/ipcam-spike-recording.yml'
   pull_request:
     paths:
@@ -37,6 +39,8 @@ on:
       - 'ipcam/tools/licenses/**'
       - 'ipcam/go.work'
       - 'ipcam/go.work.sum'
+      # The line endings of the checkout on the windows job (the fork's files are -text).
+      - 'ipcam/.gitattributes'
       - '.github/workflows/ipcam-spike-recording.yml'
 
 permissions:
@@ -258,7 +262,8 @@ jobs:
           exit "${status}"
       - name: Test the MediaMTX fork
         # Its patch tests (TestMTX*) and the recorder's own tests only (C03). The -run
-        # pattern still compiles the tests of every package.
+        # pattern still compiles the tests of every package. TestMTX2_WorstCaseLoss is
+        # single-threaded, so -race adds nothing to it: the mtx2-loss step runs it.
         id: fork-test
         working-directory: ipcam/hub/third_party/mediamtx
         env:
@@ -266,8 +271,8 @@ jobs:
         run: |
           set -o pipefail
           {
-            go test -count=1 -race ./internal/recorder/... &&
-              go test -count=1 -race -run '^TestMTX' ./...
+            go test -count=1 -race -skip '^TestMTX2_WorstCaseLoss$' ./internal/recorder/... &&
+              go test -count=1 -race -run '^TestMTX' -skip '^TestMTX2_WorstCaseLoss$' ./...
           } 2>&1 | tee "${RUNNER_TEMP}/fork-test.log"
       - name: MTX-2 loss
         # R01, O17: TestMTX2_WorstCaseLoss prints one "mtx2-loss: <json>" line, the median and
@@ -344,10 +349,14 @@ jobs:
           done
 
   windows:
-    # MTX-1 on Windows (ruling C14): the fork's patch tests on windows-latest, where
-    # the directory sync is a no-op and the rename is MoveFileEx with
-    # MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH. Without -race, which needs a C
-    # compiler there; the recorder job runs the same tests with it.
+    # On windows-latest: the hub's tests, the process tests among them, with a Windows
+    # build of the fork as MEDIAMTX_BIN and the media, so that they cannot skip
+    # (G06): the restart after a kill, the Job Object that ends MediaMTX with the
+    # hub, MoveFileEx. Then the fork's patch tests (MTX-1 on Windows, ruling C14),
+    # where the directory sync is a no-op and the rename is MoveFileEx with
+    # MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH. Without -race, which needs a
+    # C compiler there; the recorder job runs the same tests with it.
+    needs: media
     runs-on: windows-latest
     timeout-minutes: 45
     defaults:
@@ -361,29 +370,67 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: ipcam/go.work
-          cache-dependency-path: ipcam/hub/third_party/mediamtx/go.sum
-      - name: Test the MediaMTX fork's patches
-        # The patch tests of ./internal/...: MTX-0's tests in the root package check the
-        # vendored files' bytes, which this checkout's line endings (core.autocrlf) change,
-        # so they run in the recorder job only. The -run pattern still compiles the tests
-        # of every package.
-        id: fork-test
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
+      - name: Download media
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-recording-media
+          path: ${{ runner.temp }}/media
+      - name: Build the MediaMTX fork
+        id: fork-build
         working-directory: ipcam/hub/third_party/mediamtx
         env:
           GOWORK: 'off'
         run: |
           set -o pipefail
-          go test -count=1 -run '^TestMTX' ./internal/... 2>&1 | tee "${RUNNER_TEMP}/fork-test.log"
+          {
+            go build -o "${RUNNER_TEMP}/bin/mediamtx.exe" . &&
+              "${RUNNER_TEMP}/bin/mediamtx.exe" --version
+          } 2>&1 | tee "${RUNNER_TEMP}/fork-build.log"
+      - name: Test the hub
+        id: hub-test
+        env:
+          MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx.exe
+          RECSPIKE_REQUIRE_MEDIAMTX: '1'
+          MEDIAGEN_DIR: ${{ runner.temp }}/media
+          SPIKE_REQUIRE_MEDIA: '1'
+        run: |
+          set -o pipefail
+          go test -count=1 ./hub/... 2>&1 | tee "${RUNNER_TEMP}/hub-test.log"
+      - name: Test the MediaMTX fork's patches
+        # Every patch test, MTX-0's in the root package included: ipcam/.gitattributes
+        # checks the fork out without line-ending changes. The -run pattern still
+        # compiles the tests of every package.
+        id: fork-test
+        if: ${{ !cancelled() && steps.fork-build.outcome == 'success' }}
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          go test -count=1 -run '^TestMTX' ./... 2>&1 | tee "${RUNNER_TEMP}/fork-test.log"
       - name: Show failures as annotations
         # As in the other jobs, plus testify's Error, Messages, expected and actual
         # lines: a Windows failure cannot be rerun anywhere else.
         if: failure()
+        env:
+          OUTCOMES: >-
+            fork-build=${{ steps.fork-build.outcome }}
+            hub-test=${{ steps.hub-test.outcome }}
+            fork-test=${{ steps.fork-test.outcome }}
         run: |
-          log="${RUNNER_TEMP}/fork-test.log"
-          [[ -f "${log}" ]] || exit 0
-          if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
-            grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:|\s+(Error|Messages|expected|actual)\s*:)' "${log}" |
-              tools/scripts/annotate.sh fork-test 60
-          else
-            tail -n 60 "${log}" | tools/scripts/annotate.sh fork-test 60
-          fi
+          for step in ${OUTCOMES}; do
+            id="${step%%=*}"
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ "${step#*=}" == failure && -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:|\s+(Error|Messages|expected|actual)\s*:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            fi
+          done

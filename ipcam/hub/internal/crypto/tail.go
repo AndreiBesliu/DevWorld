@@ -100,7 +100,7 @@ func (s tailSealer) OpenTorn(ctx context.Context, f *os.File) (TornAge, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &tornAge{f: f, aead: aead, payloadOff: int64(len(onDisk))}
+	t := &tornAge{r: f, f: f, aead: aead, payloadOff: int64(len(onDisk))}
 	if err := t.scan(ctx, info.Size()-t.payloadOff); err != nil {
 		return nil, err
 	}
@@ -110,7 +110,8 @@ func (s tailSealer) OpenTorn(ctx context.Context, f *os.File) (TornAge, error) {
 // tornAge is a TornAge. ReadAt may run concurrently; Reseal may not run
 // concurrently with ReadAt.
 type tornAge struct {
-	f          *os.File
+	r          io.ReaderAt // the ciphertext
+	f          *os.File    // the same file, for Reseal; nil for a read-only source (KeptTail.Source)
 	aead       cipher.AEAD
 	payloadOff int64 // len(header) + 16
 
@@ -176,7 +177,7 @@ func (t *tornAge) setEnd(chunks, lastSize int64, lastFinal, complete bool) {
 // open reads chunk i into buf, whose length is the chunk's ciphertext size,
 // and decrypts it in place. ok is false when it does not authenticate.
 func (t *tornAge) open(buf []byte, i int64, final bool) (plaintext []byte, ok bool, err error) {
-	if err := readFullAt(t.f, buf, t.offset(i)); err != nil {
+	if err := readFullAt(t.r, buf, t.offset(i)); err != nil {
 		return nil, false, fmt.Errorf("crypto: read age chunk %d: %w", i, err)
 	}
 	nonce := chunkNonce(i, final)
@@ -227,18 +228,29 @@ func (t *tornAge) chunk(i int64) ([]byte, error) {
 	if c := t.cache.Load(); c != nil && c.index == i {
 		return c.data, nil
 	}
+	plaintext, err := t.readChunk(make([]byte, encChunkSize), i)
+	if err != nil {
+		return nil, err
+	}
+	t.cache.Store(&cachedChunk{index: i, data: plaintext})
+	return plaintext, nil
+}
+
+// readChunk decrypts durable chunk i into buf, which holds a full chunk and
+// its tag, authenticates it and returns its plaintext, a prefix of buf. It
+// does not cache it.
+func (t *tornAge) readChunk(buf []byte, i int64) ([]byte, error) {
 	size, final := int64(ChunkSize), false
 	if i == t.chunks-1 {
 		size, final = t.lastSize, t.lastFinal
 	}
-	plaintext, ok, err := t.open(make([]byte, size+tagSize), i, final)
+	plaintext, ok, err := t.open(buf[:size+tagSize], i, final)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
 		return nil, fmt.Errorf("crypto: age chunk %d does not authenticate", i)
 	}
-	t.cache.Store(&cachedChunk{index: i, data: plaintext})
 	return plaintext, nil
 }
 
@@ -249,7 +261,9 @@ func (t *tornAge) chunk(i int64) ([]byte, error) {
 // file right after the chunk before it and syncs, writes the new final chunk
 // and syncs again; it never writes a temporary file (G08). The header, the
 // payload nonce and the earlier chunks are never read back into the cipher
-// path or rewritten, so they stay byte-identical on disk.
+// path or rewritten, so they stay byte-identical on disk. When the last kept
+// chunk is the file's final chunk already, kept whole and unchanged, Reseal
+// only cuts the bytes after it and syncs.
 //
 // Nonce reuse (C1-R7). Sealing chunk i again under the STREAM nonce it had,
 // (i, final), with the same file key and payload nonce but other plaintext,
@@ -263,8 +277,8 @@ func (t *tornAge) chunk(i int64) ([]byte, error) {
 //   - other plaintext in the last kept chunk when that chunk is the file's
 //     last durable chunk and already final, as in a Complete file or a final
 //     chunk followed by trailing bytes (ErrFinalChunkChanged). Reseal may
-//     keep that chunk whole and unchanged, which writes the same ciphertext
-//     again, or cut it off with a keep in an earlier chunk.
+//     keep that chunk whole and unchanged, or cut it off with a keep in an
+//     earlier chunk.
 //
 // In every other case the last kept chunk was non-final, so sealing it as
 // final gives it a nonce it never had. A patch with no data changes no byte,
@@ -273,10 +287,14 @@ func (t *tornAge) chunk(i int64) ([]byte, error) {
 //
 // A cut during Reseal leaves a file that OpenTorn reads again, with at most
 // the last kept chunk lost. After an error the file may have changed, so it
-// must be opened again; a refused call leaves the file and t as they were.
+// must be opened again; a refused call leaves the file and t as they were. A
+// read-only TornAge (KeptTail.Source) refuses every Reseal.
 func (t *tornAge) Reseal(ctx context.Context, keep int64, patches []Patch) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
+	}
+	if t.f == nil {
+		return 0, errors.New("crypto: this torn recording is read-only")
 	}
 	durable := t.DurableSize()
 	if keep < 1 || keep > durable {
@@ -314,13 +332,21 @@ func (t *tornAge) Reseal(ctx context.Context, keep int64, patches []Patch) (int6
 	if finalKept && !bytes.Equal(plaintext, finalBefore) {
 		return 0, fmt.Errorf("%w: chunk %d", ErrFinalChunkChanged, last)
 	}
+	cipherSize := t.offset(last) + int64(len(plaintext)) + tagSize
+	if finalKept {
+		// The final chunk stays as it is: only the bytes after it go. Cutting
+		// the file back to the chunk's start and writing it again would lose
+		// a valid final chunk to a cut between the two syncs.
+		if err := t.truncate(cipherSize); err != nil {
+			return 0, err
+		}
+		t.setEnd(t.chunks, t.lastSize, true, true)
+		return cipherSize, nil
+	}
 
 	// Truncating and syncing first means a cut can never leave the new final
 	// chunk with older chunks after it, which the scan would take as durable.
-	if err := t.f.Truncate(t.offset(last)); err != nil {
-		return 0, err
-	}
-	if err := t.f.Sync(); err != nil {
+	if err := t.truncate(t.offset(last)); err != nil {
 		return 0, err
 	}
 	t.cache.Store(nil)
@@ -332,7 +358,25 @@ func (t *tornAge) Reseal(ctx context.Context, keep int64, patches []Patch) (int6
 		return 0, err
 	}
 	t.setEnd(last+1, int64(len(plaintext)), true, true)
-	return t.offset(last) + int64(len(plaintext)) + tagSize, nil
+	return cipherSize, nil
+}
+
+// resealCutHook, when set by a test, runs after each truncation and sync of
+// a Reseal, where a cut could stop it.
+var resealCutHook func()
+
+// truncate cuts the file to size and syncs it.
+func (t *tornAge) truncate(size int64) error {
+	if err := t.f.Truncate(size); err != nil {
+		return err
+	}
+	if err := t.f.Sync(); err != nil {
+		return err
+	}
+	if resealCutHook != nil {
+		resealCutHook()
+	}
+	return nil
 }
 
 // readFullAt reads len(buf) bytes at off.

@@ -22,6 +22,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/stretchr/testify/require"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/conf"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/test"
 )
 
@@ -191,4 +192,44 @@ func TestMTX2_LowBitratePadding_Off(t *testing.T) {
 		}
 	}
 	require.NotZero(t, unpadded, "parts left off a chunk boundary")
+}
+
+// TestMTX2_ReloadWithOtherRecipientsOrPaddingRecreatesPath: a configuration
+// reload that changes a path's recipients or its padding setting must
+// recreate the path, so that its recorder starts again with the new scope.
+// doReloadConf, which reloads a path in place, restarts the recorder for the
+// Record* keys that pathConfCanBeUpdated copies, and the two MTX-2 keys are
+// not among them; this test fails if a rebase makes them hot-reloadable.
+func TestMTX2_ReloadWithOtherRecipientsOrPaddingRecreatesPath(t *testing.T) {
+	recipients := func() string {
+		riG, err := age.GenerateX25519Identity()
+		require.NoError(t, err)
+		rk, err := age.GenerateX25519Identity()
+		require.NoError(t, err)
+		return "[" + riG.Recipient().String() + ", " + rk.Recipient().String() + "]"
+	}
+	load := func(extra string) *conf.Path {
+		t.Helper()
+		loaded, _, err := conf.Load(test.CreateTempFile(t, []byte("paths:\n"+
+			"  cam1/main:\n"+
+			"    source: rtsp://127.0.0.1:8554/cam1/main\n"+
+			"    record: yes\n"+
+			"    recordPath: /rec/%path/%Y-%m-%d/%H%M%S_%f\n"+extra)), nil, nil)
+		require.NoError(t, err)
+		return loaded.Paths["cam1/main"]
+	}
+	pair := recipients()
+	base := load("    recordAgeRecipients: " + pair + "\n")
+
+	require.True(t, pathConfCanBeUpdated(base, load("    recordAgeRecipients: "+pair+"\n")),
+		"the same configuration must reload in place")
+	require.True(t, pathConfCanBeUpdated(base, load("    recordAgeRecipients: "+pair+"\n    recordSegmentDuration: 10s\n")),
+		"a Record* key that upstream reloads in place")
+	for name, extra := range map[string]string{
+		"other recipients": "    recordAgeRecipients: " + recipients() + "\n",
+		"padding off":      "    recordAgeRecipients: " + pair + "\n    recordAgePadLowBitrate: false\n",
+		"no recipients":    "",
+	} {
+		require.False(t, pathConfCanBeUpdated(base, load(extra)), "%s: the path is reloaded in place", name)
+	}
 }

@@ -60,26 +60,37 @@ type Writer struct {
 // RI_g and RK, and the 16-byte payload nonce to dst in one Write, and returns
 // a Writer for the payload. It does not close dst.
 func NewWriter(dst io.Writer, scope KeyScope) (*Writer, error) {
-	recipients, err := scope.recipients()
+	start, aead, err := newPayload(scope)
 	if err != nil {
 		return nil, err
+	}
+	if _, err := dst.Write(start); err != nil {
+		return nil, fmt.Errorf("crypto: write the age header: %w", err)
+	}
+	return &Writer{dst: dst, aead: aead, buf: make([]byte, encChunkSize)}, nil
+}
+
+// newPayload starts a new age file for scope: a new random file key wrapped
+// for RI_g and RK and a new payload nonce. It returns the header and the
+// nonce, which start the file, and the STREAM AEAD of its payload.
+func newPayload(scope KeyScope) (start []byte, aead cipher.AEAD, err error) {
+	recipients, err := scope.recipients()
+	if err != nil {
+		return nil, nil, err
 	}
 	fileKey := make([]byte, fileKeySize)
 	_, _ = rand.Read(fileKey) // crypto/rand.Read never fails
 	hdr, err := marshalHeader(fileKey, recipients)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	nonce := make([]byte, payloadNonceSize)
 	_, _ = rand.Read(nonce)
-	aead, err := chacha20poly1305.New(payloadKey(fileKey, nonce))
+	aead, err = chacha20poly1305.New(payloadKey(fileKey, nonce))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if _, err := dst.Write(append(hdr, nonce...)); err != nil {
-		return nil, fmt.Errorf("crypto: write the age header: %w", err)
-	}
-	return &Writer{dst: dst, aead: aead, buf: make([]byte, encChunkSize)}, nil
+	return append(hdr, nonce...), aead, nil
 }
 
 // Write buffers p. A full chunk is sealed, as a non-final chunk, only once a
