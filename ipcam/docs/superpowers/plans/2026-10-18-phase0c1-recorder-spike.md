@@ -348,7 +348,7 @@ func NewTailSealer(riG *age.X25519Identity) TailSealer // built in ipcam-hub's m
 
 - **Header (C04).** It is built from public pieces: a random 16-byte file key, `Recipient.Wrap` stanzas in the age v1 text format, and an HMAC-SHA-256 under HKDF(file key, info `header`).
 - **Payload.** STREAM ChaCha20-Poly1305 with key HKDF(file key, salt = nonce, info `payload`). The chunk nonce is an 11-byte big-endian counter plus the last-chunk flag. Chunk *i* starts at `len(header) + 16 + i·65552`.
-- **`Reseal`** re-encrypts in RAM every chunk from the lowest patch offset (or the last kept chunk) up to `keep`, writes the last as the final chunk (non-empty), and truncates and syncs the file. It never writes a temporary file (G08).
+- **`Reseal`** re-encrypts in RAM only the last kept chunk, as the final chunk (non-empty, under its last-chunk-flag nonce), and truncates and syncs the file (spec §4.5). Earlier chunks are never re-encrypted: patches must lie inside the last kept chunk, else `ErrPatchBeforeFinalChunk`; an already-final chunk is never sealed again with other bytes (`ErrFinalChunkChanged`). Re-sealing chunk *i* under its old non-final nonce with new plaintext would reuse a ChaCha20-Poly1305 nonce (C1-R7). It never writes a temporary file (G08).
 
 - [ ] **Step 1: Write the failing tests.**
   - `TestRecording_RoundTrip`: 1 MiB + 17 bytes are written and read back whole, and the bytes are equal.
@@ -363,7 +363,8 @@ func NewTailSealer(riG *age.X25519Identity) TailSealer // built in ipcam-hub's m
   - `TestWriter_GoldenVectors`: with `-update-golden`, it writes `testdata/golden/` using injected randomness. The plaintext sizes are 1, 65535, 65536 + 8, 65537, 3·65536 + 8 and 1 MiB + 17, with `Flush` at fixed offsets. The plaintext of each file is byte `i` = `(i·31 + (i>>8)) & 0xff`. `vectors.json` has per file `{file, fileKeyHex, plaintextSize, plaintextSha256, ranges:[{offset,length,sha256}] ×64}`, and the ranges include every chunk boundary ± 1. Without the flag, it checks that the files decrypt to those values.
   - `TestRecording_ResealTail_DecryptsWithAgeCLI`: a file with 5 flushed chunks plus 300 trailing bytes of a torn sixth chunk gives `DurableSize() == 5·65536` and `Complete() == false`. `Reseal(keep = 5·65536 − 1000)` makes `age.Decrypt` return exactly those bytes, and so do the age CLIs and rage when required.
   - `TestTornAge_ResealAtChunkBoundary_RewritesLastChunkAsFinal`: `keep = 4·65536` rewrites chunk 3 as the final chunk.
-  - `TestTornAge_PatchIsApplied`: a patch 200 KiB before `keep` is present in the decrypted result.
+  - `TestTornAge_PatchIsApplied`: a patch inside the last kept chunk is present in the decrypted result.
+  - `TestTornAge_RefusesPatchBeforeLastChunk` (C1-R7): a patch 200 KiB before `keep` returns `ErrPatchBeforeFinalChunk` and leaves the file byte-identical; after any successful `Reseal`, every chunk before the last kept one is byte-identical on disk.
   - `TestTornAge_WritesNoTempFile` (G08): with `TMPDIR` set to an empty directory, the directory is still empty after `OpenTorn` + `Reseal`, and only the target file's inode changed.
 - [ ] **Step 2: Run.** `cd ipcam && go test -count=1 ./hub/internal/crypto/...` — Expected: FAIL (`undefined: NewWriter`, …).
 - [ ] **Step 3: Implement.** Implement the API above in `hub/internal/crypto`. Generate the goldens with `go test ./hub/internal/crypto -run 'TestWriter_GoldenVectors|TestRecording_CCTVVectors' -update-golden -update-cctv`, then rerun without the flags.
@@ -444,7 +445,7 @@ Rulings: C04, C13, C22, R01, O17 (C1-R1).
   - `TestMTX2_RejectsSecretKeyInRecipients` (C22, `internal/conf`): an `AGE-SECRET-KEY-1…` entry, one recipient, or three recipients each give an error that does not contain the input.
   - `TestMTX2_WorstCaseLoss` (R01, O17):
     - **Setup.** The real MTX-2 part writer runs on synthetic H.264-like samples (1 s parts, 20 fps, part sizes uniform within ±30 % of the nominal bitrate, 10 min). 10,000 uniformly random cut times are drawn.
-    - **Loss.** At each cut, the durable plaintext is what was flushed at the last part fsync before it. Loss = cut − PTS of the last sample wholly inside that durable plaintext (R01's whole-sample salvage).
+    - **Loss.** At each cut, the durable plaintext is what was flushed at the last part fsync before it. Loss = cut − PTS of the last sample wholly inside that durable plaintext whose part can be kept: a partial part's samples are salvaged only when its `moof` lies in the last kept chunk (C1-R7); otherwise the plaintext ends at the last complete durable part.
     - **Asserts.** Padding on: median ≤ 1000 ms and max ≤ 2000 ms at 4 Mbps, at 450 kbps and at 256 kbps; disk overhead ≤ 10 % at 4 Mbps. Padding off: max ≤ 4000 ms at 256 kbps (§4.5 as amended by O17: 1 part + 64 KiB ÷ bitrate, rounded up to whole parts).
     - **Output.** It prints `mtx2-loss: <json>` with median, max and overhead for 4 Mbps, 512 kbps, 450 kbps, 384 kbps and 256 kbps × on/off, and asserts that the line is ≤ 3,500 bytes after annotate.sh's escaping. The 512 kbps figures are information only.
 - [ ] **Step 2: Run.** `cd ipcam/hub/third_party/mediamtx && GOWORK=off go test -count=1 -run '^TestMTX2' ./...` — Expected: FAIL.
@@ -538,7 +539,7 @@ func GenerateConfig(jobs []Job, hookCmd []string, recDir string) ([]byte, error)
 - **Reconcile (§4.5, R01, C12, G07, G08).**
   - **Startup (synchronous, before serving).** For every `.part` file:
     - **Clear.** Walk the boxes (`ftyp`, `moov`, `moof`/`mdat` pairs, `free`). Keep every complete part plus the whole samples of the last partially written part, rewriting that part's `moof` sample count and `mdat` size. Write the `mvhd` duration, then rename.
-    - **`.age`.** `OpenTorn`, then the same walk over the durable plaintext, then `Reseal(keep, patches)`, then rename.
+    - **`.age`.** `OpenTorn`, then the same walk over the durable plaintext. The partial part is salvaged only when every byte its salvage changes (`moof` sample count, `mdat` size) lies in the last kept chunk; otherwise `keep` is the end of the last complete durable part and there are no patches (C1-R7, spec §4.5). Then `Reseal(keep, patches)`, then rename. A `Complete()` file is never resealed.
     - **Newest final file.** The newest final-named segment of each `<cam>/<profile>` is checked too. That is a `.mp4.age` whose `OpenTorn` gives `Complete() == false`, or a `.mp4` whose box walk ends in a torn part. Such a file is repaired exactly as a `.part` would be, and keeps its name. This covers a disk that acknowledged the close's fsync without keeping the data.
     - **Lost tails.** Each becomes a `restart` gap.
     - **Abort.** If more than 50 % of segments would be `lost`, nothing is changed and `Aborted: true` is returned (HUB-09).
