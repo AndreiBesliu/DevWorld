@@ -229,6 +229,27 @@ jobs:
         run: |
           set -o pipefail
           go test -count=1 -race ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${RUNNER_TEMP}/test.log"
+      - name: ENC-06
+        # The golden files and a resealed torn file decrypt with each age CLI and with rage,
+        # using only the recovery key (ENC-06). The test prints one "enc06: <json>" line,
+        # pass true or false, which goes out as a notice either way (C32).
+        id: enc06
+        env:
+          RECSPIKE_AGE_BINS: ${{ runner.temp }}/age-tools/age-v1.0.0/age:${{ runner.temp }}/age-tools/age-v1.3.2/age
+          RECSPIKE_RAGE_BIN: ${{ runner.temp }}/age-tools/rage-v0.12.1/rage
+          RECSPIKE_REQUIRE_AGE_TOOLS: '1'
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/enc06.log"
+          status=0
+          go test -count=1 -v -run '^TestRecording_DecryptsWithAgeCLIAndRage$' ./hub/internal/crypto/ 2>&1 |
+            tee "${log}" || status=$?
+          if ! grep -q '^enc06: ' "${log}"; then
+            echo "ENC-06: the test printed no enc06 line" | tee -a "${log}"
+            exit 1
+          fi
+          sed -n 's/^enc06: //p' "${log}" | tools/scripts/annotate.sh ENC-06 1 notice
+          exit "${status}"
       - name: Test the MediaMTX fork
         # Its patch tests (TestMTX*) and the recorder's own tests only (C03). The -run
         # pattern still compiles the tests of every package.
