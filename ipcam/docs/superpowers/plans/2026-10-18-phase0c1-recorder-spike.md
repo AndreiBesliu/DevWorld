@@ -322,7 +322,7 @@ package crypto
 const ChunkSize = 64 << 10 // plaintext bytes per age STREAM chunk
 type KeyScope struct{ RecordingIdentity, Recovery *age.X25519Recipient } // RI_g and RK (T20)
 func ParseKeyScope(riG, rk string) (KeyScope, error)  // accepts exactly two "age1…" X25519 recipients
-func (s KeyScope) Strings() [2]string                  // RI_g first, then RK
+func (s KeyScope) Strings() ([2]string, error)         // RI_g first, then RK; error on a zero or invalid scope (Task 2b)
 type Writer struct{ /* … */ }
 func NewWriter(dst io.Writer, scope KeyScope) (*Writer, error) // writes header + 16-byte payload nonce at once
 func (w *Writer) Write(p []byte) (int, error)          // seals a full chunk as non-final only when more bytes follow it
@@ -524,7 +524,7 @@ func GenerateConfig(jobs []Job, hookCmd []string, recDir string) ([]byte, error)
   - **Pull and record.** `rtspTransport: tcp`. One path per job, named `<cam>/<profile>` (MediaMTX's `IsValidPathName` allows `/`), with `source: <RestreamURL>`, `record: yes`, `recordFormat: fmp4`, `recordPartDuration: 1s`, `recordSegmentDuration: 300s` and `recordDeleteAfter: 0s`. MediaMTX's own cleaner would otherwise delete recordings after its 24 h default, and retention belongs to hubd.
   - **Record path.** `recordPath: <recDir>/%path/%Y-%m-%d/%H%M%S_%f`. MediaMTX v1.21.2 rejects a `recordPath` without `%path` (`internal/conf/path.go`: "'recordPath' must contain %path"), and `%path` expands to `<cam>/<profile>`, so the files land in `<recDir>/<cam>/<profile>/<date>/`. The date directory is in the host's local time in Phase 0, and the catalog assigns the UUIDv7 segment id.
   - **Hook.** `runOnRecordSegmentComplete: <ipcam-hub> hook segment-complete`.
-  - **Encryption.** For a scoped job, `recordAgeRecipients` holds exactly the two strings from `Scope.Strings()`, and `recordAgePadLowBitrate` follows `Job.PadLowBitrate`.
+  - **Encryption.** For a scoped job, `recordAgeRecipients` holds exactly the two strings from `Scope.Strings()` (its error fails `GenerateConfig` without echoing the scope), and `recordAgePadLowBitrate` follows `Job.PadLowBitrate`.
 - **Supervisor (C07, C09).**
   - **Child lifetime.** The MediaMTX child is bound to `ipcam-hub`'s lifetime: on Linux with `Setpgid` + `Pdeathsig: SIGKILL`; on Windows with a Job Object `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
   - **Restart.** On child exit, it restarts at once, then backs off 0.5 s, 1 s and 2 s (capped). The backoff resets after 60 s of uptime, so every restart is ≤ 3 s (HUB-13).
