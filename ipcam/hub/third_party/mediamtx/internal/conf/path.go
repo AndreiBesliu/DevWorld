@@ -17,6 +17,7 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mp4/codecs"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/pmp4"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/logger"
 )
 
@@ -247,6 +248,15 @@ type Path struct {
 	RecordMaxPartSize     StringSize   `json:"recordMaxPartSize"`
 	RecordSegmentDuration Duration     `json:"recordSegmentDuration"`
 	RecordDeleteAfter     Duration     `json:"recordDeleteAfter"`
+	// MTX-2 (hub/third_party/PATCHES.md): RI_g and RK, the two age1 X25519
+	// recipients that fMP4 segments are encrypted to; empty records in clear
+	// (Load turns an absent list into an empty one). They are kept as strings:
+	// Clone copies settable fields only, and would drop the key bytes inside a
+	// parsed recipient.
+	RecordAgeRecipients []string `json:"recordAgeRecipients"`
+	// MTX-2: whether an encrypted part smaller than one age chunk is always
+	// padded to the chunk boundary (the per-camera setting O17, on by default).
+	RecordAgePadLowBitrate bool `json:"recordAgePadLowBitrate"`
 
 	// Authentication (deprecated)
 	PublishUser *Credential `json:"publishUser,omitempty" deprecated:"true"`
@@ -388,6 +398,7 @@ func (pconf *Path) setDefaults() {
 	pconf.RecordMaxPartSize = 50 * 1024 * 1024
 	pconf.RecordSegmentDuration = 3600 * Duration(time.Second)
 	pconf.RecordDeleteAfter = 24 * 3600 * Duration(time.Second)
+	pconf.RecordAgePadLowBitrate = true // MTX-2: O17's default
 
 	// Publisher source
 	pconf.OverridePublisher = true
@@ -710,6 +721,14 @@ func (pconf *Path) validate(
 		return fmt.Errorf("'recordDeleteAfter' cannot be lower than 'recordSegmentDuration'")
 	}
 
+	// MTX-2
+	if _, err := pconf.RecordAgeScope(); err != nil {
+		return err
+	}
+	if len(pconf.RecordAgeRecipients) != 0 && pconf.RecordFormat != RecordFormatFMP4 {
+		return fmt.Errorf("'recordAgeRecipients' needs 'recordFormat: fmp4': MPEG-TS segments are not encrypted")
+	}
+
 	// Authentication (deprecated)
 
 	if deprecatedCredentialsMode {
@@ -805,6 +824,26 @@ func (pconf *Path) validate(
 	}
 
 	return nil
+}
+
+// RecordAgeScope returns the recipients that the path's fMP4 segments are
+// encrypted to (MTX-2), or nil when the list is empty and the path records in
+// clear. A list must hold exactly RI_g and RK, two different age1 X25519
+// recipients. Its errors never quote it: an entry may be a secret key pasted
+// in the wrong place.
+func (pconf *Path) RecordAgeScope() (*crypto.KeyScope, error) {
+	if len(pconf.RecordAgeRecipients) == 0 {
+		return nil, nil
+	}
+	if len(pconf.RecordAgeRecipients) != 2 {
+		return nil, fmt.Errorf("'recordAgeRecipients' must hold exactly two age1 X25519 recipients, RI_g and RK, not %d",
+			len(pconf.RecordAgeRecipients))
+	}
+	scope, err := crypto.ParseKeyScope(pconf.RecordAgeRecipients[0], pconf.RecordAgeRecipients[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid 'recordAgeRecipients': %w", err)
+	}
+	return &scope, nil
 }
 
 // Equal checks whether two Paths are equal.

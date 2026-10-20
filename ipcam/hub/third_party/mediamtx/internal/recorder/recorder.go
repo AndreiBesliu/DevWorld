@@ -4,6 +4,7 @@ package recorder
 import (
 	"time"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/conf"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/logger"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/stream"
@@ -33,6 +34,13 @@ type Recorder struct {
 	OnSegmentCreate   OnSegmentCreateFunc
 	OnSegmentComplete OnSegmentCompleteFunc
 	Parent            logger.Writer
+
+	// MTX-2 (hub/third_party/PATCHES.md): the recipients that fMP4 segments
+	// are encrypted to, or nil to record them in clear.
+	AgeScope *crypto.KeyScope
+	// MTX-2: whether an encrypted part smaller than one age chunk is always
+	// padded to the chunk boundary (the per-camera setting O17).
+	AgePadLowBitrate bool
 
 	restartPause time.Duration
 
@@ -70,6 +78,8 @@ func (r *Recorder) Initialize() {
 		onSegmentCreate:   r.OnSegmentCreate,
 		onSegmentComplete: r.OnSegmentComplete,
 		parent:            r,
+		ageScope:          r.AgeScope,
+		agePadLowBitrate:  r.AgePadLowBitrate,
 	}
 	r.currentInstance.initialize()
 
@@ -117,6 +127,8 @@ func (r *Recorder) run() {
 			onSegmentCreate:   r.OnSegmentCreate,
 			onSegmentComplete: r.OnSegmentComplete,
 			parent:            r,
+			ageScope:          r.AgeScope,
+			agePadLowBitrate:  r.AgePadLowBitrate,
 		}
 		r.currentInstance.initialize()
 	}

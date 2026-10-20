@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/conf"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/logger"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/recordstore"
@@ -23,6 +24,8 @@ type recorderInstance struct {
 	onSegmentCreate   OnSegmentCreateFunc
 	onSegmentComplete OnSegmentCompleteFunc
 	parent            logger.Writer
+	ageScope          *crypto.KeyScope // MTX-2
+	agePadLowBitrate  bool             // MTX-2
 
 	streamID    uuid.UUID
 	pathFormat2 string

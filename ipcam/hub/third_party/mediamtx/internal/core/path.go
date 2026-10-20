@@ -1028,14 +1028,25 @@ func (pa *path) setNotAvailable() {
 }
 
 func (pa *path) startRecording() {
+	// MTX-2 (hub/third_party/PATCHES.md): the recipients were checked when the
+	// configuration loaded; a path never records in clear what it should
+	// encrypt.
+	ageScope, err := pa.conf.RecordAgeScope()
+	if err != nil {
+		pa.Log(logger.Error, "recording not started: %v", err)
+		return
+	}
+
 	pa.recorder = &recorder.Recorder{
-		PathFormat:      pa.conf.RecordPath,
-		Format:          pa.conf.RecordFormat,
-		PartDuration:    time.Duration(pa.conf.RecordPartDuration),
-		MaxPartSize:     pa.conf.RecordMaxPartSize,
-		SegmentDuration: time.Duration(pa.conf.RecordSegmentDuration),
-		PathName:        pa.name,
-		Stream:          pa.stream,
+		PathFormat:       pa.conf.RecordPath,
+		Format:           pa.conf.RecordFormat,
+		PartDuration:     time.Duration(pa.conf.RecordPartDuration),
+		MaxPartSize:      pa.conf.RecordMaxPartSize,
+		SegmentDuration:  time.Duration(pa.conf.RecordSegmentDuration),
+		PathName:         pa.name,
+		Stream:           pa.stream,
+		AgeScope:         ageScope,
+		AgePadLowBitrate: pa.conf.RecordAgePadLowBitrate,
 		OnSegmentCreate: func(segmentPath string) {
 			if pa.conf.RunOnRecordSegmentCreate != "" {
 				env := pa.ExternalCmdEnv()

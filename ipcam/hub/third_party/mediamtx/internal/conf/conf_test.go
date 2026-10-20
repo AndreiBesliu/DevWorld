@@ -56,6 +56,8 @@ func TestConfFromFile(t *testing.T) {
 			RecordMaxPartSize:          50 * 1024 * 1024,
 			RecordSegmentDuration:      3600000000000,
 			RecordDeleteAfter:          86400000000000,
+			RecordAgeRecipients:        []string{},
+			RecordAgePadLowBitrate:     true,
 			RTSPUDPSourcePortRange:     []uint{32768, 60999},
 			MoQTransport:               MoQTransportQUIC,
 			WHEPSTUNGatherTimeout:      5 * Duration(time.Second),

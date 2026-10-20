@@ -11,10 +11,14 @@ import (
 // the recording identity of the current generation, and RK, the recovery
 // key. Both are public keys; package recorder and MediaMTX only ever see
 // these (§4.3). ParseKeyScope builds a valid one; a KeyScope without both
-// keys, such as the zero value, makes Strings and NewWriter return an error.
+// keys, such as the zero value, makes Strings and NewWriter return an error,
+// and one whose RK is RI_g makes NewWriter return one.
 type KeyScope struct{ RecordingIdentity, Recovery *age.X25519Recipient }
 
-var errIncompleteScope = errors.New("crypto: the key scope needs both RI_g and RK")
+var (
+	errIncompleteScope = errors.New("crypto: the key scope needs both RI_g and RK")
+	errSameRecipient   = errors.New("crypto: RK is the same recipient as RI_g; recordings need two different keys")
+)
 
 // ParseKeyScope parses RI_g and RK, each one "age1…" X25519 recipient. It
 // rejects anything else: an empty string, a list, a hybrid or SSH recipient,
@@ -31,7 +35,7 @@ func ParseKeyScope(riG, rk string) (KeyScope, error) {
 		return KeyScope{}, err
 	}
 	if ri.String() == r.String() {
-		return KeyScope{}, errors.New("crypto: RK is the same recipient as RI_g; recordings need two different keys")
+		return KeyScope{}, errSameRecipient
 	}
 	return KeyScope{RecordingIdentity: ri, Recovery: r}, nil
 }
@@ -54,10 +58,14 @@ func (s KeyScope) Strings() ([2]string, error) {
 	return [2]string{s.RecordingIdentity.String(), s.Recovery.String()}, nil
 }
 
-// recipients returns RI_g and RK in header order.
+// recipients returns RI_g and RK in header order. Like ParseKeyScope, it
+// refuses a scope built by hand whose RK is RI_g.
 func (s KeyScope) recipients() ([]age.Recipient, error) {
 	if s.RecordingIdentity == nil || s.Recovery == nil {
 		return nil, errIncompleteScope
+	}
+	if s.RecordingIdentity.String() == s.Recovery.String() {
+		return nil, errSameRecipient
 	}
 	return []age.Recipient{s.RecordingIdentity, s.Recovery}, nil
 }

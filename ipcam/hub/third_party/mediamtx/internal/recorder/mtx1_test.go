@@ -77,7 +77,7 @@ type durabilityEvent struct {
 type durabilityLog struct {
 	mu       sync.Mutex
 	events   []durabilityEvent
-	lastSync *os.File
+	lastSync segmentFile
 }
 
 func (l *durabilityLog) add(ev durabilityEvent) {
@@ -116,7 +116,7 @@ func recordDurability(t *testing.T) *durabilityLog {
 		syncFile, syncDir, renameFinal = realSyncFile, realSyncDir, realRenameFinal
 	})
 
-	syncFile = func(f *os.File) error {
+	syncFile = func(f segmentFile) error {
 		content, err := os.ReadFile(f.Name())
 		assert.NoError(t, err)
 		l.mu.Lock()
@@ -159,8 +159,12 @@ func recordDurability(t *testing.T) *durabilityLog {
 }
 
 // isOpen reports whether f has not been closed yet. A Seek that moves nothing
-// fails with os.ErrClosed on a closed file, on every OS.
-func isOpen(t *testing.T, f *os.File) bool {
+// fails with os.ErrClosed on a closed file, on every OS. It looks through
+// mtx2_test.go's appendOnlyFile, which refuses every Seek.
+func isOpen(t *testing.T, f segmentFile) bool {
+	if a, ok := f.(*appendOnlyFile); ok {
+		f = a.f
+	}
 	_, err := f.Seek(0, io.SeekCurrent)
 	if errors.Is(err, os.ErrClosed) {
 		return false
@@ -196,9 +200,20 @@ type testRecording struct {
 // startRecording starts a Recorder with 1 s parts and 3 s segments whose seams
 // record into a new durabilityLog. The first frame's wall time is firstNTP.
 func startRecording(t *testing.T, firstNTP time.Time) *testRecording {
+	return startRecordingWith(t, firstNTP, test.FormatH264, nil)
+}
+
+// startRecordingWith is startRecording for a stream of the H.264 format forma,
+// with configure, when not nil, applied to the Recorder before it starts.
+func startRecordingWith(
+	t *testing.T,
+	firstNTP time.Time,
+	forma *rtspformat.H264,
+	configure func(*Recorder),
+) *testRecording {
 	desc := &description.Session{Medias: []*description.Media{{
 		Type:    description.MediaTypeVideo,
-		Formats: []rtspformat.Format{test.FormatH264},
+		Formats: []rtspformat.Format{forma},
 	}}}
 
 	strm := &stream.Stream{
@@ -242,6 +257,9 @@ func startRecording(t *testing.T, firstNTP time.Time) *testRecording {
 		},
 		Parent: test.NilLogger,
 	}
+	if configure != nil {
+		configure(r.recorder)
+	}
 	r.recorder.Initialize()
 	t.Cleanup(r.stop)
 
@@ -257,18 +275,24 @@ func (r *testRecording) stop() {
 // wall time, each with the SPS and PPS of test.FormatH264.
 func (r *testRecording) writeFrames(n int) {
 	for range n {
-		offset := time.Duration(r.frames) * testFrameInterval
-		r.subStream.WriteUnit(r.desc.Medias[0], r.desc.Medias[0].Formats[0], &unit.Unit{
-			PTS: 10*90000 + int64(offset)*90000/int64(time.Second),
-			NTP: r.firstNTP.Add(offset),
-			Payload: unit.PayloadH264{
-				test.FormatH264.SPS,
-				test.FormatH264.PPS,
-				testIDR(r.frames),
-			},
+		r.writeFrame(unit.PayloadH264{
+			test.FormatH264.SPS,
+			test.FormatH264.PPS,
+			testIDR(r.frames),
 		})
-		r.frames++
 	}
+}
+
+// writeFrame sends au as the next frame, 50 ms after the previous one in both
+// PTS and wall time.
+func (r *testRecording) writeFrame(au unit.PayloadH264) {
+	offset := time.Duration(r.frames) * testFrameInterval
+	r.subStream.WriteUnit(r.desc.Medias[0], r.desc.Medias[0].Formats[0], &unit.Unit{
+		PTS:     10*90000 + int64(offset)*90000/int64(time.Second),
+		NTP:     r.firstNTP.Add(offset),
+		Payload: au,
+	})
+	r.frames++
 }
 
 // testIDR returns an IDR NAL unit of 1 KiB whose bytes after the header
@@ -409,6 +433,8 @@ func TestMTX1_DirSyncAtCreateAndRenameOnly(t *testing.T) {
 	rename := slices.IndexFunc(events, func(ev durabilityEvent) bool { return ev.op == "rename" })
 	require.Less(t, slices.IndexFunc(events, func(ev durabilityEvent) bool { return ev.op == "syncDir" }), firstSync,
 		"events: %v", eventOps(events))
+	require.GreaterOrEqual(t, rename, 0, "no rename; events: %v", eventOps(events))
+	require.Less(t, rename+1, len(events), "nothing after the rename; events: %v", eventOps(events))
 	require.Equal(t, "syncDir", events[rename+1].op, "events: %v", eventOps(events))
 }
 
@@ -473,7 +499,7 @@ func TestMTX1_FailedPartSyncKeepsPartName(t *testing.T) {
 
 	recordedSync := syncFile
 	calls := 0
-	syncFile = func(f *os.File) error {
+	syncFile = func(f segmentFile) error {
 		err := recordedSync(f)
 		calls++
 		if calls == 2 {
@@ -490,4 +516,93 @@ func TestMTX1_FailedPartSyncKeepsPartName(t *testing.T) {
 	require.Zero(t, r.log.count("rename"), "events: %v", eventOps(events))
 	require.Zero(t, r.log.count("complete"), "events: %v", eventOps(events))
 	require.Equal(t, []string{"2008-05-20_22-15-25-000000.mp4.part"}, dirEntries(t, r.dir))
+}
+
+// TestMTX1_SeamFailureFiresNoHook: when the close's syncFile, renameFinal, the
+// directory sync after the rename or the one after the .part is created
+// fails, no segment-complete hook runs, and the segment keeps the name it had
+// at the failure: the .part name, except after a rename that succeeded, which
+// leaves the final name.
+func TestMTX1_SeamFailureFiresNoHook(t *testing.T) {
+	name := "2008-05-20_22-15-25-000000.mp4"
+	errInjected := errors.New("injected failure")
+
+	for _, tc := range []struct {
+		name string
+		// inject replaces a seam of syncer.go so that one of its calls fails,
+		// after calling failed.
+		inject func(failed func())
+		// want is the only file left in the segment directory.
+		want string
+	}{
+		{
+			name: "final syncFile",
+			inject: func(failed func()) {
+				recorded := syncFile
+				calls := 0
+				syncFile = func(f segmentFile) error {
+					err := recorded(f)
+					calls++
+					if calls == 4 { // after the syncs of the 3 parts
+						failed()
+						return errInjected
+					}
+					return err
+				}
+			},
+			want: name + ".part",
+		},
+		{
+			name: "renameFinal",
+			inject: func(failed func()) {
+				renameFinal = func(string, string) error {
+					failed()
+					return errInjected
+				}
+			},
+			want: name + ".part",
+		},
+		{
+			name: "syncDir after the rename",
+			inject: func(failed func()) {
+				recorded := syncDir
+				calls := 0
+				syncDir = func(dir string) error {
+					err := recorded(dir)
+					calls++
+					if calls == 2 {
+						failed()
+						return errInjected
+					}
+					return err
+				}
+			},
+			want: name,
+		},
+		{
+			name: "syncDir after the creation",
+			inject: func(failed func()) {
+				recorded := syncDir
+				syncDir = func(dir string) error {
+					_ = recorded(dir)
+					failed()
+					return errInjected
+				}
+			},
+			want: name + ".part",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := startRecording(t, time.Date(2008, 5, 20, 22, 15, 25, 0, time.UTC))
+			tc.inject(func() { r.log.add(durabilityEvent{op: "failed"}) })
+
+			r.writeFrames(oneSegmentFrames)
+			r.waitFor("the injected failure", func(l *durabilityLog) bool { return l.count("failed") == 1 })
+			r.stop()
+
+			events := r.log.snapshot()
+			require.Zero(t, r.log.count("complete"), "events: %v", eventOps(events))
+			require.Equal(t, []string{tc.want}, dirEntries(t, r.dir), "events: %v", eventOps(events))
+		})
+	}
 }

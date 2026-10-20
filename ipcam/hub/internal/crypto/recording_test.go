@@ -292,8 +292,10 @@ func testParseKeyScope(t *testing.T) {
 		{"a hybrid recipient", riGs, hybrid.Recipient().String()},
 		{"a secret key", riG.String(), rks},
 		{"a secret key as RK", riGs, rk.String()},
-		// §10's two-key separation: RK must not be the recording key.
+		// §10's two-key separation: RK must not be the recording key, in
+		// whatever case its bech32 is written.
 		{"RI_g as RK", riGs, riGs},
+		{"RI_g as RK, upper case", riGs, strings.ToUpper(riGs)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := crypto.ParseKeyScope(tc.riG, tc.rk)
@@ -327,6 +329,34 @@ func TestKeyScope_StringsWithoutBothKeys_ReturnsError(t *testing.T) {
 		if got, err := tc.scope.Strings(); err == nil {
 			t.Errorf("%s: Strings() = %q, want an error", tc.name, got)
 		}
+	}
+}
+
+// TestNewWriter_RejectsRIgAsRK: a KeyScope built by hand with RI_g as RK,
+// which ParseKeyScope refuses, makes NewWriter fail before it writes anything,
+// whether both fields hold the same recipient or two parses of one key.
+func TestNewWriter_RejectsRIgAsRK(t *testing.T) {
+	scope, riG, _ := newScope(t)
+	again, err := age.ParseX25519Recipient(riG.Recipient().String())
+	if err != nil {
+		t.Fatalf("ParseX25519Recipient: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		scope crypto.KeyScope
+	}{
+		{"the same recipient", crypto.KeyScope{RecordingIdentity: scope.RecordingIdentity, Recovery: scope.RecordingIdentity}},
+		{"the same key parsed twice", crypto.KeyScope{RecordingIdentity: scope.RecordingIdentity, Recovery: again}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var dst bytes.Buffer
+			if _, err := crypto.NewWriter(&dst, tc.scope); err == nil {
+				t.Fatal("NewWriter accepted RI_g as RK")
+			}
+			if dst.Len() != 0 {
+				t.Errorf("NewWriter wrote %d bytes before it failed", dst.Len())
+			}
+		})
 	}
 }
 

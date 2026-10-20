@@ -269,6 +269,29 @@ jobs:
             go test -count=1 -race ./internal/recorder/... &&
               go test -count=1 -race -run '^TestMTX' ./...
           } 2>&1 | tee "${RUNNER_TEMP}/fork-test.log"
+      - name: MTX-2 loss
+        # R01, O17: TestMTX2_WorstCaseLoss prints one "mtx2-loss: <json>" line, the median and
+        # maximum loss at a cut and the disk overhead of encrypted recording per bitrate, with
+        # the low-bitrate padding on and off, and pass true or false. It goes out as a notice
+        # either way (C32). It runs even when an earlier step failed, so that the failure does
+        # not hide it.
+        id: mtx2-loss
+        if: ${{ !cancelled() }}
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/mtx2-loss.log"
+          status=0
+          go test -count=1 -v -run '^TestMTX2_WorstCaseLoss$' ./internal/recorder/ 2>&1 |
+            tee "${log}" || status=$?
+          if ! grep -q '^mtx2-loss: ' "${log}"; then
+            echo "MTX-2: the test printed no mtx2-loss line" | tee -a "${log}"
+            exit 1
+          fi
+          sed -n 's/^mtx2-loss: //p' "${log}" | ../../../tools/scripts/annotate.sh mtx2-loss 1 notice
+          exit "${status}"
       - name: Vulnerabilities of the hub
         # govulncheck needs a directory that holds a go.mod.
         id: vuln-hub

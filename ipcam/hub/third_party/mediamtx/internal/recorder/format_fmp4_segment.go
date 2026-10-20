@@ -126,10 +126,15 @@ type formatFMP4Segment struct {
 	number   uint64
 
 	path           string
-	fi             *os.File
+	fi             segmentFile
 	curPart        *formatFMP4Part
 	endDTS         time.Duration
 	nextPartNumber uint32
+
+	// MTX-2: the writer of an encrypted segment's plaintext, nil for a clear
+	// segment, and where the segment's fMP4 bytes go: age, or fi itself.
+	age *ageSegmentWriter
+	w   io.Writer
 
 	// MTX-1: the first failed write or fsync of a part. The segment then keeps
 	// its .part name.
@@ -155,9 +160,17 @@ func (s *formatFMP4Segment) close() error {
 			err = s.partErr
 		}
 
-		// write overall duration in the header to speed up the playback server
 		duration := s.endDTS - s.startDTS
-		err2 := writeDuration(s.fi, duration)
+		var err2 error
+		if s.age != nil {
+			// MTX-2: an encrypted segment is written strictly in order, so its
+			// mvhd keeps no duration (C13): the hub's catalog has it. The last
+			// write is the final age chunk.
+			err2 = s.age.close()
+		} else {
+			// write overall duration in the header to speed up the playback server
+			err2 = writeDuration(s.fi, duration)
+		}
 		if err == nil {
 			err = err2
 		}
@@ -193,6 +206,10 @@ func (s *formatFMP4Segment) close() error {
 func (s *formatFMP4Segment) closeCurPart() error {
 	if s.fi == nil {
 		s.path = recordstore.Path{Start: s.startNTP}.Encode(s.f.ri.pathFormat2)
+		if s.f.ri.ageScope != nil {
+			// MTX-2: an encrypted segment is <name>.mp4.age.
+			s.path += ageSuffix
+		}
 		s.f.ri.Log(logger.Debug, "creating segment %s", s.path)
 
 		err := os.MkdirAll(filepath.Dir(s.path), 0o755)
@@ -201,7 +218,7 @@ func (s *formatFMP4Segment) closeCurPart() error {
 		}
 
 		// MTX-1: the segment is written under a .part name until it is complete.
-		fi, err := os.Create(s.path + partSuffix)
+		fi, err := createFile(s.path + partSuffix)
 		if err != nil {
 			return err
 		}
@@ -215,8 +232,22 @@ func (s *formatFMP4Segment) closeCurPart() error {
 
 		s.f.ri.onSegmentCreate(fi.Name())
 
+		// MTX-2: every byte of an encrypted segment goes through the age
+		// writer, which writes the age header first. No clear byte reaches
+		// the file (HUB-04).
+		var w io.Writer = fi
+		var age *ageSegmentWriter
+		if scope := s.f.ri.ageScope; scope != nil {
+			age, err = newAgeSegmentWriter(fi, *scope, s.f.ri.agePadLowBitrate)
+			if err != nil {
+				fi.Close()
+				return err
+			}
+			w = age
+		}
+
 		err = writeInit(
-			fi,
+			w,
 			s.f.ri.streamID,
 			s.number,
 			s.startDTS,
@@ -228,9 +259,20 @@ func (s *formatFMP4Segment) closeCurPart() error {
 		}
 
 		s.fi = fi
+		s.age = age
+		s.w = w
 	}
 
-	err := s.curPart.close(s.fi)
+	var partStart int64
+	if s.age != nil {
+		partStart = s.age.size()
+	}
+	err := s.curPart.close(s.w)
+	if err == nil && s.age != nil {
+		// MTX-2: pad the part when §4.5's rule says so, and seal its complete
+		// chunks before the fsync.
+		err = s.age.endPart(partStart)
+	}
 	if err == nil {
 		// MTX-1: every part is durable once it is closed.
 		err = syncFile(s.fi)

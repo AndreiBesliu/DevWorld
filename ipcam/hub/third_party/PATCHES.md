@@ -20,11 +20,16 @@ The other upstream tests are not run. Some of them fail in the fork because of M
   - **Files touched.** `go.mod`, `go.sum`.
   - **Test.** The fork's govulncheck step in `ipcam-spike-recording.yml`.
   - **Rebase status.** MediaMTX v1.21.2 still requires v0.59.0, so a re-vendor to it redoes this change. Drop it once upstream requires v0.60.0 or later.
+- `require github.com/AndreiBesliu/DevWorld/ipcam/hub v0.0.0` (resolved by MTX-0's `replace`), `filippo.io/age` v1.3.2 (MTX-2's tests) and `go` 1.26.0 → 1.27.2, by `GOWORK=off go mod tidy` once MTX-2 imports `hub/internal/crypto`, then `v0.0.0` in place of the pseudo-version that tidy writes for a replaced module.
+  - **Why.** MTX-2 encrypts with the hub's own age writer (C03, C04). The hub module declares `go 1.27.2`, so the fork, which requires it, must too. The versions it brings (`filippo.io/age` v1.3.2, `filippo.io/hpke` v0.4.0, `golang.org/x/crypto` v0.57.0) are the hub's.
+  - **Files touched.** `go.mod`, `go.sum`.
+  - **Test.** Every MTX-2 test imports `hub/internal/crypto`; the fork's govulncheck and license steps in `ipcam-spike-recording.yml` cover the new modules.
+  - **Rebase status.** Redo with `GOWORK=off go mod tidy` after the re-vendor, and set the hub's requirement back to `v0.0.0`.
 
 ### MTX-0: own module path, no rpiCamera source, committed go:generate outputs
 
 - **What.**
-  1. **Module path.** The module is renamed from `github.com/bluenviron/mediamtx` to `github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx`, and every quoted import of the old path is rewritten. That also covers the package prefix that `internal/apidocsgen` matches on. URLs of the upstream project (the `upgrade` command, comments) are left alone. `go.mod` gets `replace github.com/AndreiBesliu/DevWorld/ipcam/hub => ../..`; the matching `require` comes with MTX-2, the first patch that imports `hub/internal/crypto` (`go mod tidy` drops a requirement that nothing imports yet, and keeps the replace). The rewrite, as the script runs it:
+  1. **Module path.** The module is renamed from `github.com/bluenviron/mediamtx` to `github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx`, and every quoted import of the old path is rewritten. That also covers the package prefix that `internal/apidocsgen` matches on. URLs of the upstream project (the `upgrade` command, comments) are left alone. `go.mod` gets `replace github.com/AndreiBesliu/DevWorld/ipcam/hub => ../..`; the matching `require` came with MTX-2, the first patch that imports `hub/internal/crypto` (`go mod tidy` drops a requirement that nothing imports yet, and keeps the replace). The rewrite, as the script runs it:
 
      ```bash
      grep -rlZF --include='*.go' '"github.com/bluenviron/mediamtx/' . \
@@ -70,9 +75,12 @@ The other upstream tests are not run. Some of them fail in the fork because of M
   2. **Every part.** Right after a part is written, the file is fsynced, so each part is durable before the next part's first write.
   3. **Creation.** The directory is synced once, right after the `.part` is created.
   4. **Close, in this order.** The last write (for a clear segment, the duration in `mvhd`, written into the `.part` before the rename), one more file fsync, `Close`, the rename, the directory sync, and then MTX-3's hook. Without the last fsync, the directory sync could make the final name durable while the file's last bytes are still in the page cache (ext4's delayed allocation does not force them out on a rename to a new name).
-  5. **Failures.** If a write, an fsync or `Close` of the segment fails, the segment keeps its `.part` name and no hook runs, and the error goes where upstream's errors go: the recorder logs it and restarts. The hub's reconcile then deals with the `.part`. That holds for a part that failed before the close too, which the segment remembers (`partErr`), and a failed rename or directory sync is handled the same way.
+  5. **Failures.** The hook runs only for a segment whose every write and fsync, `Close`, rename and directory sync succeeded; a part that failed before the close counts too, which the segment remembers (`partErr`). The error goes where upstream's errors go: the recorder logs it and restarts. The name left on disk depends on the step that failed:
+     - a failed write, fsync, `Close` or rename leaves the `.part` name, for the hub's reconcile;
+     - so does a failed directory sync after the `.part` is created, which leaves that `.part` empty;
+     - a failed directory sync after a successful rename leaves the final name, without the hook: the hub's reconcile catalogs such a file (Task 5).
   6. **Windows.** The directory sync is a no-op (`dirsync_windows.go`): Windows has no directory fsync and NTFS journals the directory entries. The rename is `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH`, after `Close` (`rename_windows.go`). On other systems the directory is opened and fsynced (`dirsync_other.go`), and the rename is `os.Rename` (`rename_other.go`).
-  7. **Seams.** `syncer.go` holds the three one-function seams that every call goes through, `syncFile`, `syncDir` and `renameFinal`, so that the tests can count and order the calls; on Windows, `moveFileEx` is a seam too.
+  7. **Seams.** `syncer.go` holds the three one-function seams that every call goes through, `syncFile`, `syncDir` and `renameFinal`, so that the tests can count and order the calls; on Windows, `moveFileEx` is a seam too. MTX-2 adds a fourth, `createFile`, and the `segmentFile` interface that `syncFile` takes.
 
   MPEG-TS segments are unchanged: ipcam records fMP4 only.
 - **Why.** Rulings C13 and C14, spec §4.5: a part is durable when it closes, so a power cut loses at most the part being written (HUB-07), and the atomic rename means that a final name always points at complete, durable bytes, while an unfinished segment is recognisable by its name for the startup reconcile. The directory is synced at creation and at the rename only, not per part, to keep the fsyncs per open file down (§4.8).
@@ -87,6 +95,7 @@ The other upstream tests are not run. Some of them fail in the fork because of M
   - `TestMTX1_RenameAfterCloseWithFinalName`: while the segment is written only `<name>.mp4.part` exists, afterwards only `<name>.mp4`; the close runs file fsync (file open, `mvhd` written), rename (file closed), directory sync, hook.
   - `TestMTX1_ClearDurationWrittenBeforeRename`: `mvhd` holds the segment's duration in the `.part` at the rename and in the final file.
   - `TestMTX1_FailedPartSyncKeepsPartName`: when the second part's fsync fails, the segment is closed without a rename and without a hook, and only its `.part` is left.
+  - `TestMTX1_SeamFailureFiresNoHook`: when the close's file fsync, the rename, the directory sync after the rename or the one after the creation fails, no hook runs; the `.part` name is left, except after a successful rename, which leaves the final name.
   - `TestMTX1_WindowsDirSyncNoOpAndWriteThroughRename` (`mtx1_windows_test.go`): the directory sync of a missing directory returns nil, so it opens no handle, and the rename passes `MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH` to `MoveFileEx` and replaces an existing file.
 
   The `recorder` job of `ipcam-spike-recording.yml` runs them on Linux with `-race`, the `windows` job on windows-latest.
@@ -94,7 +103,47 @@ The other upstream tests are not run. Some of them fail in the fork because of M
 
 ### MTX-2: age encryption at write
 
-*Not applied yet: Task 4 writes this entry.*
+- **What.** A path with age recipients writes its fMP4 segments encrypted with age as they are recorded, so that no clear byte of a recording reaches the disk:
+  1. **Configuration** (`internal/conf/path.go`).
+     - `recordAgeRecipients: [<RI_g>, <RK>]`: exactly two different age1 X25519 recipients, checked when the configuration loads with `crypto.ParseKeyScope` (`Path.RecordAgeScope`). Any other value fails the load with an error that never quotes it: one or three entries, a secret key, a hybrid or SSH recipient, RK equal to RI_g, or a value that is not a list. The key needs `recordFormat: fmp4`, since MPEG-TS segments are not encrypted. Without the key, or with an empty list, the path records in clear: `conf.Load` turns every absent list into an empty one, so the two cannot be told apart.
+     - The field holds the two strings: `Path.Clone` copies settable fields only, and would drop the key bytes inside a parsed recipient.
+     - `recordAgePadLowBitrate: true|false`, `true` when absent: the per-camera setting O17 („Pierdere minimă la pană de curent”).
+     - `internal/core/path.go` passes them to the recorder as `Recorder.AgeScope`, a `*crypto.KeyScope` that holds public keys only, and `Recorder.AgePadLowBitrate`. A changed key recreates the path, since `pathConfCanBeUpdated` compares the whole path configuration.
+  2. **Naming.** An encrypted segment is `<recordPath>.mp4.age`, written as `.mp4.age.part` and renamed by MTX-1.
+  3. **Strictly in order.** `ageSegmentWriter` (`agewriter.go`) wraps the hub's `crypto.Writer`. It writes the age header for RI_g and RK when the file is created, then the init, each part's `moof` and `mdat`, the padding and the final chunk, all through the writer and in order. At most one chunk of plaintext stays in RAM.
+  4. **Padding, per part** (§4.5 as amended by O17). Right after a part is written and before MTX-1's fsync:
+     - `p` is the distance from the part's end in the plaintext to the next 64 KiB chunk boundary; when 0 < p < 8, too short for a free box's header, it is 65,536 bytes more;
+     - the part is padded with a `free` box of `p` bytes when the setting is on and the part (its `moof` and `mdat`, without the init or the padding) is shorter than 64 KiB (`smallPartBytes`, equal to `crypto.ChunkSize`), or when `p` is at most 10 % of the part;
+     - then `Flush` seals every complete chunk, so that the part's fsync makes everything up to the last chunk boundary durable.
+
+     The decision is per part and keeps no state per stream. The spec's "stream below 512 kbps" is exactly a stream whose parts are under 64 KiB, about 524 kbps with 1 s parts, so the bitrate rule follows from the part size, and a stream whose bitrate varies (night VBR, smart codecs) is padded part by part.
+  5. **No seek-back** (C13). The close does not seek back to write the `mvhd` duration of an encrypted segment: its `mvhd` keeps a duration of 0, and playback reads durations from the hub's catalog. The file is only ever appended to.
+  6. **Close.** When every byte is sealed already (`Buffered() == 0`, as after a part padded to a boundary), an 8-byte `free` box is written first, so that the final chunk is never empty: age rejects an empty final chunk after other chunks. `Writer.Close` writes the final chunk; MTX-1's close order follows: one more `syncFile`, `Close`, `renameFinal`, `syncDir`, then MTX-3's hook. So the final chunk is durable before the final name.
+  7. **Seam.** `createFile` (`syncer.go`) creates the segment file as a `segmentFile`, an interface that `*os.File` implements, so that a test can wrap the file; `syncFile` takes a `segmentFile`.
+- **Why.** HUB-04 and C04: no clear frame on disk, with the hub's own age writer (C03). §4.5, R01 and O17 (ruling C1-R1): the `Flush` at every part's fsync bounds what a cut loses to the bytes after the last chunk boundary; padding the small parts keeps a low-bitrate stream within HUB-07 (median ≤ 1 s, maximum ≤ 2 s, with reconcile's whole-sample salvage, R01 and C1-R9) at the cost of disk for that camera only (about twice the bytes at 256 kbps); the 10 % rule aligns a large part when that is cheap. C13: the hub catalogs durations, so the file never needs a seek. C22: a secret key in the configuration is refused without being echoed. `TestMTX2_WorstCaseLoss` prints the loss and disk figures as the `mtx2-loss` notice of the recorder job.
+- **Files touched.**
+  - New: `internal/recorder/agewriter.go`.
+  - `internal/recorder/format_fmp4_segment.go` (`close`, `closeCurPart`), `syncer.go` (`segmentFile`, `createFile`), `recorder.go` and `recorder_instance.go` (the two settings, at both places where an instance is built).
+  - `internal/conf/path.go` (the keys, their default, `RecordAgeScope`, validation), `internal/core/path.go` (`startRecording`).
+  - Tests: `internal/recorder/mtx2_test.go`, `mtx2_loss_test.go`, `internal/conf/mtx2_test.go`, `internal/core/mtx2_test.go`; `internal/recorder/mtx1_test.go` takes `segmentFile` in its seam wrappers.
+  - Upstream test adapted: `internal/conf/conf_test.go`, where `TestConfFromFile`'s expected path has `RecordAgePadLowBitrate: true`.
+- **Test.** The recorder tests run a real `Recorder` with MTX-1's seam wrappers and decrypt what it wrote:
+  - `TestMTX2_EncryptedSegmentHasNoClearFrames` (HUB-04): neither the final file nor the `.part` at any fsync holds the `ftyp` and its brand, a `moof` followed by its `mfhd`, or the first 16 bytes of an SPS, PPS or IDR of the stream (whose NAL units are all at least 16 bytes), while the plaintext holds them; the file decrypts with `crypto.NewRecording(id).OpenReaderAt`, for RI_g and for RK.
+  - `TestMTX2_PartBoundaryChunkAligned_WhenPaddingAtMost10Pct`: in a 4 Mbps stream every part follows the 10 % rule and every padded part ends on a chunk boundary; parts sized to need about 20,000 bytes are padded, parts that need about 60,000, over 10 %, are not.
+  - `TestMTX2_LowBitrateDecidedPerPart`: with the setting on, a 63 KiB part is aligned and a 65 KiB part is not (HUB-07's boundary), while with it off neither is; in a 450 kbps ± 30 % stream exactly the parts under 64 KiB are aligned by the setting; a 4 Mbps stream follows the 10 % rule only.
+  - `TestMTX2_PaddingTooShortForAFreeBoxTakesAChunkMore`: a part that ends 4 bytes before a boundary is padded with 65,540 bytes when the rules pad it.
+  - `TestMTX2_FinalChunkSyncedBeforeRename`: the file at the last `syncFile` is the final file, complete for age, with or without the close's free box; `Close`, the rename, the directory sync and the hook follow.
+  - `TestMTX2_FlushAtEachPartFsync`: at each part's fsync the file is `len(header) + 16 + n·65552` bytes, `n = ⌊plaintext ÷ 65536⌋`, and a prefix of the final file.
+  - `TestMTX2_NoSeekBack`: an encrypted segment is written and closed, by the next keyframe and by the recorder's stop, through a file that refuses `Read`, `Seek`, `WriteAt` and `Truncate`; a clear segment, the control, does seek.
+  - `TestMTX2_FinalChunkNeverEmpty`: a segment whose last part ends on a chunk boundary ends with an 8-byte `free` box in a final chunk of its own, and age decrypts it.
+  - `TestMTX2_EncryptedNamingPartThenRename`: only `.mp4.age.part` exists while the segment is written and only `.mp4.age` after; the hooks get these names.
+  - `TestMTX2_RestartedRecorderStillEncrypts`: after a failed fsync restarts the recorder, the next segment is encrypted too.
+  - `TestMTX2_WorstCaseLoss` (R01, O17): the real part writer runs into a byte-counting sink over 10 minutes of 1 s parts at 20 fps, part sizes uniform within ± 30 %, with MediaMTX's close timing (a part is fsynced one frame after its end, a segment's last part at the next segment's keyframe). At 10,000 uniform cut times, the loss is the cut minus the PTS of the last sample wholly inside the plaintext sealed by the last fsync before it. With the padding on, the median is ≤ 1 s and the maximum ≤ 2 s at 4 Mbps, 450 kbps and 256 kbps, and the disk overhead at 4 Mbps is ≤ 10 %; with it off, the maximum at 256 kbps is ≤ 4 s (§4.5: 1 part + 64 KiB ÷ bitrate, rounded up to whole parts). It prints the figures for 4 Mbps, 512, 450, 384 and 256 kbps as one `mtx2-loss: <json>` line of at most 3,500 bytes once escaped, which the recorder job's `mtx2-loss` step turns into a notice.
+  - `TestMTX2_RejectsSecretKeyInRecipients` (C22, `internal/conf`): a secret key as RI_g or RK, one or three recipients, a secret key instead of a list and RI_g as RK each fail the load, with an error that contains no key; `TestMTX2_RecipientsNeedFMP4`: the key with `recordFormat: mpegts` fails the load; `TestMTX2_NoRecipientsRecordsInClear`: without the key, or with an empty list, the path loads with no scope.
+  - `TestMTX2_LowBitratePadding_DefaultOn` and `TestMTX2_LowBitratePadding_Off` (`internal/core`): a MediaMTX core records a 256 kbps RTSP publisher into encrypted segments; with `recordAgePadLowBitrate` absent every part ends on a chunk boundary, with it `false` the parts follow the 10 % rule only.
+
+  The `recorder` job of `ipcam-spike-recording.yml` runs them on Linux with `-race`, the `windows` job on windows-latest.
+- **Rebase status.** Applied on v1.21.1 (2026-10-20). Re-apply on each adopted MediaMTX release: `agewriter.go` carries over as it is; redo the two keys, their default and their validation in `conf/path.go`, the two settings in `recorder.go`, `recorder_instance.go` and `core/path.go`, the `.age` name, the age writer and `endPart` in `closeCurPart` and the age close in place of `writeDuration` in `close`; then adapt `TestConfFromFile` and run the tests above.
 
 ### MTX-3: segment-closed hook
 
