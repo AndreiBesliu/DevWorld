@@ -168,6 +168,12 @@ func TestRecorder(t *testing.T) {
 				ext = "ts"
 			}
 
+			// MTX-1: an fMP4 segment is created as <name>.mp4.part.
+			createExt := ext
+			if ca == "fmp4" {
+				createExt += partSuffix
+			}
+
 			n := 0
 
 			w := &Recorder{
@@ -181,15 +187,15 @@ func TestRecorder(t *testing.T) {
 				OnSegmentCreate: func(segPath string) {
 					switch n {
 					case 0:
-						require.Equal(t, filepath.Join(dir, "mypath", "2008-05-20_22-15-25-000000."+ext), segPath)
+						require.Equal(t, filepath.Join(dir, "mypath", "2008-05-20_22-15-25-000000."+createExt), segPath)
 					case 1:
-						require.Equal(t, filepath.Join(dir, "mypath", "2008-05-20_22-15-27-000000."+ext), segPath)
+						require.Equal(t, filepath.Join(dir, "mypath", "2008-05-20_22-15-27-000000."+createExt), segPath)
 					default:
-						require.Equal(t, filepath.Join(dir, "mypath", "2010-05-20_22-15-25-000000."+ext), segPath)
+						require.Equal(t, filepath.Join(dir, "mypath", "2010-05-20_22-15-25-000000."+createExt), segPath)
 					}
 					segCreated <- struct{}{}
 				},
-				OnSegmentComplete: func(segPath string, du time.Duration) {
+				OnSegmentComplete: func(segPath string, _ time.Time, du time.Duration) {
 					switch n {
 					case 0:
 						require.Equal(t, filepath.Join(dir, "mypath", "2008-05-20_22-15-25-000000."+ext), segPath)
@@ -783,9 +789,9 @@ func TestRecorderFMP4SegmentSwitch(t *testing.T) {
 		OnSegmentCreate: func(segPath string) {
 			switch n {
 			case 0:
-				require.Equal(t, filepath.Join(dir, "mypath", "2008-05-20_22-15-25-000000.mp4"), segPath)
+				require.Equal(t, filepath.Join(dir, "mypath", "2008-05-20_22-15-25-000000.mp4.part"), segPath) // MTX-1
 			case 1:
-				require.Equal(t, filepath.Join(dir, "mypath", "2008-05-20_22-15-25-700000.mp4"), segPath) // +0.7s
+				require.Equal(t, filepath.Join(dir, "mypath", "2008-05-20_22-15-25-700000.mp4.part"), segPath) // +0.7s
 			}
 			n++
 		},
@@ -930,7 +936,7 @@ func TestRecorderTimeDriftDetector(t *testing.T) {
 					default:
 					}
 				},
-				OnSegmentComplete: func(_ string, _ time.Duration) {
+				OnSegmentComplete: func(_ string, _ time.Time, _ time.Duration) {
 					select {
 					case segDone <- struct{}{}:
 					default:

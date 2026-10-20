@@ -3,7 +3,7 @@ name: ipcam-spike-recording
 # The Phase 0 (c1) recorder spike (ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md):
 # the hub module, the MediaMTX fork in hub/third_party/mediamtx (a nested module outside
 # go.work, built, tested and checked with GOWORK=off from its directory) and the spike
-# module tools/spikes/recording. Later tasks add the windows, mi1-smoke and mi9 jobs.
+# module tools/spikes/recording. Later tasks add the mi1-smoke and mi9 jobs.
 
 on:
   push:
@@ -319,3 +319,48 @@ jobs:
               grep -vE '^(W[0-9]{4} |/)' "${log}" | tail -n 60 | tools/scripts/annotate.sh "${id}" 60
             fi
           done
+
+  windows:
+    # MTX-1 on Windows (ruling C14): the fork's patch tests on windows-latest, where
+    # the directory sync is a no-op and the rename is MoveFileEx with
+    # MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH. Without -race, which needs a C
+    # compiler there; the recorder job runs the same tests with it.
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: ipcam/hub/third_party/mediamtx/go.sum
+      - name: Test the MediaMTX fork's patches
+        # The patch tests of ./internal/...: MTX-0's tests in the root package check the
+        # vendored files' bytes, which this checkout's line endings (core.autocrlf) change,
+        # so they run in the recorder job only. The -run pattern still compiles the tests
+        # of every package.
+        id: fork-test
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          go test -count=1 -run '^TestMTX' ./internal/... 2>&1 | tee "${RUNNER_TEMP}/fork-test.log"
+      - name: Show failures as annotations
+        # As in the other jobs, plus testify's Error, Messages, expected and actual
+        # lines: a Windows failure cannot be rerun anywhere else.
+        if: failure()
+        run: |
+          log="${RUNNER_TEMP}/fork-test.log"
+          [[ -f "${log}" ]] || exit 0
+          if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+            grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:|\s+(Error|Messages|expected|actual)\s*:)' "${log}" |
+              tools/scripts/annotate.sh fork-test 60
+          else
+            tail -n 60 "${log}" | tools/scripts/annotate.sh fork-test 60
+          fi

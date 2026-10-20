@@ -1051,10 +1051,12 @@ func (pa *path) startRecording() {
 				cmd.Start()
 			}
 		},
-		OnSegmentComplete: func(segmentPath string, segmentDuration time.Duration) {
+		OnSegmentComplete: func(segmentPath string, segmentStart time.Time, segmentDuration time.Duration) {
 			if pa.conf.RunOnRecordSegmentComplete != "" {
 				env := pa.ExternalCmdEnv()
 				env["MTX_SEGMENT_PATH"] = segmentPath
+				// MTX-3 (hub/third_party/PATCHES.md): the start in Unix milliseconds.
+				env["MTX_SEGMENT_START"] = strconv.FormatInt(segmentStart.UnixMilli(), 10)
 				env["MTX_SEGMENT_DURATION"] = strconv.FormatFloat(segmentDuration.Seconds(), 'f', -1, 64)
 
 				pa.Log(logger.Info, "runOnRecordSegmentComplete command launched")

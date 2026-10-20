@@ -130,6 +130,10 @@ type formatFMP4Segment struct {
 	curPart        *formatFMP4Part
 	endDTS         time.Duration
 	nextPartNumber uint32
+
+	// MTX-1: the first failed write or fsync of a part. The segment then keeps
+	// its .part name.
+	partErr error
 }
 
 func (s *formatFMP4Segment) initialize() {
@@ -146,6 +150,11 @@ func (s *formatFMP4Segment) close() error {
 	if s.fi != nil {
 		s.f.ri.Log(logger.Debug, "closing segment %s", s.path)
 
+		// MTX-1: a part that failed earlier is a failure of the close.
+		if err == nil {
+			err = s.partErr
+		}
+
 		// write overall duration in the header to speed up the playback server
 		duration := s.endDTS - s.startDTS
 		err2 := writeDuration(s.fi, duration)
@@ -153,13 +162,28 @@ func (s *formatFMP4Segment) close() error {
 			err = err2
 		}
 
+		// MTX-1: the last write is durable before the file gets its final name.
+		if err == nil {
+			err = syncFile(s.fi)
+		}
+
 		err2 = s.fi.Close()
 		if err == nil {
 			err = err2
 		}
 
-		if err2 == nil {
-			s.f.ri.onSegmentComplete(s.path, duration)
+		// MTX-1: only a segment whose every write and sync succeeded gets its
+		// final name, and the hook (MTX-3) runs only once that name is durable.
+		// Otherwise the .part stays for the hub's reconcile.
+		if err == nil {
+			err = renameFinal(s.fi.Name(), s.path)
+			if err == nil {
+				err = syncDir(filepath.Dir(s.path))
+			}
+		}
+
+		if err == nil {
+			s.f.ri.onSegmentComplete(s.path, s.startNTP, duration)
 		}
 	}
 
@@ -176,12 +200,20 @@ func (s *formatFMP4Segment) closeCurPart() error {
 			return err
 		}
 
-		fi, err := os.Create(s.path)
+		// MTX-1: the segment is written under a .part name until it is complete.
+		fi, err := os.Create(s.path + partSuffix)
 		if err != nil {
 			return err
 		}
 
-		s.f.ri.onSegmentCreate(s.path)
+		// MTX-1: make the new name durable.
+		err = syncDir(filepath.Dir(s.path))
+		if err != nil {
+			fi.Close()
+			return err
+		}
+
+		s.f.ri.onSegmentCreate(fi.Name())
 
 		err = writeInit(
 			fi,
@@ -198,7 +230,15 @@ func (s *formatFMP4Segment) closeCurPart() error {
 		s.fi = fi
 	}
 
-	return s.curPart.close(s.fi)
+	err := s.curPart.close(s.fi)
+	if err == nil {
+		// MTX-1: every part is durable once it is closed.
+		err = syncFile(s.fi)
+	}
+	if err != nil && s.partErr == nil {
+		s.partErr = err
+	}
+	return err
 }
 
 func (s *formatFMP4Segment) write(track *formatFMP4Track, sample *formatFMP4Sample, dts time.Duration) error {

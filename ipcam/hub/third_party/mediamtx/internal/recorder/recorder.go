@@ -16,8 +16,10 @@ const (
 // OnSegmentCreateFunc is the prototype of the function passed as OnSegmentCreate
 type OnSegmentCreateFunc = func(path string)
 
-// OnSegmentCompleteFunc is the prototype of the function passed as OnSegmentComplete
-type OnSegmentCompleteFunc = func(path string, duration time.Duration)
+// OnSegmentCompleteFunc is the prototype of the function passed as OnSegmentComplete.
+// MTX-3 (hub/third_party/PATCHES.md): it also receives the segment's start, the
+// wall time of its first sample.
+type OnSegmentCompleteFunc = func(path string, start time.Time, duration time.Duration)
 
 // Recorder writes recordings to disk.
 type Recorder struct {
@@ -47,7 +49,7 @@ func (r *Recorder) Initialize() {
 		}
 	}
 	if r.OnSegmentComplete == nil {
-		r.OnSegmentComplete = func(string, time.Duration) {
+		r.OnSegmentComplete = func(string, time.Time, time.Duration) {
 		}
 	}
 	if r.restartPause == 0 {
