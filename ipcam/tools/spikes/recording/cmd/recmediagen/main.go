@@ -8,8 +8,23 @@
 //
 // The frames are rendered as in the video spike's mediagen (a moving gradient
 // with noise, the frame number in large digits and the frame band) and piped to
-// ffmpeg. The renderer is copied from mediagen, which is package main. ffmpeg
-// with libx264 is only a CI and developer tool; it is never shipped.
+// ffmpeg. ffmpeg with libx264 is only a CI and developer tool; it is never
+// shipped.
+//
+// Mirror rule. mediagen is package main, so its code cannot be imported, and
+// this file copies it: the renderer (renderer to drawNumber), the encoder
+// (encoderArgs, runFFmpeg, encode), the probe (probeOutput, measure,
+// gopLength) and the stream types. Most are copied unchanged. streamSpec,
+// encoderArgs and measure (with levelString folded in) are cut down to H.264,
+// and encode names its temporary directory after recmediagen. A change to any
+// of them in tools/spikes/video/cmd/mediagen/main.go must be mirrored here, or
+// sub-256k.h264 is made differently from mediagen's streams, which the
+// recorder runs mix it with. TestRecMediagen_CopiesMatchMediagen fails until
+// it is: it compares the unchanged copies token by token and pins both sides
+// of each cut-down copy by a fingerprint. Copying, instead of moving the code
+// into an importable package of the video spike, leaves the released video
+// spike unchanged; this module is spike-only and is deleted after the spike
+// report.
 //
 //	recmediagen -out DIR
 package main
