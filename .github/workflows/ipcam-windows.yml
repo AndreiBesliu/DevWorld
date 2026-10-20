@@ -2,6 +2,10 @@ name: ipcam-windows
 
 on:
   push:
+    # Branch pushes only. A spike-video-v* tag starts ipcam-spike-release, whose ci-status
+    # gate reads this workflow's runs on the tagged commit; a tag push (which ignores
+    # path filters) would start runs of it that are still going when the gate looks.
+    branches: ['**']
     paths:
       - 'ipcam/apps/desktop/**'
       - 'ipcam/apps/packages/**'
