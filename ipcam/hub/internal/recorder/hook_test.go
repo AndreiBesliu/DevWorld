@@ -118,3 +118,41 @@ func TestHook_ForwardsSegmentClosed(t *testing.T) {
 		t.Error("a segment outside the recordings directory was accepted")
 	}
 }
+
+// TestHook_TokenIsNewForEachChild (G05): every MediaMTX child that the
+// recorder starts gets a hook token of its own. Once a child is started
+// again, a hook with the previous child's token gets HTTP 401, and one with
+// the new child's token is accepted.
+func TestHook_TokenIsNewForEachChild(t *testing.T) {
+	dump := filepath.Join(t.TempDir(), "child.json")
+	obs := &testObserver{}
+	r, cfg := startFake(t, "dump:"+dump, Config{Observer: obs})
+	first := readDump(t, dump)
+	if err := os.Remove(dump); err != nil {
+		t.Fatal(err)
+	}
+	killChild(t, r)
+	waitFor(t, 10*time.Second, "the child was not started again", func() bool { return len(obs.snapshot().restarts) >= 1 })
+	second := readDump(t, dump)
+	if second.PID == first.PID {
+		t.Fatal("the dump is the first child's")
+	}
+
+	start := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(cfg.RecDir, "cam1", "main", segmentName(start))
+	writeFile(t, path, []byte("a segment"))
+	previous, current := hookEnv(first, "cam1", "main", path, start, "1"), hookEnv(second, "cam1", "main", path, start, "1")
+	if previous[HookTokenEnv] == current[HookTokenEnv] {
+		t.Fatal("the new child got the previous child's token")
+	}
+	err := PostSegmentComplete(t.Context(), func(k string) string { return previous[k] })
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Errorf("a hook with the previous child's token = %v, want an HTTP 401 error", err)
+	}
+	if err := PostSegmentComplete(t.Context(), func(k string) string { return current[k] }); err != nil {
+		t.Fatalf("a hook with the new child's token: %v", err)
+	}
+	if got := receive(t, r); got.Path != path {
+		t.Errorf("SegmentClosed %+v, want %s", got, path)
+	}
+}

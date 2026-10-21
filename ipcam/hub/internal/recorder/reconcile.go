@@ -1,6 +1,7 @@
 package recorder
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,14 +18,16 @@ import (
 )
 
 // The names of the segment files: rec/<cam>/<profile>/<YYYY-MM-DD>/
-// <HHMMSS>_<µs>.mp4, with .age when encrypted (MTX-2), and .part while
-// MediaMTX writes it (MTX-1). A .rewrite is the sibling that a background
-// rewrite writes (C1-R9).
+// <HHMMSS>_<µs>.mp4, in UTC (MTX-4), with .age when encrypted (MTX-2), and
+// .part while MediaMTX writes it (MTX-1). A .rewrite is the sibling that a
+// background rewrite writes (C1-R9), and .unreadable is added to a .part
+// that reconcile could not read, which sets it aside.
 const (
-	suffixMP4     = ".mp4"
-	suffixAge     = ".age"
-	suffixPart    = ".part"
-	suffixRewrite = ".rewrite"
+	suffixMP4        = ".mp4"
+	suffixAge        = ".age"
+	suffixPart       = ".part"
+	suffixRewrite    = ".rewrite"
+	suffixUnreadable = ".unreadable"
 )
 
 // segFile is a segment file under rec/.
@@ -42,7 +45,8 @@ func (s segFile) final() string { return strings.TrimSuffix(s.abs, suffixPart) }
 func (s segFile) finalRel() string { return strings.TrimSuffix(s.rel, suffixPart) }
 
 // parseSegment reads a path relative to rec/. ok is false for a file that is
-// not a segment.
+// not a segment. The name is the start in UTC, so it stands for one instant
+// also in the hour that repeats when daylight saving time ends.
 func parseSegment(recDir, rel string) (s segFile, ok bool) {
 	rel = filepath.ToSlash(rel)
 	parts := strings.Split(rel, "/")
@@ -63,7 +67,7 @@ func parseSegment(recDir, rel string) (s segFile, ok bool) {
 	if !isMP4 || !found || len(hms) != 6 || len(micros) != 6 {
 		return segFile{}, false
 	}
-	start, err := time.ParseInLocation("2006-01-02 150405.000000", parts[2]+" "+hms+"."+micros, time.Local)
+	start, err := time.ParseInLocation("2006-01-02 150405.000000", parts[2]+" "+hms+"."+micros, time.UTC)
 	if err != nil {
 		return segFile{}, false
 	}
@@ -125,14 +129,100 @@ type repair struct {
 	f          *os.File
 	torn       crypto.TornAge // an encrypted file
 	complete   bool           // an encrypted file with its final chunk, never resealed or rewritten
-	rec        *recording     // nil when the file is unreadable or complete
+	rec        *recording     // nil when the file is unreadable, empty or complete
 	salvage    salvage
-	unreadable bool
+	unreadable bool // its bytes are no recording that can be read
+	// failed is the I/O error that kept the file from being read: it is left
+	// as it is, for the next start.
+	failed error
 }
 
 // needed reports whether the newest final file must be repaired.
 func (rp *repair) needed() bool {
-	return rp.seg.part || rp.unreadable || (!rp.complete && rp.salvage.cut)
+	return rp.seg.part || rp.unreadable || rp.failed != nil || (!rp.complete && rp.salvage.cut)
+}
+
+// lost reports whether the file counts as lost toward HUB-09's abort.
+func (rp *repair) lost() bool { return rp.unreadable || rp.failed != nil }
+
+func (rp *repair) close() {
+	if rp.f != nil {
+		_ = rp.f.Close()
+		rp.f = nil
+	}
+}
+
+// cannotRead sorts out a file of size bytes that OpenTorn or walk could not
+// read with err: an I/O error is a failure; a .part of zeros only, as NTFS
+// can leave after a cut, holds no recording and is empty; anything else is
+// unreadable.
+func (rp *repair) cannotRead(err error, size int64) {
+	if isIOError(err) {
+		rp.failed = err
+		return
+	}
+	if rp.seg.part {
+		zero, err := allZero(rp.f, size)
+		if err != nil {
+			rp.failed = err
+			return
+		}
+		if zero {
+			rp.salvage = salvage{cut: true, empty: true}
+			return
+		}
+	}
+	rp.unreadable = true
+}
+
+// isIOError reports whether err is an error of the file system rather than
+// of the bytes that it read.
+func isIOError(err error) bool {
+	var pe *fs.PathError
+	return errors.As(err, &pe)
+}
+
+// allZero reports whether the size bytes of r are all zeros.
+func allZero(r io.ReaderAt, size int64) (bool, error) {
+	buf, zeros := make([]byte, 64<<10), make([]byte, 64<<10)
+	sr := io.NewSectionReader(r, 0, size)
+	for {
+		n, err := sr.Read(buf)
+		if !bytes.Equal(buf[:n], zeros[:n]) {
+			return false, nil
+		}
+		if errors.Is(err, io.EOF) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+}
+
+// fileError is the error of a file that could not be repaired. It names the
+// file by its base name only: the directories above it can hold the name of
+// the owner's account, and the events reach published results.
+func fileError(what, path string, err error) error {
+	var pe *fs.PathError
+	var le *os.LinkError
+	switch {
+	case errors.As(err, &pe):
+		err = fmt.Errorf("%s: %w", pe.Op, pe.Err)
+	case errors.As(err, &le):
+		err = fmt.Errorf("%s: %w", le.Op, le.Err)
+	}
+	return fmt.Errorf("recorder: %s %s: %w", what, filepath.Base(path), err)
+}
+
+// quarantine sets an unreadable .part aside as <name>.unreadable, which is no
+// segment's name, so that a later start neither counts it again nor writes
+// its gap again.
+func quarantine(s segFile) error {
+	if err := renameReplace(s.abs, s.abs+suffixUnreadable); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(s.abs))
 }
 
 // Reconcile repairs the recordings under recDir after a cut or a crash
@@ -148,84 +238,128 @@ func (rp *repair) needed() bool {
 //     (C1-R9; Reconcile alone leaves the cut file). A file with its final
 //     chunk is never resealed or rewritten;
 //   - each lost tail is a restart gap, which ends where the stream's next
-//     segment starts, or stays open when there is none: the first part
-//     after the start closes it;
+//     segment that holds a recording starts, or stays open when there is
+//     none: the first part after the start closes it;
+//   - an unreadable .part gets a restart gap from the start in its name, and
+//     is set aside as <name>.unreadable;
 //   - the catalog is made to match the files.
 //
-// When more than half of the segments would be lost, it changes nothing
-// and reports Aborted (HUB-09). It decrypts in RAM only and writes no
-// temporary file (G08).
+// A file that cannot be repaired, through an I/O error or a failed Reseal,
+// is left as it is and counted as unreadable: one bad file never stops the
+// others' repair. When more than half of the segments would be lost, it
+// changes nothing and reports Aborted (HUB-09). It returns an error only
+// for ctx, the listing of recDir and the catalog. It decrypts in RAM only
+// and writes no temporary file (G08).
 func Reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *catalog.DB) (ReconcileReport, error) {
-	report, _, _, err := reconcile(ctx, recDir, tail, cat)
-	return report, err
+	res, err := reconcile(ctx, recDir, tail, cat)
+	return res.report, err
 }
 
-func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *catalog.DB) (ReconcileReport, []*pendingRewrite, []catalog.Gap, error) {
-	var report ReconcileReport
+// reconciled is what reconcile did: its report, the rewrites that its
+// salvages still need, the gaps that it wrote, and the errors of the files
+// that it could not repair.
+type reconciled struct {
+	report  ReconcileReport
+	pending []*pendingRewrite
+	gaps    []catalog.Gap
+	errs    []error
+}
+
+func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *catalog.DB) (reconciled, error) {
+	var res reconciled
 	segs, rewrites, err := scanRecDir(recDir)
 	if err != nil {
-		return report, nil, nil, fmt.Errorf("recorder: reconcile: %w", err)
+		return res, fmt.Errorf("recorder: reconcile: %w", err)
 	}
 	rows, err := cat.Segments(ctx)
 	if err != nil {
-		return report, nil, nil, err
+		return res, err
 	}
 
 	repairs, err := planRepairs(ctx, segs, tail)
 	defer func() {
 		for _, rp := range repairs {
-			if rp.f != nil {
-				_ = rp.f.Close()
-			}
+			rp.close()
 		}
 	}()
 	if err != nil {
-		return report, nil, nil, err
+		return res, err
 	}
 	if aborts(segs, rows, repairs) {
-		report.Aborted = true
-		return report, nil, nil, nil
+		res.report.Aborted = true
+		return res, nil
 	}
 	for _, path := range rewrites {
 		if err := os.Remove(path); err != nil {
-			return report, nil, nil, fmt.Errorf("recorder: remove the partial rewrite %s: %w", path, err)
+			res.errs = append(res.errs, fileError("remove the partial rewrite", path, err))
 		}
 	}
 
 	durations := map[string]int64{} // final path → ms, of the files repaired
-	var pending []*pendingRewrite
-	var gaps []catalog.Gap
+	// noRecording holds the files that hold no recording that can be read:
+	// a stream's restart gap does not end where one of them starts.
+	noRecording := map[string]bool{}
+	type lostTail struct {
+		rp         *repair
+		durationMs int64
+	}
+	var lost []lostTail
 	for _, rp := range repairs {
-		if rp.unreadable {
-			report.Unreadable++
+		if rp.failed != nil {
+			res.report.Unreadable++
+			res.errs = append(res.errs, fileError("reconcile", rp.seg.abs, rp.failed))
+			noRecording[rp.seg.abs] = true
 			continue
 		}
-		durationMs, p, err := rp.apply(ctx, &report)
+		if rp.unreadable {
+			res.report.Unreadable++
+			noRecording[rp.seg.abs] = true
+			if rp.seg.part {
+				lost = append(lost, lostTail{rp, 0})
+			}
+			continue
+		}
+		durationMs, p, err := rp.apply(ctx, &res.report)
 		if err != nil {
-			return report, nil, nil, fmt.Errorf("recorder: reconcile %s: %w", rp.seg.rel, err)
+			res.report.Unreadable++
+			res.errs = append(res.errs, fileError("reconcile", rp.seg.abs, err))
+			noRecording[rp.seg.abs] = true
+			continue
 		}
 		if p != nil {
-			pending = append(pending, p)
+			res.pending = append(res.pending, p)
 		}
 		durations[rp.seg.final()] = durationMs
+		if rp.salvage.empty {
+			noRecording[rp.seg.abs] = true
+		}
 		if rp.seg.part || rp.salvage.cut {
-			// A .part that an earlier MediaMTX left, older than other
-			// segments of its stream, has a gap that ended when the next
-			// one started.
-			g := restartGap(rp.seg, durationMs, nextStartMs(segs, rp.seg))
-			if err := cat.PutGap(ctx, g); err != nil {
-				return report, nil, nil, err
+			lost = append(lost, lostTail{rp, durationMs})
+		}
+	}
+	for _, l := range lost {
+		// A .part that an earlier MediaMTX left, older than other segments of
+		// its stream, has a gap that ended when the next one started.
+		g := restartGap(l.rp.seg, l.durationMs, nextStartMs(segs, l.rp.seg, noRecording))
+		if err := cat.PutGap(ctx, g); err != nil {
+			return res, err
+		}
+		res.gaps = append(res.gaps, g)
+		res.report.LostTails++
+		res.report.GapsWritten++
+		if l.rp.unreadable {
+			// Its gap first: a cut before the rename writes the gap again at the
+			// next start, one after it would lose the gap.
+			l.rp.close() // Windows renames only a file that nobody has open
+			if err := quarantine(l.rp.seg); err != nil {
+				res.errs = append(res.errs, fileError("set aside", l.rp.seg.abs, err))
 			}
-			gaps = append(gaps, g)
-			report.LostTails++
-			report.GapsWritten++
 		}
 	}
 
-	if err := reconcileCatalog(ctx, recDir, tail, cat, rows, durations); err != nil {
-		return report, nil, nil, err
-	}
-	return report, pending, gaps, nil
+	errs, err := reconcileCatalog(ctx, recDir, tail, cat, rows, durations)
+	res.errs = append(res.errs, errs...)
+	return res, err
 }
 
 // restartGap is the gap after the lost tail of s, whose file now holds
@@ -240,11 +374,12 @@ func restartGap(s segFile, durationMs, nextMs int64) catalog.Gap {
 }
 
 // nextStartMs returns the start, in ms, of the first of segs that belongs
-// to the stream of s and starts after it, or 0 when there is none.
-func nextStartMs(segs []segFile, s segFile) int64 {
+// to the stream of s, starts after it and is not in none, the files that
+// hold no recording, or 0 when there is none.
+func nextStartMs(segs []segFile, s segFile, none map[string]bool) int64 {
 	var next time.Time
 	for _, o := range segs {
-		if o.key == s.key && o.start.After(s.start) && (next.IsZero() || o.start.Before(next)) {
+		if o.key == s.key && !none[o.abs] && o.start.After(s.start) && (next.IsZero() || o.start.Before(next)) {
 			next = o.start
 		}
 	}
@@ -270,27 +405,35 @@ func planRepairs(ctx context.Context, segs []segFile, tail crypto.TailSealer) ([
 		}
 		rp, err := planRepair(ctx, s, tail)
 		if err != nil {
+			rp.close()
 			return repairs, err
 		}
 		if rp.needed() {
 			repairs = append(repairs, rp)
-		} else if rp.f != nil {
-			_ = rp.f.Close()
+		} else {
+			rp.close()
 		}
 	}
 	return repairs, nil
 }
 
+// openSegment opens a segment that reconcile repairs; tests replace it.
+var openSegment = func(path string, flag int) (*os.File, error) { return os.OpenFile(path, flag, 0) } //nolint:gosec // a segment under rec/
+
+// planRepair reads s, without changing it, and plans its repair. Its error
+// is ctx's alone: a file that cannot be read is reported in the plan.
 func planRepair(ctx context.Context, s segFile, tail crypto.TailSealer) (*repair, error) {
 	rp := &repair{seg: s}
-	f, err := os.OpenFile(s.abs, os.O_RDWR, 0)
+	f, err := openSegment(s.abs, os.O_RDWR)
 	if err != nil {
-		return nil, fmt.Errorf("recorder: reconcile: %w", err)
+		rp.failed = err
+		return rp, nil
 	}
 	rp.f = f
 	info, err := f.Stat()
 	if err != nil {
-		return rp, err
+		rp.failed = err
+		return rp, nil
 	}
 	var data io.ReaderAt = f
 	size := info.Size()
@@ -304,7 +447,7 @@ func planRepair(ctx context.Context, s segFile, tail crypto.TailSealer) (*repair
 			if ctx.Err() != nil {
 				return rp, ctx.Err()
 			}
-			rp.unreadable = true
+			rp.cannotRead(err, info.Size())
 			return rp, nil
 		}
 		rp.torn, rp.complete = torn, torn.Complete()
@@ -321,10 +464,10 @@ func planRepair(ctx context.Context, s segFile, tail crypto.TailSealer) (*repair
 	}
 	rec, err := walk(data, size)
 	if err != nil {
-		// errNotRecording, or a chunk that does not authenticate: an
-		// unreadable file is reported, and left as it is.
-		rp.unreadable = true
-		return rp, nil //nolint:nilerr // reported through rp.unreadable
+		// errNotRecording, a chunk that does not authenticate, or a read that
+		// failed: reported through rp.
+		rp.cannotRead(err, info.Size())
+		return rp, nil
 	}
 	rp.rec, rp.salvage = rec, rec.planSalvage(size)
 	if rp.torn != nil && !rp.complete {
@@ -350,7 +493,7 @@ func aborts(segs []segFile, rows []catalog.Segment, repairs []*repair) bool {
 		}
 	}
 	for _, rp := range repairs {
-		if rp.unreadable {
+		if rp.lost() {
 			lost++
 		}
 	}
@@ -368,8 +511,7 @@ func (rp *repair) apply(ctx context.Context, report *ReconcileReport) (int64, *p
 		// Its final chunk is there: it is never resealed or rewritten.
 	case rp.salvage.empty:
 		// Not one sample reached the disk: there is no recording to keep.
-		_ = rp.f.Close()
-		rp.f = nil
+		rp.close()
 		if err := os.Remove(rp.seg.abs); err != nil {
 			return 0, nil, err
 		}
@@ -476,10 +618,12 @@ func streamSegments(recDir string, k streamKey) []segFile {
 // complete parts and the whole samples of a torn last one, gets its final
 // name, a catalog row and a restart gap that ends where the stream's next
 // segment starts, and a salvage that changes bytes before its last kept
-// chunk gets the background rewrite (C1-R9). Without this, such a file
-// would wait for the next hub start, outside the catalog, and its gap
-// would then be closed by the first part after that start. The report
-// adds what was done and goes to ReconcileObserver; verification follows.
+// chunk gets the background rewrite (C1-R9); an unreadable one gets its gap
+// and is set aside. Without this, such a file would wait for the next hub
+// start, outside the catalog, and its gap would then be closed by the first
+// part after that start. The report adds what was done and goes to
+// ReconcileObserver as the next update; verification follows. It ends the
+// piece of background work that repairLoop began.
 func (r *rec) repairParts(ctx context.Context, paths []string) {
 	var segs []segFile
 	for _, path := range paths {
@@ -509,7 +653,7 @@ func (r *rec) repairParts(ctx context.Context, paths []string) {
 			pending = append(pending, p)
 		}
 		if err != nil {
-			r.notifyError(fmt.Errorf("recorder: repair %s: %w", s.rel, err))
+			r.notifyError(fileError("repair", s.abs, err))
 		}
 		if _, err := os.Lstat(s.abs); errors.Is(err, fs.ErrNotExist) {
 			// It has its final name, or was empty: no listing gives it again.
@@ -517,20 +661,9 @@ func (r *rec) repairParts(ctx context.Context, paths []string) {
 			r.forgetPart(s.abs)
 		}
 	}
+	r.finishWork(report, pending)
 	if report == (ReconcileReport{}) && pending == nil {
 		return
-	}
-	r.mu.Lock()
-	r.report.Finalized += report.Finalized
-	r.report.Truncated += report.Truncated
-	r.report.LostTails += report.LostTails
-	r.report.GapsWritten += report.GapsWritten
-	r.report.Unreadable += report.Unreadable
-	r.pending = append(r.pending, pending...)
-	full := r.report
-	r.mu.Unlock()
-	if o, ok := r.obs.(ReconcileObserver); ok {
-		o.Reconciled(full)
 	}
 	r.kickVerify()
 	select {
@@ -540,46 +673,47 @@ func (r *rec) repairParts(ctx context.Context, paths []string) {
 }
 
 // repairPart repairs one .part for repairParts, and returns the rewrite
-// that its salvage still needs.
+// that its salvage still needs. A file that it cannot repair counts as
+// unreadable, and its error is returned.
 func (r *rec) repairPart(ctx context.Context, s segFile, report *ReconcileReport) (*pendingRewrite, error) {
 	rel := s.finalRel()
 	r.setBusy(rel, true) // verification leaves it until its row is there
 	defer r.setBusy(rel, false)
 	rp, err := planRepair(ctx, s, r.cfg.Tail)
-	if rp != nil {
-		defer func() {
-			if rp.f != nil {
-				_ = rp.f.Close()
-			}
-		}()
-	}
+	defer rp.close()
 	if err != nil {
 		return nil, err
 	}
+	if rp.failed != nil {
+		report.Unreadable++
+		return nil, rp.failed
+	}
+	var durationMs int64
+	var pending *pendingRewrite
 	if rp.unreadable {
 		report.Unreadable++
-		return nil, nil
-	}
-	durationMs, pending, err := rp.apply(ctx, report)
-	if err != nil {
-		return nil, err
-	}
-	if removed := !rp.complete && rp.salvage.empty; !removed {
-		info, err := os.Stat(s.final())
-		if err != nil {
-			return pending, err
+	} else {
+		if durationMs, pending, err = rp.apply(ctx, report); err != nil {
+			report.Unreadable++
+			return nil, err
 		}
-		start, k := s.start.UnixMilli(), s.key
-		if err := r.cfg.Catalog.PutSegment(ctx, catalog.Segment{Cam: string(k.cam), Profile: string(k.profile), Path: rel,
-			StartMs: start, EndMs: start + durationMs, Bytes: info.Size(), Encrypted: s.encrypted, State: catalog.StateComplete}); err != nil {
-			return pending, err
+		if removed := !rp.complete && rp.salvage.empty; !removed {
+			info, err := os.Stat(s.final())
+			if err != nil {
+				return pending, err
+			}
+			start, k := s.start.UnixMilli(), s.key
+			if err := r.cfg.Catalog.PutSegment(ctx, catalog.Segment{Cam: string(k.cam), Profile: string(k.profile), Path: rel,
+				StartMs: start, EndMs: start + durationMs, Bytes: info.Size(), Encrypted: s.encrypted, State: catalog.StateComplete}); err != nil {
+				return pending, err
+			}
 		}
 	}
 	// The gap ends where the stream's next segment starts when that segment
 	// is there; otherwise the stream's first part closes it. gapMu keeps that
 	// first part from closing the stream's gaps between the two steps.
 	r.gapMu.Lock()
-	g := restartGap(s, durationMs, nextStartMs(streamSegments(r.cfg.RecDir, s.key), s))
+	g := restartGap(s, durationMs, nextStartMs(streamSegments(r.cfg.RecDir, s.key), s, nil))
 	err = r.cfg.Catalog.PutGap(ctx, g)
 	r.gapMu.Unlock()
 	if err != nil {
@@ -588,30 +722,40 @@ func (r *rec) repairPart(ctx context.Context, s segFile, report *ReconcileReport
 	r.notifyGap(g)
 	report.LostTails++
 	report.GapsWritten++
+	if rp.unreadable {
+		rp.close() // Windows renames only a file that nobody has open
+		return nil, quarantine(s)
+	}
 	return pending, nil
 }
 
 // reconcileCatalog makes the catalog's rows match the final files (G07):
 // rows for files that have none, with the start from the file's name and
 // the end from its contents, the facts of files that changed, and lost
-// rows for files that are gone.
-func reconcileCatalog(ctx context.Context, recDir string, tail crypto.TailSealer, cat *catalog.DB, rows []catalog.Segment, durations map[string]int64) error {
+// rows for files that are gone. A file whose size cannot be read keeps its
+// row as it is, and its error is returned with the others.
+func reconcileCatalog(ctx context.Context, recDir string, tail crypto.TailSealer, cat *catalog.DB, rows []catalog.Segment, durations map[string]int64) ([]error, error) {
 	segs, _, err := scanRecDir(recDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	known := map[string]catalog.Segment{}
 	for _, r := range rows {
 		known[r.Path] = r
 	}
 	var facts []catalog.FileFact
+	var errs []error
 	for _, s := range segs {
 		if s.part {
 			continue
 		}
 		info, err := os.Stat(s.abs)
 		if err != nil {
-			return err
+			errs = append(errs, fileError("catalog", s.abs, err))
+			if row, ok := known[s.rel]; ok && row.State == catalog.StateComplete {
+				facts = append(facts, catalog.FileFact{Cam: row.Cam, Profile: row.Profile, Path: row.Path, Bytes: row.Bytes, Encrypted: row.Encrypted})
+			}
+			continue
 		}
 		fact := catalog.FileFact{Cam: string(s.key.cam), Profile: string(s.key.profile), Path: s.rel, Bytes: info.Size(), Encrypted: s.encrypted}
 		if row, ok := known[s.rel]; !ok || row.Bytes != fact.Bytes || row.State != catalog.StateComplete {
@@ -625,13 +769,14 @@ func reconcileCatalog(ctx context.Context, recDir string, tail crypto.TailSealer
 		facts = append(facts, fact)
 	}
 	_, err = cat.ReconcileFiles(ctx, facts)
-	return err
+	return errs, err
 }
 
 // fileDurationMs reads the duration of a final file from its parts, or 0
-// when it cannot be read: verification then reports it.
+// when it cannot be read: verification then reports it. It opens the file
+// read-only.
 func fileDurationMs(ctx context.Context, s segFile, tail crypto.TailSealer) int64 {
-	f, err := os.OpenFile(s.abs, os.O_RDWR, 0)
+	f, err := os.Open(s.abs)
 	if err != nil {
 		return 0
 	}

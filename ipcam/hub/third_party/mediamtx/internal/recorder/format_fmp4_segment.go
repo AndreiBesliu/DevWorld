@@ -205,7 +205,9 @@ func (s *formatFMP4Segment) close() error {
 
 func (s *formatFMP4Segment) closeCurPart() error {
 	if s.fi == nil {
-		s.path = recordstore.Path{Start: s.startNTP}.Encode(s.f.ri.pathFormat2)
+		// MTX-4: the name is the start in UTC, one instant also in the hour that
+		// repeats when daylight saving time ends.
+		s.path = recordstore.Path{Start: s.startNTP.UTC()}.Encode(s.f.ri.pathFormat2)
 		if s.f.ri.ageScope != nil {
 			// MTX-2: an encrypted segment is <name>.mp4.age.
 			s.path += ageSuffix

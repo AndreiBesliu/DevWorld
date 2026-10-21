@@ -6,7 +6,8 @@
 //	ipcam-hub run --config <run.json>
 //	ipcam-hub hook segment-complete     (run by MediaMTX)
 //
-// Exit codes: 0 after SIGTERM or Ctrl-C, 1 on a fatal error, 3 when the
+// The events are described with the events type (events.go). Exit codes: 0
+// after SIGTERM, Ctrl-C or Ctrl-Break, 1 on a fatal error, 3 when the
 // startup reconcile aborted (HUB-09).
 package main
 

@@ -24,6 +24,7 @@ func TestRecorder_NoSecretKeyInConfigOrChildEnv(t *testing.T) {
 	scope, riG, _ := newTestScope(t)
 	t.Setenv("IPCAM_TEST_PASTED_KEY", riG.String())
 	t.Setenv("MTX_PATHS_CAM1_RECORD", "no")
+	t.Setenv("TZ", testZone)
 	dump := filepath.Join(t.TempDir(), "child.json")
 	r, cfg := startFake(t, "dump:"+dump, Config{})
 	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", &scope)}); err != nil {
@@ -52,7 +53,11 @@ func TestRecorder_NoSecretKeyInConfigOrChildEnv(t *testing.T) {
 	}
 
 	env := map[string]string{}
+	var zones []string
 	for _, kv := range d.Env {
+		if k, v, _ := strings.Cut(kv, "="); strings.EqualFold(k, "TZ") {
+			zones = append(zones, v)
+		}
 		if strings.Contains(strings.ToUpper(kv), "AGE-SECRET-KEY-") {
 			t.Errorf("the child's environment holds a secret key in %s", strings.SplitN(kv, "=", 2)[0])
 		}
@@ -64,6 +69,10 @@ func TestRecorder_NoSecretKeyInConfigOrChildEnv(t *testing.T) {
 	}
 	if !strings.HasPrefix(env[HookAddrEnv], "127.0.0.1:") || len(env[HookTokenEnv]) < 32 {
 		t.Errorf("the child's hook address %q or token (%d characters) is missing", env[HookAddrEnv], len(env[HookTokenEnv]))
+	}
+	// MediaMTX runs in UTC, whatever the hub's zone: its names are UTC (MTX-4).
+	if !slices.Equal(zones, []string{"UTC"}) {
+		t.Errorf("the child's TZ is %q, want only UTC", zones)
 	}
 }
 
@@ -190,6 +199,8 @@ func configPaths(t *testing.T, cfg Config) []string {
 // directory with MkdirAll and syncs only the segment's own directory, so
 // the recorder creates each stream's directory and today's and tomorrow's
 // date directories itself, syncing the parent of each directory it creates.
+// The days are UTC days, as MediaMTX names them (MTX-4): at 01:30 in
+// Romania on 21 October it is still 20 October in UTC.
 func TestRecorder_PrecreatesAndSyncsStreamDirs(t *testing.T) {
 	var synced []string
 	defer setSyncDir(func(dir string) error {
@@ -197,7 +208,7 @@ func TestRecorder_PrecreatesAndSyncsStreamDirs(t *testing.T) {
 		return nil
 	})()
 	recDir := filepath.Join(t.TempDir(), "rec")
-	now := time.Date(2026, 10, 20, 23, 59, 0, 0, time.Local)
+	now := time.Date(2026, 10, 21, 1, 30, 0, 0, time.Local)
 	if err := ensureStreamDirs(recDir, "cam1", "main", now); err != nil {
 		t.Fatalf("ensureStreamDirs: %v", err)
 	}
@@ -289,4 +300,83 @@ func startReal(t *testing.T, bin string, cfg Config) (*rec, Config) {
 		}
 	})
 	return r.(*rec), cfg
+}
+
+// TestRecorder_GracefulStopWritesHubStoppedGaps (§4.5): when the hub stops,
+// the real MediaMTX is asked to stop (SIGTERM on Linux, CTRL_BREAK_EVENT to
+// its process group on Windows), closes its segments, which get their final
+// names, their hooks and their rows, and exits. Each recorded stream then
+// gets an open hub_stopped gap from the moment of the stop, and the next
+// start finds no .part, so no restart gap. Each name encodes the start that
+// its hook reports, in UTC (MTX-4), here with the hub in Romania's zone.
+func TestRecorder_GracefulStopWritesHubStoppedGaps(t *testing.T) {
+	bin := rtsptest.MediaMTX(t)
+	srv := rtsptest.Start(t, rtsptest.MainH264(t))
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	obs := &testObserver{}
+	cfg := Config{BinaryPath: bin, RunDir: filepath.Join(dir, "run"), RecDir: filepath.Join(dir, "rec"), Catalog: openCatalog(t),
+		Observer: obs, HookCommand: []string{self, "hook", "segment-complete"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r, _, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for range r.Closed(context.Background()) {
+		}
+	}()
+	if err := r.Apply(ctx, []Job{NewJob("cam1", "main", srv.URL("cam1/main"), nil)}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "MediaMTX wrote no part", func() bool { return len(obs.snapshot().firsts) >= 1 })
+	time.Sleep(1500 * time.Millisecond) // a part or two
+
+	stopAt := time.Now().UnixMilli()
+	cancel()
+	select {
+	case <-stopped:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the recorder did not stop")
+	}
+	doneAt := time.Now().UnixMilli()
+
+	segs, _, err := scanRecDir(cfg.RecDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segs) == 0 {
+		t.Fatal("no segment")
+	}
+	rows := rowByPath(t, cfg.Catalog)
+	for _, s := range segs {
+		if s.part {
+			t.Errorf("%s is still a .part: MediaMTX did not close it", s.rel)
+			continue
+		}
+		row, ok := rows[s.rel]
+		if !ok {
+			t.Errorf("%s has no row: its hook did not come", s.rel)
+		} else if row.StartMs != s.start.UnixMilli() {
+			t.Errorf("%s: the hook's start %d ms, the name's %d ms, want the same instant", s.rel, row.StartMs, s.start.UnixMilli())
+		}
+	}
+	gaps, err := cfg.Catalog.Gaps(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gaps) != 1 || gaps[0].Reason != catalog.GapHubStopped || gaps[0].EndMs != 0 || gaps[0].Cam != "cam1" || gaps[0].Profile != "main" ||
+		gaps[0].StartMs < stopAt || gaps[0].StartMs > doneAt {
+		t.Errorf("gaps %+v, want one open hub_stopped gap of cam1/main from the stop (%d–%d); errors %q", gaps, stopAt, doneAt, obs.snapshot().errs)
+	}
+	report, err := Reconcile(t.Context(), cfg.RecDir, nil, cfg.Catalog)
+	if err != nil || report != (ReconcileReport{}) {
+		t.Errorf("the next start's reconcile %+v, %v; want nothing to repair", report, err)
+	}
 }

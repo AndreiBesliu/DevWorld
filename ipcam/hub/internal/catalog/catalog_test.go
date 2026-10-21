@@ -1,8 +1,10 @@
 package catalog
 
 import (
+	"database/sql"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -230,5 +232,50 @@ func TestCatalog_GapsOpenAndClose(t *testing.T) {
 	}
 	if err := db.PutGap(ctx, Gap{Cam: "c1", Profile: "main", StartMs: 1, Reason: "power"}); err == nil {
 		t.Error("PutGap accepted an unknown reason")
+	}
+}
+
+// TestCatalog_GapReasonCheckedBySQLite: the gaps table checks the reason
+// itself, so a row that does not come through PutGap cannot hold an unknown
+// one either. A catalog of the first schema (Task 5's, without the check)
+// is migrated with its gaps kept.
+func TestCatalog_GapReasonCheckedBySQLite(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "catalog.db")
+	v1, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		migrations[0],
+		"PRAGMA user_version = 1",
+		"INSERT INTO gaps (camera_id, profile, start_ms, end_ms, reason) VALUES ('c1', 'main', 100, 200, 'restart')",
+	} {
+		if _, err := v1.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = v1.Close()
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open of a first-schema catalog: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	gaps, err := db.Gaps(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []Gap{{Cam: "c1", Profile: "main", StartMs: 100, EndMs: 200, Reason: GapRestart}}; !slices.Equal(gaps, want) {
+		t.Errorf("after the migration, gaps %+v, want %+v", gaps, want)
+	}
+	for _, reason := range []GapReason{GapRestart, GapHubStopped, GapDiskFull, GapCard, GapCameraOffline} {
+		if _, err := db.sql.ExecContext(ctx, "INSERT INTO gaps (camera_id, profile, start_ms, end_ms, reason) VALUES ('c1', 'main', 1, 0, ?)", string(reason)); err != nil {
+			t.Errorf("SQLite refused the reason %q: %v", reason, err)
+		}
+	}
+	_, err = db.sql.ExecContext(ctx, "INSERT INTO gaps (camera_id, profile, start_ms, end_ms, reason) VALUES ('c1', 'main', 1, 0, 'power')")
+	if err == nil || !strings.Contains(err.Error(), "CHECK constraint failed") {
+		t.Errorf("an unknown reason written past PutGap: %v, want SQLite's CHECK constraint failure", err)
 	}
 }

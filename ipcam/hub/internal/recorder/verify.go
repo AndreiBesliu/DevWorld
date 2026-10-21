@@ -3,6 +3,7 @@ package recorder
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -135,7 +136,9 @@ var verifyOpenHook = func(string) {}
 // no complete box.
 var errTornPart = errors.New("the recording ends in a torn part")
 
-// check reads the segment at path whole.
+// check reads the segment at path whole, in one pass: its plaintext is read
+// once and in order, and each part is parsed as it comes, so each age chunk
+// is decrypted once (MI3 budgets the CPU).
 func (v *verifier) check(ctx context.Context, path string, encrypted bool) error {
 	f, err := os.Open(path) //nolint:gosec // a segment under rec/
 	if err != nil {
@@ -156,21 +159,34 @@ func (v *verifier) check(ctx context.Context, path string, encrypted bool) error
 		if data, size, err = v.recording.OpenReaderAt(ctx, f, size); err != nil {
 			return err
 		}
-		// Decrypting every byte authenticates every chunk, also those that
-		// hold only padding.
-		if _, err := io.Copy(io.Discard, io.NewSectionReader(data, 0, size)); err != nil {
-			return err
-		}
 	}
-	return checkRecording(data, size)
+	s := &streamAt{r: io.NewSectionReader(data, 0, size)}
+	if err := checkRecording(s, size); err != nil {
+		return err
+	}
+	// The rest, which no box header read reaches, such as the inside of the
+	// last free box: decrypting every byte authenticates every chunk, also
+	// those that hold only padding.
+	return s.drain()
 }
 
-// checkRecording parses the size bytes of a recording's plaintext: walk
+// checkRecording parses the size bytes of a recording's plaintext in s: walk
 // reads the init's boxes (mediacommon's init parser would refuse MediaMTX's
 // own mtxi box), and mediacommon's fMP4 parser reads each part, which
 // checks that every sample lies in its mdat.
-func checkRecording(r io.ReaderAt, size int64) error {
-	rec, err := walk(r, size)
+func checkRecording(s *streamAt, size int64) error {
+	rec, err := walkParts(s, size, func(p part) error {
+		data, err := s.slice(p.moof.off, p.mdat.end())
+		if err != nil {
+			return err
+		}
+		var parts fmp4.Parts
+		if err := parts.Unmarshal(data); err != nil {
+			return err
+		}
+		s.release(p.mdat.end())
+		return nil
+	})
 	if err != nil {
 		return err
 	}
@@ -180,15 +196,67 @@ func checkRecording(r io.ReaderAt, size int64) error {
 	if rec.torn != nil || rec.tail {
 		return errTornPart
 	}
-	for _, p := range rec.parts {
-		data := make([]byte, p.mdat.end()-p.moof.off)
-		if err := readAt(r, data, p.moof.off); err != nil {
-			return err
-		}
-		var parts fmp4.Parts
-		if err := parts.Unmarshal(data); err != nil {
-			return err
-		}
-	}
 	return nil
+}
+
+// streamAt reads r, the plaintext of a recording, once and in order, and
+// serves the reads of walk from what it read: it keeps the bytes from the
+// last release on, at most a part and the boxes around it.
+type streamAt struct {
+	r    io.Reader
+	base int64 // the offset of buf[0]
+	buf  []byte
+	err  error // what ended r: io.EOF, or the error of a chunk that does not authenticate
+}
+
+func (s *streamAt) ReadAt(p []byte, off int64) (int, error) {
+	b, err := s.slice(off, off+int64(len(p)))
+	return copy(p, b), err
+}
+
+// slice returns the bytes from from to to, which stay valid until the next
+// release, or fewer at the end of r, with the error that ended it. from must
+// not lie before the last release.
+func (s *streamAt) slice(from, to int64) ([]byte, error) {
+	if from < s.base {
+		return nil, fmt.Errorf("recorder: a read at %d, before %d, which the stream has left", from, s.base)
+	}
+	if need := to - s.base; need > int64(len(s.buf)) && s.err == nil {
+		if need > int64(cap(s.buf)) {
+			s.buf = append(make([]byte, 0, max(need, 2*int64(cap(s.buf)))), s.buf...)
+		}
+		n, err := io.ReadFull(s.r, s.buf[len(s.buf):need])
+		s.buf = s.buf[:len(s.buf)+n]
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			err = io.EOF
+		}
+		s.err = err
+	}
+	lo, hi := min(from-s.base, int64(len(s.buf))), min(to-s.base, int64(len(s.buf)))
+	if hi-lo < to-from {
+		return s.buf[lo:hi], s.err
+	}
+	return s.buf[lo:hi], nil
+}
+
+// release drops the bytes before off, which no read reaches any more.
+func (s *streamAt) release(off int64) {
+	k := min(off-s.base, int64(len(s.buf)))
+	if k <= 0 {
+		return
+	}
+	s.buf = s.buf[:copy(s.buf, s.buf[k:])]
+	s.base += k
+}
+
+// drain reads the rest of r.
+func (s *streamAt) drain() error {
+	if s.err != nil {
+		if errors.Is(s.err, io.EOF) {
+			return nil
+		}
+		return s.err
+	}
+	_, err := io.Copy(io.Discard, s.r)
+	return err
 }

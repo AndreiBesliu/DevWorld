@@ -186,7 +186,10 @@ func TestMTX3_HookEnvironment(t *testing.T) {
 	require.NoError(t, err)
 	var named recordstore.Path
 	require.True(t, named.Decode(recordPath+".mp4", segmentPath))
-	require.Equal(t, named.Start.UnixMilli(), startMs, "MTX_SEGMENT_START against the file name")
+	// MTX-4: the name is in UTC, which Decode, without %z, reads as local time.
+	n := named.Start
+	nameStart := time.Date(n.Year(), n.Month(), n.Day(), n.Hour(), n.Minute(), n.Second(), n.Nanosecond(), time.UTC)
+	require.Equal(t, nameStart.UnixMilli(), startMs, "MTX_SEGMENT_START against the file name")
 	require.GreaterOrEqual(t, startMs, before.Add(-time.Second).UnixMilli())
 	require.LessOrEqual(t, startMs, after.Add(time.Second).UnixMilli())
 

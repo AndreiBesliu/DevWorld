@@ -67,7 +67,7 @@ const (
 	configSettle = 1500 * time.Millisecond
 	// stopGrace is how long MediaMTX gets to close its segments when the hub
 	// stops, before it is killed.
-	stopGrace = 10 * time.Second
+	stopGrace = 5 * time.Second
 	// logDrain is how long the child's output may stay open after it exited:
 	// a hook command that MediaMTX started holds it too.
 	logDrain = 2 * time.Second
@@ -93,13 +93,18 @@ type rec struct {
 	partsKick  chan struct{}
 	wg         sync.WaitGroup // the background loops and the child's log readers
 
-	mu       sync.Mutex
-	jobs     map[streamKey]Job
-	stopped  map[streamKey]bool
-	report   ReconcileReport
-	pending  []*pendingRewrite
-	busy     map[string]bool // the final rel paths that a rewrite or a repair is changing
-	childPid int             // 0 while no child runs
+	mu      sync.Mutex
+	jobs    map[streamKey]Job
+	stopped map[streamKey]bool
+	report  ReconcileReport
+	// seq is the Seq of the last reconcile update given out, and lastFinal
+	// its Final; working counts the rewrites and batches of repairs that run.
+	seq       int
+	lastFinal bool
+	working   int
+	pending   []*pendingRewrite
+	busy      map[string]bool // the final rel paths that a rewrite or a repair is changing
+	childPid  int             // 0 while no child runs
 	// parts are the .part files that MediaMTX no longer writes, for
 	// repairLoop, and tried those that were queued once or that reconcile
 	// left: each is repaired at most once while the hub runs.
@@ -125,8 +130,12 @@ type rec struct {
 // 0.5 s, 1 s and 2 s (HUB-13, C09), serves the hook, polls the open parts,
 // verifies closed segments, runs the rewrites that reconcile left, and
 // repairs the .part files that MediaMTX leaves while the hub runs
-// (repairParts), all in the background. When reconcile aborts, it starts
-// nothing and returns ErrReconcileAborted with the report.
+// (repairParts), all in the background. When ctx is done, it asks MediaMTX
+// to stop, and once MediaMTX has closed its segments and exited, each
+// recorded stream gets an open hub_stopped gap. The startup's report goes
+// to ReconcileObserver as the update of Seq 1, and the error of each file
+// that reconcile could not repair to ErrorObserver. When reconcile aborts,
+// it starts nothing and returns ErrReconcileAborted with the report.
 func New(ctx context.Context, cfg Config) (Recorder, ReconcileReport, error) {
 	if cfg.BinaryPath == "" || cfg.RunDir == "" || cfg.RecDir == "" || cfg.Catalog == nil {
 		return nil, ReconcileReport{}, errors.New("recorder: the configuration needs a binary, a run and a recordings directory, and a catalog")
@@ -155,27 +164,35 @@ func New(ctx context.Context, cfg Config) (Recorder, ReconcileReport, error) {
 		return nil, ReconcileReport{}, err
 	}
 
-	report, pending, gaps, err := reconcile(ctx, cfg.RecDir, cfg.Tail, cfg.Catalog)
+	res, err := reconcile(ctx, cfg.RecDir, cfg.Tail, cfg.Catalog)
+	report := res.report
 	if err != nil {
 		return nil, report, err
 	}
 	if report.Aborted {
+		if o, ok := cfg.Observer.(ReconcileObserver); ok {
+			o.Reconciled(ReconcileUpdate{ReconcileReport: report, Seq: 1, Final: true})
+		}
 		return nil, report, ErrReconcileAborted
 	}
 	r := &rec{
 		cfg: cfg, obs: cfg.Observer, configPath: filepath.Join(cfg.RunDir, configName),
 		watch: newPartWatcher(cfg.RecDir), closed: make(chan SegmentClosed, 1024),
 		verifyKick: make(chan struct{}, 1), jobsKick: make(chan struct{}, 1), partsKick: make(chan struct{}, 1),
-		jobs: map[streamKey]Job{}, stopped: map[streamKey]bool{}, report: report, pending: pending, busy: map[string]bool{},
-		tried: map[string]bool{},
+		jobs: map[streamKey]Job{}, stopped: map[streamKey]bool{}, report: report, pending: res.pending, busy: map[string]bool{},
+		tried: map[string]bool{}, seq: 1, lastFinal: len(res.pending) == 0,
 	}
 	for _, p := range leftParts(cfg.RecDir) {
-		r.tried[p] = true // reconcile could not read it
+		r.tried[p] = true // reconcile could not repair it
 	}
 	r.verify = &verifier{recDir: cfg.RecDir, cat: cfg.Catalog, recording: cfg.Recording, obs: cfg.Observer, busy: r.isBusy, open: &r.fileMu}
-	for _, g := range gaps {
+	for _, err := range res.errs {
+		r.notifyError(err)
+	}
+	for _, g := range res.gaps {
 		r.notifyGap(g)
 	}
+	r.giveOut(ReconcileUpdate{ReconcileReport: report, Seq: r.seq, Final: r.lastFinal})
 	if r.hook, err = startHookServer(r.segmentComplete); err != nil {
 		return nil, report, err
 	}
@@ -222,6 +239,7 @@ func (r *rec) supervise(ctx context.Context, started chan<- error) {
 	defer runtime.UnlockOSThread()
 	var b backoff
 	for restart := false; ; restart = true {
+		var stoppedAt time.Time
 		// The .part files there now are written by no child.
 		r.watch.childStarted(time.Now())
 		child, logs, err := r.startChild()
@@ -239,9 +257,12 @@ func (r *rec) supervise(ctx context.Context, started chan<- error) {
 			if restart {
 				r.obs.ChildRestarted(at)
 			}
-			uptime = r.runChild(ctx, child, logs, at)
+			uptime, stoppedAt = r.runChild(ctx, child, logs, at)
 		}
 		if ctx.Err() != nil {
+			if !stoppedAt.IsZero() {
+				r.writeStoppedGaps(context.WithoutCancel(ctx), stoppedAt)
+			}
 			return
 		}
 		if err == nil {
@@ -263,7 +284,7 @@ func (r *rec) supervise(ctx context.Context, started chan<- error) {
 func (r *rec) startChild() (*childProc, <-chan struct{}, error) {
 	cmd := exec.Command(r.cfg.BinaryPath, r.configPath) //nolint:gosec // the configured MediaMTX binary
 	cmd.Dir = r.cfg.RunDir
-	cmd.Env = childEnv(os.Environ(), r.hook.env())
+	cmd.Env = childEnv(os.Environ(), r.hook.newChild())
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, nil, err
@@ -286,8 +307,9 @@ func (r *rec) startChild() (*childProc, <-chan struct{}, error) {
 }
 
 // runChild waits until the child exits, or stops it when ctx is done, and
-// returns how long it ran.
-func (r *rec) runChild(ctx context.Context, child *childProc, logs <-chan struct{}, at time.Time) time.Duration {
+// returns how long it ran and, when the child closed its segments and exited
+// by itself within stopGrace of being asked to stop, when it was asked.
+func (r *rec) runChild(ctx context.Context, child *childProc, logs <-chan struct{}, at time.Time) (uptime time.Duration, stoppedAt time.Time) {
 	r.setChild(child.cmd.Process.Pid)
 	go r.settleConfig(ctx, at)
 	exited := make(chan struct{})
@@ -298,10 +320,20 @@ func (r *rec) runChild(ctx context.Context, child *childProc, logs <-chan struct
 	select {
 	case <-exited:
 	case <-ctx.Done():
-		_ = child.interrupt()
-		select {
-		case <-exited:
-		case <-time.After(stopGrace):
+		asked, graceful := time.Now(), false
+		if err := child.interrupt(); err != nil {
+			r.notifyError(fmt.Errorf("recorder: ask MediaMTX to stop: %w; it is killed", err))
+		} else {
+			select {
+			case <-exited:
+				graceful = true
+			case <-time.After(stopGrace):
+				r.notifyError(fmt.Errorf("recorder: MediaMTX did not stop within %v; it is killed", stopGrace))
+			}
+		}
+		if graceful {
+			stoppedAt = asked
+		} else {
 			_ = child.cmd.Process.Kill()
 			<-exited
 		}
@@ -312,7 +344,22 @@ func (r *rec) runChild(ctx context.Context, child *childProc, logs <-chan struct
 	case <-logs:
 	case <-time.After(logDrain):
 	}
-	return time.Since(at)
+	return time.Since(at), stoppedAt
+}
+
+// writeStoppedGaps writes an open hub_stopped gap from at, when MediaMTX was
+// asked to stop, for each stream that the hub recorded: MediaMTX closed
+// their segments, so the next start finds no .part, and its first part
+// closes the gap.
+func (r *rec) writeStoppedGaps(ctx context.Context, at time.Time) {
+	for _, j := range r.appliedJobs() {
+		g := catalog.Gap{Cam: string(j.Cam), Profile: string(j.Profile), StartMs: at.UnixMilli(), Reason: catalog.GapHubStopped}
+		if err := r.cfg.Catalog.PutGap(ctx, g); err != nil {
+			r.notifyError(err)
+			continue
+		}
+		r.notifyGap(g)
+	}
 }
 
 // forwardLines hands each line of the child's output to ChildLog, cutting a
@@ -339,19 +386,21 @@ func (r *rec) forwardLines(out io.ReadCloser) {
 // childEnv is the child's environment: the hub's, without any secret key
 // (C22) and without the MTX_ and RTSP_ variables that MediaMTX reads as
 // configuration, so the generated configuration is all there is, plus the
-// hook's address and token.
+// hook's address and token, and TZ=UTC. MediaMTX names its segments in UTC
+// (MTX-4) because Go on Windows ignores TZ; TZ=UTC puts its log times in
+// the same zone on Linux.
 func childEnv(parent, hook []string) []string {
-	env := make([]string, 0, len(parent)+len(hook))
+	env := make([]string, 0, len(parent)+len(hook)+1)
 	for _, kv := range parent {
 		k, v, _ := strings.Cut(kv, "=")
 		k = strings.ToUpper(k)
-		if strings.HasPrefix(k, "MTX_") || strings.HasPrefix(k, "RTSP_") || k == HookAddrEnv || k == HookTokenEnv ||
+		if strings.HasPrefix(k, "MTX_") || strings.HasPrefix(k, "RTSP_") || k == HookAddrEnv || k == HookTokenEnv || k == "TZ" ||
 			strings.Contains(strings.ToUpper(v), "AGE-SECRET-KEY-") {
 			continue
 		}
 		env = append(env, kv)
 	}
-	return append(env, hook...)
+	return append(append(env, hook...), "TZ=UTC")
 }
 
 // backoff is the restart policy: at once, then after 0.5 s, 1 s and 2 s,
@@ -699,7 +748,8 @@ func (r *rec) rewriteLoop(ctx context.Context) {
 }
 
 // queueParts hands the .part files that MediaMTX no longer writes to
-// repairLoop, each once.
+// repairLoop, each once. Repairs to come make the reconcile report not
+// final, which an update says.
 func (r *rec) queueParts(paths []string) {
 	r.mu.Lock()
 	for _, p := range paths {
@@ -709,7 +759,11 @@ func (r *rec) queueParts(paths []string) {
 		}
 	}
 	queued := len(r.parts) > 0
+	u, ok := r.updateLocked(r.report)
 	r.mu.Unlock()
+	if ok {
+		r.giveOut(u)
+	}
 	if queued {
 		select {
 		case r.partsKick <- struct{}{}:
@@ -737,12 +791,62 @@ func (r *rec) repairLoop(ctx context.Context) {
 		r.mu.Lock()
 		paths := r.parts
 		r.parts = nil
+		if len(paths) > 0 {
+			r.working++ // repairParts ends it
+		}
 		r.mu.Unlock()
-		r.repairParts(ctx, paths)
+		if len(paths) > 0 {
+			r.repairParts(ctx, paths)
+		}
 	}
 }
 
-// nextRewrite takes a pending rewrite whose stream has an encrypted job.
+// finishWork ends a piece of background work, a rewrite or a batch of
+// repairs: it adds what the work did to the reconcile report, and the
+// rewrites that its salvages need to those pending, and gives the report
+// out as the next update when it changed or is final now.
+func (r *rec) finishWork(add ReconcileReport, pending []*pendingRewrite) {
+	r.mu.Lock()
+	before := r.report
+	r.working--
+	r.report.Finalized += add.Finalized
+	r.report.Truncated += add.Truncated
+	r.report.LostTails += add.LostTails
+	r.report.GapsWritten += add.GapsWritten
+	r.report.Rewritten += add.Rewritten
+	r.report.Unreadable += add.Unreadable
+	r.pending = append(r.pending, pending...)
+	u, ok := r.updateLocked(before)
+	r.mu.Unlock()
+	if ok {
+		r.giveOut(u)
+	}
+}
+
+// updateLocked returns the next reconcile update when the report changed
+// since before, or when whether work is pending changed since the last
+// update: a rewrite waiting for its job, repairs queued, or work running.
+// r.mu is held.
+func (r *rec) updateLocked(before ReconcileReport) (ReconcileUpdate, bool) {
+	final := r.working == 0 && len(r.pending) == 0 && len(r.parts) == 0
+	if r.report == before && final == r.lastFinal {
+		return ReconcileUpdate{}, false
+	}
+	r.seq++
+	r.lastFinal = final
+	return ReconcileUpdate{ReconcileReport: r.report, Seq: r.seq, Final: final}, true
+}
+
+// giveOut hands u to ReconcileObserver. The updates of two goroutines may
+// arrive out of order: Seq orders them.
+func (r *rec) giveOut(u ReconcileUpdate) {
+	if o, ok := r.obs.(ReconcileObserver); ok {
+		o.Reconciled(u)
+	}
+}
+
+// nextRewrite takes a pending rewrite whose stream has an encrypted job,
+// which runRewrite ends.
 func (r *rec) nextRewrite() (*pendingRewrite, crypto.KeyScope) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -750,6 +854,7 @@ func (r *rec) nextRewrite() (*pendingRewrite, crypto.KeyScope) {
 		if j, ok := r.jobs[p.seg.key]; ok && j.Scope != nil {
 			r.pending = slices.Delete(r.pending, i, i+1)
 			r.busy[p.seg.rel] = true
+			r.working++
 			return p, *j.Scope
 		}
 	}
@@ -773,17 +878,20 @@ func (r *rec) setBusy(rel string, busy bool) {
 }
 
 // runRewrite rewrites a salvage over its interim file (C1-R9), then updates
-// its catalog row, its gap and the reconcile report.
+// its catalog row, its gap and the reconcile report. A rewrite that fails
+// leaves the interim file, a valid segment, and its error.
 func (r *rec) runRewrite(ctx context.Context, p *pendingRewrite, scope crypto.KeyScope) {
+	var done ReconcileReport
 	defer func() {
 		r.setBusy(p.seg.rel, false)
+		r.finishWork(done, nil)
 		r.kickVerify()
 	}()
 	rewriteHook()
 	size, err := rewriteSegment(ctx, p, scope, &r.fileMu)
 	if err != nil {
 		if ctx.Err() == nil {
-			r.notifyError(fmt.Errorf("recorder: rewrite %s: %w", p.seg.rel, err))
+			r.notifyError(fileError("rewrite", p.seg.abs, err))
 		}
 		return
 	}
@@ -804,13 +912,7 @@ func (r *rec) runRewrite(ctx context.Context, p *pendingRewrite, scope crypto.Ke
 			}
 		}
 	}
-	r.mu.Lock()
-	r.report.Rewritten++
-	report := r.report
-	r.mu.Unlock()
-	if o, ok := r.obs.(ReconcileObserver); ok {
-		o.Reconciled(report)
-	}
+	done.Rewritten = 1
 }
 
 // rewriteSegment writes the salvage into <name>.mp4.age.rewrite, ciphertext

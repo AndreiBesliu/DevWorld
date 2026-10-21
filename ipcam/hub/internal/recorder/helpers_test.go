@@ -9,12 +9,15 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+	_ "time/tzdata" // testZone, also where the host has no zone database
 
 	"filippo.io/age"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
@@ -44,11 +47,26 @@ type helperJob struct {
 	Recipients        []string // RI_g and RK, or none for a clear job
 }
 
+// testZone is the host's zone in every test of this package: Romania's,
+// whose clocks go back an hour on the last Sunday of October, as on the
+// owner's devices. Segment names are UTC (MTX-4), so no test may depend on
+// the zone of the machine that runs it.
+const testZone = "Europe/Bucharest"
+
 func TestMain(m *testing.M) {
+	// Before anything runs that could read time.Local.
+	zone, err := time.LoadLocation(testZone)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	time.Local = zone
 	if mode := os.Getenv(fakeChildEnv); mode != "" {
 		os.Exit(runFakeChild(mode, os.Args[1:]))
 	}
 	if len(os.Args) == 3 && os.Args[1] == "hook" && os.Args[2] == "segment-complete" {
+		// As ipcam-hub's hook command does: the stop of MediaMTX must not end it.
+		signal.Notify(make(chan os.Signal, 1), os.Interrupt, syscall.SIGTERM)
 		if err := PostSegmentComplete(context.Background(), os.Getenv); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -211,9 +229,11 @@ type testObserver struct {
 	firsts    []string // "<cam>/<profile>"
 	firstAt   []time.Time
 	verified  []ReconcileReport
-	reports   []ReconcileReport // Reconciled, after a rewrite
+	reports   []ReconcileReport // Reconciled after the startup's: a rewrite or a repair
+	updates   []ReconcileUpdate // every Reconciled, the startup's included
 	gaps      []catalog.Gap
 	passedSeg []string
+	errs      []string
 }
 
 func (o *testObserver) ChildRestarted(at time.Time) {
@@ -241,10 +261,19 @@ func (o *testObserver) Verified(r ReconcileReport) {
 	o.verified = append(o.verified, r)
 }
 
-func (o *testObserver) Reconciled(r ReconcileReport) {
+func (o *testObserver) Reconciled(u ReconcileUpdate) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.reports = append(o.reports, r)
+	o.updates = append(o.updates, u)
+	if u.Seq > 1 {
+		o.reports = append(o.reports, u.ReconcileReport)
+	}
+}
+
+func (o *testObserver) Error(err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.errs = append(o.errs, err.Error())
 }
 
 func (o *testObserver) Gap(g catalog.Gap) {
@@ -266,7 +295,8 @@ func (o *testObserver) snapshot() testObserver {
 		restarts: append([]time.Time(nil), o.restarts...), logs: append([]string(nil), o.logs...),
 		firsts: append([]string(nil), o.firsts...), firstAt: append([]time.Time(nil), o.firstAt...),
 		verified: append([]ReconcileReport(nil), o.verified...), reports: append([]ReconcileReport(nil), o.reports...),
-		gaps: append([]catalog.Gap(nil), o.gaps...), passedSeg: append([]string(nil), o.passedSeg...),
+		updates: append([]ReconcileUpdate(nil), o.updates...), gaps: append([]catalog.Gap(nil), o.gaps...),
+		passedSeg: append([]string(nil), o.passedSeg...), errs: append([]string(nil), o.errs...),
 	}
 }
 
@@ -574,10 +604,10 @@ func writeFile(t *testing.T, path string, data []byte) {
 }
 
 // segmentName is the name MediaMTX gives a segment that starts at start, in
-// the host's local time (recordPath …/%Y-%m-%d/%H%M%S_%f).
+// UTC (recordPath …/%Y-%m-%d/%H%M%S_%f, MTX-4).
 func segmentName(start time.Time) string {
-	l := start.Local()
-	return l.Format("2006-01-02") + "/" + l.Format("150405") + fmt.Sprintf("_%06d", l.Nanosecond()/1000) + ".mp4"
+	u := start.UTC()
+	return u.Format("2006-01-02") + "/" + u.Format("150405") + fmt.Sprintf("_%06d", u.Nanosecond()/1000) + ".mp4"
 }
 
 // The age CLIs of ENC-06, as crypto's tests read them from the environment.
@@ -636,4 +666,12 @@ func setRewriteHook(f func()) (restore func()) {
 	previous := rewriteHook
 	rewriteHook = f
 	return func() { rewriteHook = previous }
+}
+
+// setOpenSegment makes reconcile open each segment that it repairs with f,
+// until restore is called.
+func setOpenSegment(f func(path string, flag int) (*os.File, error)) (restore func()) {
+	previous := openSegment
+	openSegment = f
+	return func() { openSegment = previous }
 }

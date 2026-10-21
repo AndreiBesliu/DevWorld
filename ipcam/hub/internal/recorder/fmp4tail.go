@@ -110,8 +110,17 @@ type recording struct {
 }
 
 // walk reads the layout of the size bytes of plaintext in r. It returns
-// errNotRecording for data that is not an fMP4 recording at all.
-func walk(r io.ReaderAt, size int64) (*recording, error) {
+// errNotRecording for data that is not an fMP4 recording at all, or whose
+// damage lies before its last part. Damage at the end is a torn tail, as a
+// cut leaves: a box cut short, bytes that are no box (the zeros that NTFS
+// can leave after a file's valid data among them), or a last moof that
+// cannot be parsed.
+func walk(r io.ReaderAt, size int64) (*recording, error) { return walkParts(r, size, nil) }
+
+// walkParts is walk, and calls visit, when it is not nil, with each complete
+// part as it finds it: walk reads nothing before the end of that part
+// afterwards. An error of visit ends the walk.
+func walkParts(r io.ReaderAt, size int64, visit func(p part) error) (*recording, error) {
 	rec := &recording{timescales: map[uint32]uint32{}}
 	ftyp, ok, err := readBox(r, 0, size)
 	if err != nil {
@@ -127,11 +136,8 @@ func walk(r io.ReaderAt, size int64) (*recording, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !ok && size-ftyp.end() >= 8 {
-		return nil, errNotRecording // no box header after the ftyp
-	}
 	if ftyp.end() > size || !ok || moov.end() > size {
-		return rec, nil // the init itself is torn
+		return rec, nil // the init itself is torn, or zeros follow the ftyp
 	}
 	if moov.typ != "moov" || moov.size > maxInitBox {
 		return nil, errNotRecording
@@ -167,7 +173,19 @@ func walk(r io.ReaderAt, size int64) (*recording, error) {
 			}
 			p.mdat = mdat
 			if p.frags, err = readMoof(r, b); err != nil {
-				return nil, err
+				if !errors.Is(err, errNotRecording) {
+					return nil, err
+				}
+				// Unparsable: the tail when no part follows, else damage.
+				more, ferr := partFollows(r, mdat.end(), size)
+				if ferr != nil {
+					return nil, ferr
+				}
+				if more {
+					return nil, err
+				}
+				rec.tail = true
+				return rec, nil
 			}
 			if mdat.end() > size {
 				rec.torn = &p
@@ -177,6 +195,11 @@ func walk(r io.ReaderAt, size int64) (*recording, error) {
 				return nil, fmt.Errorf("a part of %d bytes is larger than MediaMTX writes", mdat.end()-b.off)
 			}
 			rec.parts = append(rec.parts, p)
+			if visit != nil {
+				if err := visit(p); err != nil {
+					return nil, err
+				}
+			}
 			b = mdat
 		default:
 			rec.tail = true
@@ -186,6 +209,26 @@ func walk(r io.ReaderAt, size int64) (*recording, error) {
 		rec.end = pos
 	}
 	return rec, nil
+}
+
+// partFollows reports whether a moof starts at from, or after the free
+// boxes there, in the size bytes of r.
+func partFollows(r io.ReaderAt, from, size int64) (bool, error) {
+	for pos := from; pos < size; {
+		b, ok, err := readBox(r, pos, size)
+		if err != nil || !ok {
+			return false, err
+		}
+		switch b.typ {
+		case "moof":
+			return true, nil
+		case "free", "skip":
+			pos = b.end()
+		default:
+			return false, nil
+		}
+	}
+	return false, nil
 }
 
 // children calls f for each box in data[from:to], data being the bytes of a
@@ -303,7 +346,8 @@ const (
 	tfhdSampleFlags    = 0x20
 )
 
-// readMoof reads the trafs of a whole moof.
+// readMoof reads the trafs of a whole moof. A moof that cannot be parsed is
+// errNotRecording.
 func readMoof(r io.ReaderAt, moof box) ([]trackFrag, error) {
 	data := make([]byte, moof.size)
 	if err := readAt(r, data, moof.off); err != nil {
@@ -379,7 +423,7 @@ func readTraf(body []byte, off, moofOff int64) (trackFrag, error) {
 			}
 		case "trun":
 			if haveTrun {
-				return errors.New("a traf with two truns, which MediaMTX never writes")
+				return fmt.Errorf("%w: a traf with two truns, which MediaMTX never writes", errNotRecording)
 			}
 			haveTrun = true
 			return f.readTrun(b, p, base, defaultDuration, defaultSize)

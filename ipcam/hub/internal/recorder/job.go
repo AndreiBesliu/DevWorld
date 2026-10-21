@@ -125,11 +125,23 @@ type (
 	// SegmentVerifiedObserver is told of each segment that the background
 	// verification passed, by its absolute path.
 	SegmentVerifiedObserver interface{ SegmentVerified(path string) }
-	// ReconcileObserver gets the reconcile report again, whole, when a
-	// background rewrite or a repair of the .part files that MediaMTX left
-	// while the hub runs has added to it: the latest report holds them all.
-	ReconcileObserver interface{ Reconciled(r ReconcileReport) }
+	// ReconcileObserver gets the startup's reconcile report, then the whole
+	// report again each time a background rewrite or a repair of the .part
+	// files that MediaMTX left while the hub runs has added to it, or such
+	// work was queued: the update with the highest Seq holds everything.
+	ReconcileObserver interface{ Reconciled(u ReconcileUpdate) }
 )
+
+// ReconcileUpdate is the reconcile report as it stands. Seq numbers the
+// updates, 1 for the startup's and one more for each later one; updates
+// from two goroutines may arrive out of order, so a reader keeps the one
+// with the highest Seq. Final is true when no background rewrite or repair
+// is pending: the report is complete until MediaMTX leaves another .part.
+type ReconcileUpdate struct {
+	ReconcileReport
+	Seq   int
+	Final bool
+}
 
 // nopObserver is the Observer of a recorder without one.
 type nopObserver struct{}

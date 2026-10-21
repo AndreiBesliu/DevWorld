@@ -1,8 +1,11 @@
 package recorder
 
 import (
+	"context"
+	"io"
 	"os"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,5 +77,91 @@ func TestReconcile_ReportsUnreadableAndTornParts(t *testing.T) {
 	}
 	if _, err := os.Stat(good); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// countingRecording opens recordings with Recording, and counts the bytes of
+// ciphertext that their plaintext readers read.
+type countingRecording struct {
+	crypto.Recording
+	read atomic.Int64
+}
+
+func (c *countingRecording) OpenReaderAt(ctx context.Context, src io.ReaderAt, size int64) (io.ReaderAt, int64, error) {
+	return c.Recording.OpenReaderAt(ctx, countingReaderAt{src, &c.read}, size)
+}
+
+type countingReaderAt struct {
+	r io.ReaderAt
+	n *atomic.Int64
+}
+
+func (c countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n, err := c.r.ReadAt(p, off)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// TestVerify_DecryptsEachAgeSegmentOnce (MI3): the background verification
+// checks a closed .age segment in one pass, parsing its parts from the
+// stream that it decrypts once, so it reads the ciphertext about once: each
+// chunk, plus the header and the final chunk that opening it authenticates.
+// Decrypting it whole and then reading it again for the parse would read it
+// twice, and double the CPU of every closed segment on a Pi.
+func TestVerify_DecryptsEachAgeSegmentOnce(t *testing.T) {
+	recDir, cat := t.TempDir(), openCatalog(t)
+	ctx := t.Context()
+	scope, riG, _ := newTestScope(t)
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{20000, 20000, 20000, 20000}})
+	file := encryptFMP4(t, f.data, scope, f.partEnd, false)
+	path := segPath(recDir, "cam1", "main", t0, ".age")
+	writeFile(t, path, file)
+	if err := cat.PutSegment(ctx, catalog.Segment{Cam: "cam1", Profile: "main", Path: relSeg("cam1", "main", t0, ".age"),
+		StartMs: t0.UnixMilli(), EndMs: t0.UnixMilli() + 4000, Bytes: int64(len(file)), Encrypted: true, State: catalog.StateComplete}); err != nil {
+		t.Fatal(err)
+	}
+
+	obs := &testObserver{}
+	rec := &countingRecording{Recording: crypto.NewRecording(riG)}
+	v := &verifier{recDir: recDir, cat: cat, recording: rec, obs: obs}
+	report, err := v.pass(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report != (ReconcileReport{}) || !slices.Equal(obs.snapshot().passedSeg, []string{path}) {
+		t.Fatalf("verification %+v, passed %q; want the segment passed", report, obs.snapshot().passedSeg)
+	}
+	limit := int64(len(file)) + 2*(crypto.ChunkSize+16)
+	if got := rec.read.Load(); got > limit {
+		t.Errorf("the verification read %d bytes of ciphertext for a file of %d, want at most %d: each chunk decrypted once", got, len(file), limit)
+	}
+}
+
+// TestVerify_AuthenticatesTheTrailingPadding (C12): the one pass reads the
+// plaintext to its end, so a chunk that does not authenticate inside the
+// free box after the last part, which no box header read reaches, still
+// makes the segment unreadable.
+func TestVerify_AuthenticatesTheTrailingPadding(t *testing.T) {
+	recDir, cat := t.TempDir(), openCatalog(t)
+	ctx := t.Context()
+	scope, riG, _ := newTestScope(t)
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000}})
+	file := encryptFMP4(t, slices.Concat(f.data, freeBox(3*crypto.ChunkSize)), scope, nil, false)
+	// A chunk inside the free box, neither the one with its header nor the final one.
+	chunk := int64(len(f.data))/crypto.ChunkSize + 1
+	file[int64(len(headerOf(t, file)))+16+chunk*(crypto.ChunkSize+16)+100] ^= 0x40
+	path := segPath(recDir, "cam1", "main", t0, ".age")
+	writeFile(t, path, file)
+	if err := cat.PutSegment(ctx, catalog.Segment{Cam: "cam1", Profile: "main", Path: relSeg("cam1", "main", t0, ".age"),
+		StartMs: t0.UnixMilli(), EndMs: t0.UnixMilli() + 2000, Bytes: int64(len(file)), Encrypted: true, State: catalog.StateComplete}); err != nil {
+		t.Fatal(err)
+	}
+	v := &verifier{recDir: recDir, cat: cat, recording: crypto.NewRecording(riG), obs: &testObserver{}}
+	report, err := v.pass(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report != (ReconcileReport{Unreadable: 1}) {
+		t.Errorf("verification %+v, want the corrupt padding found: 1 unreadable", report)
 	}
 }

@@ -256,15 +256,15 @@ func newestOf(parts []string) (path string, size int64, ok bool) {
 var syncDir = platformSyncDir
 
 // ensureStreamDirs creates the stream's directory and its date directories
-// for today and tomorrow (local time, as MediaMTX names them), syncing the
-// parent of each directory it creates. MediaMTX creates a missing
+// for today and tomorrow (UTC days, as MediaMTX names them: MTX-4), syncing
+// the parent of each directory it creates. MediaMTX creates a missing
 // directory with MkdirAll and syncs only the segment's own directory (MTX-1),
 // so without this a cut could lose the directory entry of a new day or a
 // new camera, with the segments in it.
 func ensureStreamDirs(recDir string, cam CameraID, p Profile, now time.Time) error {
 	stream := filepath.Join(recDir, string(cam), string(p))
 	for _, day := range []time.Time{now, now.AddDate(0, 0, 1)} {
-		if err := mkdirSynced(filepath.Join(stream, day.Local().Format("2006-01-02"))); err != nil {
+		if err := mkdirSynced(filepath.Join(stream, day.UTC().Format("2006-01-02"))); err != nil {
 			return err
 		}
 	}

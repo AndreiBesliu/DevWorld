@@ -15,16 +15,18 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 // The segment-closed hook (G05). MediaMTX runs "ipcam-hub hook
 // segment-complete" when a segment is complete (MTX-3); that command posts
 // the segment to the recorder's endpoint on 127.0.0.1, whose address and
-// per-start token MediaMTX's environment carries.
+// token MediaMTX's environment carries. Each MediaMTX child gets a token of
+// its own.
 const (
 	HookAddrEnv  = "IPCAM_HOOK_ADDR"  // host:port of the endpoint
-	HookTokenEnv = "IPCAM_HOOK_TOKEN" //nolint:gosec // the variable's name; its bearer token is new at every start
+	HookTokenEnv = "IPCAM_HOOK_TOKEN" //nolint:gosec // the variable's name; its bearer token is new for every child
 	HookPath     = "/hook/segment-complete"
 )
 
@@ -95,20 +97,18 @@ func PostSegmentComplete(ctx context.Context, getenv func(string) string) error 
 type hookServer struct {
 	ln     net.Listener
 	srv    *http.Server
-	token  string
+	token  atomic.Pointer[string] // the running child's; nil before the first
 	handle func(ctx context.Context, req HookRequest) (status int, err error)
 }
 
-// startHookServer listens on 127.0.0.1 at a random port with a new random
-// token.
+// startHookServer listens on 127.0.0.1 at a random port. It accepts no
+// token until newChild gives one out.
 func startHookServer(handle func(ctx context.Context, req HookRequest) (int, error)) (*hookServer, error) {
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("recorder: the hook endpoint: %w", err)
 	}
-	token := make([]byte, 32)
-	_, _ = rand.Read(token) // crypto/rand.Read never fails
-	h := &hookServer{ln: ln, token: hex.EncodeToString(token), handle: handle}
+	h := &hookServer{ln: ln, handle: handle}
 	mux := http.NewServeMux()
 	mux.HandleFunc(HookPath, h.serve)
 	h.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second}
@@ -116,9 +116,15 @@ func startHookServer(handle func(ctx context.Context, req HookRequest) (int, err
 	return h, nil
 }
 
-// env is what MediaMTX's environment needs for the hook command.
-func (h *hookServer) env() []string {
-	return []string{HookAddrEnv + "=" + h.ln.Addr().String(), HookTokenEnv + "=" + h.token}
+// newChild makes a new random token, from now on the only one accepted: a
+// hook with an earlier child's token gets HTTP 401. It returns what the new
+// child's environment needs for the hook command.
+func (h *hookServer) newChild() []string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b) // crypto/rand.Read never fails
+	token := hex.EncodeToString(b)
+	h.token.Store(&token)
+	return []string{HookAddrEnv + "=" + h.ln.Addr().String(), HookTokenEnv + "=" + token}
 }
 
 func (h *hookServer) shutdown(ctx context.Context) { _ = h.srv.Shutdown(ctx) }
@@ -130,7 +136,8 @@ func (h *hookServer) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || subtle.ConstantTimeCompare([]byte(got), []byte(h.token)) != 1 {
+	want := h.token.Load()
+	if !ok || want == nil || subtle.ConstantTimeCompare([]byte(got), []byte(*want)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

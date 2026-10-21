@@ -9,9 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -47,6 +45,7 @@ func startHub(t *testing.T, args ...string) *hub {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), os.Args[0], args...) //nolint:gosec // the test binary itself
 	cmd.Env = append(os.Environ(), mainEnv+"=1")
+	inOwnGroup(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -121,9 +120,12 @@ func writeJSON(t *testing.T, path string, v any) {
 }
 
 // TestRun_EmitsReadyThenRecordingThenSegmentClosed: ipcam-hub run with the
-// real MediaMTX reconciles, is ready, reports the first part of each stream,
-// then each 10 s segment as it closes, and then each closed segment that the
-// background verification passed. It exits 0 on SIGTERM.
+// real MediaMTX reconciles (one reconcile event, seq 1 and final), is
+// ready, reports the first part of each stream, then each 10 s segment as it
+// closes, and then each closed segment that the background verification
+// passed. Stopped, by SIGTERM on Linux and Ctrl+Break on Windows, it stops
+// MediaMTX gracefully, reports a hub_stopped gap for each stream, and
+// exits 0.
 func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 	bin := rtsptest.MediaMTX(t)
 	srv := rtsptest.Start(t, rtsptest.MainH264(t))
@@ -155,8 +157,8 @@ func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 	h := startHub(t, "run", "--config", config)
 
 	reconcile := h.next(t, 30*time.Second, "reconcile event", ofType("reconcile"))
-	if reconcile["aborted"] != false {
-		t.Errorf("reconcile %v", reconcile)
+	if reconcile["aborted"] != false || reconcile["seq"] != float64(1) || reconcile["final"] != true {
+		t.Errorf("reconcile %v, want seq 1, final, not aborted", reconcile)
 	}
 	h.next(t, 30*time.Second, "ready event", ofType("ready"))
 	recording := map[string]bool{}
@@ -236,15 +238,27 @@ func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 		t.Errorf("no catalog: %v", err)
 	}
 
-	if runtime.GOOS == "windows" {
-		return // no SIGTERM to send
+	if err := stopHub(h); err != nil {
+		t.Fatalf("stop ipcam-hub: %v", err)
 	}
-	if err := h.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatal(err)
+	stoppedGaps := map[string]bool{}
+	for e := range h.events {
+		if e["type"] == "gap" && e["reason"] == "hub_stopped" && e["endMs"] == float64(0) {
+			stoppedGaps[e["cam"].(string)+"/"+e["profile"].(string)] = true
+		}
+		if e["type"] == "gap" && e["reason"] == "restart" {
+			t.Errorf("a restart gap after a graceful stop: %v", e)
+		}
+		if e["type"] == "error" {
+			t.Errorf("an error after the stop: %v", e["message"])
+		}
 	}
 	<-h.done
 	if err := h.cmd.Wait(); err != nil {
-		t.Errorf("ipcam-hub after SIGTERM: %v, want exit 0", err)
+		t.Errorf("ipcam-hub after the stop: %v, want exit 0", err)
+	}
+	if !stoppedGaps["cam1/main"] || !stoppedGaps["cam1/sub"] {
+		t.Errorf("hub_stopped gaps for %v, want both streams", stoppedGaps)
 	}
 }
 
@@ -293,8 +307,8 @@ func TestRun_ExitCode3WhenReconcileAborts(t *testing.T) {
 	h := startHub(t, "run", "--config", config)
 
 	e := h.next(t, 30*time.Second, "reconcile event", ofType("reconcile"))
-	if e["aborted"] != true {
-		t.Errorf("reconcile %v, want aborted", e)
+	if e["aborted"] != true || e["seq"] != float64(1) || e["final"] != true {
+		t.Errorf("reconcile %v, want aborted, seq 1 and final", e)
 	}
 	<-h.done
 	err := h.cmd.Wait()
@@ -332,5 +346,69 @@ func TestRun_ExitCode1OnBadConfig(t *testing.T) {
 		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
 			t.Errorf("%s: ipcam-hub ended with %v, want exit code 1", name, err)
 		}
+	}
+}
+
+// TestLoadRunConfig_EncryptedJobsNeedTheirRIg: a run.json with an encrypted
+// job is refused without an identityFile, and with one whose recipient is
+// not the job's RI_g: reconcile and the verification could read none of its
+// files, and every cut would count toward HUB-09's abort. The errors quote
+// no key, public or secret.
+func TestLoadRunConfig_EncryptedJobsNeedTheirRIg(t *testing.T) {
+	dir := t.TempDir()
+	ids := make([]*age.X25519Identity, 3)
+	for i := range ids {
+		id, err := age.GenerateX25519Identity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = id
+	}
+	riG, rk, other := ids[0], ids[1], ids[2]
+	identity := filepath.Join(dir, "ri_g.key")
+	if err := os.WriteFile(identity, []byte(riG.String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	otherIdentity := filepath.Join(dir, "other.key")
+	if err := os.WriteFile(otherIdentity, []byte(other.String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	job := func(recipients any) map[string]any {
+		return map[string]any{"cam": "cam1", "profile": "main", "restreamUrl": "rtsp://127.0.0.1:1/cam1/main", "recipients": recipients}
+	}
+	encrypted := job([]string{riG.Recipient().String(), rk.Recipient().String()})
+	for _, tc := range []struct {
+		name     string
+		identity string
+		jobs     []map[string]any
+		ok       bool
+	}{
+		{"encrypted, no identity", "", []map[string]any{job(nil), encrypted}, false},
+		{"encrypted, another identity", otherIdentity, []map[string]any{encrypted}, false},
+		{"encrypted, its RI_g", identity, []map[string]any{encrypted}, true},
+		{"clear, no identity", "", []map[string]any{job(nil)}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := filepath.Join(t.TempDir(), "run.json")
+			writeJSON(t, config, map[string]any{"dataDir": filepath.Join(dir, "data"), "identityFile": tc.identity, "jobs": tc.jobs})
+			_, _, id, err := loadRunConfig(config)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("loadRunConfig: %v", err)
+				}
+				if (tc.identity != "") != (id != nil) {
+					t.Errorf("identity %v, want one exactly when the configuration names it", id)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("loadRunConfig accepted it")
+			}
+			for _, key := range []string{"AGE-SECRET-KEY-", "age1"} {
+				if strings.Contains(err.Error(), key) {
+					t.Errorf("the error %q quotes a key", err)
+				}
+			}
+		})
 	}
 }

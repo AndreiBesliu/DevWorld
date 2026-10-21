@@ -27,7 +27,7 @@ func startChild(cmd *exec.Cmd) (*childProc, error) {
 }
 
 // interrupt asks MediaMTX to stop: it closes its segments, which renames
-// them and runs their hooks.
+// them and runs their hooks, and exits.
 func (c *childProc) interrupt() error { return c.cmd.Process.Signal(syscall.SIGTERM) }
 
 // release frees what startChild holds once the child has exited.

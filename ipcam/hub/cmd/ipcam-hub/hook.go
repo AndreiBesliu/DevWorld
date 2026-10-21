@@ -23,9 +23,12 @@ func hookCommand(args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "usage: ipcam-hub hook segment-complete")
 		return exitFatal
 	}
-	// When MediaMTX stops, it interrupts its hook commands and waits for
-	// them: the post of the segment it has just closed must still land.
-	signal.Ignore(os.Interrupt, syscall.SIGTERM)
+	// When MediaMTX stops, it waits for its hook commands: the post of the
+	// segment it has just closed must still land, also when the stop's
+	// SIGINT, SIGTERM or Ctrl+Break reaches this command too. On Windows,
+	// signal.Ignore would leave a Ctrl+Break to the default handler, which
+	// ends the process, so the signals are caught and dropped.
+	signal.Notify(make(chan os.Signal, 1), os.Interrupt, syscall.SIGTERM)
 	ctx, cancel := context.WithTimeout(context.Background(), hookTimeout)
 	defer cancel()
 	if err := recorder.PostSegmentComplete(ctx, os.Getenv); err != nil {

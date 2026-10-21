@@ -56,9 +56,9 @@ var ErrFinalChunkChanged = errors.New("crypto: the age chunk is already final; s
 
 // TailSealer opens torn recordings for reconcile (§4.5).
 type TailSealer interface {
-	// OpenTorn reads the header of f, which must be open for reading and
-	// writing, and finds its durable chunks, checking ctx at each chunk of
-	// the scan. f stays the caller's to close.
+	// OpenTorn reads the header of f, which must be open for reading, and for
+	// writing too when the caller reseals it, and finds its durable chunks,
+	// checking ctx at each chunk of the scan. f stays the caller's to close.
 	OpenTorn(ctx context.Context, f *os.File) (TornAge, error)
 }
 

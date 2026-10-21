@@ -22,7 +22,7 @@ import (
 // GapReason is why a stream has no recording for a while (§4.5).
 type GapReason string
 
-// The gap reasons.
+// The gap reasons. The gaps table's CHECK (migration 2) lists the same.
 const (
 	GapRestart       GapReason = "restart"        // a crash or a cut: the lost tail until recording resumed
 	GapHubStopped    GapReason = "hub_stopped"    // the hub was stopped
@@ -108,6 +108,21 @@ var migrations = []string{
 		end_ms    INTEGER NOT NULL,
 		reason    TEXT NOT NULL
 	);
+	CREATE INDEX gaps_stream ON gaps (camera_id, profile, start_ms);`,
+	// 2: SQLite checks the gap reason itself. A table's constraints cannot be
+	// altered, so gaps is rebuilt with its rows.
+	`CREATE TABLE gaps_v2 (
+		id        INTEGER PRIMARY KEY,
+		camera_id TEXT NOT NULL,
+		profile   TEXT NOT NULL,
+		start_ms  INTEGER NOT NULL,
+		end_ms    INTEGER NOT NULL,
+		reason    TEXT NOT NULL CHECK (reason IN ('restart', 'hub_stopped', 'disk_full', 'card', 'camera_offline'))
+	);
+	INSERT INTO gaps_v2 (id, camera_id, profile, start_ms, end_ms, reason)
+		SELECT id, camera_id, profile, start_ms, end_ms, reason FROM gaps;
+	DROP TABLE gaps;
+	ALTER TABLE gaps_v2 RENAME TO gaps;
 	CREATE INDEX gaps_stream ON gaps (camera_id, profile, start_ms);`,
 }
 

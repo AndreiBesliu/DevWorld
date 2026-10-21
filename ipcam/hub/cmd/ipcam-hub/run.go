@@ -53,30 +53,46 @@ type runJobDef struct {
 	PadLowBitrate *bool     `json:"padLowBitrate"` // absent: true (O17)
 }
 
-func loadRunConfig(path string) (runConfig, []recorder.Job, error) {
+// loadRunConfig reads run.json, its jobs and the identity that it names, if
+// any. An encrypted job needs the identity of its RI_g: without it,
+// reconcile and the verification could read none of the job's files. Its
+// errors quote no key.
+func loadRunConfig(path string) (runConfig, []recorder.Job, *age.X25519Identity, error) {
 	var cfg runConfig
 	b, err := os.ReadFile(path) //nolint:gosec // the configuration that the caller named
 	if err != nil {
-		return cfg, nil, err
+		return cfg, nil, nil, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
-		return cfg, nil, fmt.Errorf("%s: %w", path, err)
+		return cfg, nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if cfg.DataDir == "" {
-		return cfg, nil, fmt.Errorf("%s: no dataDir", path)
+		return cfg, nil, nil, fmt.Errorf("%s: no dataDir", path)
+	}
+	var id *age.X25519Identity
+	if cfg.IdentityFile != "" {
+		if id, err = loadIdentity(cfg.IdentityFile); err != nil {
+			return cfg, nil, nil, err
+		}
 	}
 	jobs := make([]recorder.Job, 0, len(cfg.Jobs))
 	for i, d := range cfg.Jobs {
 		var scope *crypto.KeyScope
 		if d.Recipients != nil {
 			if len(*d.Recipients) != 2 {
-				return cfg, nil, fmt.Errorf("%s: job %d: recipients must be RI_g and RK, not %d entries", path, i+1, len(*d.Recipients))
+				return cfg, nil, nil, fmt.Errorf("%s: job %d: recipients must be RI_g and RK, not %d entries", path, i+1, len(*d.Recipients))
 			}
 			s, err := crypto.ParseKeyScope((*d.Recipients)[0], (*d.Recipients)[1])
 			if err != nil {
-				return cfg, nil, fmt.Errorf("%s: job %d: %w", path, i+1, err)
+				return cfg, nil, nil, fmt.Errorf("%s: job %d: %w", path, i+1, err)
+			}
+			switch {
+			case id == nil:
+				return cfg, nil, nil, fmt.Errorf("%s: job %d records encrypted, and no identityFile holds the identity of its RI_g", path, i+1)
+			case id.Recipient().String() != s.RecordingIdentity.String():
+				return cfg, nil, nil, fmt.Errorf("%s: job %d: the identityFile's identity is not the one of the job's RI_g", path, i+1)
 			}
 			scope = &s
 		}
@@ -89,7 +105,7 @@ func loadRunConfig(path string) (runConfig, []recorder.Job, error) {
 		}
 		jobs = append(jobs, j)
 	}
-	return cfg, jobs, nil
+	return cfg, jobs, id, nil
 }
 
 // loadIdentity reads RI_g from a file that only its owner may read.
@@ -119,7 +135,7 @@ func loadIdentity(path string) (*age.X25519Identity, error) {
 }
 
 // runCommand is "ipcam-hub run": it reconciles, records the jobs of
-// run.json and reports, until SIGTERM or Ctrl-C.
+// run.json and reports, until SIGTERM, Ctrl-C or Ctrl-Break.
 func runCommand(args []string, stdout, stderr io.Writer) int {
 	ev := &events{out: stdout}
 	fail := func(err error) int {
@@ -136,7 +152,7 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 	if *configPath == "" || flags.NArg() != 0 {
 		return fail(errors.New("usage: ipcam-hub run --config <run.json>"))
 	}
-	cfg, jobs, err := loadRunConfig(*configPath)
+	cfg, jobs, id, err := loadRunConfig(*configPath)
 	if err != nil {
 		return fail(err)
 	}
@@ -166,11 +182,7 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	rc := recorder.Config{BinaryPath: mediamtx, RunDir: runDir, RecDir: filepath.Join(cfg.DataDir, "rec")}
-	if cfg.IdentityFile != "" {
-		id, err := loadIdentity(cfg.IdentityFile)
-		if err != nil {
-			return fail(err)
-		}
+	if id != nil {
 		rc.Tail, rc.Recording = crypto.NewTailSealer(id), crypto.NewRecording(id)
 	}
 
@@ -184,8 +196,8 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 	rc.Catalog = cat
 	rc.Observer = &observer{ev: ev, stderr: stderr}
 
-	rec, report, err := recorder.New(ctx, rc)
-	ev.emit("reconcile", reportFields(report))
+	// New gives the reconcile event out (observer.Reconciled), as later updates.
+	rec, _, err := recorder.New(ctx, rc)
 	if errors.Is(err, recorder.ErrReconcileAborted) {
 		_, _ = fmt.Fprintln(stderr, "ipcam-hub:", err)
 		return exitAborted

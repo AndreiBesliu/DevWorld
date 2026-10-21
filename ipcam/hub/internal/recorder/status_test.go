@@ -48,7 +48,7 @@ func TestStatus_LastPartAgoFromPartFileSize(t *testing.T) {
 	if len(firsts) != 1 || firsts[0].key != key || !firsts[0].at.Equal(t0.Add(500*time.Millisecond)) {
 		t.Fatalf("the new .part gave first parts %+v, want one for cam1/main", firsts)
 	}
-	if want := time.Date(2026, 10, 20, 10, 0, 1, 0, time.Local); !firsts[0].segmentStart.Equal(want) {
+	if want := time.Date(2026, 10, 20, 10, 0, 1, 0, time.UTC); !firsts[0].segmentStart.Equal(want) {
 		t.Errorf("the first part's segment starts at %v, want %v from its name", firsts[0].segmentStart, want)
 	}
 	if s := w.status(key, t0.Add(500*time.Millisecond)); s.LastPartAgoMs != 0 {
