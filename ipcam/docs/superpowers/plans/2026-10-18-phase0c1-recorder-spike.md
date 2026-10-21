@@ -57,7 +57,7 @@ Proba verifică ambele variante: varianta pornită în rulările obișnuite, iar
 - **`recreport`.** It renders the results, judged by each gate's `Judge`, into the Romanian report and the CSVs. All of `tools/spikes/recording/` is deleted after the report.
 
 **Tech Stack:**
-- **Go and the fork.** Go 1.27.2. MediaMTX v1.21.1 or v1.21.2 (picked by C31, see Global Constraints) as a vendored MIT fork.
+- **Go and the fork.** Go 1.27.3 (C1-R12). MediaMTX v1.21.1 or v1.21.2 (picked by C31, see Global Constraints) as a vendored MIT fork.
 - **Go modules in the workspace.** `filippo.io/age` v1.3.2 (BSD-3) and `modernc.org/sqlite` (newest ≥ 14 days old, BSD-3). From the video spike, at its versions: `github.com/bluenviron/gortsplib/v5` v5.6.6, `github.com/bluenviron/mediacommon/v2` v2.9.6, `github.com/pion/webrtc/v4` v4.2.22 and `github.com/pion/turn/v5` v5.1.2.
 - **TypeScript.** `@noble/ciphers` 2.4.0 and `@noble/hashes` 2.4.0 (MIT). `fast-check` (MIT, tests only). `age-encryption` (typage, BSD-3, spike app only).
 - **Lab-only tools.** ffmpeg with libx264, QEMU/KVM (TST-09), the `coturn/coturn` Docker image (≥ 4.14) and `tc netem`. The age CLI v1.0.0 and the newest age release, plus rage, for ENC-06.
@@ -73,7 +73,7 @@ Proba verifică ambele variante: varianta pornită în rulările obișnuite, iar
   - one extra 256 kbps run with the setting off in **every** automated MI1 set (lab and owner devices), outside the set's median and max, judged against that bound and reported separately.
 
 **Prerequisites (they exist in this worktree; the video spike is done):**
-- **Go workspace and tooling.** `ipcam/go.work` (`go 1.27.2`; `use ./tools ./tools/spikes/video`). `ipcam/tools/go.mod` with `tool` directives for golangci-lint v2.14.0, govulncheck (x/vuln v1.8.0) and go-licenses v2.0.1.
+- **Go workspace and tooling.** `ipcam/go.work` (`go 1.27.3`, C1-R12; `use ./tools ./tools/spikes/video`). `ipcam/tools/go.mod` with `tool` directives for golangci-lint v2.14.0, govulncheck (x/vuln v1.8.0) and go-licenses v2.0.1.
 - **Video spike packages.**
   - `tools/spikes/video/source`: `ReadAnnexB`, `NewSim` with `SentLog()` and `JitterSnapshot()`, `NewRTSP`, `Clock`.
   - `tools/spikes/video/band`: `Paint`, `Decode`.
@@ -102,7 +102,7 @@ Proba verifică ambele variante: varianta pornită în rulările obișnuite, iar
   - **Shared versions.** Shared dependencies stay no newer than the video module's: `tools/scripts/check-video-build-list.sh` must stay green.
   - **Tidy and lockfiles.** Each task runs `GOWORK=off go mod tidy` in every Go module whose imports it changes and commits that module's `go.mod`/`go.sum` (the Files lists name them); a task that changes a `package.json` runs `pnpm -C ipcam install` and commits `ipcam/pnpm-lock.yaml`.
 - **Versions (C31, R27 pattern).**
-  - **Toolchain.** Go 1.27.2 (go1.27.3 becomes eligible on 2026-11-02).
+  - **Toolchain.** Go 1.27.3 since 2026-10-21, a security exception (C1-R12, GO-2026-6809). `ipcam/go.work` sets it, and CI's setup-go reads it; the module `go` lines stay 1.27.2.
   - **MediaMTX.** If Task 1 runs before 2026-10-22, it vendors MediaMTX v1.21.1. Task 3 re-vendors v1.21.2 first when it starts on or after 2026-10-22, before any patch exists. `SOURCE.md` records the version.
   - **Fork dependencies.** The fork's gortsplib, mediacommon and webrtc are whatever that release requires, in its own `go.mod`.
   - **hub and recording.** They pin mediacommon v2.9.6, webrtc v4.2.22, gortsplib v5.6.6 and pion/turn v5.1.2: the video spike's versions, because the workspace shares one build list.
