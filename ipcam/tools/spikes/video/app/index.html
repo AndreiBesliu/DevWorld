@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ro">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ipcam video spike</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 12px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      h1 {
+        font-size: 1.2rem;
+      }
+      label {
+        display: block;
+      }
+      input {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        font-size: 1rem;
+        padding: 6px;
+        margin: 4px 0 8px;
+      }
+      button {
+        font-size: 1rem;
+        padding: 6px 12px;
+      }
+      .connection.failed {
+        border-left: 4px solid #c62828;
+        padding-left: 8px;
+      }
+      .scenario {
+        display: grid;
+        grid-template-columns: 4em 1fr auto;
+        gap: 4px 8px;
+        align-items: center;
+        padding: 6px 0;
+        border-bottom: 1px solid #8884;
+      }
+      .scenario .status {
+        grid-column: 2;
+        font-size: 0.9rem;
+        opacity: 0.8;
+      }
+      .scenario button {
+        grid-column: 3;
+        grid-row: 1 / span 2;
+      }
+      .scenario.failed .status {
+        color: #c62828;
+      }
+      /*
+       * The stage: nothing outside a run; during one, an opaque layer over the
+       * whole viewport, above the start page, so that the tiles, S5's
+       * instruction and S10's question are on screen (client-stage-offscreen)
+       * and the compositor draws what MV3, MV5 and MV6 measure.
+       */
+      .stage {
+        display: none;
+      }
+      .stage.active {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        box-sizing: border-box;
+        padding: 8px;
+        background: Canvas;
+        color: CanvasText;
+      }
+      .stage .status {
+        margin: 0;
+        font-size: 0.9rem;
+        opacity: 0.8;
+      }
+      /* The grid takes the height that is left, and each tile shows its whole frame inside its cell. */
+      .stage .grid {
+        flex: 1;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: repeat(var(--columns, 1), minmax(0, 1fr));
+        grid-template-rows: repeat(var(--rows, 1), minmax(0, 1fr));
+        gap: 2px;
+      }
+      .stage video {
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        object-fit: contain;
+        background: #000;
+        display: block;
+      }
+      /* Over everything, and the only thing a picture-in-picture window shows (S6). */
+      .stage .full {
+        position: fixed;
+        inset: 0;
+        z-index: 1;
+        background: #000;
+        display: flex;
+        align-items: center;
+      }
+      .stage [hidden] {
+        display: none;
+      }
+      .stage .message {
+        font-weight: bold;
+        margin: 0;
+        padding: 8px;
+        border: 2px solid currentColor;
+      }
+      .stage .question {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+      .stage .question p {
+        flex-basis: 100%;
+        margin: 0;
+        font-weight: bold;
+      }
+      /* Over the fullscreen video, at the top: S3's MV4 explanation stays readable while the camera is held. */
+      .stage:has(> .full:not([hidden])) .message {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 2;
+        margin: 0;
+        background: Canvas;
+        color: CanvasText;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

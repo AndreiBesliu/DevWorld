@@ -1,0 +1,172 @@
+package session
+
+import (
+	"encoding/hex"
+	"fmt"
+	"slices"
+	"strings"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
+	"github.com/pion/rtp"
+	"github.com/pion/rtp/codecs"
+	"github.com/pion/webrtc/v4"
+)
+
+// offeredH264 are the H.264 profile-level-ids that WebRTC clients offer:
+// libwebrtc (Chrome, Edge, WebView2, Android WebView) offers 42001f, 42e01f,
+// 4d001f, 64001f, 640c1f and f4001f; Firefox 42e01f and 42001f; Safari 42e01f
+// and 640c1f. Pion negotiates an offered H.264 format only when its
+// profile_idc and constraint byte equal a registered one, and ignores the
+// level, so these entries negotiate every level a client offers of them.
+var offeredH264 = []string{"42001f", "42e01f", "4d001f", "64001f", "640c1f", "f4001f"}
+
+// videoFeedback is the RTCP feedback the hub negotiates: NACK, which Pion's
+// default NACK responder answers from its send buffer while the session reads
+// each sender's RTCP (Session.readRTCP, R50), and PLI, which the hub reads and
+// does not answer (see the package doc).
+var videoFeedback = []webrtc.RTCPFeedback{{Type: "nack"}, {Type: "nack", Parameter: "pli"}}
+
+// registerCodecs registers what the hub can send: H.264 in packetization
+// mode 1 (FU-A fragments large NAL units) and H.265 Main.
+func registerCodecs(me *webrtc.MediaEngine) error {
+	pt := webrtc.PayloadType(96)
+	register := func(mime, fmtp string) error {
+		err := me.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: mime, ClockRate: 90000, SDPFmtpLine: fmtp, RTCPFeedback: videoFeedback},
+			PayloadType:        pt,
+		}, webrtc.RTPCodecTypeVideo)
+		pt++
+		if err != nil {
+			return fmt.Errorf("register %s %s: %w", mime, fmtp, err)
+		}
+		return nil
+	}
+	for _, plid := range offeredH264 {
+		if err := register(webrtc.MimeTypeH264, "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id="+plid); err != nil {
+			return err
+		}
+	}
+	return register(webrtc.MimeTypeH265, "level-id=93;profile-id=1;tier-flag=0;tx-mode=SRST")
+}
+
+// fmtpValue returns the value of a parameter in an SDP fmtp line, or "".
+func fmtpValue(fmtp, key string) string {
+	for _, param := range strings.Split(fmtp, ";") {
+		if k, v, ok := strings.Cut(param, "="); ok && strings.EqualFold(strings.TrimSpace(k), key) {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func isH264(c webrtc.RTPCodecParameters) bool {
+	return strings.EqualFold(c.MimeType, webrtc.MimeTypeH264)
+}
+
+func isH265(c webrtc.RTPCodecParameters) bool {
+	return strings.EqualFold(c.MimeType, webrtc.MimeTypeH265)
+}
+
+// sendable reports whether the hub can send a codec of an answer.
+func sendable(c webrtc.RTPCodecParameters) bool {
+	return isH265(c) || isH264(c) && fmtpValue(c.SDPFmtpLine, "packetization-mode") == "1"
+}
+
+// profileLevelID splits an H.264 profile-level-id ("4d401f") into its
+// profile_idc and level_idc bytes.
+func profileLevelID(s string) (profileIDC, levelIDC byte, ok bool) {
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != 3 {
+		return 0, 0, false
+	}
+	return b[0], b[2], true
+}
+
+// h264Ladder lists the profile_idc of the H.264 profiles that WebRTC clients
+// offer, from the poorest to the richest: Baseline, Main, High, High 10,
+// High 4:2:2 and High 4:4:4 Predictive. A decoder of one of them decodes what
+// cameras send in the ones before it.
+var h264Ladder = []byte{0x42, 0x4d, 0x64, 0x6e, 0x7a, 0xf4}
+
+// chooseCodec picks, from the codecs that an answer lists for a slot, the one
+// that carries src. For H.264 it is the first entry, in offer order, in
+// packetization mode 1 whose profile_idc equals the source's (R20); the level is
+// not enforced. When no entry has that profile_idc and sub is set (a bind of a
+// substream, R23, spec §6.3 step 7), it is the first entry of the closest
+// offered profile, and fallback is that entry's profile-level-id. For H.265 it
+// is the first H.265 entry. ok is false when nothing fits, including an H.264
+// source whose profile is not known yet.
+//
+// The first entry, not the one with the highest level, because that is the one
+// that goes on the wire: Pion binds a track to the first offered entry whose
+// profile_idc, constraint byte and packetization mode equal the track's, and
+// ignores the level. Another choice would make the payload type, and the
+// fallback that "bound" reports, differ from what the client receives.
+func chooseCodec(src source.Source, sub bool, offered []webrtc.RTPCodecParameters) (codec webrtc.RTPCodecParameters, fallback string, ok bool) {
+	switch src.Codec() {
+	case source.CodecH265:
+		for _, c := range offered {
+			if isH265(c) {
+				return c, "", true
+			}
+		}
+	case source.CodecH264:
+		want, _, known := profileLevelID(src.Profile())
+		if !known {
+			break
+		}
+		if i := firstH264(offered, want); i >= 0 {
+			return offered[i], "", true
+		}
+		if !sub {
+			break
+		}
+		for _, idc := range closestProfiles(want) {
+			if i := firstH264(offered, idc); i >= 0 {
+				return offered[i], strings.ToLower(fmtpValue(offered[i].SDPFmtpLine, "profile-level-id")), true
+			}
+		}
+	}
+	return webrtc.RTPCodecParameters{}, "", false
+}
+
+// firstH264 returns the index of the first entry in packetization mode 1 with
+// the given profile_idc, or -1.
+func firstH264(offered []webrtc.RTPCodecParameters, profileIDC byte) int {
+	for i, c := range offered {
+		if !isH264(c) || !sendable(c) {
+			continue
+		}
+		if idc, _, ok := profileLevelID(fmtpValue(c.SDPFmtpLine, "profile-level-id")); ok && idc == profileIDC {
+			return i
+		}
+	}
+	return -1
+}
+
+// closestProfiles returns the profiles of h264Ladder other than profileIDC,
+// closest first: the richer ones, whose decoders decode the stream, from the
+// nearest up, then the poorer ones from the nearest down. It is empty for a
+// profile outside the ladder.
+func closestProfiles(profileIDC byte) []byte {
+	i := slices.Index(h264Ladder, profileIDC)
+	if i < 0 {
+		return nil
+	}
+	closest := slices.Clone(h264Ladder[i+1:])
+	for j := i - 1; j >= 0; j-- {
+		closest = append(closest, h264Ladder[j])
+	}
+	return closest
+}
+
+// payloaderFor returns the RTP payloader of a codec the hub sends.
+func payloaderFor(c webrtc.RTPCodecCapability) (rtp.Payloader, error) {
+	switch {
+	case strings.EqualFold(c.MimeType, webrtc.MimeTypeH264):
+		return &codecs.H264Payloader{}, nil
+	case strings.EqualFold(c.MimeType, webrtc.MimeTypeH265):
+		return &codecs.H265Payloader{}, nil
+	}
+	return nil, fmt.Errorf("no payloader for %s", c.MimeType)
+}

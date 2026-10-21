@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPIKE-ONLY (plan 2026-10-18-phase0b-video-spike, Task 10): the spike hub
+     speaks plain HTTP on the LAN (port 7080). Replaces main's file in the
+     `spike` flavour only. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

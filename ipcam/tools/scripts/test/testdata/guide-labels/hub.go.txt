@@ -1,0 +1,10 @@
+// A hub's sources, for check-guide-labels.test.sh: the texts as Go strings.
+package main
+
+const (
+	lanHeading = "Adresele acestui calculator în rețeaua locală:"
+	connected  = "Camera %s este conectată: %s, profil %s, %s."
+	closePrompt = "Apăsați Enter pentru a închide."
+	// sourceOnly is left out of the build (hub.bin), like a text behind a build tag.
+	sourceOnly = "Doar în sursă."
+)

@@ -1,0 +1,23 @@
+// SPIKE-ONLY (plan 2026-10-18-phase0b-video-spike, Task 10): the Android
+// library of the spike metrics plugin; `cap sync` adds it to the app. MV14
+// does not count it.
+apply plugin: 'com.android.library'
+
+android {
+    // The Kotlin package is ro.ipcam.spike; the app module owns that namespace.
+    namespace = "ro.ipcam.spike.metrics"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        minSdk = rootProject.ext.minSdkVersion
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+}
+
+dependencies {
+    implementation project(':capacitor-android')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    testImplementation "junit:junit:$junitVersion"
+}

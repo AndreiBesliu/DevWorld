@@ -1,0 +1,24 @@
+[
+  {
+    "name": "spike-video-app",
+    "version": "0.0.0",
+    "path": "@DATA@/app",
+    "private": true,
+    "dependencies": {
+      "@ipcam/capacitor-pip": { "from": "@ipcam/capacitor-pip", "version": "link:../pip", "path": "@DATA@/npm/pip" },
+      "@tauri-apps/api": { "from": "@tauri-apps/api", "version": "2.12.1", "path": "@DATA@/npm/tauri-api" },
+      "@ipcam/player": {
+        "from": "@ipcam/player",
+        "version": "link:../player",
+        "path": "@DATA@/npm/player",
+        "dependencies": {
+          "hls.js": { "from": "hls.js", "version": "1.7.3", "path": "@DATA@/npm/hls.js" }
+        }
+      },
+      "hls.js": { "from": "hls.js", "version": "1.7.3", "path": "@DATA@/npm/hls.js" }
+    },
+    "unsavedDependencies": {
+      "eslint": { "from": "eslint", "version": "10.12.0", "path": "@DATA@/npm/nolicense" }
+    }
+  }
+]

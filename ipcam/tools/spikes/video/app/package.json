@@ -1,0 +1,29 @@
+{
+  "name": "spike-video-app",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Phase 0 (b) video spike app: binds simulated cameras over WebRTC and measures the player (SPIKE-ONLY, never shipped).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@capacitor/core": "8.5.2",
+    "@ipcam/capacitor-pip": "workspace:*",
+    "@ipcam/player": "workspace:*",
+    "@tauri-apps/api": "2.12.1",
+    "hash-wasm": "4.12.0",
+    "spike-android-metrics": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "typescript": "6.0.3",
+    "vite": "8.3.2",
+    "vitest": "5.0.3"
+  }
+}

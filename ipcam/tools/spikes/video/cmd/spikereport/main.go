@@ -1,0 +1,351 @@
+// Command spikereport turns the result files that spikehub stores into the owner's
+// report of the Phase 0 (b) video spike: a Romanian Markdown report with the A3
+// verdicts (AND-1, WIN-1, web) and the decisions they trigger, and CSV files with the
+// raw samples (PH0-30).
+//
+//	spikereport [-in results] [-out docs/research] [-date YYYY-MM-DD]
+//
+// It writes <out>/<date>-phase0b-results.md and <out>/phase0-data/phase0b-<device>.csv, and
+// removes the phase0b-*.csv files of an earlier run that the current input no longer produces.
+// The date is the day of the newest run, on the devices' clocks, unless -date gives it.
+// The output depends only on the input files: running it twice gives the same bytes.
+//
+// Everything that reaches the output passes through scrubText first, so that an address,
+// a MAC, an e-mail, a serial number or an SSID in a note cannot reach the public
+// repository (PH0-22). Then the redaction scanner (package redact, R51) reads every file
+// the run would write: when it finds anything, nothing is written and the run fails,
+// naming the file, the line and the kind of each match, never its text.
+// See ipcam/docs/superpowers/plans/2026-10-18-phase0b-video-spike.md, Task 13.
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/redact"
+)
+
+// maxResultBytes is the largest results file that is read. The hub stores at most 2 MiB.
+const maxResultBytes = 8 << 20
+
+// dateLayout is the layout of -date and of the date in the report's file name.
+const dateLayout = "2006-01-02"
+
+// platformName is what the app puts in a result's device.platform (device.ts): lower case,
+// digits and hyphens. It names a CSV file, so nothing else is accepted.
+var platformName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}$`)
+
+// The parts of an address pattern: a group of an IPv6 literal, and four dotted numbers.
+const (
+	hextet     = `[0-9a-f]{1,4}`
+	dottedQuad = `\d{1,3}(?:\.\d{1,3}){3}`
+)
+
+var (
+	ssidPattern   = regexp.MustCompile(`(?i)(\bssid\s*[:=]\s*).*`)
+	serialPattern = regexp.MustCompile(`(?i)(\bserial(?:[ _-]?(?:number|no))?\s*[:=]\s*)\S+`)
+	urlPattern    = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://\S+`)
+	emailPattern  = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
+	macPattern    = regexp.MustCompile(`(?i)\b[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}\b`)
+	// An IPv6 literal: compressed with `::`, or in full (eight groups); the last 32 bits may be
+	// an IPv4 address (::ffff:192.168.1.20), which is part of the literal and goes with it;
+	// with a zone (%eth0), and in brackets with a port.
+	ipv6Pattern = regexp.MustCompile(`(?i)\[?(?:` +
+		`(?:` + hextet + `:)*(?:` + hextet + `)?::` +
+		// After `::`: groups that end in an IPv4 address (tried first, or the greedy groups would
+		// stop before its first dot), or just groups.
+		`(?:(?:` + hextet + `(?::` + hextet + `)*:)?` + dottedQuad + `|(?:` + hextet + `)?(?::` + hextet + `)*)` +
+		`|(?:` + hextet + `:){7}` + hextet +
+		`|(?:` + hextet + `:){6}` + dottedQuad +
+		`)(?:%[\w.]+)?(?:\](?::\d{1,5})?)?`)
+	ipv4Pattern = regexp.MustCompile(`\b` + dottedQuad + `(?::\d{1,5})?\b`)
+	// A dotted version of four numbers, as a browser or WebView reports it: 141.0.0.0.
+	versionPattern = regexp.MustCompile(`(/?)(\d+)\.(\d+)\.(\d+)\.(\d+)`)
+)
+
+// scrubText removes what must not reach a public report (PH0-22): URLs, e-mail addresses,
+// MAC addresses, IPv4 and IPv6 literals, and what follows "serial" and "ssid". The app
+// already does this for its notes (scrubText in results.ts); the report does it again
+// for any file it is given.
+func scrubText(s string) string {
+	s = ssidPattern.ReplaceAllString(s, "${1}[redacted]")
+	s = serialPattern.ReplaceAllString(s, "${1}[redacted]")
+	s = urlPattern.ReplaceAllString(s, "[url]")
+	s = emailPattern.ReplaceAllString(s, "[email]")
+	s = macPattern.ReplaceAllString(s, "[mac]")
+	s = replaceStandalone(ipv6Pattern, s, "[ip]")
+	return ipv4Pattern.ReplaceAllString(s, "[ip]")
+}
+
+// replaceStandalone replaces the matches of re that stand alone: not glued to a letter, a digit
+// or an underscore on either side, nor followed by a colon, so that a scope operator (std::string, Vec::new) is
+// not taken for an IPv6 literal (Task 13b). A match that holds no hex digit (a bare ::) stays.
+func replaceStandalone(re *regexp.Regexp, s, with string) string {
+	var b strings.Builder
+	last := 0
+	for _, loc := range re.FindAllStringIndex(s, -1) {
+		start, end := loc[0], loc[1]
+		if !strings.ContainsAny(s[start:end], "0123456789abcdefABCDEF") || glued(s, start, end) {
+			continue
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(with)
+		last = end
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// glued: the text right before or after s[start:end] continues a word, or an address after it.
+// A colon before the match is a label's ("ip:fe80::1"), not a part of the address.
+func glued(s string, start, end int) bool {
+	before, _ := utf8.DecodeLastRuneInString(s[:start])
+	after, _ := utf8.DecodeRuneInString(s[end:])
+	word := func(c rune) bool { return c == '_' || unicode.IsLetter(c) || unicode.IsDigit(c) }
+	return start > 0 && word(before) || end < len(s) && (word(after) || after == ':')
+}
+
+// shortVersions drops the fourth number of a four-number version (Chrome/141.0.0.0 becomes
+// Chrome/141.0.0), which a scanner for addresses would take for an IPv4 literal. Only what
+// is a version for sure is shortened: a number after a slash, or one above 255. A real
+// address is left to scrubText, which removes it whole.
+func shortVersions(s string) string {
+	return versionPattern.ReplaceAllStringFunc(s, func(m string) string {
+		parts := versionPattern.FindStringSubmatch(m)
+		sure := parts[1] == "/"
+		for _, n := range parts[2:] {
+			if v, err := strconv.Atoi(n); err != nil || v > 255 {
+				sure = true
+			}
+		}
+		if !sure {
+			return m
+		}
+		return parts[1] + strings.Join(parts[2:5], ".")
+	})
+}
+
+// Skipped is a file in the input folder that is not a usable result.
+type Skipped struct {
+	File   string
+	Reason string
+}
+
+// loadResults reads every *.json file of dir (not its subfolders), in the order of their
+// names. A file that is not a usable result is listed in the second return value with the
+// reason, and the others are still read.
+func loadResults(dir string) ([]Result, []Skipped, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	var results []Result
+	var skipped []Skipped
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		r, err := readResult(filepath.Join(dir, name))
+		if err != nil {
+			skipped = append(skipped, Skipped{File: name, Reason: err.Error()})
+			continue
+		}
+		r.File = name
+		results = append(results, r)
+	}
+	return results, skipped, nil
+}
+
+// readResult parses one results file. Its errors are in Romanian: they reach the report.
+func readResult(path string) (Result, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return Result{}, errors.New("nu se poate citi")
+	}
+	if info.Size() > maxResultBytes {
+		return Result{}, fmt.Errorf("fișier mai mare de %d MiB", maxResultBytes>>20)
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // the path is a file of the folder that the owner named
+	if err != nil {
+		return Result{}, errors.New("nu se poate citi")
+	}
+	var r Result
+	if err := json.Unmarshal(data, &r); err != nil {
+		var wrongType *json.UnmarshalTypeError
+		switch {
+		case errors.As(err, &wrongType) && wrongType.Field != "":
+			return Result{}, fmt.Errorf("câmpul „%s” are alt tip decât cel din aplicație", scrubText(wrongType.Field))
+		case errors.As(err, &wrongType):
+			return Result{}, errors.New("nu e un obiect de rezultat")
+		default:
+			return Result{}, errors.New("nu e JSON valid")
+		}
+	}
+	if _, known := scenarioOrder[r.Scenario]; !known {
+		return Result{}, fmt.Errorf("scenariu necunoscut „%s”", truncate(scrubText(r.Scenario), 24))
+	}
+	if !platformName.MatchString(r.Device.Platform) {
+		return Result{}, errors.New("lipsește platforma dispozitivului sau nu e una cunoscută")
+	}
+	return r, nil
+}
+
+func truncate(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
+}
+
+// reportDate is the UTC day of the newest run, on the devices' clocks.
+func reportDate(results []Result) (string, error) {
+	var newest time.Time
+	for _, r := range results {
+		if t := r.startedAt(); t.After(newest) {
+			newest = t
+		}
+	}
+	if newest.IsZero() {
+		return "", errors.New("no result has a readable startedAt: give the date with -date")
+	}
+	return newest.UTC().Format(dateLayout), nil
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("spikereport", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	in := flags.String("in", "results", "folder with the results files that spikehub stored")
+	out := flags.String("out", filepath.Join("docs", "research"), "folder for the report; the CSV files go to phase0-data/ inside it")
+	date := flags.String("date", "", "date of the report, YYYY-MM-DD (default: the day of the newest run)")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	if flags.NArg() > 0 {
+		say(stderr, "spikereport: takes flags only")
+		return 2
+	}
+	if *date != "" {
+		if _, err := time.Parse(dateLayout, *date); err != nil {
+			say(stderr, "spikereport: -date must be YYYY-MM-DD")
+			return 2
+		}
+	}
+
+	results, skipped, err := loadResults(*in)
+	if err != nil {
+		say(stderr, "spikereport: cannot read %s: %v", *in, err)
+		return 1
+	}
+	for _, s := range skipped {
+		say(stderr, "spikereport: skipped %s: %s", scrubText(s.File), scrubText(s.Reason))
+	}
+	if len(results) == 0 {
+		say(stderr, "spikereport: no usable result in %s", *in)
+		return 1
+	}
+	if *date == "" {
+		if *date, err = reportDate(results); err != nil {
+			say(stderr, "spikereport: %v", err)
+			return 1
+		}
+	}
+
+	report := BuildReport(results, skipped, *date)
+	files := map[string]string{report.FileName(): report.Markdown()}
+	for name, content := range report.CSVs() {
+		files[name] = content
+	}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if leaks := scanOutputs(names, files); len(leaks) > 0 {
+		say(stderr, "spikereport: nothing written: the redaction scanner (PH0-22, R51) found text that must not be published:")
+		for _, leak := range leaks {
+			say(stderr, "spikereport:   %s", leak)
+		}
+		say(stderr, "spikereport: remove it from the result files (a note or a device field) or pseudonymise it, then run again")
+		return 1
+	}
+	for _, name := range names {
+		path := filepath.Join(*out, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // documentation, meant to be committed and read
+			say(stderr, "spikereport: %v", err)
+			return 1
+		}
+		if err := os.WriteFile(path, []byte(files[name]), 0o644); err != nil { //nolint:gosec // documentation, meant to be committed and read
+			say(stderr, "spikereport: %v", err)
+			return 1
+		}
+		say(stdout, "wrote %s", path)
+	}
+	if err := removeStaleCSVs(*out, files, stdout); err != nil {
+		say(stderr, "spikereport: %v", err)
+		return 1
+	}
+	return 0
+}
+
+// scanOutputs runs the redaction scanner on every file the run would write, and lists each
+// match as <file>:<line>:<column>: <kind>, without the text it found.
+func scanOutputs(names []string, files map[string]string) []string {
+	var leaks []string
+	for _, name := range names {
+		for _, m := range redact.Scan(files[name]) {
+			leaks = append(leaks, fmt.Sprintf("%s:%d:%d: %s", name, m.Line, m.Column, m.Kind))
+		}
+	}
+	return leaks
+}
+
+// removeStaleCSVs deletes the phase0b-*.csv files in <out>/phase0-data that this run did not
+// write. The CSV of a device that the input no longer has would disagree with the report's list
+// of raw data. It touches no other file, and no folder.
+func removeStaleCSVs(out string, written map[string]string, stdout io.Writer) error {
+	dir := filepath.Join(out, csvDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, csvPrefix) || !strings.HasSuffix(name, csvSuffix) {
+			continue
+		}
+		if _, kept := written[csvDir+"/"+name]; kept {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		say(stdout, "removed %s", path)
+	}
+	return nil
+}
+
+// say writes a line to w. A message that cannot be written has nowhere else to go.
+func say(w io.Writer, format string, args ...any) { _, _ = fmt.Fprintf(w, format+"\n", args...) }
+
+func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }

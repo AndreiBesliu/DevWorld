@@ -2,10 +2,11 @@
 
 Commercial cross-platform IP camera app. Working name `ipcam` until the product name is chosen. Stay inside this folder (see the root `CLAUDE.md`).
 
-## Current phase: design
+## Current phase: Phase 0 (risk probes)
 
-- Agreed requirements are in `docs/brief.md`. Treat them as the source of truth and update them when the owner changes something.
-- Do not write product code, scaffold projects or add dependencies until the owner has approved the design spec in `docs/superpowers/specs/` and an implementation plan exists in `docs/superpowers/plans/`.
+- The design spec `docs/superpowers/specs/2026-10-17-ipcam-design.md` was approved by the owner on 2026-10-18. It is the source of truth; `docs/brief.md` summarises the owner's decisions.
+- Work only from an implementation plan in `docs/superpowers/plans/`. Code outside an approved plan needs the owner's go-ahead.
+- Phase 0 costs nothing (O13): no paid services, accounts or payment details. Anything paid or iOS-related belongs to "Faza 0-bis" (spec §16.9).
 
 ## Engineering priorities
 

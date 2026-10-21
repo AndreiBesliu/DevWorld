@@ -1,0 +1,8 @@
+// An app's texts, for check-guide-labels.test.sh.
+export const ro = {
+  check: 'Verifică conexiunea',
+  statusDone: 'gata în {seconds} s',
+  kindRefused: 'Conexiunea a fost refuzată (refused).',
+  yes: 'Da',
+  no: 'Nu',
+};

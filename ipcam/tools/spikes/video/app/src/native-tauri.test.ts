@@ -1,0 +1,95 @@
+import { describe, expect, it, vi } from 'vitest';
+import { installTauriNative, type TauriInstallDeps, type TauriMetrics } from './native-tauri';
+import type { SpikeNative } from './native';
+
+/** What the shell's `spike_metrics` command answers on a Windows 11 PC. */
+const WIN1: TauriMetrics = {
+  cpu_pct_total: 12.5,
+  cpu_pct_app: 4.25,
+  rss_mb: 512.5,
+  private_mb: 301.25,
+  webview2_procs: 5,
+  ram_mb: 16069,
+  cpu_model: 'Intel(R) Core(TM) i5-12400',
+  gpu: 'Intel(R) UHD Graphics 730',
+  os: 'Windows 11 Pro',
+  webview: '154.0.4258.62',
+};
+
+describe('installTauriNative', () => {
+  it('nativeTauri_installsSpikeNative', async () => {
+    const invoke = vi.fn<TauriInstallDeps['invoke']>(() => Promise.resolve(WIN1));
+    const target: { spikeNative?: SpikeNative } = {};
+
+    installTauriNative({ tauri: true, invoke, target });
+
+    const native = target.spikeNative;
+    if (!native) throw new Error('window.spikeNative was not installed');
+    await expect(native.metrics()).resolves.toEqual({
+      cpuPctTotal: 12.5,
+      cpuPctApp: 4.25,
+      // Private bytes, not the working sets (R37).
+      memMb: 301.25,
+      webview2Procs: 5,
+      ramMb: 16069,
+      model: 'Intel(R) Core(TM) i5-12400',
+      gpu: 'Intel(R) UHD Graphics 730',
+      os: 'Windows 11 Pro',
+      webview: 'WebView2 154.0.4258.62',
+    });
+    expect(invoke.mock.calls).toEqual([['spike_metrics']]);
+    // Windows has no picture-in-picture or keep-awake in Phase 0.
+    expect(native.enterPip).toBeUndefined();
+    expect(native.onPip).toBeUndefined();
+    expect(native.keepAwake).toBeUndefined();
+  });
+
+  it('nativeTauri_unknownNamesAndRam_areLeftOut', async () => {
+    // The shell sends empty names when it cannot tell (no display adapter, a CPU without a brand string,
+    // no OS name or WebView2 Runtime version), and 0 MiB of RAM when it cannot read the total.
+    const invoke = vi.fn<TauriInstallDeps['invoke']>(() =>
+      Promise.resolve({ ...WIN1, cpu_model: '', gpu: '', os: '', webview: '', ram_mb: 0 }),
+    );
+    const target: { spikeNative?: SpikeNative } = {};
+
+    installTauriNative({ tauri: true, invoke, target });
+
+    await expect(target.spikeNative?.metrics()).resolves.toEqual({
+      cpuPctTotal: 12.5,
+      cpuPctApp: 4.25,
+      memMb: 301.25,
+      webview2Procs: 5,
+    });
+  });
+
+  it('nativeTauri_noWebView2Process_appSumsAreNa', async () => {
+    // R52: without a WebView2 process the shell's sums would cover the app process alone, so it sends null
+    // (n/a) for them, and the page records no cpuPctApp or memMb, only that it counted 0 WebView2 processes.
+    const invoke = vi.fn<TauriInstallDeps['invoke']>(() =>
+      Promise.resolve({ ...WIN1, cpu_pct_app: null, rss_mb: null, private_mb: null, webview2_procs: 0 }),
+    );
+    const target: { spikeNative?: SpikeNative } = {};
+
+    installTauriNative({ tauri: true, invoke, target });
+
+    await expect(target.spikeNative?.metrics()).resolves.toEqual({
+      cpuPctTotal: 12.5,
+      webview2Procs: 0,
+      ramMb: 16069,
+      model: 'Intel(R) Core(TM) i5-12400',
+      gpu: 'Intel(R) UHD Graphics 730',
+      os: 'Windows 11 Pro',
+      webview: 'WebView2 154.0.4258.62',
+    });
+  });
+
+  it('nativeTauri_outsideTauri_installsNothing', () => {
+    const invoke = vi.fn<TauriInstallDeps['invoke']>(() => Promise.resolve(WIN1));
+    const target: { spikeNative?: SpikeNative } = {};
+
+    installTauriNative({ tauri: false, invoke, target });
+
+    expect(target.spikeNative).toBeUndefined();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});

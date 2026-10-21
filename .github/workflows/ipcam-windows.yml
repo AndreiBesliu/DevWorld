@@ -1,0 +1,298 @@
+name: ipcam-windows
+
+on:
+  push:
+    # Branch pushes only. A spike-video-v* tag starts ipcam-spike-release, whose ci-status
+    # gate reads this workflow's runs on the tagged commit; a tag push (which ignores
+    # path filters) would start runs of it that are still going when the gate looks.
+    branches: ['**']
+    paths:
+      - 'ipcam/apps/desktop/**'
+      - 'ipcam/apps/packages/**'
+      - 'ipcam/tools/spikes/video/**'
+      # The spike app imports the PiP plugin.
+      - 'ipcam/apps/mobile/plugins/pip/**'
+      # pnpm's version, the JS dependencies and the shared TypeScript settings.
+      - 'ipcam/pnpm-lock.yaml'
+      - 'ipcam/package.json'
+      - 'ipcam/pnpm-workspace.yaml'
+      - 'ipcam/tsconfig.base.json'
+      # spikehub's Go version and workspace.
+      - 'ipcam/go.work*'
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      # The line count (APP-01) and the failure annotations.
+      - 'ipcam/tools/scripts/count-native-lines.sh'
+      - 'ipcam/tools/scripts/annotate.sh'
+      # The line endings of the Windows checkout (annotate.sh runs in Git Bash).
+      - 'ipcam/.gitattributes'
+      - '.github/workflows/ipcam-windows.yml'
+  pull_request:
+    paths:
+      - 'ipcam/apps/desktop/**'
+      - 'ipcam/apps/packages/**'
+      - 'ipcam/tools/spikes/video/**'
+      # The spike app imports the PiP plugin.
+      - 'ipcam/apps/mobile/plugins/pip/**'
+      # pnpm's version, the JS dependencies and the shared TypeScript settings.
+      - 'ipcam/pnpm-lock.yaml'
+      - 'ipcam/package.json'
+      - 'ipcam/pnpm-workspace.yaml'
+      - 'ipcam/tsconfig.base.json'
+      # spikehub's Go version and workspace.
+      - 'ipcam/go.work*'
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      # The line count (APP-01) and the failure annotations.
+      - 'ipcam/tools/scripts/count-native-lines.sh'
+      - 'ipcam/tools/scripts/annotate.sh'
+      # The line endings of the Windows checkout (annotate.sh runs in Git Bash).
+      - 'ipcam/.gitattributes'
+      - '.github/workflows/ipcam-windows.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipcam-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Go version comes from go.work alone; never switch toolchains silently.
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+jobs:
+  media:
+    # The simulated cameras for spikehub on the Windows runner, made here
+    # because ffmpeg with libx264 and libx265 comes from Ubuntu's archive.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ipcam
+        # bash -eo pipefail, as in the other jobs (see checks).
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+      - name: Install ffmpeg
+        # ffmpeg with libx264 and libx265 only generates the test media in CI. It is
+        # never shipped and never part of a release asset (Global Constraints, Licenses).
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+      - name: Generate media
+        # Its few lines of output go into an annotation on a failure.
+        run: |
+          out="$(go run ./tools/spikes/video/cmd/mediagen -out "${RUNNER_TEMP}/spike-video-media" 2>&1)" || {
+            printf '%s\n' "${out}" | tools/scripts/annotate.sh mediagen
+            exit 1
+          }
+          echo "${out}"
+      - name: Upload media
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spike-video-media
+          path: ${{ runner.temp }}/spike-video-media
+          if-no-files-found: error
+          retention-days: 1
+          # H.264, H.265 and fMP4 do not compress further.
+          compression-level: 0
+
+  checks:
+    # The Rust of the shell: its line budget (APP-01), the licenses of the
+    # crates in the Windows binary (R35), formatting and Clippy. Clippy checks
+    # the Windows target from Linux: type-checking needs no Windows SDK.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ipcam
+        # An explicit bash runs steps with -eo pipefail (the default shell has
+        # -e only), so "cargo ... | tee" fails when cargo fails: without
+        # pipefail, the licenses, fmt and Clippy steps would report tee's 0.
+        shell: bash
+    env:
+      CARGO_DENY_VERSION: 0.20.2
+      # sha256 of cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz, as its release publishes it.
+      CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Native line count (APP-01)
+        # All of the shell's Rust, its build script (src/build.rs) included.
+        run: |
+          counts="$(tools/scripts/count-native-lines.sh 299 apps/desktop/src-tauri/src 2>&1)" || {
+            printf '%s\n' "${counts}" | tools/scripts/annotate.sh APP-01
+            exit 1
+          }
+          summary="APP-01 Rust of the Windows shell (under 300 lines): ${counts}"
+          echo "::notice title=APP-01::${summary}"
+          echo "${summary}" >> "${GITHUB_STEP_SUMMARY}"
+      - name: Rust toolchain
+        # The version and its components come from rust-toolchain.toml alone.
+        working-directory: ipcam/apps/desktop/src-tauri
+        run: |
+          rustup toolchain install
+          rustup target add x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ipcam/apps/desktop/src-tauri -> target
+      - name: Resource compiler for Clippy
+        # tauri-build's build script compiles the shell's Windows resources
+        # (icon, version info) for Clippy too. From Linux, embed-resource runs
+        # llvm-rc, which is not on the runner's PATH: without it the build
+        # script panics and Clippy checks nothing.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends llvm
+          command -v llvm-rc
+      - name: Licenses (R35)
+        run: |
+          {
+            archive="${RUNNER_TEMP}/cargo-deny.tar.gz"
+            curl -fsSL -o "${archive}" \
+              "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+            echo "${CARGO_DENY_SHA256}  ${archive}" | sha256sum --check --strict
+            tar -xzf "${archive}" -C "${RUNNER_TEMP}" --strip-components=1
+            "${RUNNER_TEMP}/cargo-deny" --color never --manifest-path apps/desktop/src-tauri/Cargo.toml --locked check licenses
+          } 2>&1 | tee -a "${RUNNER_TEMP}/checks.log"
+      - name: Format and Clippy
+        working-directory: ipcam/apps/desktop/src-tauri
+        # With the spike-metrics feature (the spike build) and without it; each
+        # check runs even when one before it failed. Clippy only type-checks,
+        # but tauri::generate_context! reads the frontendDist folder, which the
+        # windows job fills with the spike app's build: an empty one stands in.
+        # From Linux, tauri-build's resource step (cc) warns "GNU compiler is
+        # not supported for this target" on every build; the windows job
+        # compiles the resources, so that line is left out here.
+        run: |
+          mkdir -p ../../../tools/spikes/video/app/dist
+          log="${RUNNER_TEMP}/checks.log"
+          noise='/: GNU compiler is not supported for this target$/d'
+          status=0
+          cargo fmt --check -- --color never 2>&1 | tee -a "${log}" || status=1
+          cargo clippy --color never --locked --target x86_64-pc-windows-msvc --all-targets --features spike-metrics -- -D warnings 2>&1 \
+            | sed -e "${noise}" | tee -a "${log}" || status=1
+          cargo clippy --color never --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings 2>&1 \
+            | sed -e "${noise}" | tee -a "${log}" || status=1
+          exit "${status}"
+      - name: Show check failures as annotations
+        # Job logs cannot be read from everywhere; check-run annotations can
+        # (gh api repos/<owner>/<repo>/check-runs/<job id>/annotations).
+        if: failure()
+        run: |
+          log="${RUNNER_TEMP}/checks.log"
+          [[ -f "${log}" ]] || exit 0
+          # Clippy's and cargo-deny's errors, build-script panics and rustfmt's
+          # diffs, else the end of the log.
+          lines="$({
+            grep -E -A12 '^error' "${log}" || true
+            grep -E -A2 'panicked at' "${log}" || true
+            grep -E -A10 '^Diff in ' "${log}" || true
+          })"
+          [[ -n "${lines}" ]] || lines="$(tail -n 30 "${log}")"
+          printf '%s\n' "${lines}" | tools/scripts/annotate.sh checks
+
+  windows:
+    # WIN-2: the spike shell on Windows and WebView2, unsigned (code signing is
+    # Faza 0-bis): the unit tests, the executable (tauri build --no-bundle) and
+    # the NSIS installer, zlib-compressed so that its stub carries no LZMA
+    # decoder (R36, tauri.conf.json). Then S1 by autorun (R5) against spikehub
+    # with 4 simulated cameras on the runner, from several starts of the app,
+    # and a second start while the app runs, which must restore the first
+    # window and end (single instance, R52).
+    needs: media
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The pnpm version comes from "packageManager" in ipcam/package.json alone.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ipcam/package.json
+      # Node also runs ci/page-state.ts, which reads the page during the smoke test.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ipcam/pnpm-lock.yaml
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+      - name: Rust toolchain
+        # The version and its components come from rust-toolchain.toml alone.
+        working-directory: ipcam/apps/desktop/src-tauri
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ipcam/apps/desktop/src-tauri -> target
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build the spike app
+        # Tauri embeds its dist/ into the executable (frontendDist).
+        run: pnpm --filter spike-video-app build
+      - name: Unit tests, executable and installer
+        # The tests run in the release profile, so the build reuses their dependencies.
+        run: |
+          set -o pipefail
+          {
+            (cd apps/desktop/src-tauri && cargo test --release --locked --features spike-metrics) &&
+              pnpm --filter @ipcam/desktop run build:spike &&
+              pnpm --filter @ipcam/desktop run bundle:spike
+          } 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: Show build failures as annotations
+        # Job logs cannot be read from everywhere; check-run annotations can
+        # (gh api repos/<owner>/<repo>/check-runs/<job id>/annotations).
+        if: failure()
+        run: |
+          log="${RUNNER_TEMP}/build.log"
+          [[ -f "${log}" ]] || exit 0
+          { grep -E -A12 '^error' "${log}" || true; grep -E -B2 -A10 'panicked|FAILED|failed to bundle' "${log}" || true; } \
+            | tools/scripts/annotate.sh build
+      - name: Build spikehub
+        run: |
+          out="$(go build -o "${RUNNER_TEMP}/spikehub.exe" ./tools/spikes/video/cmd/spikehub 2>&1)" || {
+            printf '%s\n' "${out}" | tools/scripts/annotate.sh 'spikehub build'
+            exit 1
+          }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-video-media
+          path: ${{ runner.temp }}/spike-video-media
+      - name: S1 by autorun and single instance (WIN-2)
+        shell: pwsh
+        run: >-
+          ./apps/desktop/ci/windows-smoke.ps1
+          -App apps/desktop/src-tauri/target/release/ipcam-desktop.exe
+          -Hub "$env:RUNNER_TEMP/spikehub.exe"
+          -Media "$env:RUNNER_TEMP/spike-video-media"
+          -Work "$env:RUNNER_TEMP/smoke"
+          -Starts 3
+      - name: Upload the installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ipcam-desktop-nsis
+          path: ipcam/apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7

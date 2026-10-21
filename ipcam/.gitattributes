@@ -1,0 +1,7 @@
+# Shell scripts keep LF line endings in every checkout. On the windows-latest
+# runner (ipcam-windows.yml), Git for Windows has core.autocrlf=true and would
+# check them out with CRLF. Its bash (MSYS2) runs a CRLF copy of
+# tools/scripts/annotate.sh correctly today, but other shells stop at the
+# shebang ("env: 'bash\r': No such file or directory"), so the scripts stay
+# byte-identical to the repository instead of relying on that.
+*.sh text eol=lf

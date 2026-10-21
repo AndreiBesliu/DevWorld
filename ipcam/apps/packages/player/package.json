@@ -1,0 +1,23 @@
+{
+  "name": "@ipcam/player",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Framework-free video player: WebRTC slot live and HLS recordings (spec 6.2).",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "hls.js": "1.7.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4"
+  }
+}

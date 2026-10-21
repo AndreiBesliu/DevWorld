@@ -1,0 +1,12 @@
+{
+  // The CI helpers under ci/, which run under Node. The Rust shell is in
+  // src-tauri/; the page it loads is the spike app's build.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    // package.json says "type": "module": a file without imports, such as a
+    // script with a top-level await, is a module too.
+    "moduleDetection": "force"
+  },
+  "include": ["ci"]
+}
