@@ -5,10 +5,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,11 +27,16 @@ import (
 
 // The test binary is ipcam-hub too: with mainEnv set, it runs main. The hook
 // command that MediaMTX runs inherits the variable, so it is this binary
-// with "hook segment-complete".
-const mainEnv = "IPCAM_HUB_TEST_MAIN"
+// with "hook segment-complete". As ipcam-hub, it reads the mount table that
+// mountInfoEnv names, none when it is unset, and never the host's.
+const (
+	mainEnv      = "IPCAM_HUB_TEST_MAIN"
+	mountInfoEnv = "IPCAM_HUB_TEST_MOUNTINFO"
+)
 
 func TestMain(m *testing.M) {
 	if os.Getenv(mainEnv) == "1" {
+		mountInfoPath = os.Getenv(mountInfoEnv)
 		os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 	}
 	os.Exit(m.Run())
@@ -347,6 +356,107 @@ func TestRun_ExitCode1OnBadConfig(t *testing.T) {
 			t.Errorf("%s: ipcam-hub ended with %v, want exit code 1", name, err)
 		}
 	}
+}
+
+// mountInfoLine is a line of /proc/self/mountinfo that mounts the device
+// devnum ("major:minor") from source at mountPoint, with the mount point
+// escaped as the kernel escapes it.
+func mountInfoLine(id int, devnum, mountPoint, source string) string {
+	escaped := strings.NewReplacer("\\", `\134`, " ", `\040`, "\t", `\011`, "\n", `\012`).Replace(mountPoint)
+	return fmt.Sprintf("%d 1 %s / %s rw,noatime shared:%d - ext4 %s rw\n", id, devnum, escaped, id, source)
+}
+
+// countFiles counts the regular files under dir, 0 when dir is absent.
+func countFiles(t *testing.T, dir string) int {
+	t.Helper()
+	n := 0
+	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type().IsRegular() {
+			n++
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestRun_RefusesSdCardUntilConfirmed (HUB-17, T40, G16): while rec/ is on
+// an SD card and run.json has no sdCardConfirmed, ipcam-hub reports
+// sd_card_unconfirmed and exits 4 before it changes anything under its data
+// directory: rec/ holds no file, and no reconcile or MediaMTX ran. With
+// sdCardConfirmed true, it records.
+func TestRun_RefusesSdCardUntilConfirmed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the SD-card check reads Linux's mount table (T40); Windows has none, and its gate never closes")
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(dir, "hub data")
+	mountinfo := filepath.Join(dir, "mountinfo")
+	table := mountInfoLine(21, "259:2", "/", "/dev/nvme0n1p2") + mountInfoLine(22, "179:2", dataDir, "/dev/mmcblk0p2")
+	if err := os.WriteFile(mountinfo, []byte(table), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(mountInfoEnv, mountinfo)
+	job := map[string]any{"cam": "cam1", "profile": "main", "segmentSecs": 10, "recipients": nil}
+
+	t.Run("unconfirmed", func(t *testing.T) {
+		config := filepath.Join(dir, "run-unconfirmed.json")
+		job["restreamUrl"] = "rtsp://127.0.0.1:1/cam1/main"
+		writeJSON(t, config, map[string]any{"dataDir": dataDir, "mediamtx": filepath.Join(dir, "no-mediamtx"), "jobs": []any{job}})
+		h := startHub(t, "run", "--config", config)
+		var types []any
+		for e := range h.events {
+			types = append(types, e["type"])
+		}
+		<-h.done
+		err := h.cmd.Wait()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 4 {
+			t.Errorf("ipcam-hub ended with %v, want exit code 4", err)
+		}
+		if !slices.Equal(types, []any{"sd_card_unconfirmed"}) {
+			t.Errorf("events %v, want sd_card_unconfirmed alone", types)
+		}
+		if n := countFiles(t, filepath.Join(dataDir, "rec")); n != 0 {
+			t.Errorf("rec/ holds %d files", n)
+		}
+		if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the data directory is there (%v): ipcam-hub changed it before the check", err)
+		}
+	})
+
+	t.Run("confirmed", func(t *testing.T) {
+		bin := rtsptest.MediaMTX(t)
+		srv := rtsptest.Start(t, rtsptest.MainH264(t))
+		config := filepath.Join(dir, "run-confirmed.json")
+		job["restreamUrl"] = srv.URL("cam1/main")
+		writeJSON(t, config, map[string]any{"dataDir": dataDir, "mediamtx": bin, "sdCardConfirmed": true, "jobs": []any{job}})
+		h := startHub(t, "run", "--config", config)
+		h.next(t, 40*time.Second, "recording event", ofType("recording"))
+		if n := countFiles(t, filepath.Join(dataDir, "rec")); n == 0 {
+			t.Error("rec/ holds no file after the recording event")
+		}
+		if err := stopHub(h); err != nil {
+			t.Fatalf("stop ipcam-hub: %v", err)
+		}
+		for e := range h.events {
+			if e["type"] == "sd_card_unconfirmed" || e["type"] == "error" {
+				t.Errorf("event %v", e)
+			}
+		}
+		<-h.done
+		if err := h.cmd.Wait(); err != nil {
+			t.Errorf("ipcam-hub after the stop: %v, want exit 0", err)
+		}
+	})
 }
 
 // TestLoadRunConfig_EncryptedJobsNeedTheirRIg: a run.json with an encrypted

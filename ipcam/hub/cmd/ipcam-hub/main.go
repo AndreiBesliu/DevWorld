@@ -4,11 +4,14 @@
 // does as JSON lines on stdout (ruling C01).
 //
 //	ipcam-hub run --config <run.json>
-//	ipcam-hub hook segment-complete     (run by MediaMTX)
+//	ipcam-hub hook segment-complete      (run by MediaMTX)
+//	ipcam-hub diag host [--rec <dir>]    (the host, its Pi model and storage)
+//	ipcam-hub diag pimodel --raw <model> (§4.8's row for a model string)
 //
 // The events are described with the events type (events.go). Exit codes: 0
 // after SIGTERM, Ctrl-C or Ctrl-Break, 1 on a fatal error, 3 when the
-// startup reconcile aborted (HUB-09).
+// startup reconcile aborted (HUB-09), 4 when rec/ is on an SD card that the
+// owner has not confirmed (HUB-17).
 package main
 
 import (
@@ -19,9 +22,10 @@ import (
 
 // The exit codes.
 const (
-	exitOK      = 0
-	exitFatal   = 1
-	exitAborted = 3
+	exitOK                = 0
+	exitFatal             = 1
+	exitAborted           = 3
+	exitSdCardUnconfirmed = 4
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -34,8 +38,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return runCommand(args[1:], stdout, stderr)
 		case "hook":
 			return hookCommand(args[1:], stderr)
+		case "diag":
+			return diagCommand(args[1:], stdout, stderr)
 		}
 	}
-	_, _ = fmt.Fprintln(stderr, "usage: ipcam-hub run --config <run.json>\n       ipcam-hub hook segment-complete")
+	_, _ = fmt.Fprintln(stderr, "usage: ipcam-hub run --config <run.json>\n       ipcam-hub hook segment-complete\n"+
+		"       ipcam-hub diag host [--rec <dir>]\n       ipcam-hub diag pimodel --raw <model>")
 	return exitFatal
 }

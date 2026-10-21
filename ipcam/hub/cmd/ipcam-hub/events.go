@@ -36,6 +36,9 @@ import (
 //   - status: cam, profile, lastPartAgoMs, lastSegmentAgoMs, running; every
 //     1 s per job.
 //   - error: message.
+//   - sd_card_unconfirmed: rec/ is on an SD card and run.json does not
+//     confirm the wear warning (HUB-17, T40); ipcam-hub has changed nothing
+//     and exits 4.
 type events struct {
 	mu  sync.Mutex
 	out io.Writer

@@ -19,12 +19,17 @@ import (
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/health"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/recorder"
 )
 
 // statusInterval is how often each job's status goes out as an event and
 // into the status file.
 const statusInterval = time.Second
+
+// mountInfoPath is the mount table that tells whether rec/ is on an SD card
+// (T40); tests replace it, and Windows has none.
+var mountInfoPath = health.SystemRoots.MountInfo
 
 // runConfig is run.json.
 type runConfig struct {
@@ -35,8 +40,8 @@ type runConfig struct {
 	// IdentityFile is RI_g's identity, a 0600 file, for reconcile and the
 	// verification of encrypted segments; empty when every job is clear.
 	IdentityFile string `json:"identityFile"`
-	// SDCardConfirmed is the owner's answer to the SD-card warning (T40);
-	// the card check that reads it comes with the SD-card detection (Task 7a).
+	// SDCardConfirmed is the owner's answer to the SD-card warning (T40):
+	// without it, ipcam-hub writes nothing while rec/ is on an SD card.
 	SDCardConfirmed bool        `json:"sdCardConfirmed"`
 	Jobs            []runJobDef `json:"jobs"`
 }
@@ -155,6 +160,14 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 	cfg, jobs, id, err := loadRunConfig(*configPath)
 	if err != nil {
 		return fail(err)
+	}
+	// HUB-17, T40: no segment goes to an SD card before the owner confirmed
+	// the wear warning, so nothing under the data directory changes first:
+	// no reconcile, no catalog, no MediaMTX.
+	if !cfg.SDCardConfirmed && health.IsSdCard(mountInfoPath, filepath.Join(cfg.DataDir, "rec")) {
+		ev.emit("sd_card_unconfirmed", nil)
+		_, _ = fmt.Fprintln(stderr, "ipcam-hub: rec/ is on an SD card, and run.json does not confirm the SD-card warning (sdCardConfirmed)")
+		return exitSdCardUnconfirmed
 	}
 
 	// <data>/state/catalog.db, <data>/state/run/, <data>/rec/, and <data>/tmp/,

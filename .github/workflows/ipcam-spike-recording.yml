@@ -413,6 +413,34 @@ jobs:
         run: |
           set -o pipefail
           go test -count=1 -run '^TestMTX' ./... 2>&1 | tee "${RUNNER_TEMP}/fork-test.log"
+      - name: diag host
+        # What ipcam-hub reads about a Windows host (R07, G09): one ipcam.diag.host/1 line,
+        # which must be valid JSON with "os":"windows" and at most 3,500 bytes after
+        # annotate.sh's escaping, goes out as a notice (C32). It runs even when an earlier
+        # step failed, and turns its own failure into an error annotation.
+        id: diag-host
+        if: ${{ !cancelled() }}
+        run: |
+          out="${RUNNER_TEMP}/diag-host.json"
+          log="${RUNNER_TEMP}/diag-host.log"
+          status=0
+          go run ./hub/cmd/ipcam-hub diag host > "${out}" 2> "${log}" || status=$?
+          line=$(cat "${out}")
+          escaped="${line//%/%25}"
+          # shellcheck disable=SC2016 # the $ of the PowerShell check are PowerShell's
+          if [[ ${status} -ne 0 || $(wc -l < "${out}") -ne 1 ]] ||
+            (( $(printf '%s' "${escaped}" | LC_ALL=C wc -c) > 3500 )) ||
+            ! OUT="${out}" pwsh -NoProfile -NonInteractive -Command \
+              '$j = Get-Content -Raw -LiteralPath $env:OUT | ConvertFrom-Json; if ($j.schema -ne "ipcam.diag.host/1" -or $j.os -ne "windows") { exit 1 }' \
+              >> "${log}" 2>&1; then
+            {
+              echo "diag host: exit ${status}; want one line of JSON, ipcam.diag.host/1 with \"os\":\"windows\", of at most 3,500 bytes after escaping:"
+              cat "${out}"
+            } >> "${log}"
+            tail -n 60 "${log}" | tools/scripts/annotate.sh diag-host 60
+            exit 1
+          fi
+          tools/scripts/annotate.sh diag-host 1 notice < "${out}"
       - name: Show failures as annotations
         # As in the other jobs, plus testify's Error, Messages, expected and actual
         # lines: a Windows failure cannot be rerun anywhere else.
