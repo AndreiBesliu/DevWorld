@@ -1,0 +1,178 @@
+// SPIKE-ONLY: ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md
+
+// Package lastindex reads which access unit was the last that a host
+// recorded of a stream before a stop: the SEI index (C15) of the last
+// complete sample in the stream's newest segment that holds one. It reads
+// the fMP4 files that ipcam-hub's MediaMTX wrote, decrypting .age files
+// with filippo.io/age's public API, and imports nothing of the hub (C01).
+package lastindex
+
+import (
+	"cmp"
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+
+	"filippo.io/age"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
+	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
+)
+
+// Before is the stream's segment files that existed when the host stopped.
+// recspike lists them before it restarts ipcam-hub, which records new
+// segments at once (ResumeMs, ColdBootMs); a .part name stands for the final
+// name reconcile gives it.
+type Before []string
+
+// ErrNoSample is returned when no file of Before holds a complete sample.
+var ErrNoSample = errors.New("lastindex: no segment holds a complete sample")
+
+// The suffixes of segment names: .part while MediaMTX writes it (MTX-1),
+// .age when encrypted (MTX-2).
+const (
+	suffixPart = ".part"
+	suffixAge  = ".age"
+)
+
+// maxPart bounds the moof and mdat of one part that LastRecorded reads into
+// memory; MediaMTX's recordMaxPartSize is 50 MiB.
+const maxPart = 64 << 20
+
+// LastRecorded returns the SEI index of the last complete sample in the
+// newest non-empty segment of files; .age files are decrypted with id. The
+// newest is the one whose name (date folder, then time, both UTC) sorts
+// last. A file that reconcile removed is skipped, as is one with no
+// complete part.
+func LastRecorded(ctx context.Context, files Before, id age.Identity) (uint64, error) {
+	finals := make([]string, 0, len(files))
+	for _, f := range files {
+		finals = append(finals, strings.TrimSuffix(f, suffixPart))
+	}
+	slices.SortFunc(finals, func(a, b string) int {
+		return cmp.Or(
+			cmp.Compare(filepath.Base(filepath.Dir(a)), filepath.Base(filepath.Dir(b))),
+			cmp.Compare(filepath.Base(a), filepath.Base(b)))
+	})
+	finals = slices.Compact(finals)
+	for i := len(finals) - 1; i >= 0; i-- {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		index, ok, err := lastInFile(finals[i], id)
+		if err != nil {
+			return 0, fmt.Errorf("lastindex: %s: %w", filepath.Base(finals[i]), err)
+		}
+		if ok {
+			return index, nil
+		}
+	}
+	return 0, ErrNoSample
+}
+
+// lastInFile reads the index of the file's last complete sample; ok is false
+// when the file does not exist or holds no complete part.
+func lastInFile(path string, id age.Identity) (index uint64, ok bool, err error) {
+	f, err := os.Open(path) //nolint:gosec // a segment file that recspike listed
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return 0, false, err
+	}
+	var data io.ReaderAt = f
+	size := info.Size()
+	if strings.HasSuffix(path, suffixAge) {
+		if id == nil {
+			return 0, false, errors.New("an encrypted segment and no identity")
+		}
+		if size == 0 {
+			return 0, false, nil
+		}
+		if data, size, err = age.DecryptReaderAt(f, size, id); err != nil {
+			return 0, false, err
+		}
+	}
+	moof, end, found, err := lastPart(data, size)
+	if err != nil || !found {
+		return 0, false, err
+	}
+	if end-moof > maxPart {
+		return 0, false, fmt.Errorf("a part of %d bytes", end-moof)
+	}
+	buf := make([]byte, end-moof)
+	if _, err := data.ReadAt(buf, moof); err != nil && !errors.Is(err, io.EOF) {
+		return 0, false, err
+	}
+	var parts fmp4.Parts
+	if err := parts.Unmarshal(buf); err != nil {
+		return 0, false, err
+	}
+	for _, track := range parts[len(parts)-1].Tracks {
+		if len(track.Samples) == 0 {
+			continue
+		}
+		var au h264.AVCC
+		if err := au.Unmarshal(track.Samples[len(track.Samples)-1].Payload); err != nil {
+			return 0, false, err
+		}
+		if index, ok := controller.ReadIndex(au); ok {
+			return index, true, nil
+		}
+		return 0, false, errors.New("the last sample carries no index")
+	}
+	return 0, false, nil
+}
+
+// lastPart walks the top-level boxes of a recording's plaintext (ftyp, moov,
+// then a moof and an mdat per part, with free boxes as MTX-2's padding) and
+// returns where the last complete part starts and ends. A box that runs
+// past the end, as a cut leaves, ends the walk.
+func lastPart(r io.ReaderAt, size int64) (moof, end int64, found bool, err error) {
+	var pendingMoof int64 = -1
+	for off := int64(0); size-off >= 8; {
+		var h [16]byte
+		if _, err := r.ReadAt(h[:8], off); err != nil {
+			return 0, 0, false, err
+		}
+		boxSize, hdr := int64(binary.BigEndian.Uint32(h[:4])), int64(8)
+		if boxSize == 1 {
+			if size-off < 16 {
+				break
+			}
+			if _, err := r.ReadAt(h[8:16], off+8); err != nil {
+				return 0, 0, false, err
+			}
+			boxSize, hdr = int64(binary.BigEndian.Uint64(h[8:16])), 16 //nolint:gosec // checked below
+		}
+		if boxSize < hdr || boxSize > size-off {
+			break
+		}
+		switch string(h[4:8]) {
+		case "moof":
+			pendingMoof = off
+		case "mdat":
+			if pendingMoof >= 0 {
+				moof, end, found = pendingMoof, off+boxSize, true
+			}
+			pendingMoof = -1
+		case "free", "skip":
+		default:
+			pendingMoof = -1
+		}
+		off += boxSize
+	}
+	return moof, end, found, nil
+}

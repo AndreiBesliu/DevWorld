@@ -1,0 +1,464 @@
+name: ipcam-spike-recording
+
+# The Phase 0 (c1) recorder spike (ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md):
+# the hub module, the MediaMTX fork in hub/third_party/mediamtx (a nested module outside
+# go.work, built, tested and checked with GOWORK=off from its directory) and the spike
+# module tools/spikes/recording. Later tasks add the mi1-smoke and mi9 jobs.
+
+on:
+  push:
+    # Branch pushes only, as in the other ipcam workflows: a tag push ignores path filters.
+    branches: ['**']
+    paths:
+      - 'ipcam/hub/**'
+      - 'ipcam/tools/spikes/recording/**'
+      # The recording module imports the video module, and the media job runs its mediagen.
+      - 'ipcam/tools/spikes/video/**'
+      # The pinned tools (golangci-lint, govulncheck, go-licenses), the scripts the jobs
+      # run, and the license allowlist that the license checks read.
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      - 'ipcam/tools/scripts/**'
+      - 'ipcam/tools/licenses/**'
+      - 'ipcam/go.work'
+      - 'ipcam/go.work.sum'
+      # The line endings of the checkout on the windows job (the fork's files are -text).
+      - 'ipcam/.gitattributes'
+      - '.github/workflows/ipcam-spike-recording.yml'
+  pull_request:
+    paths:
+      - 'ipcam/hub/**'
+      - 'ipcam/tools/spikes/recording/**'
+      # The recording module imports the video module, and the media job runs its mediagen.
+      - 'ipcam/tools/spikes/video/**'
+      # The pinned tools (golangci-lint, govulncheck, go-licenses), the scripts the jobs
+      # run, and the license allowlist that the license checks read.
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      - 'ipcam/tools/scripts/**'
+      - 'ipcam/tools/licenses/**'
+      - 'ipcam/go.work'
+      - 'ipcam/go.work.sum'
+      # The line endings of the checkout on the windows job (the fork's files are -text).
+      - 'ipcam/.gitattributes'
+      - '.github/workflows/ipcam-spike-recording.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipcam-spike-recording-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Go version comes from go.work alone; never switch toolchains silently.
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+# Every step that runs a command writes its output to ${RUNNER_TEMP}/<step id>.log. Job
+# logs cannot be read from everywhere, check-run annotations can (gh api
+# repos/<owner>/<repo>/check-runs/<job id>/annotations), so the last step of each job
+# turns the log of each failed step into one error annotation: the failure and compile
+# error lines of a go test, else the end of the log.
+
+jobs:
+  media:
+    # G02: the video spike's media and sub-256k.h264, the 256 kbps stream of HUB-07's
+    # low-bitrate runs. They are generated here and never committed.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+      - name: Install ffmpeg
+        # ffmpeg with libx264 only generates the test media in CI. It is never shipped and
+        # never part of a release asset (Global Constraints, Licenses).
+        id: ffmpeg
+        run: |
+          set -o pipefail
+          {
+            sudo apt-get update &&
+              sudo apt-get install --yes --no-install-recommends ffmpeg &&
+              ffmpeg -version | sed -n 1p
+          } 2>&1 | tee "${RUNNER_TEMP}/ffmpeg.log"
+      - name: Generate media
+        id: generate
+        run: |
+          set -o pipefail
+          {
+            go run ./tools/spikes/video/cmd/mediagen -out "${RUNNER_TEMP}/media" &&
+              go run ./tools/spikes/recording/cmd/recmediagen -out "${RUNNER_TEMP}/media"
+          } 2>&1 | tee "${RUNNER_TEMP}/generate.log"
+      - name: Check the recording media
+        # Tests the files that the upload step uploads. A missing ffmpeg fails instead of skipping.
+        id: check
+        env:
+          MEDIAGEN_DIR: ${{ runner.temp }}/media
+          MEDIAGEN_REQUIRE_FFMPEG: '1'
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run TestRecMediagen ./tools/spikes/recording/cmd/recmediagen/... 2>&1 |
+            tee "${RUNNER_TEMP}/check.log"
+      - name: Upload media
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spike-recording-media
+          path: ${{ runner.temp }}/media
+          if-no-files-found: error
+          retention-days: 7
+          # H.264, H.265 and fMP4 do not compress further.
+          compression-level: 0
+      - name: Show failures as annotations
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            fi
+          done
+
+  recorder:
+    needs: media
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # The crypto tests that need the age tools fail instead of skipping. The
+      # tools' paths depend on RUNNER_TEMP, which a job's env cannot read, so the
+      # age-tools step exports RECSPIKE_AGE_BINS and RECSPIKE_RAGE_BIN to the
+      # steps after it.
+      RECSPIKE_REQUIRE_AGE_TOOLS: '1'
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
+      - name: Download media
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-recording-media
+          path: ${{ runner.temp }}/media
+      - name: Install age and rage
+        # ENC-06 (G01): the age CLI v1.0.0 and v1.3.2, the newest age release at least 14
+        # days old (proxy.golang.org: 2026-08-29), and rage 0.12.1, the newest rage release
+        # at least 14 days old (crates.io: 2026-07-14). Each comes from its GitHub release
+        # archive, checked against the SHA-256 below. Lab tools only: never shipped.
+        id: age-tools
+        run: |
+          set -o pipefail
+          tools="${RUNNER_TEMP}/age-tools"
+          # fetch <url> <sha256> <directory>: unpacks the checked archive into ${tools}/<directory>.
+          fetch() {
+            local url="$1" sha256="$2" dir="${tools}/$3" archive="${tools}/${1##*/}"
+            mkdir -p "${dir}" &&
+              curl -fsSL --retry 3 -o "${archive}" "${url}" &&
+              echo "${sha256}  ${archive}" | sha256sum --check --strict &&
+              tar -xzf "${archive}" -C "${dir}" --strip-components=1
+          }
+          {
+            fetch https://github.com/FiloSottile/age/releases/download/v1.0.0/age-v1.0.0-linux-amd64.tar.gz \
+              6414f71ce947fbbea1314f6e9786c5d48436ebc76c3fd6167bf018e432b3b669 age-v1.0.0 &&
+              fetch https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz \
+                cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10 age-v1.3.2 &&
+              fetch https://github.com/str4d/rage/releases/download/v0.12.1/rage-v0.12.1-x86_64-linux.tar.gz \
+                c5d7ab41fbf1213590e89721fd2b8eb122e84518c155ce35866f1c5759a3a29f rage-v0.12.1 &&
+              "${tools}/age-v1.0.0/age" --version &&
+              "${tools}/age-v1.3.2/age" --version &&
+              "${tools}/rage-v0.12.1/rage" --version
+          } 2>&1 | tee "${RUNNER_TEMP}/age-tools.log"
+          # For the Test and ENC-06 steps (agecli_test.go reads them).
+          {
+            echo "RECSPIKE_AGE_BINS=${tools}/age-v1.0.0/age:${tools}/age-v1.3.2/age"
+            echo "RECSPIKE_RAGE_BIN=${tools}/rage-v0.12.1/rage"
+          } >> "${GITHUB_ENV}"
+      - name: Build
+        id: build
+        run: |
+          set -o pipefail
+          go build ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: Build the MediaMTX fork
+        # For Linux, which the tests below run, and for Windows (C02).
+        id: fork-build
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          {
+            go build -o "${RUNNER_TEMP}/bin/mediamtx" . &&
+              GOOS=windows GOARCH=amd64 go build -o "${RUNNER_TEMP}/bin/mediamtx.exe" . &&
+              "${RUNNER_TEMP}/bin/mediamtx" --version
+          } 2>&1 | tee "${RUNNER_TEMP}/fork-build.log"
+      - name: Lint
+        # The fork is never linted: ./hub/... stops at its go.mod.
+        id: lint
+        run: |
+          set -o pipefail
+          go tool golangci-lint run ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${RUNNER_TEMP}/lint.log"
+      - name: Video build list
+        # R04: the modules that join the workspace must not move a dependency of the video spike.
+        id: build-list
+        run: |
+          set -o pipefail
+          tools/scripts/check-video-build-list.sh 2>&1 | tee "${RUNNER_TEMP}/build-list.log"
+      - name: Test
+        # -count=1: a result restored from the Go build cache would hide a flaky test. The
+        # variables make the tests that need the fork or the media fail instead of skipping;
+        # the job's env and the age-tools step do the same for the age tools.
+        id: test
+        env:
+          MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx
+          RECSPIKE_REQUIRE_MEDIAMTX: '1'
+          MEDIAGEN_DIR: ${{ runner.temp }}/media
+          SPIKE_REQUIRE_MEDIA: '1'
+        run: |
+          set -o pipefail
+          go test -count=1 -race ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${RUNNER_TEMP}/test.log"
+      - name: ENC-06
+        # The golden files and a resealed torn file decrypt with each age CLI and with rage,
+        # using only the recovery key (ENC-06). The test prints one "enc06: <json>" line,
+        # pass true or false, which goes out as a notice either way (C32). It runs whenever
+        # the age tools are installed, so that a failure in another step does not hide it.
+        id: enc06
+        if: ${{ !cancelled() && steps.age-tools.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/enc06.log"
+          status=0
+          go test -count=1 -v -run '^TestRecording_DecryptsWithAgeCLIAndRage$' ./hub/internal/crypto/ 2>&1 |
+            tee "${log}" || status=$?
+          if ! grep -q '^enc06: ' "${log}"; then
+            echo "ENC-06: the test printed no enc06 line" | tee -a "${log}"
+            exit 1
+          fi
+          sed -n 's/^enc06: //p' "${log}" | tools/scripts/annotate.sh ENC-06 1 notice
+          exit "${status}"
+      - name: Test the MediaMTX fork
+        # Its patch tests (TestMTX*) and the recorder's own tests only (C03). The -run
+        # pattern still compiles the tests of every package. TestMTX2_WorstCaseLoss is
+        # single-threaded, so -race adds nothing to it: the mtx2-loss step runs it.
+        id: fork-test
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          {
+            go test -count=1 -race -skip '^TestMTX2_WorstCaseLoss$' ./internal/recorder/... &&
+              go test -count=1 -race -run '^TestMTX' -skip '^TestMTX2_WorstCaseLoss$' ./...
+          } 2>&1 | tee "${RUNNER_TEMP}/fork-test.log"
+      - name: MTX-2 loss
+        # R01, O17: TestMTX2_WorstCaseLoss prints one "mtx2-loss: <json>" line, the median and
+        # maximum loss at a cut and the disk overhead of encrypted recording per bitrate, with
+        # the low-bitrate padding on and off, and pass true or false. It goes out as a notice
+        # either way (C32). It runs even when an earlier step failed, so that the failure does
+        # not hide it.
+        id: mtx2-loss
+        if: ${{ !cancelled() }}
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/mtx2-loss.log"
+          status=0
+          go test -count=1 -v -run '^TestMTX2_WorstCaseLoss$' ./internal/recorder/ 2>&1 |
+            tee "${log}" || status=$?
+          if ! grep -q '^mtx2-loss: ' "${log}"; then
+            echo "MTX-2: the test printed no mtx2-loss line" | tee -a "${log}"
+            exit 1
+          fi
+          sed -n 's/^mtx2-loss: //p' "${log}" | ../../../tools/scripts/annotate.sh mtx2-loss 1 notice
+          exit "${status}"
+      - name: Vulnerabilities of the hub
+        # govulncheck needs a directory that holds a go.mod.
+        id: vuln-hub
+        working-directory: ipcam/hub
+        run: |
+          set -o pipefail
+          go tool govulncheck ./... 2>&1 | tee "${RUNNER_TEMP}/vuln-hub.log"
+      - name: Vulnerabilities of the recorder spike
+        id: vuln-recording
+        working-directory: ipcam/tools/spikes/recording
+        run: |
+          set -o pipefail
+          go tool govulncheck ./... 2>&1 | tee "${RUNNER_TEMP}/vuln-recording.log"
+      - name: Vulnerabilities of the MediaMTX fork
+        # The tools module's govulncheck, run outside the workspace like the fork itself.
+        id: vuln-fork
+        working-directory: ipcam/tools
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          go tool govulncheck -C ../hub/third_party/mediamtx ./... 2>&1 | tee "${RUNNER_TEMP}/vuln-fork.log"
+      - name: Licenses
+        id: licenses
+        run: |
+          set -o pipefail
+          tools/scripts/check-licenses.sh ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${RUNNER_TEMP}/licenses.log"
+      - name: Licenses of the MediaMTX fork
+        # G35: go-licenses on the fork's dependencies; MediaMTX's own MIT license and the
+        # hls.js in hls.min.js are named in the release notices (hub/third_party/mediamtx/SOURCE.md).
+        id: fork-licenses
+        run: |
+          set -o pipefail
+          tools/scripts/check-licenses.sh -C hub/third_party/mediamtx ./... 2>&1 | tee "${RUNNER_TEMP}/fork-licenses.log"
+      - name: Show failures as annotations
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              # go-licenses warns about every package with assembly; those lines hide its verdict.
+              grep -vE '^(W[0-9]{4} |/)' "${log}" | tail -n 60 | tools/scripts/annotate.sh "${id}" 60
+            fi
+          done
+
+  windows:
+    # On windows-latest: the hub's tests, the process tests among them, with a Windows
+    # build of the fork as MEDIAMTX_BIN and the media, so that they cannot skip
+    # (G06): the restart after a kill, the Job Object that ends MediaMTX with the
+    # hub, MoveFileEx. Then the fork's patch tests (MTX-1 on Windows, ruling C14),
+    # where the directory sync is a no-op and the rename is MoveFileEx with
+    # MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH. Without -race, which needs a
+    # C compiler there; the recorder job runs the same tests with it.
+    needs: media
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
+      - name: Download media
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-recording-media
+          path: ${{ runner.temp }}/media
+      - name: Build the MediaMTX fork
+        id: fork-build
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          {
+            go build -o "${RUNNER_TEMP}/bin/mediamtx.exe" . &&
+              "${RUNNER_TEMP}/bin/mediamtx.exe" --version
+          } 2>&1 | tee "${RUNNER_TEMP}/fork-build.log"
+      - name: Test the hub
+        id: hub-test
+        env:
+          MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx.exe
+          RECSPIKE_REQUIRE_MEDIAMTX: '1'
+          MEDIAGEN_DIR: ${{ runner.temp }}/media
+          SPIKE_REQUIRE_MEDIA: '1'
+        run: |
+          set -o pipefail
+          go test -count=1 ./hub/... 2>&1 | tee "${RUNNER_TEMP}/hub-test.log"
+      - name: Test the MediaMTX fork's patches
+        # Every patch test, MTX-0's in the root package included: ipcam/.gitattributes
+        # checks the fork out without line-ending changes. The -run pattern still
+        # compiles the tests of every package.
+        id: fork-test
+        if: ${{ !cancelled() && steps.fork-build.outcome == 'success' }}
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          go test -count=1 -run '^TestMTX' ./... 2>&1 | tee "${RUNNER_TEMP}/fork-test.log"
+      - name: diag host
+        # What ipcam-hub reads about a Windows host (R07, G09): one ipcam.diag.host/1 line,
+        # which must be valid JSON with "os":"windows" and at most 3,500 bytes after
+        # annotate.sh's escaping, goes out as a notice (C32). It runs even when an earlier
+        # step failed, and turns its own failure into an error annotation.
+        id: diag-host
+        if: ${{ !cancelled() }}
+        run: |
+          out="${RUNNER_TEMP}/diag-host.json"
+          log="${RUNNER_TEMP}/diag-host.log"
+          status=0
+          go run ./hub/cmd/ipcam-hub diag host > "${out}" 2> "${log}" || status=$?
+          line=$(cat "${out}")
+          escaped="${line//%/%25}"
+          # shellcheck disable=SC2016 # the $ of the PowerShell check are PowerShell's
+          if [[ ${status} -ne 0 || $(wc -l < "${out}") -ne 1 ]] ||
+            (( $(printf '%s' "${escaped}" | LC_ALL=C wc -c) > 3500 )) ||
+            ! OUT="${out}" pwsh -NoProfile -NonInteractive -Command \
+              '$j = Get-Content -Raw -LiteralPath $env:OUT | ConvertFrom-Json; if ($j.schema -ne "ipcam.diag.host/1" -or $j.os -ne "windows") { exit 1 }' \
+              >> "${log}" 2>&1; then
+            {
+              echo "diag host: exit ${status}; want one line of JSON, ipcam.diag.host/1 with \"os\":\"windows\", of at most 3,500 bytes after escaping:"
+              cat "${out}"
+            } >> "${log}"
+            tail -n 60 "${log}" | tools/scripts/annotate.sh diag-host 60
+            exit 1
+          fi
+          tools/scripts/annotate.sh diag-host 1 notice < "${out}"
+      - name: Show failures as annotations
+        # As in the other jobs, plus testify's Error, Messages, expected and actual
+        # lines: a Windows failure cannot be rerun anywhere else.
+        if: failure()
+        env:
+          OUTCOMES: >-
+            fork-build=${{ steps.fork-build.outcome }}
+            hub-test=${{ steps.hub-test.outcome }}
+            fork-test=${{ steps.fork-test.outcome }}
+        run: |
+          for step in ${OUTCOMES}; do
+            id="${step%%=*}"
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ "${step#*=}" == failure && -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:|\s+(Error|Messages|expected|actual)\s*:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            fi
+          done
