@@ -86,6 +86,20 @@ func (w *partWatcher) childStarted(time.Time) {
 	}
 }
 
+// claimFirst marks the stream's first part since the child started as
+// reported, and reports whether no poll had reported it: a segment that
+// closed before a poll saw its .part grow.
+func (w *partWatcher) claimFirst(k streamKey) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s, ok := w.streams[k]
+	if !ok || s.reported {
+		return false
+	}
+	s.reported = true
+	return true
+}
+
 func (w *partWatcher) segmentClosed(k streamKey, at time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

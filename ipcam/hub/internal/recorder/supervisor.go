@@ -112,6 +112,11 @@ type rec struct {
 	// finds where its gap ends and writes it.
 	gapMu sync.Mutex
 
+	// firstMu is held while a poll finds and reports first parts, and while
+	// a segment's hook claims its stream's first part: a stream's FirstPart
+	// always comes before its SegmentClosed.
+	firstMu sync.Mutex
+
 	// fileMu is held while a verification has a segment open and while a
 	// rewrite renames over one: Windows renames over a file only when
 	// nobody has it open.
@@ -594,7 +599,8 @@ func writeFileSynced(path string, data []byte, perm os.FileMode) error {
 }
 
 // segmentComplete handles a hook post: the segment gets its catalog row and
-// one SegmentClosed, and a verification pass follows.
+// one SegmentClosed, after its stream's FirstPart, and a verification pass
+// follows.
 func (r *rec) segmentComplete(ctx context.Context, req HookRequest) (int, error) {
 	path := filepath.Clean(req.Path)
 	rel, err := filepath.Rel(r.cfg.RecDir, path)
@@ -618,6 +624,20 @@ func (r *rec) segmentComplete(ctx context.Context, req HookRequest) (int, error)
 		return 500, err
 	}
 	r.watch.segmentClosed(seg.key, time.Now())
+	// A segment that closed before a poll saw its .part grow, one shorter
+	// than pollInterval, is its stream's first part since the child started:
+	// it is reported, and its gap closed, before its SegmentClosed goes out.
+	r.firstMu.Lock()
+	first := r.watch.claimFirst(seg.key)
+	if first {
+		r.obs.FirstPart(seg.key.cam, seg.key.profile, time.Now())
+	}
+	r.firstMu.Unlock()
+	if first {
+		if err := r.closeGaps(ctx, seg.key, closed.StartMs); err != nil {
+			r.notifyError(err)
+		}
+	}
 	select {
 	case r.closed <- closed:
 	default:
@@ -685,10 +705,16 @@ func (r *rec) pollLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-poll.C:
+			// Every first part goes out before the catalog writes, so that a slow
+			// write for one stream does not hold back another stream's.
+			r.firstMu.Lock()
 			firsts, left := r.watch.poll(now)
-			r.queueParts(left)
 			for _, f := range firsts {
 				r.obs.FirstPart(f.key.cam, f.key.profile, f.at)
+			}
+			r.firstMu.Unlock()
+			r.queueParts(left)
+			for _, f := range firsts {
 				// Recording resumed: the stream's gap ends where its new segment starts.
 				if err := r.closeGaps(ctx, f.key, f.segmentStart.UnixMilli()); err != nil && ctx.Err() == nil {
 					r.notifyError(err)

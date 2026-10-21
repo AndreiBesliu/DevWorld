@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -440,5 +441,98 @@ func TestStop_GraceIsTenSecondsOnLinux(t *testing.T) {
 	if killed || len(gaps) != 1 || gaps[0].Reason != catalog.GapHubStopped || took < slowStop {
 		t.Errorf("after %v: killed %v, gaps %+v, errors %q; want a graceful stop after %v with one hub_stopped gap",
 			took, killed, gaps, obs.snapshot().errs, slowStop)
+	}
+}
+
+// TestRecorder_SegmentClosedUnseen_RecordingComesFirst: a segment that
+// MediaMTX closed before a poll saw its .part grow, one shorter than
+// pollInterval, is still its stream's first part since the child started:
+// its hook reports FirstPart before the SegmentClosed goes out, and the
+// stream is not reported again when its next .part grows.
+func TestRecorder_SegmentClosedUnseen_RecordingComesFirst(t *testing.T) {
+	obs := &testObserver{}
+	r, cfg := startFake(t, "sleep", Config{Observer: obs})
+	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil)}); err != nil {
+		t.Fatal(err)
+	}
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000}})
+	start := time.Now().Add(-time.Second)
+	final := segPath(cfg.RecDir, "cam1", "main", start, "")
+	writeFile(t, final, f.data)
+
+	code, err := r.segmentComplete(t.Context(), HookRequest{Path: final, StartMs: start.UnixMilli(), DurationMs: 1000, Cam: "cam1", Profile: "main"})
+	if err != nil || code != 204 {
+		t.Fatalf("segmentComplete: %d, %v", code, err)
+	}
+	if firsts := obs.snapshot().firsts; !slices.Equal(firsts, []string{"cam1/main"}) {
+		t.Errorf("FirstPart before the SegmentClosed went out: %q, want cam1/main", firsts)
+	}
+	select {
+	case s := <-r.Closed(t.Context()):
+		if s.Path != final {
+			t.Errorf("SegmentClosed %+v, want %s", s, final)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no SegmentClosed")
+	}
+
+	writeFile(t, segPath(cfg.RecDir, "cam1", "main", time.Now(), ".part"), f.data)
+	time.Sleep(4 * pollInterval)
+	if firsts := obs.snapshot().firsts; len(firsts) != 1 {
+		t.Errorf("FirstPart %q, want it once since the child started", firsts)
+	}
+}
+
+// gapBlocker is a testObserver whose Gap blocks, for a gap that is closed,
+// until release is closed, as a catalog write that is slow would hold the
+// recorder there.
+type gapBlocker struct {
+	testObserver
+	blocked chan struct{} // closed when the first Gap of a closed gap blocks
+	release chan struct{}
+	once    sync.Once
+}
+
+func (o *gapBlocker) Gap(g catalog.Gap) {
+	if g.EndMs != 0 {
+		o.once.Do(func() { close(o.blocked) })
+		<-o.release
+	}
+	o.testObserver.Gap(g)
+}
+
+// TestRecorder_FirstPartsOfOnePollComeBeforeGapCloses: when one poll finds
+// the first part of two streams, both FirstParts go out before the gaps
+// that recording resumed are closed in the catalog: a slow close of one
+// stream's gap does not hold back the other stream's FirstPart, which must
+// come before its first SegmentClosed.
+func TestRecorder_FirstPartsOfOnePollComeBeforeGapCloses(t *testing.T) {
+	recDir := filepath.Join(t.TempDir(), "rec")
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000}})
+	for _, p := range []string{"main", "sub"} { // each stream gets an open restart gap at startup
+		writeFile(t, segPath(recDir, "cam1", p, t0, ".part"), f.data[:f.partStart[1]+10])
+	}
+	obs := &gapBlocker{blocked: make(chan struct{}), release: make(chan struct{})}
+	r, _ := startFake(t, "sleep", Config{RecDir: recDir, Observer: obs})
+	defer close(obs.release)
+	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil),
+		NewJob("cam1", "sub", "rtsp://127.0.0.1:1/cam1/sub", nil)}); err != nil {
+		t.Fatal(err)
+	}
+	// Both .part files appear between two polls.
+	r.watch.mu.Lock()
+	now := time.Now()
+	for _, p := range []string{"main", "sub"} {
+		writeFile(t, segPath(recDir, "cam1", p, now, ".part"), f.data)
+	}
+	r.watch.mu.Unlock()
+
+	select {
+	case <-obs.blocked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no gap was closed")
+	}
+	if firsts := obs.snapshot().firsts; len(firsts) != 2 {
+		t.Errorf("FirstPart %q while the first gap closes, want both streams", firsts)
 	}
 }
