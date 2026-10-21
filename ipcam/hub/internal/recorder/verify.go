@@ -65,7 +65,10 @@ func (v *verifier) pass(ctx context.Context) (ReconcileReport, error) {
 	for _, s := range segs {
 		rows[s.Path] = true
 	}
-	files, _, err := scanRecDir(v.recDir)
+	files, _, listErrs, err := scanRecDir(v.recDir)
+	if err == nil && len(listErrs) > 0 {
+		err = listErrs[0] // the rows under it would read as lost
+	}
 	if err != nil {
 		return report, err
 	}

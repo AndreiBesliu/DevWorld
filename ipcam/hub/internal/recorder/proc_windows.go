@@ -6,13 +6,18 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// The Windows parts: the MediaMTX child dies with the hub, the directory
-// sync and the rename.
+// The Windows parts: the MediaMTX child dies with the hub, the stop, the
+// directory sync and the rename.
+
+// stopGrace is how long MediaMTX gets to close its segments when the hub
+// stops, after the Ctrl+Break, before it is killed.
+const stopGrace = 5 * time.Second
 
 // childProc is a started MediaMTX child and the Job Object that holds it.
 type childProc struct {

@@ -65,9 +65,6 @@ const (
 	// configSettle is how long a starting MediaMTX may take before it
 	// watches its file; a write in that time is made again after it.
 	configSettle = 1500 * time.Millisecond
-	// stopGrace is how long MediaMTX gets to close its segments when the hub
-	// stops, before it is killed.
-	stopGrace = 5 * time.Second
 	// logDrain is how long the child's output may stay open after it exited:
 	// a hook command that MediaMTX started holds it too.
 	logDrain = 2 * time.Second
@@ -133,8 +130,8 @@ type rec struct {
 // (repairParts), all in the background. When ctx is done, it asks MediaMTX
 // to stop, and once MediaMTX has closed its segments and exited, each
 // recorded stream gets an open hub_stopped gap. The startup's report goes
-// to ReconcileObserver as the update of Seq 1, and the error of each file
-// that reconcile could not repair to ErrorObserver. When reconcile aborts,
+// to ReconcileObserver as the update of Seq 1, and each error that
+// reconcile met on a file or a directory to ErrorObserver. When reconcile aborts,
 // it starts nothing and returns ErrReconcileAborted with the report.
 func New(ctx context.Context, cfg Config) (Recorder, ReconcileReport, error) {
 	if cfg.BinaryPath == "" || cfg.RunDir == "" || cfg.RecDir == "" || cfg.Catalog == nil {

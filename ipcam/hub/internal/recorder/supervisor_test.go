@@ -347,7 +347,7 @@ func TestRecorder_GracefulStopWritesHubStoppedGaps(t *testing.T) {
 	}
 	doneAt := time.Now().UnixMilli()
 
-	segs, _, err := scanRecDir(cfg.RecDir)
+	segs, _, _, err := scanRecDir(cfg.RecDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,5 +378,67 @@ func TestRecorder_GracefulStopWritesHubStoppedGaps(t *testing.T) {
 	report, err := Reconcile(t.Context(), cfg.RecDir, nil, cfg.Catalog)
 	if err != nil || report != (ReconcileReport{}) {
 		t.Errorf("the next start's reconcile %+v, %v; want nothing to repair", report, err)
+	}
+}
+
+// TestStop_GraceIsTenSecondsOnLinux (M2): a stop gives MediaMTX 10 s on
+// Linux to close its segments, since a Pi that records its recommended
+// cameras on an SD card fsyncs, renames, syncs a directory and runs a hook
+// per segment. A MediaMTX that takes 7 s stops gracefully there: no error,
+// and the stream gets its hub_stopped gap. Windows keeps 5 s: it is killed,
+// with an error, and no gap is written.
+func TestStop_GraceIsTenSecondsOnLinux(t *testing.T) {
+	ready := filepath.Join(t.TempDir(), "ready")
+	t.Setenv(fakeChildEnv, "slowstop:"+ready)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	obs := &testObserver{}
+	cfg := Config{BinaryPath: self, RunDir: filepath.Join(dir, "run"), RecDir: filepath.Join(dir, "rec"), Catalog: openCatalog(t),
+		Observer: obs, HookCommand: []string{self, "hook", "segment-complete"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r, _, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for range r.Closed(context.Background()) {
+		}
+	}()
+	if err := r.Apply(ctx, []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil)}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 10*time.Second, "the fake MediaMTX does not catch the stop signal", func() bool {
+		_, err := os.Stat(ready)
+		return err == nil
+	})
+
+	asked := time.Now()
+	cancel()
+	select {
+	case <-stopped:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the recorder did not stop")
+	}
+	took := time.Since(asked)
+	killed := slices.ContainsFunc(obs.snapshot().errs, func(e string) bool { return strings.Contains(e, "did not stop within") })
+	gaps, err := cfg.Catalog.Gaps(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		if !killed || len(gaps) != 0 || took >= slowStop {
+			t.Errorf("after %v: killed %v, gaps %+v; want MediaMTX killed after 5 s, without a gap", took, killed, gaps)
+		}
+		return
+	}
+	if killed || len(gaps) != 1 || gaps[0].Reason != catalog.GapHubStopped || took < slowStop {
+		t.Errorf("after %v: killed %v, gaps %+v, errors %q; want a graceful stop after %v with one hub_stopped gap",
+			took, killed, gaps, obs.snapshot().errs, slowStop)
 	}
 }

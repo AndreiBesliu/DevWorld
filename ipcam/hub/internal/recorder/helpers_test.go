@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -91,10 +93,23 @@ type fakeChildDump struct {
 //   - "dump:<file>": it writes its arguments, environment and PID to file,
 //     then waits;
 //   - "stderr:<n>": it writes the lines "line 1" … "line <n>" to stderr,
-//     then waits.
+//     then waits;
+//   - "slowstop:<file>": it creates file once it catches the stop signal
+//     (SIGTERM, or Ctrl+Break on Windows), then waits; asked to stop, it
+//     exits slowStop later, as a MediaMTX that closes many segments on a
+//     slow card would.
 func runFakeChild(mode string, args []string) int {
 	switch {
 	case mode == "sleep":
+	case strings.HasPrefix(mode, "slowstop:"):
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+		if err := os.WriteFile(strings.TrimPrefix(mode, "slowstop:"), nil, 0o600); err != nil { //nolint:gosec // a file that the test named
+			return 2
+		}
+		<-stop
+		time.Sleep(slowStop)
+		return 0
 	case strings.HasPrefix(mode, "dump:"):
 		b, _ := json.Marshal(fakeChildDump{Args: args, Env: os.Environ(), PID: os.Getpid()})
 		tmp := strings.TrimPrefix(mode, "dump:") + ".tmp"
@@ -666,6 +681,47 @@ func setRewriteHook(f func()) (restore func()) {
 	previous := rewriteHook
 	rewriteHook = f
 	return func() { rewriteHook = previous }
+}
+
+// slowStop is how long a "slowstop" fake MediaMTX takes to stop: more than
+// Windows' stop grace, less than Linux's.
+const slowStop = 7 * time.Second
+
+// setWalkRecDir makes every listing of the recordings directory walk with
+// f, until restore is called.
+func setWalkRecDir(f func(root string, fn fs.WalkDirFunc) error) (restore func()) {
+	previous := walkRecDir
+	walkRecDir = f
+	return func() { walkRecDir = previous }
+}
+
+// unreadableDir is a walk of the recordings directory in which dir cannot
+// be read, as filepath.WalkDir reports a directory whose ReadDir fails: it
+// visits dir, then visits it again with the error, and visits nothing under
+// it.
+func unreadableDir(dir string) func(root string, fn fs.WalkDirFunc) error {
+	return func(root string, fn fs.WalkDirFunc) error {
+		return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || path != dir {
+				return fn(path, d, err)
+			}
+			if err := fn(path, d, nil); err != nil {
+				return err
+			}
+			if err := fn(path, d, &fs.PathError{Op: "readdirent", Path: path, Err: errors.New("injected: input/output error")}); err != nil {
+				return err
+			}
+			return fs.SkipDir
+		})
+	}
+}
+
+// setStatSegment makes reconcile read the size of each final file for the
+// catalog with f, until restore is called.
+func setStatSegment(f func(path string) (os.FileInfo, error)) (restore func()) {
+	previous := statSegment
+	statSegment = f
+	return func() { statSegment = previous }
 }
 
 // setOpenSegment makes reconcile open each segment that it repairs with f,

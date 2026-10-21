@@ -697,15 +697,18 @@ func (failingReseal) Reseal(context.Context, int64, []crypto.Patch) (int64, erro
 // fails on one of three files, because the file cannot be opened or its
 // Reseal fails, is handled like an unreadable file: the file is left, it
 // counts as unreadable, an error names it by its base name only, and the
-// other two are repaired and recording starts.
+// other two are repaired and recording starts. A file that could be read
+// has its restart gap written before its repair begins (M3), so a failed
+// Reseal leaves that gap too.
 func TestRecorder_OneFileFailingRepairDoesNotStopRecording(t *testing.T) {
 	scope, riG, _ := newTestScope(t)
 	for _, tc := range []struct {
 		name, suffix string
+		gaps         int
 		file         func(t *testing.T) []byte
 		inject       func(failOn string) (cfg Config, restore func())
 	}{
-		{"open", ".part", func(t *testing.T) []byte {
+		{"open", ".part", 2, func(t *testing.T) []byte {
 			f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
 			return f.data[:f.partStart[2]+10]
 		}, func(failOn string) (Config, func()) {
@@ -716,7 +719,7 @@ func TestRecorder_OneFileFailingRepairDoesNotStopRecording(t *testing.T) {
 				return os.OpenFile(path, flag, 0) //nolint:gosec // a file of the test
 			})
 		}},
-		{"reseal", ".age.part", func(t *testing.T) []byte {
+		{"reseal", ".age.part", 3, func(t *testing.T) []byte {
 			_, file := alignedTorn(t, scope)
 			return file
 		}, func(failOn string) (Config, func()) {
@@ -741,8 +744,8 @@ func TestRecorder_OneFileFailingRepairDoesNotStopRecording(t *testing.T) {
 			r, _ := startFake(t, "dump:"+dump, cfg)
 			readDump(t, dump) // recording started: the child runs
 
-			if rep := reportNow(r); rep.Finalized != 2 || rep.Truncated != 2 || rep.LostTails != 2 || rep.Unreadable != 1 || rep.Aborted {
-				t.Errorf("startup report %+v, want 2 repaired and 1 unreadable", rep)
+			if rep := reportNow(r); rep.Finalized != 2 || rep.Truncated != 2 || rep.LostTails != tc.gaps || rep.GapsWritten != tc.gaps || rep.Unreadable != 1 || rep.Aborted {
+				t.Errorf("startup report %+v, want 2 repaired, 1 unreadable and %d gaps", rep, tc.gaps)
 			}
 			for _, path := range []string{paths[0], paths[2]} {
 				requireMissing(t, path)
@@ -1096,7 +1099,7 @@ func TestReconcile_AfterTheHubIsKilled(t *testing.T) {
 	if report.Finalized != 2 || report.LostTails != 2 || report.Unreadable != 0 {
 		t.Errorf("report %+v, want 2 finalized with 2 lost tails", report)
 	}
-	segs, _, err := scanRecDir(recDir)
+	segs, _, _, err := scanRecDir(recDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1289,4 +1292,322 @@ func TestRecorder_ReconcileUpdatesAreNumbered(t *testing.T) {
 			t.Errorf("updates %+v, want only %+v", ups, want)
 		}
 	})
+}
+
+// TestRecorder_UnreadableDirectoryDoesNotStopRecording (M1): a directory
+// under rec/ that cannot be read, such as a date directory with an I/O
+// error after a cut on an SD card, does not fail New: it is skipped, an
+// error names it by its base name only, the other streams are repaired and
+// recording starts.
+func TestRecorder_UnreadableDirectoryDoesNotStopRecording(t *testing.T) {
+	recDir := filepath.Join(t.TempDir(), "rec")
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
+	torn := segPath(recDir, "cam1", "main", t0, ".part")
+	writeFile(t, torn, f.data[:f.partStart[2]+10])
+	hidden := segPath(recDir, "cam2", "main", t0, ".part")
+	hiddenBytes := f.data[:f.partStart[2]+10]
+	writeFile(t, hidden, hiddenBytes)
+	bad := filepath.Dir(hidden)
+	defer setWalkRecDir(unreadableDir(bad))()
+	obs := &testObserver{}
+	dump := filepath.Join(t.TempDir(), "child.json")
+	r, _ := startFake(t, "dump:"+dump, Config{RecDir: recDir, Observer: obs})
+	readDump(t, dump) // recording started: the child runs
+
+	if rep := reportNow(r); rep != (ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 1, GapsWritten: 1}) {
+		t.Errorf("startup report %+v, want cam1's .part repaired", rep)
+	}
+	requireMissing(t, torn)
+	if !bytes.Equal(readFile(t, hidden), hiddenBytes) {
+		t.Error("the .part in the directory that could not be read was changed")
+	}
+	named := false
+	for _, e := range obs.snapshot().errs {
+		if strings.Contains(e, filepath.Base(bad)) {
+			named = true
+			if strings.Contains(e, filepath.Dir(bad)) {
+				t.Errorf("the error %q names the directory's parents", e)
+			}
+		}
+	}
+	if !named {
+		t.Errorf("errors %q, want one that names %s", obs.snapshot().errs, filepath.Base(bad))
+	}
+}
+
+// TestReconcile_DirSyncFailsAfterTheChange_KeepsTheGap (M3): when the
+// rename of a repaired .part, or the removal of an empty one, succeeds and
+// the sync of its directory then fails, the file is repaired, not
+// unreadable: its restart gap is written, before the change that a cut
+// could make durable, and the sync's error names the file.
+func TestReconcile_DirSyncFailsAfterTheChange_KeepsTheGap(t *testing.T) {
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000, 1000}})
+	for _, tc := range []struct {
+		name    string
+		data    []byte
+		report  ReconcileReport
+		keptMs  int64
+		removed bool
+	}{
+		{"rename", f.data[:f.partStart[3]+10], ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 1, GapsWritten: 1}, 3000, false},
+		{"remove", make([]byte, 200_000), ReconcileReport{LostTails: 1, GapsWritten: 1}, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recDir, cat := t.TempDir(), openCatalog(t)
+			part := segPath(recDir, "cam1", "main", t0, ".part")
+			writeFile(t, part, tc.data)
+			wantGap := catalog.Gap{Cam: "cam1", Profile: "main", StartMs: t0.UnixMilli() + tc.keptMs, Reason: catalog.GapRestart}
+			gapBeforeSync := false
+			defer setSyncDir(func(dir string) error {
+				if dir != filepath.Dir(part) {
+					return nil
+				}
+				gaps, err := cat.Gaps(context.Background())
+				gapBeforeSync = err == nil && slices.Equal(gaps, []catalog.Gap{wantGap})
+				return &fs.PathError{Op: "sync", Path: dir, Err: errors.New("injected: input/output error")}
+			})()
+
+			res, err := reconcile(t.Context(), recDir, nil, cat)
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if res.report != tc.report {
+				t.Errorf("report %+v, want %+v", res.report, tc.report)
+			}
+			requireMissing(t, part)
+			if !tc.removed {
+				requireRow(t, cat, relSeg("cam1", "main", t0, ""), t0.UnixMilli(), t0.UnixMilli()+tc.keptMs, false, strings.TrimSuffix(part, ".part"))
+			}
+			requireGaps(t, cat, []catalog.Gap{wantGap})
+			if !gapBeforeSync {
+				t.Error("the gap was not in the catalog when the directory was synced")
+			}
+			if len(res.errs) != 1 || !strings.Contains(res.errs[0].Error(), filepath.Base(part)) {
+				t.Errorf("errors %q, want the sync's, naming %s", res.errs, filepath.Base(part))
+			}
+		})
+	}
+}
+
+// TestRecorder_LiveRepairDirSyncFails_KeepsTheGap (M3): the repair of a
+// .part that a dead MediaMTX left, while the hub runs, keeps its gap and
+// its catalog row when the sync of its directory fails after the rename,
+// and does not count the file as unreadable.
+func TestRecorder_LiveRepairDirSyncFails_KeepsTheGap(t *testing.T) {
+	obs := &testObserver{}
+	r, cfg := startFake(t, "sleep", Config{Observer: obs})
+	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil)}); err != nil {
+		t.Fatal(err)
+	}
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000, 1000}})
+	deadStart := time.Now().Add(-10 * time.Second)
+	dead := segPath(cfg.RecDir, "cam1", "main", deadStart, ".part")
+	defer setSyncDir(func(dir string) error {
+		if dir == filepath.Dir(dead) {
+			return &fs.PathError{Op: "sync", Path: dir, Err: errors.New("injected: input/output error")}
+		}
+		return nil
+	})()
+	writeFile(t, dead, f.data[:f.partStart[3]+10])
+	killChild(t, r)
+
+	waitFor(t, 10*time.Second, "no report after the repair", func() bool { return len(obs.snapshot().reports) >= 1 })
+	if rep := obs.snapshot().reports; rep[len(rep)-1] != (ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 1, GapsWritten: 1}) {
+		t.Errorf("report after the repair %+v, want the .part repaired, not unreadable", rep[len(rep)-1])
+	}
+	deadMs := deadStart.UnixMilli()
+	requireRow(t, cfg.Catalog, relSeg("cam1", "main", deadStart, ""), deadMs, deadMs+3000, false, strings.TrimSuffix(dead, ".part"))
+	gaps, err := cfg.Catalog.Gaps(t.Context())
+	if err != nil || len(gaps) != 1 || gaps[0].StartMs != deadMs+3000 || gaps[0].Reason != catalog.GapRestart {
+		t.Errorf("gaps %+v (%v), want the restart gap from %d", gaps, err, deadMs+3000)
+	}
+	if !slices.ContainsFunc(obs.snapshot().errs, func(e string) bool { return strings.Contains(e, filepath.Base(dead)) }) {
+		t.Errorf("errors %q, want the sync's, naming %s", obs.snapshot().errs, filepath.Base(dead))
+	}
+}
+
+// ioErrorSealer opens torn recordings with its TailSealer, but for the file
+// named failOn, OpenTorn fails with an I/O error (openErr), or the reads of
+// what it opened do (readErr), as a failing disk's would.
+type ioErrorSealer struct {
+	crypto.TailSealer
+	failOn           string
+	openErr, readErr bool
+}
+
+func (s ioErrorSealer) OpenTorn(ctx context.Context, f *os.File) (crypto.TornAge, error) {
+	if filepath.Base(f.Name()) != s.failOn {
+		return s.TailSealer.OpenTorn(ctx, f)
+	}
+	if s.openErr {
+		return nil, &fs.PathError{Op: "read", Path: f.Name(), Err: errors.New("injected: input/output error")}
+	}
+	torn, err := s.TailSealer.OpenTorn(ctx, f)
+	return failingReads{torn}, err
+}
+
+type failingReads struct{ crypto.TornAge }
+
+func (failingReads) ReadAt([]byte, int64) (int, error) {
+	return 0, &fs.PathError{Op: "read", Path: "file", Err: errors.New("injected: input/output error")}
+}
+
+// TestReconcile_IOErrorsLeaveTheFile (M4): an I/O error while reconcile
+// reads a .part, from OpenTorn, from a read of the walk or from its Stat,
+// leaves the file as it is: it is not set aside as unreadable, gets no gap,
+// counts as unreadable, and an error names it. A final file whose size the
+// catalog step cannot read keeps its row as it is.
+func TestReconcile_IOErrorsLeaveTheFile(t *testing.T) {
+	scope, riG, _ := newTestScope(t)
+	injected := func(path string) error {
+		return &fs.PathError{Op: "read", Path: path, Err: errors.New("injected: input/output error")}
+	}
+	clearTorn := func(t *testing.T) []byte {
+		f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
+		return f.data[:f.partStart[2]+10]
+	}
+	ageTorn := func(t *testing.T) []byte {
+		_, file := alignedTorn(t, scope)
+		return file
+	}
+	for _, tc := range []struct {
+		name, suffix string
+		file         func(t *testing.T) []byte
+		inject       func(failOn string) (tail crypto.TailSealer, restore func())
+	}{
+		{"OpenTorn", ".age.part", ageTorn, func(failOn string) (crypto.TailSealer, func()) {
+			return ioErrorSealer{TailSealer: crypto.NewTailSealer(riG), failOn: failOn, openErr: true}, func() {}
+		}},
+		{"walk read, encrypted", ".age.part", ageTorn, func(failOn string) (crypto.TailSealer, func()) {
+			return ioErrorSealer{TailSealer: crypto.NewTailSealer(riG), failOn: failOn, readErr: true}, func() {}
+		}},
+		{"walk read, clear", ".part", clearTorn, func(failOn string) (crypto.TailSealer, func()) {
+			// A file that is open for writing only fails every read with a *fs.PathError.
+			return nil, setOpenSegment(func(path string, flag int) (*os.File, error) {
+				if filepath.Base(path) == failOn {
+					flag = os.O_WRONLY
+				}
+				return os.OpenFile(path, flag, 0) //nolint:gosec // a file of the test
+			})
+		}},
+		{"Stat", ".part", clearTorn, func(failOn string) (crypto.TailSealer, func()) {
+			// The Stat of a closed file fails with a *fs.PathError.
+			return nil, setOpenSegment(func(path string, flag int) (*os.File, error) {
+				f, err := os.OpenFile(path, flag, 0) //nolint:gosec // a file of the test
+				if err == nil && filepath.Base(path) == failOn {
+					_ = f.Close()
+				}
+				return f, err
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recDir, cat := t.TempDir(), openCatalog(t)
+			good := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000}})
+			for _, cam := range []string{"cam2", "cam3"} { // so that it is not HUB-09's abort
+				writeFile(t, segPath(recDir, cam, "main", t0, ""), good.data)
+			}
+			part := segPath(recDir, "cam1", "main", t0, tc.suffix)
+			data := tc.file(t)
+			writeFile(t, part, data)
+			tail, restore := tc.inject(filepath.Base(part))
+			defer restore()
+
+			res, err := reconcile(t.Context(), recDir, tail, cat)
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if res.report != (ReconcileReport{Unreadable: 1}) {
+				t.Errorf("report %+v, want the file counted unreadable, and nothing else", res.report)
+			}
+			if !bytes.Equal(readFile(t, part), data) {
+				t.Error("the file was changed or moved")
+			}
+			requireMissing(t, part+".unreadable")
+			requireGaps(t, cat, nil)
+			if len(res.errs) != 1 || !strings.Contains(res.errs[0].Error(), filepath.Base(part)) {
+				t.Errorf("errors %q, want one that names %s", res.errs, filepath.Base(part))
+			}
+		})
+	}
+
+	t.Run("catalog stat", func(t *testing.T) {
+		recDir, cat := t.TempDir(), openCatalog(t)
+		good := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000}})
+		older, newer := segPath(recDir, "cam1", "main", t0, ""), segPath(recDir, "cam1", "main", t0.Add(5*time.Minute), "")
+		writeFile(t, older, good.data)
+		writeFile(t, newer, good.data)
+		row := catalog.Segment{Cam: "cam1", Profile: "main", Path: relSeg("cam1", "main", t0, ""), StartMs: t0.UnixMilli(), EndMs: t0.UnixMilli() + 2000,
+			Bytes: int64(len(good.data)), State: catalog.StateComplete}
+		if err := cat.PutSegment(t.Context(), row); err != nil {
+			t.Fatal(err)
+		}
+		defer setStatSegment(func(path string) (os.FileInfo, error) {
+			if path == older {
+				return nil, injected(path)
+			}
+			return os.Stat(path)
+		})()
+
+		res, err := reconcile(t.Context(), recDir, nil, cat)
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if res.report != (ReconcileReport{}) {
+			t.Errorf("report %+v, want nothing repaired", res.report)
+		}
+		got, ok := rowByPath(t, cat)[row.Path]
+		if !ok || got.State != catalog.StateComplete || got.Bytes != row.Bytes || got.StartMs != row.StartMs || got.EndMs != row.EndMs {
+			t.Errorf("row %+v, want it kept as %+v", got, row)
+		}
+		if _, ok := rowByPath(t, cat)[relSeg("cam1", "main", t0.Add(5*time.Minute), "")]; !ok {
+			t.Error("the other final file has no row")
+		}
+		if len(res.errs) != 1 || !strings.Contains(res.errs[0].Error(), filepath.Base(older)) {
+			t.Errorf("errors %q, want one that names %s", res.errs, filepath.Base(older))
+		}
+	})
+}
+
+// TestRecorder_LiveRepair_TornThenUnreadablePart_GapEndsAtTheNextReadable
+// (M5): while the hub runs, the .part files that a dead MediaMTX left are
+// planned together, so that a gap ends where its stream's next segment that
+// holds a recording starts, as at startup: a torn .part's gap runs past an
+// unreadable .part that follows it, to the restarted child's segment.
+func TestRecorder_LiveRepair_TornThenUnreadablePart_GapEndsAtTheNextReadable(t *testing.T) {
+	obs := &testObserver{}
+	r, cfg := startFake(t, "sleep", Config{Observer: obs})
+	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil)}); err != nil {
+		t.Fatal(err)
+	}
+	// The child leaves a segment that it tore and one that cannot be read, and
+	// dies. Both appear at once, in a date directory of their own (the hub
+	// makes today's and tomorrow's), so that the watcher sees them in one
+	// poll and finds neither left behind while the child runs: the child's
+	// exit hands both to one repair.
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000, 1000}})
+	day := time.Now().UTC().AddDate(0, 0, 2).Truncate(24 * time.Hour).Add(12 * time.Hour)
+	tornStart, unreadableStart, nextStart := day, day.Add(10*time.Second), day.Add(20*time.Second)
+	staging := filepath.Join(t.TempDir(), "day")
+	writeFile(t, filepath.Join(staging, filepath.Base(segPath(cfg.RecDir, "cam1", "main", tornStart, ".part"))), f.data[:f.partStart[3]+10])
+	writeFile(t, filepath.Join(staging, filepath.Base(segPath(cfg.RecDir, "cam1", "main", unreadableStart, ".part"))),
+		bytes.Repeat([]byte("not an fMP4 file "), 300))
+	if err := os.Rename(staging, filepath.Dir(segPath(cfg.RecDir, "cam1", "main", tornStart, ".part"))); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 10*time.Second, "the .part files were not seen", func() bool { return len(obs.snapshot().firsts) >= 1 })
+	killChild(t, r)
+	waitFor(t, 10*time.Second, "the child was not started again", func() bool { return len(obs.snapshot().restarts) >= 1 })
+	// The new child starts a segment.
+	writeFile(t, segPath(cfg.RecDir, "cam1", "main", nextStart, ".part"), make([]byte, 100))
+
+	want := []catalog.Gap{
+		{Cam: "cam1", Profile: "main", StartMs: tornStart.UnixMilli() + 3000, EndMs: nextStart.UnixMilli(), Reason: catalog.GapRestart},
+		{Cam: "cam1", Profile: "main", StartMs: unreadableStart.UnixMilli(), EndMs: nextStart.UnixMilli(), Reason: catalog.GapRestart},
+	}
+	waitFor(t, 10*time.Second, "the gaps do not end at the new segment", func() bool {
+		gaps, err := cfg.Catalog.Gaps(t.Context())
+		return err == nil && len(gaps) == 2 && gaps[0].EndMs != 0 && gaps[1].EndMs != 0
+	})
+	requireGaps(t, cfg.Catalog, want)
 }
