@@ -123,13 +123,18 @@ func RunLossMs(r results.Run) int64 {
 // settings; a run also fails when reconcile needed intervention, a file is
 // unreadable, a torn fMP4 part remains, HUB-04 found clear bytes, or no
 // stream was measured.
-func Failures(r results.Run) []string {
+func Failures(r results.Run) []string { return failuresExcept(r, 0) }
+
+// failuresExcept is Failures without the losses of streams whose limit is
+// shownLimitMs, which the O17-off row already shows as its value and limit;
+// 0 leaves none out.
+func failuresExcept(r results.Run, shownLimitMs int64) []string {
 	var out []string
 	if len(r.Streams) == 0 {
 		out = append(out, "niciun flux măsurat")
 	}
 	for _, s := range r.Streams {
-		if limit := StreamLimitMs(s.BitrateKbps*1000, s.Encrypted, s.PadLowBitrate); s.LossMs > limit {
+		if limit := streamLimit(s); s.LossMs > limit && limit != shownLimitMs {
 			out = append(out, fmt.Sprintf("%s a pierdut %s, peste limita de %s", s.Stream, secondsText(s.LossMs), wholeSecondsText(limit)))
 		}
 	}
@@ -146,6 +151,11 @@ func Failures(r results.Run) []string {
 		out = append(out, "HUB-04: octeți video în clar pe disc")
 	}
 	return out
+}
+
+// streamLimit is s's StreamLimitMs, recomputed from what was recorded.
+func streamLimit(s results.StreamLoss) int64 {
+	return StreamLimitMs(s.BitrateKbps*1000, s.Encrypted, s.PadLowBitrate)
 }
 
 // setInfo is how Judge treats a set: where its runs come from, the OS whose
@@ -193,10 +203,13 @@ type setResult struct {
 // and no failed run (G11); every stream's limit is recomputed with
 // StreamLimitMs, never read from LimitMs. The O17-off run of an automated
 // set is judged alone, outside the set's median and max and outside the
-// verdict, in a row of its own. G10 passes only when every set passes; a
-// failed run or set fails it with PlanB; a missing Pi set defers it to Faza
-// 0-bis when the Pi is unsupported (an envelope with host "pi" says so),
-// and otherwise, like any other missing run, leaves it without a verdict.
+// verdict, in a row of its own that names why it failed; a failed O17-off
+// run's failures are also in Reasons, marked «informativ, în afara G10»,
+// and change neither the verdict nor PlanB. G10 passes only when every set
+// passes; a failed run or set fails it with PlanB; a missing Pi set defers
+// it to Faza 0-bis when the Pi is unsupported (an envelope with host "pi"
+// says so), and otherwise, like any other missing run, leaves it without a
+// verdict.
 func Judge(envs []results.Envelope) results.Judgement {
 	j := results.Judgement{Gate: "G10"}
 	runs := map[string][]results.Run{}
@@ -311,27 +324,34 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 				Pass: verdict(res.failed == 0, complete)})
 	}
 	if !s.real {
-		j.Rows = append(j.Rows, o17Row(prefix, s.source, o17))
+		row, notes := o17Row(prefix, s.name, s.source, o17)
+		j.Rows = append(j.Rows, row)
+		// After the set's own reasons; they never change its state.
+		res.reasons = append(res.reasons, notes...)
 	}
 	return res
 }
 
-// o17Row reports a set's O17-off runs: the loss of the stream with the
-// largest limit, the 256 kbps one, against that limit; it passes when no
-// run fails.
-func o17Row(prefix, source string, runs []results.Run) results.Row {
-	row := results.Row{Code: prefix + O17OffLabel, Source: source}
+// o17Informative marks the reasons of a failed O17-off run: reported for
+// Task 14's decision on §4.5 (C1-R1), never part of G10's verdict.
+const o17Informative = "informativ, în afara G10: "
+
+// o17Row reports a set's O17-off runs, outside G10 (C1-R1): the loss of
+// the stream with the largest limit, the 256 kbps one, against that limit,
+// followed by every other failure of the runs, so that a failed row always
+// names its cause; it passes when no run fails. notes are each failed run's
+// Failures, marked with o17Informative, for Judgement.Reasons.
+func o17Row(prefix, set, source string, runs []results.Run) (row results.Row, notes []string) {
+	row = results.Row{Code: prefix + O17OffLabel, Source: source}
+	nominal := StreamLimitMs(lowBitrateKbps*1000, true, false)
 	if len(runs) == 0 {
-		row.Value, row.Limit = "lipsește", "≤ "+wholeSecondsText(StreamLimitMs(lowBitrateKbps*1000, true, false))
-		return row
+		row.Value, row.Limit = "lipsește", "≤ "+wholeSecondsText(nominal)
+		return row, nil
 	}
 	var loss, limit int64
-	pass := true
 	for _, r := range runs {
-		pass = pass && len(Failures(r)) == 0
 		for _, s := range r.Streams {
-			l := StreamLimitMs(s.BitrateKbps*1000, s.Encrypted, s.PadLowBitrate)
-			switch {
+			switch l := streamLimit(s); {
 			case l > limit:
 				limit, loss = l, s.LossMs
 			case l == limit:
@@ -339,8 +359,30 @@ func o17Row(prefix, source string, runs []results.Run) results.Row {
 			}
 		}
 	}
-	row.Value, row.Limit, row.Pass = secondsText(loss), "≤ "+wholeSecondsText(limit), &pass
-	return row
+	var value []string
+	if limit > 0 {
+		value = append(value, secondsText(loss))
+	}
+	pass := true
+	for _, r := range runs {
+		f := Failures(r)
+		if len(f) == 0 {
+			continue
+		}
+		pass = false
+		notes = append(notes, fmt.Sprintf("%s%s: rularea %s, cu „Pierdere minimă la pană de curent” oprită: %s", o17Informative, set, r.RunID, strings.Join(f, "; ")))
+		for _, other := range failuresExcept(r, limit) {
+			if len(runs) > 1 {
+				other = "rularea " + r.RunID + ": " + other
+			}
+			value = append(value, other)
+		}
+	}
+	if limit == 0 { // no stream measured: the bound the run was planned for
+		limit = nominal
+	}
+	row.Value, row.Limit, row.Pass = strings.Join(value, "; "), "≤ "+wholeSecondsText(limit), &pass
+	return row, notes
 }
 
 // failureRates adds the failure-rate rows: the 95 % bound per OS over the

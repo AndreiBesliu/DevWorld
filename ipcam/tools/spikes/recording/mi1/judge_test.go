@@ -265,6 +265,74 @@ func TestMI1_PaddingOff_UsesUnpaddedBound(t *testing.T) {
 	})
 }
 
+// TestMI1_O17OffRunFailuresReported (C1-R1): whatever fails an O17-off
+// run, its row names the cause beside the 256 kbps loss, and the reasons
+// carry the run's failures marked as information outside G10; G10's
+// verdict and plan B do not see them.
+func TestMI1_O17OffRunFailuresReported(t *testing.T) {
+	const set = SetLabLinuxKill9
+	j := Judge(envelopes(allSets(t)))
+	if len(j.Reasons) != 0 {
+		t.Errorf("Reasons = %q, want none when every run passes", j.Reasons)
+	}
+	if r := o17RowOf(t, j, set); !passes(r) || r.Value != "3,00 s" || r.Limit != "≤ 4 s" {
+		t.Errorf("passing O17-off row = %+v, want 3,00 s ≤ 4 s, passed", r)
+	}
+
+	note := "informativ, în afara G10: " + set + ": rularea " + set + "-21, cu „Pierdere minimă la pană de curent” oprită: "
+	for _, c := range []struct {
+		name   string
+		mutate func(*results.Run)
+		cause  string // the run's failures, as the reason gives them
+		value  string // the row's value
+	}{
+		{"the 4 Mbps stream over 2 s", func(r *results.Run) { setStreamLoss(r, MainStream, 2500) },
+			"cam01_main a pierdut 2,50 s, peste limita de 2 s", "3,00 s; cam01_main a pierdut 2,50 s, peste limita de 2 s"},
+		{"reconcile not clean", func(r *results.Run) { r.Reconciled = false },
+			"reconcilierea a cerut intervenție", "3,00 s; reconcilierea a cerut intervenție"},
+		{"unreadable files", func(r *results.Run) { r.Unreadable = 2 },
+			"2 fișiere ilizibile", "3,00 s; 2 fișiere ilizibile"},
+		{"a torn fMP4 part", func(r *results.Run) { r.TornParts = 1 },
+			"1 parte fMP4 ruptă", "3,00 s; 1 parte fMP4 ruptă"},
+		{"clear bytes on the disk", func(r *results.Run) { r.Hub04Clear = false },
+			"HUB-04: octeți video în clar pe disc", "3,00 s; HUB-04: octeți video în clar pe disc"},
+		{"no stream measured", func(r *results.Run) { r.Streams = nil },
+			"niciun flux măsurat", "niciun flux măsurat"},
+		// The row's own value and limit show this one, so it is not repeated.
+		{"the 256 kbps stream over 4 s", func(r *results.Run) { setStreamLoss(r, LowBitrateStream, 4100) },
+			"cam99_main a pierdut 4,10 s, peste limita de 4 s", "4,10 s"},
+		{"two failures", func(r *results.Run) { setStreamLoss(r, LowBitrateStream, 4100); r.TornParts = 2 },
+			"cam99_main a pierdut 4,10 s, peste limita de 4 s; 2 părți fMP4 rupte", "4,10 s; 2 părți fMP4 rupte"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			runs := allSets(t)
+			c.mutate(o17Run(t, runs, set))
+			j := Judge(envelopes(runs))
+			wantVerdict(t, j, results.Pass) // the brief keeps the whole O17-off run outside G10
+			if r := o17RowOf(t, j, set); r.Pass == nil || *r.Pass || r.Value != c.value || r.Limit != "≤ 4 s" {
+				t.Errorf("O17-off row = %+v, want %q ≤ 4 s, failed", r, c.value)
+			}
+			if want := []string{note + c.cause}; !slices.Equal(j.Reasons, want) {
+				t.Errorf("Reasons = %q, want %q", j.Reasons, want)
+			}
+		})
+	}
+
+	t.Run("two O17-off runs name the failed one", func(t *testing.T) {
+		runs := allSets(t)
+		again := *o17Run(t, runs, set)
+		again.RunID += "-b"
+		again.Hub04Clear = false
+		runs[set] = append(runs[set], again)
+		j := Judge(envelopes(runs))
+		wantVerdict(t, j, results.Pass)
+		if r, want := o17RowOf(t, j, set), "3,00 s; rularea "+set+"-21-b: HUB-04: octeți video în clar pe disc"; passes(r) || r.Value != want {
+			t.Errorf("O17-off row = %+v, want %q, failed", r, want)
+		}
+		reasonsMention(t, j, "informativ, în afara G10: "+set+": rularea "+set+"-21-b,", "HUB-04")
+	})
+}
+
 // TestMI1_Judge_RecomputesStoredLimit: Judge recomputes every stream's
 // limit and never trusts the stored LimitMs.
 func TestMI1_Judge_RecomputesStoredLimit(t *testing.T) {
