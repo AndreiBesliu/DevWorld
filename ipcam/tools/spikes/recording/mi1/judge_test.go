@@ -273,7 +273,8 @@ func TestMI1_PaddingOff_UsesUnpaddedBound(t *testing.T) {
 // cam99_main with the setting off. A clear default run whose setting is
 // left at its zero value stays a default run; a run marked O17-off without
 // that stream is an invalid composition, reported as such and never judged
-// against cam01_main's 2 s limit.
+// against cam01_main's 2 s limit as the O17-off row, while what it
+// measured to fail still fails G10.
 func TestMI1_O17OffRunIsEncryptedWith256kbpsSettingOff(t *testing.T) {
 	t.Run("a clear default run with the setting at its zero value", func(t *testing.T) {
 		runs := allSets(t)
@@ -314,12 +315,67 @@ func TestMI1_O17OffRunIsEncryptedWith256kbpsSettingOff(t *testing.T) {
 			runs := allSets(t)
 			r := o17Run(t, runs, SetPCKill9)
 			mutate(r)
-			setStreamLoss(r, MainStream, 1500) // within 2 s: it must not pass as the O17-off row
+			for i := range r.Streams {
+				r.Streams[i].LossMs = 1500 // within 2 s: it must neither fail nor pass as the O17-off row
+			}
 			j := Judge(envelopes(runs))
 			wantVerdict(t, j, results.Incomplete)
 			reasonsMention(t, j, SetPCKill9+": "+O17OffLabel+": rularea "+r.RunID+": nu înregistrează cam99_main cu setarea oprită")
 			if o := o17RowOf(t, j, SetPCKill9); o.Pass != nil || o.Value != "lipsește" || o.Limit != "≤ 4 s" {
 				t.Errorf("O17-off row = %+v, want lipsește ≤ 4 s and no pass value", o)
+			}
+		})
+	}
+
+	// What such a run measured still decides (G27, C1-R13): a failure fails
+	// the set and G10 with plan B, and its one reason names the run, why it
+	// is not the O17-off run, and the failure. A run without any stream
+	// gets that first part only, never «niciun flux măsurat» as well.
+	withoutCam99 := func(r *results.Run) {
+		r.Streams = slices.DeleteFunc(slices.Clone(r.Streams), func(s results.StreamLoss) bool { return s.Stream == LowBitrateStream })
+	}
+	for _, c := range []struct {
+		name   string
+		mutate func(*results.Run)
+		reason string // after «nu înregistrează cam99_main cu setarea oprită; »
+	}{
+		{"clear bytes on the disk", func(r *results.Run) { withoutCam99(r); r.Hub04Clear = false },
+			"HUB-04: octeți video în clar pe disc"},
+		{"the 4 Mbps stream over 2 s", func(r *results.Run) { withoutCam99(r); setStreamLoss(r, MainStream, 2500) },
+			"cam01_main a pierdut 2,50 s, peste limita de 2 s"},
+		{"reconcile not clean", func(r *results.Run) { withoutCam99(r); r.Reconciled = false },
+			"reconcilierea a cerut intervenție"},
+		{"cam99_main's file unreadable and clear bytes", func(r *results.Run) { withoutCam99(r); r.Unreadable = 1; r.Hub04Clear = false },
+			"1 fișier ilizibil; HUB-04: octeți video în clar pe disc"},
+		{"no stream and a torn fMP4 part", func(r *results.Run) { r.Streams = nil; r.TornParts = 1 },
+			"1 parte fMP4 ruptă"},
+		{"cam99_main at the setting on over 2 s", func(r *results.Run) {
+			r.Streams = slices.Clone(r.Streams)
+			for i := range r.Streams {
+				r.Streams[i].PadLowBitrate = r.Streams[i].Stream == LowBitrateStream
+			}
+			setStreamLoss(r, LowBitrateStream, 2500)
+		}, "cam99_main a pierdut 2,50 s, peste limita de 2 s"},
+	} {
+		t.Run("a run marked O17-off with "+c.name, func(t *testing.T) {
+			runs := allSets(t)
+			r := o17Run(t, runs, SetPCKill9)
+			c.mutate(r)
+			j := Judge(envelopes(runs))
+			wantVerdict(t, j, results.Fail)
+			want := []string{SetPCKill9 + ": " + O17OffLabel + ": rularea " + r.RunID + ": nu înregistrează cam99_main cu setarea oprită; " + c.reason}
+			if !slices.Equal(j.Reasons, want) {
+				t.Errorf("Reasons = %q, want %q", j.Reasons, want)
+			}
+			if len(j.Notes) != 0 {
+				t.Errorf("Notes = %q, want none: no 256 kbps loss was measured with the setting off", j.Notes)
+			}
+			// Still no O17-off measurement, and still not a default run.
+			if o := o17RowOf(t, j, SetPCKill9); o.Pass != nil || o.Value != "lipsește" || o.Limit != "≤ 4 s" {
+				t.Errorf("O17-off row = %+v, want lipsește ≤ 4 s and no pass value", o)
+			}
+			if f := row(t, j, "MI1 "+SetPCKill9+":", "eșuate"); f.Value != "0 din 20" {
+				t.Errorf("failed-runs row = %+v, want 0 din 20", f)
 			}
 		})
 	}

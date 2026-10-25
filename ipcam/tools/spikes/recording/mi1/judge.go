@@ -141,6 +141,13 @@ func failuresExcept(r results.Run, excused func(results.StreamLoss) bool) []stri
 	if len(r.Streams) == 0 {
 		out = append(out, "niciun flux măsurat")
 	}
+	return append(out, measuredFailures(r, excused)...)
+}
+
+// measuredFailures is failuresExcept without «niciun flux măsurat»: only
+// what the run measured to fail.
+func measuredFailures(r results.Run, excused func(results.StreamLoss) bool) []string {
+	var out []string
 	for _, s := range r.Streams {
 		if limit := streamLimit(s); s.LossMs > limit && (excused == nil || !excused(s)) {
 			out = append(out, lossFailure(s, limit))
@@ -219,7 +226,10 @@ type setResult struct {
 // automated set, only the 256 kbps stream's loss is judged apart (C1-R13):
 // in a row of its own, and, over its limit, in Notes, outside the verdict
 // and its plan B; any other failure of that run fails the set like a
-// default run's. The run stays outside the set's median and max. G10
+// default run's. The run stays outside the set's median and max. A counted
+// run marked O17-off (encrypted, the setting off) that does not record
+// cam99_main at the setting off leaves the set incomplete, and what it
+// measured to fail fails the set the same way (G27). G10
 // passes only when every set passes; a failed run or set fails it with
 // PlanB, even with other sets incomplete; a missing Pi set defers it to
 // Faza 0-bis when the Pi is unsupported (an envelope with host "pi" says
@@ -301,7 +311,7 @@ func dedup(envs []results.Envelope) []setRun {
 // judgeSet judges one set and adds its rows and notes to j.
 func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported bool) setResult {
 	var res setResult
-	var defaults, o17 []results.Run
+	var defaults, o17, marked []results.Run
 	var missing []string // what keeps the set from its plan
 	for _, r := range runs {
 		switch {
@@ -311,7 +321,8 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 		case slices.ContainsFunc(r.Streams, isO17Stream):
 			o17 = append(o17, r)
 		default: // marked O17-off, without what the O17-off run measures
-			missing = append(missing, o17Text(s.name, r.RunID, "nu înregistrează "+LowBitrateStream+" cu setarea oprită"))
+			marked = append(marked, r)
+			missing = append(missing, o17Text(s.name, r.RunID, notO17Run))
 		}
 	}
 	if s.real {
@@ -337,6 +348,17 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 		if f := failuresExcept(r, isO17Stream); len(f) > 0 {
 			o17Failed = true
 			res.reasons = append(res.reasons, o17Text(s.name, r.RunID, strings.Join(f, "; ")))
+		}
+	}
+	// A counted run marked O17-off without cam99_main at the setting off is
+	// an invalid composition (missing), but what it measured still decides
+	// (G27): its failures fail the set like the O17-off run's. It has no
+	// stream to excuse, and its lack of any stream is notO17Run itself, so
+	// its one reason starts with that.
+	for _, r := range marked {
+		if f := measuredFailures(r, nil); len(f) > 0 {
+			o17Failed = true
+			res.reasons = append(res.reasons, o17Text(s.name, r.RunID, strings.Join(append([]string{notO17Run}, f...), "; ")))
 		}
 	}
 
@@ -389,6 +411,10 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 	}
 	return res
 }
+
+// notO17Run is why a run marked O17-off (encrypted, the setting off) is not
+// the O17-off run.
+const notO17Run = "nu înregistrează " + LowBitrateStream + " cu setarea oprită"
 
 // o17Text is a reason or a note about the O17-off run id of set.
 func o17Text(set, id, what string) string {
