@@ -206,7 +206,12 @@ func (c *ctl) session(local net.Addr) link.Session {
 
 // startRun announces a run: the controller keeps its beacons, marks the
 // pacing, and watches for the beacons' end, near the stop. A run of an
-// unknown kind, or a smoke run outside the lab, is refused in Romanian.
+// unknown kind, or a smoke run outside the lab, is refused in Romanian. A
+// run announced again, by a host whose link dropped and which cannot know
+// whether the old link lost its run_start, keeps its schedule, its cut and
+// its pacing start, and only moves to the new link, as a repeated ready
+// does: a new announcement would draw its cut again and shorten its
+// pacing.
 func (c *ctl) startRun(conn *link.Conn, m link.RunStart) {
 	kind := controller.ShutdownKind(m.Kind)
 	var refusal string
@@ -221,12 +226,20 @@ func (c *ctl) startRun(conn *link.Conn, m link.RunStart) {
 		c.reply(conn, link.Refused{RunID: m.RunID, Reason: refusal})
 		return
 	}
+	c.mu.Lock()
+	if known := c.runs[m.RunID]; known != nil {
+		known.conn = conn
+		c.mu.Unlock()
+		c.say("Rularea %s: gazda a anunțat-o din nou, după o reconectare; rularea continuă.", m.RunID)
+		return
+	}
+	c.mu.Unlock()
 	c.beacons.Expect(m.RunID)
 	ctx, cancel := context.WithCancel(c.ctx)
 	r := &runState{ctx: ctx, cancel: cancel, start: m, startMark: c.pacer.MarkPacing(), cut: controller.Cut{RunID: m.RunID, Kind: kind}, conn: conn}
 	c.mu.Lock()
 	if old := c.runs[m.RunID]; old != nil {
-		old.cancel() // announced again: the new announcement's schedule counts
+		old.cancel() // announced twice at once: the latest announcement counts
 	}
 	c.runs[m.RunID] = r
 	c.mu.Unlock()
@@ -460,7 +473,9 @@ func (c *ctl) report(m link.Report) results.Run {
 	pacing := c.pacer.Pacing(r.startMark, *end, stopAt)
 	run := c.judge(r, m, cut, len(beacons), interrupted, errBound, pacing)
 
-	env := results.Envelope{Schema: results.Schema, Code: "MI1", RunID: m.RunID, Set: r.start.Set, Host: r.start.Host, OS: r.start.OS,
+	// A lab smoke run's envelope goes under its own results set, apart from
+	// the set's counted envelopes.
+	env := results.Envelope{Schema: results.Schema, Code: "MI1", RunID: m.RunID, Set: mi1.ResultsSet(r.start.Set, r.start.Smoke), Host: r.start.Host, OS: r.start.OS,
 		PiModel: r.start.PiModel, Storage: r.start.Storage, SdConfirmation: r.start.SdConfirmation, Runs: []results.Run{run}}
 	written := results.Write(c.results, env)
 	if written != nil {

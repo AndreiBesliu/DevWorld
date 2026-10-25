@@ -32,6 +32,19 @@ const (
 	SetRealPi            = "real-pi"
 )
 
+// ResultsSet is the set under which a run keeps its results and names
+// its run ids: its set, or for a lab smoke run <set>-smoke, such as
+// lab-linux-kill9-smoke. A smoke run only checks the harness, with the
+// smoke windows: reccontroller writes its envelope apart from the set's
+// counted ones (MI1/<results set>/<runId>.json), and its run ids never
+// name one of the set's runs, which Judge would merge.
+func ResultsSet(set string, smoke bool) string {
+	if smoke {
+		return set + "-smoke"
+	}
+	return set
+}
+
 // The streams that MI1 records, as reccontroller serves them: every run
 // records cam01_main (4 Mbps); cam99_main is the 256 kbps camera of
 // HUB-07's low-bitrate runs.

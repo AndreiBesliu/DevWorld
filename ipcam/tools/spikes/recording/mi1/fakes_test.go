@@ -153,8 +153,11 @@ func killFakeHubs(t *testing.T, path string) {
 // answers a report with a valid verdict (or verdict's), serves sendResults
 // on pull_results, and, with pullAtBye, pulls the host's results into
 // pulled when it says bye. It keeps every beacon it receives, and drops the
-// link instead of answering the first dropReports reports. Every message it
-// gets is also an event.
+// link instead of answering the first dropReports reports. It loses the
+// first loseStarts run_starts and drops the link at their run's ready, as
+// a link that died after the run_start would; like reccontroller, it
+// refuses the ready of a run that it never kept (unknownRun). dropLinks
+// drops every link it has. Every message it gets is also an event.
 type fakeController struct {
 	t           *testing.T
 	ln          net.Listener
@@ -166,13 +169,21 @@ type fakeController struct {
 	verdict     func(start link.RunStart, r link.Report) results.Run
 	dropReports int
 
-	mu      sync.Mutex
-	starts  []link.RunStart
-	reports []link.Report
-	refused []link.Refused
-	beacons map[uint64][]uint64 // each run's beacon sequence numbers, as they arrived
-	events  chan string
+	mu         sync.Mutex
+	loseStarts int
+	lost       map[string]bool // the run_starts it lost, until their ready
+	conns      map[*link.Conn]bool
+	hellos     int
+	starts     []link.RunStart
+	reports    []link.Report
+	refused    []link.Refused
+	beacons    map[uint64][]uint64 // each run's beacon sequence numbers, as they arrived
+	events     chan string
 }
+
+// unknownRun is reccontroller's refusal of a ready for a run that it does
+// not know.
+const unknownRun = "rularea nu a fost anunțată controlorului"
 
 func startFakeController(t *testing.T) *fakeController {
 	t.Helper()
@@ -185,7 +196,7 @@ func startFakeController(t *testing.T) *fakeController {
 		t.Fatal(err)
 	}
 	f := &fakeController{t: t, ln: ln, beacon: beacon, sendResults: t.TempDir(), pulled: t.TempDir(),
-		beacons: map[uint64][]uint64{}, events: make(chan string, 256)}
+		lost: map[string]bool{}, conns: map[*link.Conn]bool{}, beacons: map[uint64][]uint64{}, events: make(chan string, 256)}
 	t.Cleanup(func() { _, _ = ln.Close(), beacon.Close() })
 	go func() {
 		buf := make([]byte, 64)
@@ -223,7 +234,15 @@ func (f *fakeController) event(e string) {
 }
 
 func (f *fakeController) serve(c *link.Conn) {
-	defer func() { _ = c.Close() }()
+	f.mu.Lock()
+	f.conns[c] = true
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		delete(f.conns, c)
+		f.mu.Unlock()
+		_ = c.Close()
+	}()
 	runs := map[string]link.RunStart{}
 	for {
 		m, err := c.Receive()
@@ -235,11 +254,24 @@ func (f *fakeController) serve(c *link.Conn) {
 			port := f.beacon.LocalAddr().(*net.UDPAddr).Port
 			_ = c.Send(link.Session{RTSPBase: "rtsp://127.0.0.1:1", User: "u", Pass: "p", Streams: []string{"cam01_main", "cam99_main"},
 				BeaconPort: port, Needles: [][]byte{[]byte("ftypmp42")}})
+			f.mu.Lock()
+			f.hellos++
+			f.mu.Unlock()
 			f.event("hello " + m.Host)
 		case link.RunStart:
 			f.mu.Lock()
-			f.starts = append(f.starts, m)
+			lose := f.loseStarts > 0
+			if lose {
+				f.loseStarts--
+				f.lost[m.RunID] = true
+			} else {
+				f.starts = append(f.starts, m)
+			}
 			f.mu.Unlock()
+			if lose {
+				f.event("lost run_start " + m.RunID)
+				continue
+			}
 			runs[m.RunID] = m
 			f.event("run_start " + m.RunID)
 		case link.Ready:
@@ -249,10 +281,21 @@ func (f *fakeController) serve(c *link.Conn) {
 				f.mu.Lock()
 				for _, s := range f.starts {
 					if s.RunID == m.RunID {
-						start = s
+						start, ok = s, true
 					}
 				}
+				lost := f.lost[m.RunID]
+				delete(f.lost, m.RunID)
 				f.mu.Unlock()
+				switch {
+				case !ok && lost:
+					f.event("dropped at ready " + m.RunID)
+					return // the link that lost the run_start dies
+				case !ok:
+					_ = c.Send(link.Refused{RunID: m.RunID, Reason: unknownRun})
+					f.event("unknown " + m.RunID)
+					continue
+				}
 			}
 			if f.onReady != nil {
 				f.onReady(c, start)
@@ -301,6 +344,22 @@ func (f *fakeController) serve(c *link.Conn) {
 			return
 		}
 	}
+}
+
+// dropLinks drops every link that the fake controller has.
+func (f *fakeController) dropLinks() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for c := range f.conns {
+		_ = c.Close()
+	}
+}
+
+// helloCount is how many times a host connected and said hello.
+func (f *fakeController) helloCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hellos
 }
 
 func (f *fakeController) runStarts() []link.RunStart {

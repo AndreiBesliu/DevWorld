@@ -312,7 +312,9 @@ func (d *Driver) Resume(ctx context.Context) error {
 // begin returns the run state of the set o asks for: the one in progress,
 // or a new one when the last set is complete or there is none. A lab state
 // is its shard's, and a smoke run's is its own: another shard, or the full
-// shard after its smoke run, never continues it.
+// shard after its smoke run, never continues it. A smoke run's run ids and
+// envelopes are its own too (ResultsSet), so a smoke run and its full
+// shard may follow each other in one folder, in either order.
 // A set that is complete stays so: its run ids are taken, and its envelopes
 // are the controller's. A new set's host is o.Host's, when it has one.
 func (d *Driver) begin(ctx context.Context, st *RunState, o SetOptions) (*RunState, error) {
@@ -445,6 +447,14 @@ func (d *Driver) loop(ctx context.Context, s *session, st *RunState, waitForWind
 				if err := d.waitWindow(ctx, w); err != nil {
 					return err
 				}
+			}
+		}
+		// A link that dropped since the last run, or while the set waited
+		// for its window, is connected again before the run is prepared:
+		// its run.json takes the controller's cameras from the session.
+		if !s.up() {
+			if err := d.reconnect(ctx, s, st, errLinkDown); err != nil {
+				return err
 			}
 		}
 		if err := d.record(ctx, s, st, next, attempt); err != nil {
@@ -757,6 +767,16 @@ func read(c *link.Conn, in chan<- received, closed <-chan struct{}, broken chan<
 func (s *session) send(m link.Message) error {
 	if err := s.c.Send(m); err != nil {
 		return fmt.Errorf("%w: %w", errLinkDown, err)
+	}
+	return nil
+}
+
+// sendAll sends msgs in order, until one fails.
+func (s *session) sendAll(msgs []link.Message) error {
+	for _, m := range msgs {
+		if err := s.send(m); err != nil {
+			return err
+		}
 	}
 	return nil
 }

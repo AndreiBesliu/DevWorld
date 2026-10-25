@@ -109,7 +109,10 @@ func TestMI1_LabKill9Smoke(t *testing.T) {
 		t.Fatalf("RunSet: %v\nrecspike:\n%s\nreccontroller:\n%s", err, out.String(), screen.String())
 	}
 
-	files, err := filepath.Glob(filepath.Join(bin, "results", "MI1", set, "*.json"))
+	// A smoke run's envelopes are under its own results set, apart from
+	// the set's counted ones.
+	smokeSet := ResultsSet(set, true)
+	files, err := filepath.Glob(filepath.Join(bin, "results", "MI1", smokeSet, "*.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +122,7 @@ func TestMI1_LabKill9Smoke(t *testing.T) {
 		if err != nil {
 			t.Fatalf("envelope %s: %v", filepath.Base(f), err)
 		}
-		if len(e.Runs) != 1 || e.Host != d.Host.Pseudonym || e.Set != set {
+		if len(e.Runs) != 1 || e.Host != d.Host.Pseudonym || e.Set != smokeSet {
 			t.Errorf("envelope %s: %+v", filepath.Base(f), e)
 			continue
 		}

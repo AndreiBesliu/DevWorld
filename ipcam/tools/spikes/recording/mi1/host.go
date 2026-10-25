@@ -100,10 +100,11 @@ func OwnerHost(ctx context.Context, hub, recDir, goos string, in *bufio.Reader, 
 // record records one run: it starts ipcam-hub with the run's beacon, tells
 // the controller that it is ready, stops the host when the controller says
 // (G09, C16), and finishes and reports the run; a sysrq or bugcheck run is
-// finished after the reboot, by Resume.
+// finished after the reboot, by Resume. A lab smoke run's id names its own
+// results set (ResultsSet), never one of the set's runs.
 func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan, attempt int) error {
 	cur := &CurrentRun{
-		RunID: fmt.Sprintf("%s-%02d-%d", st.Set, p.Index, attempt), Index: p.Index, Attempt: attempt,
+		RunID: fmt.Sprintf("%s-%02d-%d", ResultsSet(st.Set, st.Smoke), p.Index, attempt), Index: p.Index, Attempt: attempt,
 		Encrypted: p.Encrypted, PadLowBitrate: p.PadLowBitrate, Streams: p.Streams, Phase: PhaseRecording,
 	}
 	if st.Mode == ModeReal {
@@ -122,11 +123,7 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 	if err := SaveRunState(d.statePath(), st); err != nil {
 		return err
 	}
-	if err := s.send(link.RunStart{
-		RunID: cur.RunID, Set: st.Set, Kind: st.Kind, Encrypted: cur.Encrypted, PadLowBitrate: cur.PadLowBitrate, Streams: cur.Streams,
-		Host: st.Host.Pseudonym, OS: st.Host.OS, Storage: st.Host.Storage, PiModel: st.Host.PiModel, SdConfirmation: st.Host.SdConfirmation,
-		Slot: cur.Slot, Attempt: cur.Attempt, Smoke: st.Smoke,
-	}); err != nil {
+	if err := d.announce(ctx, s, st, cur, false); err != nil {
 		return err
 	}
 	d.say("Rularea %s (%s) începe.", cur.RunID, encryptionText(cur.Encrypted))
@@ -149,17 +146,62 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 		}
 		return fmt.Errorf("ipcam-hub nu a pornit rularea %s: %w (jurnalul: %s)", cur.RunID, err, filepath.Join(d.runDir(cur.RunID), "ipcam-hub.log"))
 	}
-	if err := s.send(link.Ready{RunID: cur.RunID}); err != nil {
+	if err := d.announce(ctx, s, st, cur, true); err != nil {
+		stopHub(hub)
 		return err
 	}
 	return d.awaitCut(ctx, s, st, cur, vol, hub)
 }
 
+// runStart is the announcement of cur to the controller.
+func runStart(st *RunState, cur *CurrentRun) link.RunStart {
+	return link.RunStart{
+		RunID: cur.RunID, Set: st.Set, Kind: st.Kind, Encrypted: cur.Encrypted, PadLowBitrate: cur.PadLowBitrate, Streams: cur.Streams,
+		Host: st.Host.Pseudonym, OS: st.Host.OS, Storage: st.Host.Storage, PiModel: st.Host.PiModel, SdConfirmation: st.Host.SdConfirmation,
+		Slot: cur.Slot, Attempt: cur.Attempt, Smoke: st.Smoke,
+	}
+}
+
+// announce tells the controller of cur: its run_start, or its ready once
+// ipcam-hub is ready. A link that is down, or that drops as recspike
+// sends, is connected again in an unattended set (deliver), and the new
+// link hears the whole announcement, run_start then ready: the old link may
+// have lost the run_start too. The controller keeps a run that it knows,
+// with its schedule and its cut, and moves it to the new link.
+func (d *Driver) announce(ctx context.Context, s *session, st *RunState, cur *CurrentRun, ready bool) error {
+	start := runStart(st, cur)
+	if !ready {
+		return d.deliver(ctx, s, st, []link.Message{start}, []link.Message{start})
+	}
+	return d.deliver(ctx, s, st, []link.Message{link.Ready{RunID: cur.RunID}}, []link.Message{start, link.Ready{RunID: cur.RunID}})
+}
+
+// deliver sends msgs to the controller, in order. In an unattended set, a
+// link that is down, or that drops as recspike sends, is connected again,
+// at most maxReconnects times, and the new link hears again: what the old
+// one may have lost. A real set's drop ends it, as before (reconnect).
+func (d *Driver) deliver(ctx context.Context, s *session, st *RunState, msgs, again []link.Message) error {
+	for reconnects := 0; ; reconnects++ {
+		err := errLinkDown
+		if s.up() {
+			err = s.sendAll(msgs)
+		}
+		if err == nil || !errors.Is(err, errLinkDown) || reconnects == maxReconnects {
+			return err
+		}
+		if err := d.reconnect(ctx, s, st, err); err != nil {
+			return err
+		}
+		msgs = again
+	}
+}
+
 // awaitCut waits for the controller's cut of cur and stops the host as its
 // kind says. A cut or a refusal of another run, one that has ended, is
 // ignored: it never stops this run (C16). In an unattended set, a link that
-// drops meanwhile is connected again, and the run's ready repeated on it:
-// the controller delivers the cut there.
+// drops meanwhile is connected again, and the run announced again on it,
+// run_start then ready: the controller delivers the cut there, the same
+// cut if it went out on the old link.
 func (d *Driver) awaitCut(ctx context.Context, s *session, st *RunState, cur *CurrentRun, vol Volume, hub *hubproc.Hub) error {
 	for reconnects := 0; ; {
 		var m link.Message
@@ -186,7 +228,9 @@ func (d *Driver) awaitCut(ctx context.Context, s *session, st *RunState, cur *Cu
 				stopHub(hub)
 				return err
 			}
-			if err := s.send(link.Ready{RunID: cur.RunID}); err != nil {
+			start := runStart(st, cur)
+			whole := []link.Message{start, link.Ready{RunID: cur.RunID}}
+			if err := d.deliver(ctx, s, st, whole, whole); err != nil {
 				stopHub(hub)
 				return err
 			}
@@ -297,7 +341,8 @@ func (d *Driver) refuse(ctx context.Context, s *session, st *RunState, cur *Curr
 	if err != nil {
 		return err
 	}
-	if err := s.send(link.Refused{RunID: cur.RunID, Reason: reason}); err != nil {
+	refused := []link.Message{link.Refused{RunID: cur.RunID, Reason: reason}}
+	if err := d.deliver(ctx, s, st, refused, refused); err != nil {
 		return err
 	}
 	return d.done(st, cur, vol, results.Run{RunID: cur.RunID, InvalidReason: reason, Slot: cur.Slot, Attempt: cur.Attempt,
@@ -319,7 +364,7 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 	// is measured on its boot clock.
 	booted := cur.Phase == PhaseStopping
 	if booted && !d.rebootedSince(cur) {
-		return d.notRebooted(s, st, cur, vol)
+		return d.notRebooted(ctx, s, st, cur, vol)
 	}
 	if cur.Phase != PhaseStopped {
 		if err := d.listBefore(cur, vol); err != nil {
@@ -366,10 +411,11 @@ func (d *Driver) rebootedSince(cur *CurrentRun) bool {
 // notRebooted ends a run whose OS stop did not reboot the host (the stop
 // failed, or the host never went down): it is invalid, with no ColdBootMs
 // and no report; the controller hears why, and the run is redone.
-func (d *Driver) notRebooted(s *session, st *RunState, cur *CurrentRun, vol Volume) error {
+func (d *Driver) notRebooted(ctx context.Context, s *session, st *RunState, cur *CurrentRun, vol Volume) error {
 	reason := fmt.Sprintf("gazda nu a repornit după oprirea %s", st.Kind)
 	d.say("Rularea %s: %s; rularea se reface.", cur.RunID, reason)
-	if err := s.send(link.Refused{RunID: cur.RunID, Reason: reason}); err != nil {
+	refused := []link.Message{link.Refused{RunID: cur.RunID, Reason: reason}}
+	if err := d.deliver(ctx, s, st, refused, refused); err != nil {
 		return err
 	}
 	return d.done(st, cur, vol, results.Run{RunID: cur.RunID, InvalidReason: reason, Slot: cur.Slot, Attempt: cur.Attempt,

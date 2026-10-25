@@ -21,6 +21,7 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/lastindex"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
 )
 
 // rig is one host's folders, its fake log and its screen.
@@ -520,7 +521,8 @@ func TestAwaitCut_IgnoresACutOfAnotherRun(t *testing.T) {
 // full shard after a smoke run of it, or shard 2 after shard 1, starts a
 // state of its own instead of reporting complete from the old one, and a
 // shard still in progress refuses another in Romanian; the same shard
-// continues its own state.
+// continues its own state. (A smoke run's envelopes never meet the full
+// shard's: TestLab_SmokeAndFullRunsNeverShareAnEnvelope.)
 func TestBegin_LabShardsAndSmokeRunsKeepTheirOwnState(t *testing.T) {
 	d := &Driver{Results: t.TempDir(), Host: LabHost("linux")}
 	state := func(shard int, smoke bool, counted int) *RunState {
@@ -566,6 +568,80 @@ func TestBegin_LabShardsAndSmokeRunsKeepTheirOwnState(t *testing.T) {
 	}
 	if st, err := d.begin(t.Context(), half, lab(1, false)); err != nil || st != half {
 		t.Errorf("shard 1 again: begin = %+v, %v; want its own state continued", st, err)
+	}
+}
+
+// TestLab_SmokeAndFullRunsNeverShareAnEnvelope (item 3, R03): a lab
+// shard's smoke run and the full shard, in either order in the same results
+// folder, never name the same envelope. reccontroller writes a run's
+// envelope at MI1/<results set>/<runId>.json: a smoke run's results set is
+// <set>-smoke and its run ids start with it, so a smoke window's result
+// never overwrites a counted one, never lands beside the set's envelopes,
+// and never shares a run id that Judge would merge.
+func TestLab_SmokeAndFullRunsNeverShareAnEnvelope(t *testing.T) {
+	r := newRig(t, "lab-linux")
+	lab := func(smoke bool) SetOptions {
+		return SetOptions{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: 1, Smoke: smoke}
+	}
+	// A smoke run, then the full shard: its first two runs are the ones
+	// whose indexes the smoke run shares; the test ends it as its third
+	// starts.
+	if err := r.driver(t).RunSet(t.Context(), lab(true)); err != nil {
+		t.Fatalf("the smoke run: RunSet = %v\nscreen:\n%s", err, r.out.String())
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	third := cancelAt(r.f, "run_start "+SetLabLinuxKill9+"-03-1", cancel)
+	if err := r.driver(t).RunSet(ctx, lab(false)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the full shard: RunSet = %v, want the test's cancel at its third run\nscreen:\n%s", err, r.out.String())
+	}
+	if err := <-third; err != nil {
+		t.Fatal(err)
+	}
+	// The full shard complete, then a smoke run again.
+	d := r.driver(t)
+	shard := &RunState{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: 1, Host: d.Host}
+	plan, err := d.plan(shard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range plan {
+		shard.Done = append(shard.Done, DoneRun{Index: p.Index, Run: results.Run{RunID: fmt.Sprintf("%s-%02d-1", shard.Set, p.Index), Valid: true}})
+	}
+	if err := SaveRunState(d.statePath(), shard); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RunSet(t.Context(), lab(true)); err != nil {
+		t.Fatalf("the smoke run after the full shard: RunSet = %v\nscreen:\n%s", err, r.out.String())
+	}
+	envelope := func(s link.RunStart) string {
+		return filepath.Join("MI1", ResultsSet(s.Set, s.Smoke), s.RunID+".json")
+	}
+	var smoke, full []link.RunStart
+	for _, s := range r.f.runStarts() {
+		if s.Smoke {
+			smoke = append(smoke, s)
+		} else {
+			full = append(full, s)
+		}
+	}
+	if len(smoke) != 4 || len(full) != 3 {
+		t.Fatalf("%d smoke runs and %d full runs, want 2 + 2 smoke runs and the full shard's first 3", len(smoke), len(full))
+	}
+	for _, s := range smoke {
+		if dir, want := filepath.Dir(envelope(s)), filepath.Join("MI1", SetLabLinuxKill9+"-smoke"); dir != want {
+			t.Errorf("smoke run %s: envelope in %s, want %s", s.RunID, dir, want)
+		}
+		for _, f := range full {
+			if s.RunID == f.RunID || envelope(s) == envelope(f) {
+				t.Errorf("smoke run %s and full run %s share the run id or the envelope %s", s.RunID, f.RunID, envelope(f))
+			}
+		}
+	}
+	for _, f := range full {
+		if dir, want := filepath.Dir(envelope(f)), filepath.Join("MI1", SetLabLinuxKill9); dir != want {
+			t.Errorf("full run %s: envelope in %s, want %s", f.RunID, dir, want)
+		}
 	}
 }
 
@@ -806,11 +882,56 @@ func TestSession_EndsWithPullAndByeAfterAnError(t *testing.T) {
 	}
 }
 
-// TestSession_ReconnectsAfterALinkDrop: in an unattended automated set, a
-// link that drops while recspike waits for its cut, or for its verdict, is
-// connected again (with bounded retries) instead of ending the set: the run
-// repeats `ready` on the new link and gets its cut there, or sends its
-// report again and gets its verdict, and the set goes on.
+// gateClock is a stepClock whose first tick waits for the test: the
+// driver's wait for its window stops there (waiting is closed) until the
+// test sends the time to open on open.
+type gateClock struct {
+	*stepClock
+	waiting chan struct{}
+	open    chan time.Time
+	once    sync.Once
+}
+
+func newGateClock(now time.Time) *gateClock {
+	c := &gateClock{stepClock: newStepClock(), waiting: make(chan struct{}), open: make(chan time.Time, 1)}
+	c.set(now)
+	return c
+}
+
+func (c *gateClock) NewTicker(d time.Duration) source.Ticker { return &gateTicker{c: c, d: d} }
+
+type gateTicker struct {
+	c *gateClock
+	d time.Duration
+}
+
+func (t *gateTicker) C() <-chan time.Time {
+	first := false
+	t.c.once.Do(func() { first = true })
+	if !first {
+		return (&stepTicker{clock: t.c.stepClock, d: t.d}).C()
+	}
+	close(t.c.waiting)
+	ch := make(chan time.Time, 1)
+	go func() {
+		now := <-t.c.open
+		t.c.set(now)
+		ch <- now
+	}()
+	return ch
+}
+
+func (t *gateTicker) Stop() {}
+
+// TestSession_ReconnectsAfterALinkDrop (item 11): in an unattended
+// automated set, a link that drops is connected again (with bounded
+// retries) instead of ending the set: while the set waits for its window,
+// before a run's run_start, while ipcam-hub starts, while recspike waits
+// for the cut or for the verdict, and as it tells the controller why a run
+// was not stopped. A new link hears the whole announcement of the run in
+// progress, run_start then ready, as the old one may have lost both: the
+// run then gets its cut there; a report is sent again and gets its
+// verdict; and the set goes on.
 func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 	o := func(t *testing.T) SetOptions {
 		return SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: windowAroundNow(t)}
@@ -849,6 +970,91 @@ func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 		}
 		if !strings.Contains(r.out.String(), "Legătura cu controlorul s-a refăcut") {
 			t.Errorf("screen:\n%s\nwant the reconnection said", r.out.String())
+		}
+	})
+
+	t.Run("while it waits for its window", func(t *testing.T) {
+		r := newRig(t, "pc")
+		clock := newGateClock(at("21:00"))
+		d := r.driver(t)
+		d.Clock = clock
+		w, err := ParseWindow("22:00-23:00")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			done <- d.RunSet(ctx, SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: &w, WaitForWindow: true})
+		}()
+		select {
+		case <-clock.waiting:
+		case err := <-done:
+			t.Fatalf("RunSet = %v before it waited for its window", err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("the set never waited for its window")
+		}
+		r.f.dropLinks()                    // the link drops during the wait, hours before the run
+		time.Sleep(200 * time.Millisecond) // recspike's reader sees it
+		reported := cancelAt(r.f, "report pc-kill9-01-1", cancel)
+		clock.open <- at("22:00")
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunSet = %v, want the link connected again before the run and the set going on until the test's cancel\nscreen:\n%s", err, r.out.String())
+		}
+		if err := <-reported; err != nil {
+			t.Fatal(err)
+		}
+		if n := r.f.helloCount(); n != 2 {
+			t.Errorf("the host said hello %d times, want twice: at the start and once after the drop", n)
+		}
+		if s := r.f.runStarts(); len(s) != 1 || s[0].RunID != "pc-kill9-01-1" {
+			t.Errorf("run starts = %+v, want run 1 announced once, on the new link", s)
+		}
+	})
+
+	t.Run("when its run_start is lost with the link", func(t *testing.T) {
+		r := newRig(t, "pc")
+		r.f.mu.Lock()
+		r.f.loseStarts = 1
+		r.f.mu.Unlock()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		reported := cancelAt(r.f, "report pc-kill9-01-1", cancel)
+		if err := r.driver(t).RunSet(ctx, o(t)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunSet = %v, want the run announced again on the new link and the set going on\nscreen:\n%s", err, r.out.String())
+		}
+		if err := <-reported; err != nil {
+			t.Fatal(err)
+		}
+		if s := r.f.runStarts(); len(s) != 1 || s[0].RunID != "pc-kill9-01-1" || s[0].Kind != "kill9" || len(s[0].Streams) != 1 {
+			t.Errorf("run starts kept = %+v, want run 1's announcement, made again in full on the new link", s)
+		}
+		if n := r.f.helloCount(); n != 2 {
+			t.Errorf("the host said hello %d times, want twice", n)
+		}
+	})
+
+	t.Run("when it refuses a stop after its window", func(t *testing.T) {
+		r := newRig(t, "pc")
+		w, err := ParseWindow("22:00-23:00")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clock := newStepClock()
+		clock.set(at("22:30"))
+		r.f.onReady = func(c *link.Conn, start link.RunStart) {
+			clock.set(at("23:05"))
+			_ = c.Send(link.Cut{RunID: start.RunID, Kind: start.Kind, PromptAt: time.Now()})
+			_ = c.Close() // the link drops after the cut
+		}
+		d := r.driver(t)
+		d.Clock = clock
+		if err := d.RunSet(t.Context(), SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: &w}); err != nil {
+			t.Fatalf("RunSet = %v, want nil: the set waits for the next window", err)
+		}
+		if err := r.f.waitEventWithin("refused pc-kill9-01-1", 5*time.Second); err != nil {
+			t.Errorf("%v: the controller never heard why the run was not stopped", err)
 		}
 	})
 

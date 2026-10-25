@@ -849,3 +849,64 @@ func TestReady_UnknownRunIsRefused(t *testing.T) {
 		t.Errorf("reply = %#v, want the run refused: rularea nu a fost anunțată controlorului", m)
 	}
 }
+
+// TestReport_SmokeRunKeepsItsOwnSet (item 3, R03): a lab smoke run's
+// envelope goes under its own results set, <set>-smoke, never into the
+// set's folder beside the counted envelopes, which a smoke window's result
+// would otherwise overwrite or join.
+func TestReport_SmokeRunKeepsItsOwnSet(t *testing.T) {
+	r := newRig(t)
+	conn := r.connect("lab-linux")
+	id := mi1.ResultsSet(mi1.SetLabLinuxKill9, true) + "-01-1"
+	r.send(conn, link.RunStart{RunID: id, Set: mi1.SetLabLinuxKill9, Kind: "kill9", Encrypted: true, PadLowBitrate: true,
+		Streams: []string{"cam01_main"}, Host: "lab-linux", OS: "linux", Storage: "unknown", Attempt: 1, Smoke: true})
+	r.send(conn, link.Report{RunID: id, Hub04Clear: true})
+	if _, ok := r.receive(conn).(link.Verdict); !ok {
+		t.Fatal("no verdict")
+	}
+	e, err := results.Read(filepath.Join(r.results, "MI1", mi1.SetLabLinuxKill9+"-smoke", id+".json"))
+	if err != nil || e.Set != mi1.SetLabLinuxKill9+"-smoke" || len(e.Runs) != 1 || e.Runs[0].RunID != id {
+		t.Errorf("the smoke run's envelope = %+v, %v; want it under %s-smoke", e, err, mi1.SetLabLinuxKill9)
+	}
+	if _, err := os.Stat(filepath.Join(r.results, "MI1", mi1.SetLabLinuxKill9)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the set's own folder exists (%v): a smoke run's envelope went beside the counted ones", err)
+	}
+}
+
+// TestRunStart_AgainKeepsTheRun (item 11): a host whose link dropped
+// announces its run again on the new link, run_start then ready, since the
+// old link may have lost the run_start. A run that the controller knows
+// keeps its schedule, its cut and its pacing start, and only moves to the
+// new link: the repeated ready gets the same cut, not a new draw.
+func TestRunStart_AgainKeepsTheRun(t *testing.T) {
+	r := newRig(t)
+	first := r.connect("pc")
+	id := "pc-kill9-11-1"
+	start := link.RunStart{RunID: id, Set: "pc-kill9", Kind: "kill9", Streams: []string{"cam01_main"}, Host: "pc", OS: "windows", Attempt: 1}
+	r.send(first, start)
+	r.send(first, link.Ready{RunID: id})
+	boot := r.clock.Now().Add(time.Second)
+	r.beaconAt(id, 0, boot)
+	waitFor(t, "the drawn moment", func() bool { return strings.Contains(r.screen.String(), "e programată la") })
+	r.clock.set(boot.Add(13 * time.Minute)) // past every moment the schedule may draw
+	cut, ok := r.receive(first).(link.Cut)
+	if !ok || cut.RunID != id {
+		t.Fatalf("the host got %+v, want the run's cut", cut)
+	}
+	r.c.mu.Lock()
+	run := r.c.runs[id]
+	r.c.mu.Unlock()
+	_ = first.Close() // the cut was lost with the link
+
+	again := r.connect("pc")
+	r.send(again, start)
+	r.send(again, link.Ready{RunID: id})
+	if got, ok := r.receive(again).(link.Cut); !ok || got.RunID != id || !got.PromptAt.Equal(cut.PromptAt) {
+		t.Errorf("after run_start and ready again the host got %+v, want the same cut %+v", got, cut)
+	}
+	r.c.mu.Lock()
+	defer r.c.mu.Unlock()
+	if r.c.runs[id] != run {
+		t.Error("the run announced again was replaced: its schedule and its pacing start are lost")
+	}
+}
