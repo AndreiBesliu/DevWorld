@@ -100,6 +100,12 @@ type runState struct {
 	cut       controller.Cut
 	scheduled bool       // its cut is scheduled: a repeated ready changes nothing
 	conn      *link.Conn // the host's latest connection that named the run
+	// judging is made by the run's first report and closed once that
+	// report has its verdict, in verdict: a report sent again meanwhile,
+	// on another link, waits for it and gets that verdict, so the run is
+	// judged, and its envelope written, once.
+	judging chan struct{}
+	verdict results.Run
 }
 
 // say prints one line on the controller's screen.
@@ -463,12 +469,25 @@ type hubEvent struct {
 // from the beacons, the validity of the cut, the controller's pacing up to
 // the beacons' end, and each stream's loss from the send log; it writes
 // the run's envelope and returns the verdict. A report sent again gets the
-// same verdict. A run whose envelope cannot be written does not count: the
-// host redoes it, so no set is complete without its envelopes.
+// same verdict: from memory once the run is judged, and, while its first
+// report is still being judged (the host's link dropped meanwhile, and the
+// host sent it again on a new one, on its own goroutine here), once that
+// first report has its verdict. Judging it a second time would find the
+// first report's envelope and call the run invalid on the new link, the
+// one the host listens to, while that envelope stays counted. A run whose
+// envelope cannot be written does not count: the host redoes it, so no set
+// is complete without its envelopes.
 func (c *ctl) report(m link.Report) results.Run {
 	c.mu.Lock()
 	r := c.runs[m.RunID]
 	judged, again := c.judged[m.RunID]
+	var judging, done chan struct{}
+	if r != nil {
+		if judging = r.judging; judging == nil {
+			done = make(chan struct{})
+			r.judging = done
+		}
+	}
 	c.mu.Unlock()
 	switch {
 	case r == nil && again:
@@ -476,7 +495,20 @@ func (c *ctl) report(m link.Report) results.Run {
 	case r == nil:
 		c.say("Raport pentru rularea necunoscută %s: rularea se reface.", m.RunID)
 		return results.Run{RunID: m.RunID, InvalidReason: unknownRun}
+	case judging != nil:
+		c.say("Rularea %s: gazda a trimis din nou raportul, după o reconectare; primește același verdict.", m.RunID)
+		<-judging
+		return r.verdict // set before judging closed
 	}
+	run := c.judgeReport(r, m)
+	r.verdict = run // read only once done is closed
+	close(done)
+	return run
+}
+
+// judgeReport is report's judgement of run r, by the run's first report:
+// it writes the envelope, ends the run and returns its verdict.
+func (c *ctl) judgeReport(r *runState, m link.Report) results.Run {
 	beacons := c.beacons.Beacons(m.RunID)
 	interrupted := c.beacons.Interrupted(m.RunID)
 	late := len(beacons) > 0 && startedLate(beacons[0])

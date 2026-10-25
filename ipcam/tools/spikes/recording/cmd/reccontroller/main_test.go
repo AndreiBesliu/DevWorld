@@ -9,9 +9,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime/pprof"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,6 +74,9 @@ type fakePacer struct {
 	stats controller.PacingStats
 	mu    sync.Mutex
 	marks []time.Time
+	// onPacing, when set, runs at each Pacing call, which a report makes
+	// as it judges its run: a test holds the report there.
+	onPacing func()
 }
 
 func (p *fakePacer) MarkPacing() controller.PacingMark {
@@ -82,6 +87,12 @@ func (p *fakePacer) MarkPacing() controller.PacingMark {
 }
 
 func (p *fakePacer) Pacing(controller.PacingMark, controller.PacingMark, time.Time) controller.PacingStats {
+	p.mu.Lock()
+	hook := p.onPacing
+	p.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return p.stats
 }
 
@@ -983,5 +994,131 @@ func TestReport_NeverOverwritesAnEnvelope(t *testing.T) {
 	env, err := results.Read(filepath.Join(r.results, "MI1", "pc-kill9", id+".json"))
 	if err != nil || len(env.Runs) != 1 || env.Runs[0].LossMs != 1234 {
 		t.Errorf("the envelope on disk = %+v, %v; want the first run's, 1234 ms", env.Runs, err)
+	}
+}
+
+// TestReport_SentAgainWhileJudgedGetsTheSameVerdict (Task 7.2c fix 1): a
+// host whose link drops while the controller judges its run's report sends
+// the report again on its new link, the only one it still listens to. The
+// controller judges the run once: the report sent again waits for that
+// judgement and gets its verdict, and the run has one envelope. Judged a
+// second time, it would find the first report's envelope on disk and tell
+// the new link that the run does not count (envelopeExists), while that
+// envelope stays counted: the host would redo the run, and the set would
+// hold one counted run too many. The test holds the first report as it
+// judges, until the second has come. With a results folder that cannot be
+// written, both reports get the first one's invalid verdict, and nothing
+// is on disk. A third report, after both, gets the verdict from memory, or
+// none that counts when no envelope was written.
+func TestReport_SentAgainWhileJudgedGetsTheSameVerdict(t *testing.T) {
+	const (
+		exists     = "există deja la controlor un rezultat cu numele acestei rulări: nu îl suprascriu"
+		notWritten = "rezultatul nu s-a putut scrie la controlor"
+	)
+	for _, writable := range []bool{true, false} {
+		t.Run(fmt.Sprintf("writable=%v", writable), func(t *testing.T) {
+			r := newRig(t)
+			if !writable {
+				file := filepath.Join(t.TempDir(), "not-a-folder")
+				if err := os.WriteFile(file, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				r.c.results = filepath.Join(file, "results") // every write fails: its parent is a file
+			}
+			id := "pc-kill9-14-1"
+			var calls atomic.Int32
+			judging := make(chan struct{}, 2)
+			release := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+			r.pacer.mu.Lock()
+			r.pacer.onPacing = func() {
+				n := min(calls.Add(1), 2) - 1
+				judging <- struct{}{}
+				<-release[n]
+			}
+			r.pacer.mu.Unlock()
+
+			first := r.connect("pc")
+			report := r.validKill9Run(first, id)
+			r.send(first, report)
+			select {
+			case <-judging:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the first report never judged its run")
+			}
+			again := r.connect("pc")
+			r.send(again, report)
+			// The report sent again either judges the run a second time, or
+			// waits for the first report's verdict.
+			waitFor(t, "the report sent again", func() bool {
+				return calls.Load() == 2 || strings.Contains(r.screen.String(), "gazda a trimis din nou raportul")
+			})
+			close(release[0])
+			v1, ok1 := r.receive(first).(link.Verdict)
+			close(release[1])
+			v2, ok2 := r.receive(again).(link.Verdict)
+			if !ok1 || !ok2 {
+				t.Fatalf("verdicts %+v, %+v; want one on each link", v1, v2)
+			}
+			switch {
+			case writable && (!mi1.Counts(v1.Run) || v1.Run.InvalidReason != "" || v1.Run.LossMs != 700):
+				t.Errorf("first link's verdict = %+v, want a counting run of 700 ms", v1.Run)
+			case !writable && (v1.Run.Valid || mi1.Counts(v1.Run) || v1.Run.InvalidReason != notWritten):
+				t.Errorf("first link's verdict = %+v, want invalid: %s", v1.Run, notWritten)
+			}
+			if !reflect.DeepEqual(v2.Run, v1.Run) {
+				t.Errorf("new link's verdict = %+v,\nfirst link's = %+v; want the same verdict", v2.Run, v1.Run)
+			}
+			for _, v := range []link.Verdict{v1, v2} {
+				if strings.Contains(v.Run.InvalidReason, exists) {
+					t.Errorf("a verdict says %q: the run was judged twice and found its own envelope", v.Run.InvalidReason)
+				}
+			}
+			if n := calls.Load(); n != 1 {
+				t.Errorf("the run was judged %d times, want once", n)
+			}
+
+			folder := filepath.Join(r.c.results, "MI1", "pc-kill9")
+			r.c.mu.Lock()
+			judged, remembered := r.c.judged[id]
+			r.c.mu.Unlock()
+			if writable {
+				entries, err := os.ReadDir(folder)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var names []string
+				for _, e := range entries {
+					names = append(names, e.Name())
+				}
+				if len(names) != 1 || names[0] != id+".json" {
+					t.Errorf("the results folder holds %v, want the run's one envelope", names)
+				}
+				env, err := results.Read(filepath.Join(folder, id+".json"))
+				if err != nil || len(env.Runs) != 1 || !reflect.DeepEqual(env.Runs[0], v1.Run) {
+					t.Errorf("the envelope = %+v, %v; want the verdict sent, %+v", env.Runs, err, v1.Run)
+				}
+				if !remembered || !reflect.DeepEqual(judged, v1.Run) {
+					t.Errorf("the controller remembers %+v (%v), want the verdict sent, %+v", judged, remembered, v1.Run)
+				}
+			} else if _, err := os.Stat(r.c.results); err == nil || remembered {
+				t.Errorf("results folder %v, verdict remembered %v (%+v); want nothing written and nothing remembered", err, remembered, judged)
+			}
+			screen := r.screen.String()
+			if strings.Contains(screen, "rezultatul ei există deja") ||
+				!strings.Contains(screen, "Rularea "+id+": gazda a trimis din nou raportul, după o reconectare; primește același verdict.") {
+				t.Errorf("screen:\n%s\nwant the report sent again shown, and no envelope found", screen)
+			}
+
+			r.send(again, report)
+			v3, ok := r.receive(again).(link.Verdict)
+			switch {
+			case !ok:
+				t.Error("no verdict for a third report")
+			case writable && !reflect.DeepEqual(v3.Run, v1.Run):
+				t.Errorf("a third report got %+v, want the same verdict %+v", v3.Run, v1.Run)
+			case !writable && mi1.Counts(v3.Run):
+				t.Errorf("a third report got %+v, want no counting verdict", v3.Run)
+			}
+		})
 	}
 }

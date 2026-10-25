@@ -25,9 +25,13 @@ var ErrExists = errors.New("results: the envelope exists already")
 // Create is Write for an envelope that must not exist yet: a run id names
 // one run, so the envelope of a counted run is never replaced by another
 // run's of the same id. An envelope on disk already is ErrExists, and stays
-// as it is. Create looks before it writes: two writers of one envelope at
-// the same moment may both write it, which for reccontroller is one run's
-// report, sent again over a new link while the first was being written.
+// as it is. Create looks before it writes, so it does not order two writers
+// of one envelope at the same moment: both may write it, the later rename
+// replacing the earlier envelope, or the later writer may find the earlier
+// one's envelope, of the same run, and get ErrExists. A caller writes each
+// envelope from one goroutine at a time: reccontroller judges a run's
+// report once, and a report sent again while the first is being judged
+// waits for that verdict.
 func Create(dir string, e Envelope) error { return write(dir, e, false) }
 
 // write is Write, and with replace false Create.
