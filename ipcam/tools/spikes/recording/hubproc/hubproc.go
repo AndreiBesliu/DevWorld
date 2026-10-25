@@ -357,6 +357,12 @@ func (h *Hub) Kill() (time.Time, error) {
 	}
 	at := time.Now()
 	if err := kill(h.cmd.Process); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			// cmd.Wait has reaped the child and Start's goroutine is
+			// about to close exited.
+			<-h.exited
+			return time.Time{}, ErrExited
+		}
 		select {
 		case <-h.exited:
 			return time.Time{}, ErrExited
@@ -369,7 +375,8 @@ func (h *Hub) Kill() (time.Time, error) {
 }
 
 // Stop asks the child to stop cleanly (SIGTERM, Ctrl+Break), as recspike
-// does after a run's report, and kills it when ctx is done first.
+// does after a run's report, and kills it when ctx is done first. A child
+// that has exited by itself needs no stop: nil.
 func (h *Hub) Stop(ctx context.Context) error {
 	h.stopBeacon()
 	<-h.beaconDone
@@ -379,7 +386,13 @@ func (h *Hub) Stop(ctx context.Context) error {
 	default:
 	}
 	if err := interrupt(h.cmd.Process); err != nil {
+		// The signal failed: the child exited meanwhile (os.ErrProcessDone,
+		// then Kill gives ErrExited), or it is killed and the failed clean
+		// stop is the error.
 		_, kerr := h.Kill()
+		if errors.Is(kerr, ErrExited) {
+			return nil
+		}
 		return errors.Join(err, kerr)
 	}
 	select {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -339,6 +340,49 @@ func TestHubproc_ResumeMsFromRecordingEvents(t *testing.T) {
 			t.Errorf("WaitRecording = %v, want ErrExited", err)
 		}
 	})
+}
+
+// reapedHub is a Hub whose child has exited and been reaped, as cmd.Wait
+// leaves it just before Start's goroutine closes Exited: the process is
+// done, and Exited is still open.
+func reapedHub(t *testing.T) *Hub {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec // the test binary, running no test
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	_, stopBeacon := context.WithCancel(t.Context())
+	h := &Hub{cmd: cmd, exited: make(chan struct{}), exitCode: -1, stopBeacon: stopBeacon, beaconDone: make(chan struct{})}
+	close(h.beaconDone)
+	return h
+}
+
+// afterLateExit runs call and returns its error: at once if call returns
+// while Exited is open, else after Exited closes 100 ms later.
+func afterLateExit(h *Hub, call func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- call() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(100 * time.Millisecond):
+		close(h.exited)
+		return <-done
+	}
+}
+
+// TestHubproc_KillOrStopRacingTheExit: between the child's reaping by
+// cmd.Wait and Exited closing, a signal fails with os.ErrProcessDone; Kill
+// then gives ErrExited and Stop nil, as for a child that exited earlier.
+func TestHubproc_KillOrStopRacingTheExit(t *testing.T) {
+	h := reapedHub(t)
+	if err := afterLateExit(h, func() error { _, err := h.Kill(); return err }); !errors.Is(err, ErrExited) {
+		t.Errorf("Kill = %v, want ErrExited", err)
+	}
+	h = reapedHub(t)
+	if err := afterLateExit(h, func() error { return h.Stop(ctxFor(t, 10*time.Second)) }); err != nil {
+		t.Errorf("Stop = %v, want nil", err)
+	}
 }
 
 // TestHubproc_WaitEvent: the current reconcile event is the one with the
