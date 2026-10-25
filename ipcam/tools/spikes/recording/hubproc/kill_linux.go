@@ -15,6 +15,3 @@ func ownGroup(*exec.Cmd) {}
 
 // kill ends p at once, as a crash would: SIGKILL.
 func kill(p *os.Process) error { return p.Signal(syscall.SIGKILL) }
-
-// interrupt asks p to stop cleanly, as systemd does: SIGTERM.
-func interrupt(p *os.Process) error { return p.Signal(syscall.SIGTERM) }

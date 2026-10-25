@@ -4,7 +4,7 @@
 // (C01): it writes run.json, starts `ipcam-hub run`, reads its JSON-lines
 // events, sends the run's liveness beacon from ipcam-hub's `ready` until the
 // child exits, kills it as a crash would (SIGKILL on Linux, TerminateProcess
-// on Windows), stops it cleanly (SIGTERM, Ctrl+Break), restarts it, and
+// on Windows), stops it cleanly by ending its stdin, restarts it, and
 // measures the resume on the monotonic clock (C07, G13).
 package hubproc
 
@@ -127,9 +127,10 @@ const maxEventLine = 1 << 20
 
 // Hub is one ipcam-hub child.
 type Hub struct {
-	opts Options
-	cmd  *exec.Cmd
-	jobs []jobKey
+	opts  Options
+	cmd   *exec.Cmd
+	stdin *os.File // the write end of the child's stdin; Stop closes it
+	jobs  []jobKey
 
 	exited   chan struct{} // closed when the process has exited
 	exitCode int           // valid once exited is closed
@@ -147,10 +148,13 @@ type Hub struct {
 
 type jobKey struct{ cam, profile string }
 
-// Start starts `ipcam-hub run --config <Config>`; the jobs of run.json are
-// the ones whose `recording` events WaitRecording waits for. With a Beacon,
-// it first resolves and dials the beacon's address, and an address that
-// does not work is its error: no child runs without its beacon.
+// Start starts `ipcam-hub run --config <Config> --stop-on-stdin-eof`; the
+// jobs of run.json are the ones whose `recording` events WaitRecording waits
+// for. With a Beacon, it first resolves and dials the beacon's address, and
+// an address that does not work is its error: no child runs without its
+// beacon. The child's stdin is a pipe that only Stop closes: a stop that
+// needs neither a signal nor a console, as recspike's boot task has none
+// on Windows (G14); if recspike itself dies, ipcam-hub stops cleanly too.
 func Start(o Options) (*Hub, error) {
 	cfg, err := ReadConfig(o.Config)
 	if err != nil {
@@ -178,15 +182,22 @@ func Start(o Options) (*Hub, error) {
 		closeConn(beaconConn)
 		return nil, err
 	}
-	h.cmd = exec.Command(o.Binary, "run", "--config", o.Config) //nolint:gosec // recspike's own ipcam-hub
-	h.cmd.Stdout, h.cmd.Stderr, h.cmd.WaitDelay = w, o.Stderr, time.Second
-	ownGroup(h.cmd)
-	if err := h.cmd.Start(); err != nil {
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
 		_, _ = r.Close(), w.Close()
 		closeConn(beaconConn)
 		return nil, err
 	}
-	_ = w.Close() // the child holds the write end
+	h.stdin = stdinW
+	h.cmd = exec.Command(o.Binary, "run", "--config", o.Config, "--stop-on-stdin-eof") //nolint:gosec // recspike's own ipcam-hub
+	h.cmd.Stdin, h.cmd.Stdout, h.cmd.Stderr, h.cmd.WaitDelay = stdinR, w, o.Stderr, time.Second
+	ownGroup(h.cmd)
+	if err := h.cmd.Start(); err != nil {
+		_, _, _, _ = r.Close(), w.Close(), stdinR.Close(), stdinW.Close()
+		closeConn(beaconConn)
+		return nil, err
+	}
+	_, _ = w.Close(), stdinR.Close() // the child holds these ends
 	beaconCtx, stopBeacon := context.WithCancel(context.Background())
 	h.stopBeacon = stopBeacon
 	go h.read(r)
@@ -195,6 +206,7 @@ func Start(o Options) (*Hub, error) {
 		if h.cmd.ProcessState != nil {
 			h.exitCode = h.cmd.ProcessState.ExitCode()
 		}
+		_ = h.stdin.Close()
 		close(h.exited)
 		stopBeacon() // the beacon ends with the child
 	}()
@@ -407,9 +419,9 @@ func (h *Hub) Kill() (time.Time, error) {
 	return at, nil
 }
 
-// Stop asks the child to stop cleanly (SIGTERM, Ctrl+Break), as recspike
-// does after a run's report, and kills it when ctx is done first. A child
-// that has exited by itself needs no stop: nil.
+// Stop asks the child to stop cleanly, as recspike does after a run's
+// report, by ending its stdin (--stop-on-stdin-eof), and kills it when ctx
+// is done first. A child that has exited by itself needs no stop: nil.
 func (h *Hub) Stop(ctx context.Context) error {
 	h.stopBeacon()
 	<-h.beaconDone
@@ -418,10 +430,10 @@ func (h *Hub) Stop(ctx context.Context) error {
 		return nil
 	default:
 	}
-	if err := interrupt(h.cmd.Process); err != nil {
-		// The signal failed: the child exited meanwhile (os.ErrProcessDone,
-		// then Kill gives ErrExited), or it is killed and the failed clean
-		// stop is the error.
+	if err := h.stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		// The pipe would not close, so the child cannot see the request: it
+		// is killed, and the failed clean stop is the error. A child that
+		// exited meanwhile needs neither.
 		_, kerr := h.Kill()
 		if errors.Is(kerr, ErrExited) {
 			return nil

@@ -866,3 +866,22 @@ func TestMI1_ArmV6PiSetsDeferred(t *testing.T) {
 		wantVerdict(t, Judge(append(envelopes(runs), armv6)), results.Incomplete)
 	})
 }
+
+// TestMI1_O17Row_RunWithoutTheO17Stream: o17Row's precondition is that
+// each run records cam99_main encrypted with the setting off, as judgeSet
+// sorts them; a run that breaks it does not panic the judge, and the row
+// still names that run's failures with its loss «lipsește».
+func TestMI1_O17Row_RunWithoutTheO17Stream(t *testing.T) {
+	plan, err := Plan(SetLabLinuxKill9, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := runOf(SetLabLinuxKill9, plan[defaultRuns], 500)
+	r.Streams = r.Streams[:1] // cam01_main only
+	r.TornParts = 1
+	var j results.Judgement
+	got := o17Row(&j, "MI1 "+SetLabLinuxKill9+": ", SetLabLinuxKill9, "lab", []results.Run{r})
+	if !strings.HasPrefix(got.Value, "lipsește") || !strings.Contains(got.Value, "1 parte fMP4 ruptă") || passes(got) {
+		t.Errorf("row = %+v, want «lipsește», the torn part, and no pass", got)
+	}
+}

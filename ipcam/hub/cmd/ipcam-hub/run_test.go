@@ -37,14 +37,16 @@ const (
 func TestMain(m *testing.M) {
 	if os.Getenv(mainEnv) == "1" {
 		mountInfoPath = os.Getenv(mountInfoEnv)
-		os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+		os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
 	os.Exit(m.Run())
 }
 
-// hub is an ipcam-hub process that a test started.
+// hub is an ipcam-hub process that a test started, with its stdin, which
+// stays open until the test closes it.
 type hub struct {
 	cmd    *exec.Cmd
+	stdin  io.WriteCloser
 	events chan map[string]any
 	stderr *bytes.Buffer
 	done   chan struct{}
@@ -52,14 +54,24 @@ type hub struct {
 
 func startHub(t *testing.T, args ...string) *hub {
 	t.Helper()
+	return startHubWith(t, inOwnGroup, args...)
+}
+
+// startHubWith starts ipcam-hub with the process attributes that attrs sets.
+func startHubWith(t *testing.T, attrs func(*exec.Cmd), args ...string) *hub {
+	t.Helper()
 	cmd := exec.CommandContext(t.Context(), os.Args[0], args...) //nolint:gosec // the test binary itself
 	cmd.Env = append(os.Environ(), mainEnv+"=1")
-	inOwnGroup(cmd)
+	attrs(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &hub{cmd: cmd, events: make(chan map[string]any, 1024), stderr: &bytes.Buffer{}, done: make(chan struct{})}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &hub{cmd: cmd, stdin: stdin, events: make(chan map[string]any, 1024), stderr: &bytes.Buffer{}, done: make(chan struct{})}
 	cmd.Stderr = h.stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -132,9 +144,10 @@ func writeJSON(t *testing.T, path string, v any) {
 // real MediaMTX reconciles (one reconcile event, seq 1 and final), is
 // ready, reports the first part of each stream, then each 10 s segment as it
 // closes, and then each closed segment that the background verification
-// passed. Stopped, by SIGTERM on Linux and Ctrl+Break on Windows, it stops
-// MediaMTX gracefully, reports a hub_stopped gap for each stream, and
-// exits 0.
+// passed. Without --stop-on-stdin-eof, the end of its stdin changes nothing,
+// as under systemd. Stopped, by SIGTERM on Linux and Ctrl+Break on Windows,
+// it stops MediaMTX gracefully, reports a hub_stopped gap for each stream,
+// and exits 0.
 func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 	bin := rtsptest.MediaMTX(t)
 	srv := rtsptest.Start(t, rtsptest.MainH264(t))
@@ -164,6 +177,9 @@ func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 		},
 	})
 	h := startHub(t, "run", "--config", config)
+	if err := h.stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	reconcile := h.next(t, 30*time.Second, "reconcile event", ofType("reconcile"))
 	if reconcile["aborted"] != false || reconcile["seq"] != float64(1) || reconcile["final"] != true {
@@ -268,6 +284,47 @@ func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 	}
 	if !stoppedGaps["cam1/main"] || !stoppedGaps["cam1/sub"] {
 		t.Errorf("hub_stopped gaps for %v, want both streams", stoppedGaps)
+	}
+}
+
+// TestRun_StopsCleanlyWhenStdinEnds: with --stop-on-stdin-eof, ipcam-hub
+// stops as on SIGTERM when its stdin ends, which is how recspike stops it: a
+// stop that needs no console, so that it also works from the boot task
+// (C07, G14). Started without a console (DETACHED_PROCESS on Windows), it
+// still stops MediaMTX gracefully: it reports a hub_stopped gap for its
+// stream, no error, and exits 0.
+func TestRun_StopsCleanlyWhenStdinEnds(t *testing.T) {
+	bin := rtsptest.MediaMTX(t)
+	srv := rtsptest.Start(t, rtsptest.MainH264(t))
+	dir := t.TempDir()
+	config := filepath.Join(dir, "run.json")
+	writeJSON(t, config, map[string]any{
+		"dataDir":  filepath.Join(dir, "data"),
+		"mediamtx": bin,
+		"jobs": []map[string]any{
+			{"cam": "cam1", "profile": "main", "restreamUrl": srv.URL("cam1/main"), "segmentSecs": 10, "recipients": nil},
+		},
+	})
+	h := startHubWith(t, withoutConsole, "run", "--config", config, "--stop-on-stdin-eof")
+	h.next(t, 40*time.Second, "recording event", ofType("recording"))
+	if err := h.stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	for e := range h.events {
+		switch {
+		case e["type"] == "gap" && e["reason"] == "hub_stopped":
+			stopped = true
+		case e["type"] == "error":
+			t.Errorf("an error after the end of stdin: %v", e["message"])
+		}
+	}
+	<-h.done
+	if err := h.cmd.Wait(); err != nil {
+		t.Errorf("ipcam-hub after the end of its stdin: %v, want exit 0", err)
+	}
+	if !stopped {
+		t.Error("no hub_stopped gap: MediaMTX was not stopped gracefully")
 	}
 }
 

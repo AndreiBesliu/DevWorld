@@ -14,7 +14,7 @@ import (
 // line of JSON. The file is written beside its final name, synced and
 // renamed over it, so a reader never sees half an envelope, and the folder
 // is synced after the rename, so the envelope keeps its name after a power
-// cut.
+// cut; so is the parent of each folder that Write creates.
 func Write(dir string, e Envelope) error {
 	if err := e.Validate(); err != nil {
 		return err
@@ -24,7 +24,7 @@ func Write(dir string, e Envelope) error {
 		return err
 	}
 	folder := filepath.Join(dir, e.Code, e.Set)
-	if err := os.MkdirAll(folder, 0o750); err != nil {
+	if err := mkdirAllSynced(folder); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(folder, e.RunID+".*.tmp")
@@ -48,6 +48,28 @@ func Write(dir string, e Envelope) error {
 		return err
 	}
 	return syncDir(folder)
+}
+
+// mkdirAllSynced creates folder and its missing parents, as os.MkdirAll
+// does, and syncs the parent of each folder that it created, top down, so
+// that the new folders survive a power cut.
+func mkdirAllSynced(folder string) error {
+	var missing []string
+	for d := folder; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil || !errors.Is(err, os.ErrNotExist) || filepath.Dir(d) == d {
+			break
+		}
+		missing = append(missing, d)
+	}
+	if err := os.MkdirAll(folder, 0o750); err != nil {
+		return err
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := syncDir(filepath.Dir(missing[i])); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // syncDir makes the entries of the folder dir durable: an fsync of the

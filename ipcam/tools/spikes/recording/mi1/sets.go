@@ -2,7 +2,11 @@
 
 // Package mi1 is the power-cut measurement MI1 (G10, §16.4, T43): the
 // composition of its sets and its check, the rules that redo a run that
-// does not count, and Judge, the one rule of the gate (C17).
+// does not count, and Judge, the one rule of the gate (C17); and recspike's
+// driver of the sets on the host under test (Driver): each run's steps
+// (host.go), the set's loop, its resume after a reboot and the link to the
+// controller (session.go), with the run state, the window, the preflight,
+// the autostart and the HUB-04 scan.
 package mi1
 
 import (

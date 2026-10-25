@@ -16,6 +16,15 @@ import (
 // BeaconEvery is the interval of recspike's liveness beacon.
 const BeaconEvery = 50 * time.Millisecond
 
+// BeaconSilence ends a run's beacons: recspike stops beaconing when its
+// ipcam-hub stops, and never beacons again under the run (hubproc), so a
+// beacon that comes more than BeaconSilence after the run's previous one is
+// late, from a sender that must not move the stop (C16), and the log drops
+// it and every later one of the run. It is 40 beacon intervals: a LAN does
+// not hold a beacon that long, and a stop that it would hide makes the run
+// invalid, never a smaller loss.
+const BeaconSilence = 2 * time.Second
+
 // Beacon is one beacon of a run: its sequence number, and At, the
 // controller's clock when it arrived (C16).
 type Beacon struct {
@@ -73,11 +82,13 @@ type BeaconLog struct {
 }
 
 type beaconRun struct {
-	first Beacon
-	seen  bool
-	last  [beaconsKept]Beacon // the newest beacons after the first, a ring
-	n     int                 // beacons kept in last
-	next  int                 // where the next one goes
+	first  Beacon
+	seen   bool
+	last   [beaconsKept]Beacon // the newest beacons after the first, a ring
+	n      int                 // beacons kept in last
+	next   int                 // where the next one goes
+	latest Beacon              // the newest beacon kept
+	ended  bool                // a silence ended the run's beacons
 }
 
 // NewBeaconLog returns a log that expects no run yet.
@@ -146,21 +157,58 @@ func (l *BeaconLog) WaitFirst(ctx context.Context, runID string) (Beacon, error)
 	}
 }
 
-// add keeps a beacon of the run with the given hash, if it is expected.
+// WaitSilence waits until the run has beaconed and then gone silent: the
+// clock is more than BeaconSilence past its newest beacon, which it returns.
+// The controller marks the end of the run's pacing then, near the stop
+// (R07). It checks at each beacon and at each BeaconEvery of the clock.
+func (l *BeaconLog) WaitSilence(ctx context.Context, runID string, clock source.Clock) (Beacon, error) {
+	tick := clock.NewTicker(BeaconEvery)
+	defer tick.Stop()
+	hash := link.RunHash(runID)
+	for {
+		l.mu.Lock()
+		arrived := l.arrived
+		var latest Beacon
+		seen := false
+		if r := l.runs[hash]; r != nil && r.seen {
+			latest, seen = r.latest, true
+		}
+		l.mu.Unlock()
+		if seen && clock.Now().Sub(latest.At) > BeaconSilence {
+			return latest, nil
+		}
+		select {
+		case <-ctx.Done():
+			return Beacon{}, ctx.Err()
+		case <-arrived:
+		case <-tick.C():
+		}
+	}
+}
+
+// add keeps a beacon of the run with the given hash, if it is expected and
+// its beacons have not ended (BeaconSilence).
 func (l *BeaconLog) add(run, seq uint64, at time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	r := l.runs[run]
-	if r == nil {
+	if r == nil || r.ended {
 		return
 	}
 	b := Beacon{Seq: seq, At: at}
 	if r.seen {
+		if at.Sub(r.latest.At) > BeaconSilence {
+			r.ended = true
+			return
+		}
 		r.last[r.next] = b
 		r.next = (r.next + 1) % beaconsKept
 		r.n = min(r.n+1, beaconsKept)
 	} else {
 		r.first, r.seen = b, true
+	}
+	if !r.latest.At.After(at) {
+		r.latest = b
 	}
 	close(l.arrived)
 	l.arrived = make(chan struct{})

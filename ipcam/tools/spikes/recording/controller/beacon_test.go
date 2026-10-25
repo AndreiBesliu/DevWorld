@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -147,5 +149,88 @@ func TestBeaconLog_BoundedPerRun(t *testing.T) {
 	}
 	if _, errBound := StopMoment(KindKill9, got); errBound != BeaconEvery {
 		t.Errorf("errBound over the kept beacons = %v, want %v", errBound, BeaconEvery)
+	}
+}
+
+// TestBeaconLog_RejectsLateBeacons (C16): a run's beacons end at its first
+// silence longer than BeaconSilence. recspike never beacons again under a
+// run once its child has stopped, so a later beacon of the run is late, from
+// a sender that must not move the stop: it is dropped, and so is every one
+// after it.
+func TestBeaconLog_RejectsLateBeacons(t *testing.T) {
+	beacons := NewBeaconLog()
+	beacons.Expect("pi-sysrq-04-1")
+	hash := link.RunHash("pi-sysrq-04-1")
+	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	steady := steadyBeacons(start, 40)
+	for _, b := range steady {
+		beacons.add(hash, b.Seq, b.At)
+	}
+	last := steady[len(steady)-1]
+	beacons.add(hash, 40, last.At.Add(BeaconSilence+time.Millisecond))
+	beacons.add(hash, 41, last.At.Add(BeaconSilence+BeaconEvery))
+	got := beacons.Beacons("pi-sysrq-04-1")
+	if len(got) != len(steady) || got[len(got)-1] != last {
+		t.Errorf("kept %d beacons ending with %+v, want the %d before the silence, ending with %+v", len(got), got[len(got)-1], len(steady), last)
+	}
+	if at, _ := StopMoment(KindSysrq, got); !at.Equal(last.At) {
+		t.Errorf("StopMoment = %v, want the last beacon before the silence, %v", at, last.At)
+	}
+
+	t.Run("a pause shorter than the silence", func(t *testing.T) {
+		beacons.Expect("pc-kill9-05-1")
+		h := link.RunHash("pc-kill9-05-1")
+		beacons.add(h, 0, start)
+		beacons.add(h, 1, start.Add(BeaconSilence))
+		if got := beacons.Beacons("pc-kill9-05-1"); len(got) != 2 {
+			t.Errorf("kept %d beacons after a pause of exactly BeaconSilence, want 2", len(got))
+		}
+	})
+}
+
+// TestBeaconLog_WaitSilence: WaitSilence returns a run's last beacon once
+// the controller's clock is more than BeaconSilence past it, so that the
+// controller can mark the end of the run's pacing near its stop (R07).
+func TestBeaconLog_WaitSilence(t *testing.T) {
+	beacons := NewBeaconLog()
+	beacons.Expect("lab-linux-kill9-01-1")
+	clock := newFakeClock()
+	start := clock.Now()
+	type result struct {
+		b   Beacon
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		b, err := beacons.WaitSilence(t.Context(), "lab-linux-kill9-01-1", clock)
+		done <- result{b, err}
+	}()
+	hash := link.RunHash("lab-linux-kill9-01-1")
+	for seq := range uint64(10) {
+		at := start.Add(time.Duration(seq) * BeaconEvery) //nolint:gosec // seq < 10
+		beacons.add(hash, seq, at)
+		clock.tickAt(t, at)
+	}
+	lastAt := start.Add(9 * BeaconEvery)
+	clock.tickAt(t, lastAt.Add(BeaconSilence))
+	select {
+	case r := <-done:
+		t.Fatalf("WaitSilence returned %+v, %v after a silence of only BeaconSilence", r.b, r.err)
+	default:
+	}
+	clock.tickAt(t, lastAt.Add(BeaconSilence+BeaconEvery))
+	select {
+	case r := <-done:
+		if r.err != nil || r.b.Seq != 9 || !r.b.At.Equal(lastAt) {
+			t.Errorf("WaitSilence = %+v, %v; want seq 9 at %v", r.b, r.err, lastAt)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("WaitSilence did not return after the silence")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := beacons.WaitSilence(ctx, "lab-linux-kill9-02-1", clock); !errors.Is(err, context.Canceled) {
+		t.Errorf("WaitSilence on a cancelled context = %v, want context.Canceled", err)
 	}
 }

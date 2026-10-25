@@ -140,8 +140,10 @@ func loadIdentity(path string) (*age.X25519Identity, error) {
 }
 
 // runCommand is "ipcam-hub run": it reconciles, records the jobs of
-// run.json and reports, until SIGTERM, Ctrl-C or Ctrl-Break.
-func runCommand(args []string, stdout, stderr io.Writer) int {
+// run.json and reports, until SIGTERM, Ctrl-C or Ctrl-Break, or, with
+// --stop-on-stdin-eof, until its stdin ends: a stop that needs no console,
+// which recspike uses, also from a boot task that has none (G14).
+func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ev := &events{out: stdout}
 	fail := func(err error) int {
 		ev.emit("error", map[string]any{"message": err.Error()})
@@ -151,11 +153,12 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "the run configuration (run.json)")
+	stopOnEOF := flags.Bool("stop-on-stdin-eof", false, "stop cleanly, as on SIGTERM, when stdin ends")
 	if err := flags.Parse(args); err != nil {
 		return exitFatal
 	}
 	if *configPath == "" || flags.NArg() != 0 {
-		return fail(errors.New("usage: ipcam-hub run --config <run.json>"))
+		return fail(errors.New("usage: ipcam-hub run --config <run.json> [--stop-on-stdin-eof]"))
 	}
 	cfg, jobs, id, err := loadRunConfig(*configPath)
 	if err != nil {
@@ -201,6 +204,15 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if *stopOnEOF {
+		go func() {
+			_, _ = io.Copy(io.Discard, stdin)
+			stop()
+		}()
+	}
+	// MediaMTX's clean stop is a Ctrl+Break to its process group, which needs
+	// a console that it shares with the hub.
+	ensureConsole()
 	cat, err := catalog.Open(ctx, filepath.Join(stateDir, "catalog.db"))
 	if err != nil {
 		return fail(err)

@@ -5,6 +5,8 @@ package link
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
 // Message is one line of the link: a JSON object whose "type" field names
@@ -24,23 +26,39 @@ type Hello struct {
 
 // Session tells the host where the controller serves its cameras: the base
 // URL of the RTSP server, as the host reached the controller, and the
-// credentials of this reccontroller start. The host never writes them to
-// its results or logs.
+// credentials of this reccontroller start, which the host never writes to
+// its results or logs. BeaconPort is where the beacon goes on the same
+// address (0: BeaconPort). Needles are the byte strings of the served media
+// that HUB-04's scan looks for in an encrypted camera's files (G08).
 type Session struct {
-	RTSPBase string   `json:"rtspBase"`
-	User     string   `json:"user"`
-	Pass     string   `json:"pass"`
-	Streams  []string `json:"streams"`
+	RTSPBase   string   `json:"rtspBase"`
+	User       string   `json:"user"`
+	Pass       string   `json:"pass"`
+	Streams    []string `json:"streams"`
+	BeaconPort int      `json:"beaconPort,omitempty"`
+	Needles    [][]byte `json:"needles,omitempty"`
 }
 
-// RunStart announces a run before the host starts ipcam-hub for it.
+// RunStart announces a run before the host starts ipcam-hub for it, with
+// what the controller's envelope says of the host: its pseudonym (PH0-22),
+// OS, storage, Pi model and SD-card confirmation. Slot is a real cut's slot;
+// Attempt counts the attempts of the run's position, or of a real set (a
+// redo has a new run id). Smoke asks for the lab's short smoke windows.
 type RunStart struct {
-	RunID         string   `json:"runId"`
-	Set           string   `json:"set"`
-	Kind          string   `json:"kind"`
-	Encrypted     bool     `json:"encrypted"`
-	PadLowBitrate bool     `json:"padLowBitrate"`
-	Streams       []string `json:"streams"`
+	RunID          string                  `json:"runId"`
+	Set            string                  `json:"set"`
+	Kind           string                  `json:"kind"`
+	Encrypted      bool                    `json:"encrypted"`
+	PadLowBitrate  bool                    `json:"padLowBitrate"`
+	Streams        []string                `json:"streams"`
+	Host           string                  `json:"host"`
+	OS             string                  `json:"os"`
+	Storage        string                  `json:"storage"`
+	PiModel        *results.PiModelInfo    `json:"piModel,omitempty"`
+	SdConfirmation *results.SdConfirmation `json:"sdConfirmation,omitempty"`
+	Slot           int                     `json:"slot,omitempty"`
+	Attempt        int                     `json:"attempt"`
+	Smoke          bool                    `json:"smoke,omitempty"`
 }
 
 // Ready says that the host records the run and beacons.
@@ -80,6 +98,32 @@ type Report struct {
 	WriteCache string          `json:"writeCache"`
 }
 
+// Verdict answers a report: the run as the controller judged it and wrote
+// it into its envelope (C16), so that the host knows whether it counts or
+// is redone.
+type Verdict struct {
+	Run results.Run `json:"run"`
+}
+
+// Refused says, in Romanian, why the controller does not measure a run.
+type Refused struct {
+	RunID  string `json:"runId"`
+	Reason string `json:"reason"`
+}
+
+// BeaconCheck asks the controller whether the beacons of ID, which the host
+// sends now, arrive (the preflight, R08); BeaconAck answers it.
+type BeaconCheck struct {
+	ID string `json:"id"`
+}
+
+// BeaconAck answers a BeaconCheck: Received is true when a beacon of ID
+// arrived.
+type BeaconAck struct {
+	ID       string `json:"id"`
+	Received bool   `json:"received"`
+}
+
 // Results is one results file that the host sends to the controller, by its
 // path relative to the results folder.
 type Results struct {
@@ -116,6 +160,18 @@ func (Cut) Type() string { return "cut" }
 // Type is "report".
 func (Report) Type() string { return "report" }
 
+// Type is "verdict".
+func (Verdict) Type() string { return "verdict" }
+
+// Type is "refused".
+func (Refused) Type() string { return "refused" }
+
+// Type is "beacon_check".
+func (BeaconCheck) Type() string { return "beacon_check" }
+
+// Type is "beacon_ack".
+func (BeaconAck) Type() string { return "beacon_ack" }
+
 // Type is "results".
 func (Results) Type() string { return "results" }
 
@@ -136,6 +192,10 @@ var decoders = map[string]func([]byte) (Message, error){
 	"ready":        decodeAs[Ready],
 	"cut":          decodeAs[Cut],
 	"report":       decodeAs[Report],
+	"verdict":      decodeAs[Verdict],
+	"refused":      decodeAs[Refused],
+	"beacon_check": decodeAs[BeaconCheck],
+	"beacon_ack":   decodeAs[BeaconAck],
 	"results":      decodeAs[Results],
 	"pull_results": decodeAs[PullResults],
 	"results_tar":  decodeAs[ResultsTar],

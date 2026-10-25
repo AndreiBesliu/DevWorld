@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -23,15 +24,17 @@ import (
 )
 
 // The test binary stands in for ipcam-hub when fakeEnv is set (TestMain):
-// "ipcam-hub run --config <run.json>" prints the startup's reconcile
-// events (seq 2 before seq 1, as they may come out of order), ready, a
-// `recording` event of a camera that run.json does not have, then one
-// `recording` event per job of run.json after the delays in fakeDelays
-// (milliseconds, in job order), and a verify event. It exits 0 on SIGTERM
-// or Ctrl+Break, and by itself with code 1 after fakeExitAfter
-// milliseconds, when that is set. With fakeLongLine set, it prints a 2 MiB
-// line after ready, then 4 MiB of events, and then creates the file that
-// fakeLongLine names; a failed write of its events exits with code 3.
+// "ipcam-hub run --config <run.json> --stop-on-stdin-eof" prints the
+// startup's reconcile events (seq 2 before seq 1, as they may come out of
+// order), ready, a `recording` event of a camera that run.json does not
+// have, then one `recording` event per job of run.json after the delays in
+// fakeDelays (milliseconds, in job order), and a verify event. It exits 0
+// when its stdin ends, and ignores SIGTERM, Ctrl+C and Ctrl+Break, so that
+// a clean stop that needs a signal or a console never reaches it; it exits
+// by itself with code 1 after fakeExitAfter milliseconds, when that is set.
+// With fakeLongLine set, it prints a 2 MiB line after ready, then 4 MiB of
+// events, and then creates the file that fakeLongLine names; a failed write
+// of its events exits with code 3.
 const (
 	fakeEnv       = "HUBPROC_FAKE_HUB"
 	fakeDelays    = "HUBPROC_FAKE_DELAYS"
@@ -47,8 +50,8 @@ func TestMain(m *testing.M) {
 }
 
 func fakeHub(args []string) int {
-	if len(args) != 3 || args[0] != "run" || args[1] != "--config" {
-		fmt.Fprintln(os.Stderr, "fake ipcam-hub: usage: run --config <run.json>")
+	if len(args) != 4 || args[0] != "run" || args[1] != "--config" || args[3] != "--stop-on-stdin-eof" {
+		fmt.Fprintln(os.Stderr, "fake ipcam-hub: usage: run --config <run.json> --stop-on-stdin-eof")
 		return 1
 	}
 	cfg, err := ReadConfig(args[2])
@@ -56,8 +59,12 @@ func fakeHub(args []string) int {
 		fmt.Fprintln(os.Stderr, "fake ipcam-hub:", err)
 		return 1
 	}
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	signal.Ignore(os.Interrupt, syscall.SIGTERM)
+	stop := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		close(stop)
+	}()
 	var mu sync.Mutex
 	emit := func(fields map[string]any) {
 		fields["atMs"] = time.Now().UnixMilli()
@@ -389,6 +396,28 @@ func TestHubproc_OverlongEventLine(t *testing.T) {
 	}
 }
 
+// TestHubproc_StopEndsStdin (G14): Stop asks ipcam-hub to stop by ending
+// its stdin, which needs neither a signal nor a console, so that it works
+// from the boot task too; the child exits 0 and Stop returns nil before its
+// context ends. The fake ignores every signal, so a stop that sent one would
+// end in a kill.
+func TestHubproc_StopEndsStdin(t *testing.T) {
+	h := startFake(t, "0,0", nil)
+	if _, err := h.WaitRecording(ctxFor(t, 10*time.Second)); err != nil {
+		t.Fatalf("WaitRecording: %v", err)
+	}
+	ctx := ctxFor(t, 5*time.Second)
+	if err := h.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Error("Stop waited until its context ended: the child was killed, not stopped")
+	}
+	if got := h.ExitCode(); got != 0 {
+		t.Errorf("ExitCode = %d, want 0", got)
+	}
+}
+
 // TestHubproc_StartRefusesABadBeaconAddress: Start resolves and dials the
 // beacon's address, IPv4 UDP (R08), and returns the error; a run without its
 // beacon would only show as an invalid cut at the controller.
@@ -396,9 +425,12 @@ func TestHubproc_StartRefusesABadBeaconAddress(t *testing.T) {
 	t.Setenv(fakeEnv, "1")
 	for _, addr := range []string{"127.0.0.1", "[::1]:7082", "127.0.0.1:99999"} {
 		h, err := Start(Options{Binary: os.Args[0], Config: writeRunJSON(t), Beacon: &Beacon{Addr: addr, RunID: "pc-kill9-01"}})
-		if err == nil {
+		if h != nil {
 			_, _ = h.Kill()
-			t.Errorf("Start with the beacon address %q = nil error", addr)
+			t.Errorf("Start with the beacon address %q started a child", addr)
+		}
+		if err == nil || !strings.HasPrefix(err.Error(), "hubproc: beacon: ") {
+			t.Errorf("Start with the beacon address %q = %v, want a hubproc: beacon: error", addr, err)
 		}
 	}
 }

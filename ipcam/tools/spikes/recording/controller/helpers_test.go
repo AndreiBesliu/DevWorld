@@ -64,14 +64,15 @@ func (c *fakeClock) Now() time.Time {
 func (c *fakeClock) NewTicker(time.Duration) source.Ticker {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	tk := &fakeTicker{ch: make(chan time.Time)}
+	tk := &fakeTicker{ch: make(chan time.Time), stopped: make(chan struct{})}
 	c.tickers = append(c.tickers, tk)
 	return tk
 }
 
 // tickAt moves the clock to at and fires every ticker. It returns when each
-// ticker's receiver has taken the tick; a test waits for the effect (a
-// SentRecord) before it ticks again.
+// ticker's receiver has taken the tick, or has stopped its ticker: a waiter
+// that reads the new time before its tick may stop instead of receiving. A
+// test waits for the effect (a SentRecord) before it ticks again.
 func (c *fakeClock) tickAt(t *testing.T, at time.Time) {
 	t.Helper()
 	c.mu.Lock()
@@ -79,22 +80,37 @@ func (c *fakeClock) tickAt(t *testing.T, at time.Time) {
 	tickers := append([]*fakeTicker(nil), c.tickers...)
 	c.mu.Unlock()
 	for _, tk := range tickers {
+		tk.mu.Lock()
 		select {
 		case tk.ch <- at:
+		case <-tk.stopped:
 		case <-time.After(10 * time.Second):
+			tk.mu.Unlock()
 			t.Fatal("nothing received the tick")
 		}
+		tk.mu.Unlock()
 	}
 }
 
+// fakeTicker is a ticker of fakeClock. Stop marks it stopped before it
+// closes its channel, under mu, so that tickAt never sends on a closed one.
 type fakeTicker struct {
-	ch   chan time.Time
-	once sync.Once
+	mu      sync.Mutex
+	ch      chan time.Time
+	stopped chan struct{}
+	once    sync.Once
 }
 
 func (tk *fakeTicker) C() <-chan time.Time { return tk.ch }
 
-func (tk *fakeTicker) Stop() { tk.once.Do(func() { close(tk.ch) }) }
+func (tk *fakeTicker) Stop() {
+	tk.once.Do(func() {
+		close(tk.stopped)
+		tk.mu.Lock()
+		defer tk.mu.Unlock()
+		close(tk.ch)
+	})
+}
 
 // synthAUs returns n H.264 access units with a keyframe every gop frames. A
 // keyframe carries SPS, PPS and an IDR slice; any other frame is one non-IDR

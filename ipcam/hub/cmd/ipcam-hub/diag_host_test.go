@@ -32,7 +32,7 @@ func setHostProbe(probe func(recDir string) hostFacts) (restore func()) {
 func diag(t *testing.T, args ...string) (int, string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := run(args, &stdout, &stderr)
+	code := run(args, nil, &stdout, &stderr)
 	if stderr.Len() > 0 {
 		t.Logf("stderr: %s", stderr.String())
 	}

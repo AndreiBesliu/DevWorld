@@ -428,7 +428,8 @@ func o17Text(set, id, what string) string {
 // passes when no run fails. A 256 kbps loss over its limit is also one of
 // j's Notes, outside G10's verdict; the other failures are the set's
 // reasons (judgeSet). Each run records an isO17Stream, as judgeSet sorts
-// them.
+// them; a run without one adds only its other failures, and when no run has
+// one, the loss reads «lipsește».
 func o17Row(j *results.Judgement, prefix, set, source string, runs []results.Run) results.Row {
 	row := results.Row{Code: prefix + O17OffLabel, Source: source}
 	if len(runs) == 0 {
@@ -438,16 +439,18 @@ func o17Row(j *results.Judgement, prefix, set, source string, runs []results.Run
 	var shown results.StreamLoss
 	var shownRun string
 	var others []string
-	pass := true
-	for i, r := range runs {
-		s := r.Streams[slices.IndexFunc(r.Streams, isO17Stream)]
-		limit := streamLimit(s)
-		if i == 0 || s.LossMs-limit > shown.LossMs-streamLimit(shown) {
-			shown, shownRun = s, r.RunID
-		}
-		if s.LossMs > limit {
-			pass = false
-			j.Notes = append(j.Notes, o17Text(set, r.RunID, lossFailure(s, limit)))
+	pass, found := true, false
+	for _, r := range runs {
+		if i := slices.IndexFunc(r.Streams, isO17Stream); i >= 0 {
+			s := r.Streams[i]
+			limit := streamLimit(s)
+			if !found || s.LossMs-limit > shown.LossMs-streamLimit(shown) {
+				shown, shownRun, found = s, r.RunID, true
+			}
+			if s.LossMs > limit {
+				pass = false
+				j.Notes = append(j.Notes, o17Text(set, r.RunID, lossFailure(s, limit)))
+			}
 		}
 		for _, f := range failuresExcept(r, isO17Stream) {
 			pass = false
@@ -457,12 +460,17 @@ func o17Row(j *results.Judgement, prefix, set, source string, runs []results.Run
 			others = append(others, f)
 		}
 	}
-	value := secondsText(shown.LossMs)
-	if len(runs) > 1 {
-		value += " (rularea " + shownRun + ")"
+	value, limit := "lipsește", StreamLimitMs(lowBitrateKbps*1000, true, false)
+	if found {
+		value, limit = secondsText(shown.LossMs), streamLimit(shown)
+		if len(runs) > 1 {
+			value += " (rularea " + shownRun + ")"
+		}
+	} else {
+		pass = false
 	}
 	row.Value = strings.Join(append([]string{value}, others...), "; ")
-	row.Limit, row.Pass = "≤ "+wholeSecondsText(streamLimit(shown)), &pass
+	row.Limit, row.Pass = "≤ "+wholeSecondsText(limit), &pass
 	return row
 }
 
