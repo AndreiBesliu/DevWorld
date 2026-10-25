@@ -14,7 +14,9 @@ import (
 // line of JSON. The file is written beside its final name, synced and
 // renamed over it, so a reader never sees half an envelope, and the folder
 // is synced after the rename, so the envelope keeps its name after a power
-// cut; so is the parent of each folder that Write creates.
+// cut; so is the parent of each folder that Write creates. When that last
+// sync fails, the envelope is removed again: an error from Write leaves no
+// envelope of the run.
 func Write(dir string, e Envelope) error {
 	if err := e.Validate(); err != nil {
 		return err
@@ -44,10 +46,16 @@ func Write(dir string, e Envelope) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, filepath.Join(folder, e.RunID+".json")); err != nil {
+	final := filepath.Join(folder, e.RunID+".json")
+	if err := os.Rename(tmp, final); err != nil {
 		return err
 	}
-	return syncDir(folder)
+	if err := syncDir(folder); err != nil {
+		// The writer reports the failure, and the run is redone: no
+		// envelope of it may stay on disk to be counted.
+		return errors.Join(err, os.Remove(final))
+	}
+	return nil
 }
 
 // mkdirAllSynced creates folder and its missing parents, as os.MkdirAll

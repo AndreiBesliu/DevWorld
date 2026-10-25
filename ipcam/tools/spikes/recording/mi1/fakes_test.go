@@ -152,7 +152,9 @@ func killFakeHubs(t *testing.T, path string) {
 // refused, sends `cut` when a run is ready (or lets onReady do it),
 // answers a report with a valid verdict (or verdict's), serves sendResults
 // on pull_results, and, with pullAtBye, pulls the host's results into
-// pulled when it says bye. Every message it gets is also an event.
+// pulled when it says bye. It keeps every beacon it receives, and drops the
+// link instead of answering the first dropReports reports. Every message it
+// gets is also an event.
 type fakeController struct {
 	t           *testing.T
 	ln          net.Listener
@@ -162,11 +164,13 @@ type fakeController struct {
 	pullAtBye   bool
 	onReady     func(c *link.Conn, start link.RunStart)
 	verdict     func(start link.RunStart, r link.Report) results.Run
+	dropReports int
 
 	mu      sync.Mutex
 	starts  []link.RunStart
 	reports []link.Report
 	refused []link.Refused
+	beacons map[uint64][]uint64 // each run's beacon sequence numbers, as they arrived
 	events  chan string
 }
 
@@ -180,13 +184,20 @@ func startFakeController(t *testing.T) *fakeController {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeController{t: t, ln: ln, beacon: beacon, sendResults: t.TempDir(), pulled: t.TempDir(), events: make(chan string, 256)}
+	f := &fakeController{t: t, ln: ln, beacon: beacon, sendResults: t.TempDir(), pulled: t.TempDir(),
+		beacons: map[uint64][]uint64{}, events: make(chan string, 256)}
 	t.Cleanup(func() { _, _ = ln.Close(), beacon.Close() })
-	go func() { // drain the beacons
+	go func() {
 		buf := make([]byte, 64)
 		for {
-			if _, _, err := beacon.ReadFrom(buf); err != nil {
+			n, _, err := beacon.ReadFrom(buf)
+			if err != nil {
 				return
+			}
+			if run, seq, ok := link.ParseBeacon(buf[:n]); ok {
+				f.mu.Lock()
+				f.beacons[run] = append(f.beacons[run], seq)
+				f.mu.Unlock()
 			}
 		}
 	}()
@@ -252,6 +263,12 @@ func (f *fakeController) serve(c *link.Conn) {
 		case link.Report:
 			f.mu.Lock()
 			f.reports = append(f.reports, m)
+			if f.dropReports > 0 {
+				f.dropReports--
+				f.mu.Unlock()
+				f.event("dropped " + m.RunID)
+				return // the link drops before the verdict
+			}
 			var start link.RunStart
 			for _, s := range f.starts {
 				if s.RunID == m.RunID {
@@ -298,19 +315,40 @@ func (f *fakeController) runReports() []link.Report {
 	return append([]link.Report(nil), f.reports...)
 }
 
-// waitEvent waits for an event that starts with prefix.
-func (f *fakeController) waitEvent(t *testing.T, prefix string) string {
-	t.Helper()
-	timeout := time.After(30 * time.Second)
+// beaconSeqs is the sequence numbers of the run's beacons, as they arrived.
+func (f *fakeController) beaconSeqs(runID string) []uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]uint64(nil), f.beacons[link.RunHash(runID)]...)
+}
+
+// waitEvent waits up to 30 s for an event that starts with prefix. It
+// returns an error instead of failing the test, so that a goroutine may
+// call it; the test's goroutine fails on it.
+func (f *fakeController) waitEvent(prefix string) error {
+	return f.waitEventWithin(prefix, 30*time.Second)
+}
+
+func (f *fakeController) waitEventWithin(prefix string, d time.Duration) error {
+	timeout := time.After(d)
 	for {
 		select {
 		case e := <-f.events:
 			if strings.HasPrefix(e, prefix) {
-				return e
+				return nil
 			}
 		case <-timeout:
-			t.Fatalf("no %q event from the fake controller", prefix)
+			return fmt.Errorf("no %q event from the fake controller in %v", prefix, d)
 		}
+	}
+}
+
+// mustEvent waits for an event that starts with prefix, on the test's
+// goroutine.
+func (f *fakeController) mustEvent(t *testing.T, prefix string) {
+	t.Helper()
+	if err := f.waitEvent(prefix); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -375,4 +413,20 @@ func lines(s string) []string {
 		out = append(out, sc.Text())
 	}
 	return out
+}
+
+// TestFakeController_WaitEventReturnsAnError: the fake controller's wait
+// for an event returns an error when the event does not come, so that the
+// goroutines that wait (a power cut at the cut, a cancel at the next run)
+// never call t.Fatal; the test's goroutine fails on the error.
+func TestFakeController_WaitEventReturnsAnError(t *testing.T) {
+	f := startFakeController(t)
+	f.event("hello pc")
+	if err := f.waitEventWithin("hello", time.Second); err != nil {
+		t.Errorf("waitEvent for an event that came = %v", err)
+	}
+	err := f.waitEventWithin("run_start pc-kill9-01-1", 20*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), `"run_start pc-kill9-01-1"`) {
+		t.Errorf("waitEvent for an event that never comes = %v, want an error that names it", err)
+	}
 }

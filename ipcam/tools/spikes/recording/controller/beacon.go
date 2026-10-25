@@ -89,6 +89,10 @@ type beaconRun struct {
 	next   int                 // where the next one goes
 	latest Beacon              // the newest beacon kept
 	ended  bool                // a silence ended the run's beacons
+	// interrupted: after the silence, a beacon newer than the latest kept
+	// one came, so the sender went on through it; a straggler of an older
+	// one, or a sender that started again from 0, does not set it.
+	interrupted bool
 }
 
 // NewBeaconLog returns a log that expects no run yet.
@@ -140,6 +144,17 @@ func (l *BeaconLog) First(runID string) (Beacon, bool) {
 	return r.first, true
 }
 
+// Interrupted reports whether the run's beacons came back after a silence
+// longer than BeaconSilence, with sequence numbers past the latest kept
+// one: the host went on beaconing while its network (often Wi-Fi) lost
+// them, so its last kept beacon is not its stop.
+func (l *BeaconLog) Interrupted(runID string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	r := l.runs[link.RunHash(runID)]
+	return r != nil && r.interrupted
+}
+
 // WaitFirst waits until the run's first beacon has arrived.
 func (l *BeaconLog) WaitFirst(ctx context.Context, runID string) (Beacon, error) {
 	for {
@@ -187,20 +202,22 @@ func (l *BeaconLog) WaitSilence(ctx context.Context, runID string, clock source.
 }
 
 // add keeps a beacon of the run with the given hash, if it is expected and
-// its beacons have not ended (BeaconSilence).
+// its beacons have not ended (BeaconSilence); a beacon past the latest
+// kept one that comes after the silence marks the run interrupted.
 func (l *BeaconLog) add(run, seq uint64, at time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	r := l.runs[run]
-	if r == nil || r.ended {
+	if r == nil {
+		return
+	}
+	if r.seen && (r.ended || at.Sub(r.latest.At) > BeaconSilence) {
+		r.ended = true
+		r.interrupted = r.interrupted || seq > r.latest.Seq
 		return
 	}
 	b := Beacon{Seq: seq, At: at}
 	if r.seen {
-		if at.Sub(r.latest.At) > BeaconSilence {
-			r.ended = true
-			return
-		}
 		r.last[r.next] = b
 		r.next = (r.next + 1) % beaconsKept
 		r.n = min(r.n+1, beaconsKept)

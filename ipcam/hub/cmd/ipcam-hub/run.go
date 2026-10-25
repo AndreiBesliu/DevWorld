@@ -209,10 +209,12 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			_, _ = io.Copy(io.Discard, stdin)
 			stop()
 		}()
+		// MediaMTX's clean stop is a Ctrl+Break to its process group, which
+		// needs a console that it shares with the hub. Only recspike's
+		// console-less stop asks for one: a hub started otherwise never
+		// opens a console window in the owner's session.
+		ensureConsole()
 	}
-	// MediaMTX's clean stop is a Ctrl+Break to its process group, which needs
-	// a console that it shares with the hub.
-	ensureConsole()
 	cat, err := catalog.Open(ctx, filepath.Join(stateDir, "catalog.db"))
 	if err != nil {
 		return fail(err)

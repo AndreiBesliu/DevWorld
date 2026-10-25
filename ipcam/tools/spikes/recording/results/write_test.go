@@ -57,3 +57,34 @@ func TestWrite_SyncsTheFolderAfterTheRename(t *testing.T) {
 		t.Errorf("syncDir(%q) = %v", folder, err)
 	}
 }
+
+// TestWrite_RemovesTheEnvelopeWhenTheFolderSyncFails: when the folder's
+// sync fails after the rename, Write removes the renamed envelope before it
+// returns the error: the writer (reccontroller) then answers that the run
+// does not count, and the host redoes it, so no envelope that would count
+// may stay on disk for it.
+func TestWrite_RemovesTheEnvelopeWhenTheFolderSyncFails(t *testing.T) {
+	dir := t.TempDir()
+	e := sample()
+	folder := filepath.Join(dir, e.Code, e.Set)
+	final := filepath.Join(folder, e.RunID+".json")
+	realSync := syncDir
+	t.Cleanup(func() { syncDir = realSync })
+	failed := errors.New("sync failed")
+	syncDir = func(d string) error {
+		if _, err := os.Stat(final); err == nil {
+			return failed // the folder's sync after the rename
+		}
+		return realSync(d)
+	}
+	if err := Write(dir, e); !errors.Is(err, failed) {
+		t.Fatalf("Write with a failing folder sync = %v, want %v", err, failed)
+	}
+	if _, err := os.Stat(final); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the envelope is still on disk after the failed sync (%v): it would count for a run that the host redoes", err)
+	}
+	entries, err := os.ReadDir(folder)
+	if err != nil || len(entries) != 0 {
+		t.Errorf("the set's folder holds %v (%v), want nothing", entries, err)
+	}
+}

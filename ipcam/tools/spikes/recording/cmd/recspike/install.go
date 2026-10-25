@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -106,23 +107,45 @@ func utf16File(s string) []byte {
 	return out
 }
 
+// serviceAutoStart is SERVICE_AUTO_START, the start type that install
+// gives Windows' time service.
+const serviceAutoStart = 2
+
+// timeService is Windows' time service (W32Time) in the service manager
+// (C1-R16).
+type timeService interface {
+	StartType() (uint32, error)
+	SetStartType(uint32) error
+	Start() error
+}
+
+// savedStartType is the time service's start type before install changed
+// it.
+type savedStartType struct {
+	StartType uint32 `json:"startType"`
+}
+
 // autostart is what install and uninstall need of the OS; tests replace
 // each part.
 type autostart struct {
-	goos       string
-	privileged func() bool
-	elevate    func(args []string) (int, error)
-	run        func(name string, args ...string) error
-	userSID    func() (string, error)
-	desktop    func() (string, error)
-	shortcut   func(path, target, args, dir string, runAsAdmin bool) error
-	unitPath   string
-	tempDir    string
+	goos        string
+	privileged  func() bool
+	elevate     func(args []string) (int, error)
+	run         func(name string, args ...string) error
+	userSID     func() (string, error)
+	desktop     func() (string, error)
+	shortcut    func(path, target, args, dir string, runAsAdmin bool) error
+	unitPath    string
+	tempDir     string
+	timeService timeService
+	// savedStart keeps the time service's start type from before install,
+	// in recspike's private folder.
+	savedStart string
 	out        io.Writer
 }
 
-// systemAutostart is this OS's.
-func systemAutostart(out io.Writer) autostart {
+// systemAutostart is this OS's; work is recspike's private folder.
+func systemAutostart(out io.Writer, work string) autostart {
 	return autostart{
 		goos:       runtime.GOOS,
 		privileged: mi1.Privileged,
@@ -134,12 +157,14 @@ func systemAutostart(out io.Writer) autostart {
 			}
 			return nil
 		},
-		userSID:  mi1.UserSID,
-		desktop:  mi1.DesktopDir,
-		shortcut: mi1.CreateShortcut,
-		unitPath: systemdUnitPath,
-		tempDir:  os.TempDir(),
-		out:      out,
+		userSID:     mi1.UserSID,
+		desktop:     mi1.DesktopDir,
+		shortcut:    mi1.CreateShortcut,
+		unitPath:    systemdUnitPath,
+		tempDir:     os.TempDir(),
+		timeService: mi1.TimeService{},
+		savedStart:  filepath.Join(work, "w32time-start.json"),
+		out:         out,
 	}
 }
 
@@ -222,6 +247,10 @@ func (a autostart) install(exe string) error {
 	if err := a.shortcut(link, exe, shortcutArgs, dir, true); err != nil {
 		return err
 	}
+	if err := a.startTimeService(); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintln(a.out, "Serviciul de timp Windows pornește acum automat, ca ceasul să se sincronizeze după fiecare repornire; dezinstalarea îi pune la loc pornirea de dinainte.")
 	_, _ = fmt.Fprintf(a.out, "Pornirea automată este instalată, iar pe desktop este scurtătura „%s”; când o deschideți, Windows cere permisiunea de administrator: răspundeți „Da”.\n", mi1.RealShortcut)
 	return nil
 }
@@ -264,6 +293,62 @@ func (a autostart) uninstall() error {
 	if err := os.Remove(link); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if err := a.restoreTimeService(); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintln(a.out, "Pornirea automată și scurtătura de pe desktop au fost șterse.")
 	return nil
+}
+
+// startTimeService sets Windows' time service to start automatically and
+// starts it (C1-R16): on a PC outside a domain it is otherwise stopped after
+// every boot, and the clock never syncs. Its start type from before is
+// saved once, so that a second install keeps the original for uninstall.
+func (a autostart) startTimeService() error {
+	if _, err := os.Stat(a.savedStart); errors.Is(err, os.ErrNotExist) {
+		before, err := a.timeService.StartType()
+		if err != nil {
+			return fmt.Errorf("nu pot citi serviciul de timp Windows: %w", err)
+		}
+		data, err := json.Marshal(savedStartType{StartType: before})
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(a.savedStart), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(a.savedStart, append(data, '\n'), 0o600); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	if err := a.timeService.SetStartType(serviceAutoStart); err != nil {
+		return fmt.Errorf("nu pot porni automat serviciul de timp Windows: %w", err)
+	}
+	if err := a.timeService.Start(); err != nil {
+		return fmt.Errorf("nu pot porni serviciul de timp Windows: %w", err)
+	}
+	return nil
+}
+
+// restoreTimeService gives the time service back the start type that
+// install saved; without one, install changed nothing.
+func (a autostart) restoreTimeService() error {
+	data, err := os.ReadFile(a.savedStart)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var saved savedStartType
+	if err := json.Unmarshal(data, &saved); err != nil {
+		return fmt.Errorf("%s: %w", filepath.Base(a.savedStart), err)
+	}
+	if err := a.timeService.SetStartType(saved.StartType); err != nil {
+		return fmt.Errorf("nu pot pune la loc pornirea serviciului de timp Windows: %w", err)
+	}
+	_, _ = fmt.Fprintln(a.out, "Serviciul de timp Windows are din nou pornirea de dinainte.")
+	return os.Remove(a.savedStart)
 }

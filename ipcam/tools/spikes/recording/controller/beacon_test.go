@@ -167,6 +167,10 @@ func TestBeaconLog_RejectsLateBeacons(t *testing.T) {
 		beacons.add(hash, b.Seq, b.At)
 	}
 	last := steady[len(steady)-1]
+	beacons.add(hash, 12, last.At.Add(BeaconSilence+time.Millisecond)) // a straggler of an older beacon
+	if beacons.Interrupted("pi-sysrq-04-1") {
+		t.Error("Interrupted = true for a straggler of an older beacon after the silence")
+	}
 	beacons.add(hash, 40, last.At.Add(BeaconSilence+time.Millisecond))
 	beacons.add(hash, 41, last.At.Add(BeaconSilence+BeaconEvery))
 	got := beacons.Beacons("pi-sysrq-04-1")
@@ -176,6 +180,9 @@ func TestBeaconLog_RejectsLateBeacons(t *testing.T) {
 	if at, _ := StopMoment(KindSysrq, got); !at.Equal(last.At) {
 		t.Errorf("StopMoment = %v, want the last beacon before the silence, %v", at, last.At)
 	}
+	if !beacons.Interrupted("pi-sysrq-04-1") {
+		t.Error("Interrupted = false for a run whose beacons came back after the silence")
+	}
 
 	t.Run("a pause shorter than the silence", func(t *testing.T) {
 		beacons.Expect("pc-kill9-05-1")
@@ -184,6 +191,9 @@ func TestBeaconLog_RejectsLateBeacons(t *testing.T) {
 		beacons.add(h, 1, start.Add(BeaconSilence))
 		if got := beacons.Beacons("pc-kill9-05-1"); len(got) != 2 {
 			t.Errorf("kept %d beacons after a pause of exactly BeaconSilence, want 2", len(got))
+		}
+		if beacons.Interrupted("pc-kill9-05-1") {
+			t.Error("Interrupted = true after a pause of exactly BeaconSilence")
 		}
 	})
 }

@@ -3,6 +3,7 @@
 package mi1
 
 import (
+	"io/fs"
 	"os"
 	"syscall"
 )
@@ -22,4 +23,12 @@ func DeviceChecks(_, dataDir string, cameras int) []Check {
 		},
 		Cameras: cameras,
 	})
+}
+
+// ownerUID is the user that owns the file, -1 when unknown.
+func ownerUID(fi fs.FileInfo) int {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return int(st.Uid)
+	}
+	return -1
 }

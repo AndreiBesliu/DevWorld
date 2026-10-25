@@ -87,6 +87,9 @@ type CurrentRun struct {
 	Before map[string][]string `json:"before,omitempty"`
 	// ResumeMs is the kill to the restarted ipcam-hub's recording (kill9).
 	ResumeMs *int64 `json:"resumeMs,omitempty"`
+	// StopUptimeMs is the host's uptime when recspike asked the OS to stop
+	// (sysrq, bugcheck): a later uptime below it proves the reboot.
+	StopUptimeMs *int64 `json:"stopUptimeMs,omitempty"`
 }
 
 // LoadRunState reads the run state at path; nil when there is none.

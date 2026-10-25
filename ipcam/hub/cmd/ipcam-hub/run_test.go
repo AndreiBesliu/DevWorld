@@ -579,3 +579,43 @@ func TestLoadRunConfig_EncryptedJobsNeedTheirRIg(t *testing.T) {
 		})
 	}
 }
+
+// TestRun_ConsoleOnlyForTheStdinStop: ipcam-hub gives itself a console
+// (ensureConsole, AllocConsole on Windows) only when it runs with
+// --stop-on-stdin-eof, as recspike starts it, where MediaMTX's clean stop
+// needs one; a hub started otherwise, for instance DETACHED_PROCESS in the
+// owner's session, never opens a console window.
+func TestRun_ConsoleOnlyForTheStdinStop(t *testing.T) {
+	realEnsure, realMountInfo := ensureConsole, mountInfoPath
+	t.Cleanup(func() { ensureConsole, mountInfoPath = realEnsure, realMountInfo })
+	mountInfoPath = "" // no SD-card check of the host's mounts
+	calls := 0
+	ensureConsole = func() { calls++ }
+	for _, tc := range []struct {
+		args []string
+		want int
+	}{{nil, 0}, {[]string{"--stop-on-stdin-eof"}, 1}} {
+		calls = 0
+		// A data directory whose reconcile aborts (HUB-09): run returns 3
+		// after the point where it would give itself a console, and starts
+		// no MediaMTX.
+		dir := t.TempDir()
+		for _, cam := range []string{"cam1", "cam2", "cam3"} {
+			path := filepath.Join(dir, "data", "rec", cam, "main", "2026-10-20", "100000_000000.mp4.part")
+			if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, bytes.Repeat([]byte("not an fMP4 file "), 300), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		config := filepath.Join(dir, "run.json")
+		writeJSON(t, config, map[string]any{"dataDir": filepath.Join(dir, "data"), "mediamtx": filepath.Join(dir, "no-mediamtx"), "jobs": []any{}})
+		stdin, stdinW := io.Pipe()
+		code := runCommand(append([]string{"--config", config}, tc.args...), stdin, io.Discard, io.Discard)
+		_ = stdinW.Close()
+		if code != exitAborted || calls != tc.want {
+			t.Errorf("run %v: exit %d, %d consoles; want exit %d and %d", tc.args, code, calls, exitAborted, tc.want)
+		}
+	}
+}

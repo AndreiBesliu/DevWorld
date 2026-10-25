@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 )
 
 // TestCLI_RomanianUsageAndErrors: recspike's usage and its argument errors
@@ -47,5 +51,37 @@ func TestCLI_RomanianUsageAndErrors(t *testing.T) {
 	}
 	if got := controllerAddr("192.0.2.1:9000"); got != "192.0.2.1:9000" {
 		t.Errorf("controllerAddr = %q, want the port kept", got)
+	}
+}
+
+// TestMI1_RefusesAnotherSetBeforeAskingTheOwner (G16): `recspike mi1` for a
+// new set while another set is still in progress in the same results
+// folder refuses at once, in Romanian: it reads no host and asks the owner
+// nothing (an SD card's «DA»), since that set would not start.
+func TestMI1_RefusesAnotherSetBeforeAskingTheOwner(t *testing.T) {
+	dir := t.TempDir()
+	realExecutable := executable
+	t.Cleanup(func() { executable = realExecutable })
+	executable = func() (string, error) { return filepath.Join(dir, "recspike"), nil }
+	inProgress, other := "kill9", "sysrq"
+	if ownerHost() == "pc" {
+		other = "bugcheck"
+	}
+	set, err := mi1.SetFor(ownerHost(), inProgress, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &mi1.RunState{Set: set, Mode: mi1.ModeAutomated, Kind: inProgress, Window: "22:00-06:00", Host: mi1.HostState{Pseudonym: ownerHost()}}
+	if err := mi1.SaveRunState(filepath.Join(dir, "results", "state", "run-state.json"), st); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	err = run(t.Context(), []string{"mi1", "--controller", "127.0.0.1", "--window", "00:00-23:59", "--kind", other},
+		bufio.NewReader(strings.NewReader("DA\n")), &out)
+	if err == nil || !strings.Contains(err.Error(), "proba "+set+" nu s-a încheiat") {
+		t.Errorf("recspike mi1 --kind %s while %s is in progress = %v, want the Romanian refusal before anything else", other, set, err)
+	}
+	if strings.Contains(out.String(), "Scrieți DA") {
+		t.Errorf("the owner was asked:\n%s", out.String())
 	}
 }

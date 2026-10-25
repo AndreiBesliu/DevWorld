@@ -3,6 +3,10 @@ package mi1
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -105,12 +109,12 @@ func TestResume_AfterReboot_StartsHubBeforeNTPWait(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() {
-		r.f.waitEvent(t, "run_start pi-sysrq-02-1") // the set goes on with run 2
-		cancel()
-	}()
+	next := cancelAt(r.f, "run_start pi-sysrq-02-1", cancel) // the set goes on with run 2
 	if err := d.Resume(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Resume = %v, want the test's cancel during run 2", err)
+	}
+	if err := <-next; err != nil {
+		t.Fatal(err)
 	}
 
 	entries := logEntries(t, r.log)
@@ -149,15 +153,23 @@ func realCut(t *testing.T, r *rig, set string) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	d := r.driver(t)
+	cut := make(chan error, 1)
 	go func() {
-		r.f.waitEvent(t, "cut ")
+		defer cancel()
+		if err := r.f.waitEvent("cut "); err != nil {
+			cut <- err
+			return
+		}
 		waitFor(t, "the prompt on recspike's screen", func() bool { return strings.Contains(r.out.String(), "Scoateți acum alimentarea") })
-		cancel()
+		cut <- nil
 	}()
 	if err := d.RunSet(ctx, SetOptions{Set: set, Mode: ModeReal, Kind: "power"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("RunSet until the power cut = %v, want context.Canceled", err)
 	}
 	killFakeHubs(t, r.log)
+	if err := <-cut; err != nil {
+		t.Fatal(err)
+	}
 }
 
 // waitFor polls cond for up to 30 s.
@@ -185,12 +197,12 @@ func TestResume_RealSet_LinuxContinues(t *testing.T) {
 	d := r.driver(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() {
-		r.f.waitEvent(t, "run_start real-pi-02-2")
-		cancel()
-	}()
+	next := cancelAt(r.f, "run_start real-pi-02-2", cancel)
 	if err := d.Resume(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Resume = %v, want the test's cancel at the next cut", err)
+	}
+	if err := <-next; err != nil {
+		t.Fatal(err)
 	}
 	if reps := r.f.runReports(); len(reps) != 1 || reps[0].RunID != "real-pi-01-1" {
 		t.Errorf("reports = %+v, want the cut's", reps)
@@ -249,8 +261,8 @@ func TestResume_SecondInstanceWaits(t *testing.T) {
 	if err := unlock(); err != nil {
 		t.Fatal(err)
 	}
-	r.f.waitEvent(t, "report real-pc-01-1")
-	r.f.waitEvent(t, "run_start real-pc-02-2")
+	r.f.mustEvent(t, "report real-pc-01-1")
+	r.f.mustEvent(t, "run_start real-pc-02-2")
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Errorf("RunSet = %v, want the test's cancel", err)
@@ -281,7 +293,7 @@ func TestWindow_DriverRefusesACutAfterTheWindow(t *testing.T) {
 	if err := d.RunSet(t.Context(), SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: &w}); err != nil {
 		t.Fatalf("RunSet = %v, want nil: the set waits for the next window", err)
 	}
-	r.f.waitEvent(t, "refused pc-kill9-01-1")
+	r.f.mustEvent(t, "refused pc-kill9-01-1")
 	if reps := r.f.runReports(); len(reps) != 0 {
 		t.Errorf("reports = %+v, want none for a refused stop", reps)
 	}
@@ -336,8 +348,8 @@ func TestSession_PCPullsPiResultsAtEnd(t *testing.T) {
 		if err := r.driver(t).RunSet(t.Context(), SetOptions{Set: SetRealPC, Mode: ModeReal, Kind: "power", Resume: true}); err != nil {
 			t.Fatalf("RunSet: %v", err)
 		}
-		r.f.waitEvent(t, "pull_results")
-		r.f.waitEvent(t, "bye")
+		r.f.mustEvent(t, "pull_results")
+		r.f.mustEvent(t, "bye")
 		if _, err := os.Stat(filepath.Join(r.results, "pi", "MI1", "pc-kill9", "pc-kill9-01-1.json")); err != nil {
 			t.Errorf("the Pi's results are not under results/pi: %v", err)
 		}
@@ -351,7 +363,7 @@ func TestSession_PCPullsPiResultsAtEnd(t *testing.T) {
 		if err := r.driver(t).RunSet(t.Context(), SetOptions{Set: SetRealPi, Mode: ModeReal, Kind: "power", Resume: true}); err != nil {
 			t.Fatalf("RunSet: %v", err)
 		}
-		r.f.waitEvent(t, "bye")
+		r.f.mustEvent(t, "bye")
 		if _, err := os.Stat(filepath.Join(r.f.pulled, "MI2", "pi", "mi2-1.json")); err != nil {
 			t.Errorf("the PC's controller did not get the Pi's results: %v", err)
 		}
@@ -417,6 +429,18 @@ func TestLoop_RunsThatDoNotCountStopThisRecspikeNotTheSet(t *testing.T) {
 	if want := []string{"pc-kill9-01-1", "pc-kill9-01-2", "pc-kill9-01-3", "pc-kill9-01-4", "pc-kill9-02-1"}; !slices.Equal(ids, want) {
 		t.Errorf("runs = %v, want %v", ids, want)
 	}
+}
+
+// cancelAt calls cancel once the fake controller has an event that starts
+// with prefix, or after waitEvent's timeout; the channel then gives
+// waitEvent's error, for the test's goroutine.
+func cancelAt(f *fakeController, prefix string, cancel context.CancelFunc) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		defer cancel()
+		done <- f.waitEvent(prefix)
+	}()
+	return done
 }
 
 // waitEventCh is closed when the fake controller has an event that starts
@@ -489,4 +513,363 @@ func TestAwaitCut_IgnoresACutOfAnotherRun(t *testing.T) {
 	if got := logEntries(t, r.log); len(got) < 2 || !slices.Equal(got[:2], []string{"hub", "hub"}) {
 		t.Errorf("fake log = %v, want ipcam-hub killed and restarted at the run's own cut", got)
 	}
+}
+
+// TestBegin_LabShardsAndSmokeRunsKeepTheirOwnState (R03): a lab run state
+// belongs to its set, shard and smoke flag. In the same results folder, a
+// full shard after a smoke run of it, or shard 2 after shard 1, starts a
+// state of its own instead of reporting complete from the old one, and a
+// shard still in progress refuses another in Romanian; the same shard
+// continues its own state.
+func TestBegin_LabShardsAndSmokeRunsKeepTheirOwnState(t *testing.T) {
+	d := &Driver{Results: t.TempDir(), Host: LabHost("linux")}
+	state := func(shard int, smoke bool, counted int) *RunState {
+		st := &RunState{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: shard, Smoke: smoke, Host: d.Host}
+		plan, err := d.plan(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range plan[:min(counted, len(plan))] {
+			st.Done = append(st.Done, DoneRun{Index: p.Index, Run: results.Run{RunID: fmt.Sprintf("%s-%02d-1", st.Set, p.Index), Valid: true}})
+		}
+		return st
+	}
+	lab := func(shard int, smoke bool) SetOptions {
+		return SetOptions{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: shard, Smoke: smoke}
+	}
+	for _, tc := range []struct {
+		name string
+		old  *RunState
+		o    SetOptions
+	}{
+		{"a full shard 1 after its smoke run", state(1, true, 2), lab(1, false)},
+		{"shard 2 after shard 1", state(1, false, 10), lab(2, false)},
+		{"a smoke run after a full shard 1", state(1, false, 10), lab(1, true)},
+	} {
+		if !d.complete(tc.old) {
+			t.Fatalf("%s: the old state is not complete", tc.name)
+		}
+		st, err := d.begin(t.Context(), tc.old, tc.o)
+		if err != nil {
+			t.Errorf("%s: begin = %v", tc.name, err)
+			continue
+		}
+		if st.Shard != tc.o.Shard || st.Smoke != tc.o.Smoke || len(st.Done) != 0 || d.complete(st) {
+			t.Errorf("%s: begin gave shard %d, smoke %v, %d runs done, complete %v; want a new state of its own",
+				tc.name, st.Shard, st.Smoke, len(st.Done), d.complete(st))
+		}
+	}
+
+	half := state(1, false, 3)
+	if _, err := d.begin(t.Context(), half, lab(2, false)); err == nil || !strings.Contains(err.Error(), "nu s-a încheiat") || !strings.Contains(err.Error(), "shard 1") {
+		t.Errorf("shard 2 while shard 1 is in progress: begin = %v, want a Romanian refusal that names shard 1", err)
+	}
+	if st, err := d.begin(t.Context(), half, lab(1, false)); err != nil || st != half {
+		t.Errorf("shard 1 again: begin = %+v, %v; want its own state continued", st, err)
+	}
+}
+
+// TestRunSet_ReadsTheHostOnlyForASetThatStarts (C24, G16): a new set's
+// host, with the owner's answers, is read once the set is sure to start:
+// not while another set is in progress, which refuses it; and the host that
+// it reads is the one the run state and the runs keep.
+func TestRunSet_ReadsTheHostOnlyForASetThatStarts(t *testing.T) {
+	r := newRig(t, "pc")
+	asked := 0
+	host := func(context.Context) (HostState, error) {
+		asked++
+		return HostState{Pseudonym: "pc", OS: "windows", Storage: "ssd", WriteCache: "unknown", Cameras: 2}, nil
+	}
+	state := filepath.Join(r.results, "state", "run-state.json")
+	if err := SaveRunState(state, &RunState{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: "22:00-06:00", Host: HostState{Pseudonym: "pc"}}); err != nil {
+		t.Fatal(err)
+	}
+	err := r.driver(t).RunSet(t.Context(), SetOptions{Set: SetPCBugcheck, Mode: ModeAutomated, Kind: "bugcheck", Window: windowAroundNow(t), Host: host})
+	if err == nil || !strings.Contains(err.Error(), "proba pc-kill9 nu s-a încheiat") || asked != 0 {
+		t.Errorf("another set in progress: RunSet = %v, host read %d times; want the refusal and no host read", err, asked)
+	}
+
+	if err := os.Remove(state); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	started := cancelAt(r.f, "run_start pc-kill9-01-1", cancel)
+	if err := r.driver(t).RunSet(ctx, SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: windowAroundNow(t), Host: host}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a new set: RunSet = %v, want the test's cancel at its first run", err)
+	}
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadRunState(state)
+	if err != nil || st == nil || asked != 1 || st.Host.Cameras != 2 {
+		t.Errorf("a new set: host read %d times, run state %+v, %v; want the host read once and kept", asked, st, err)
+	}
+	if s := r.f.runStarts(); len(s) != 1 || len(s[0].Streams) != 2 || s[0].OS != "windows" {
+		t.Errorf("run starts = %+v, want the read host's two cameras", s)
+	}
+}
+
+// TestPush_WithoutRootAsksForSudo (G15): on the Pi, MI1 runs as root, so
+// root owns its results; `recspike push` started without sudo refuses
+// before it connects, in Romanian, with the command to run, instead of
+// failing on the first file with the system's English error. As root, or
+// with results of its own, it goes on.
+func TestPush_WithoutRootAsksForSudo(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "MI1", "pi-kill9"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "MI1", "pi-kill9", "pi-kill9-01-1.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	realEuid, realOwner := geteuid, fileOwner
+	t.Cleanup(func() { geteuid, fileOwner = realEuid, realOwner })
+	ownedBy := func(uid int) func(fs.FileInfo) int { return func(fs.FileInfo) int { return uid } }
+
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	connected := make(chan struct{})
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			close(connected)
+			_ = c.Close()
+		}
+	}()
+	geteuid, fileOwner = func() int { return 1000 }, ownedBy(0)
+	err = Push(t.Context(), ln.Addr().String(), dir, "pi", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "sudo ./recspike push --controller") {
+		t.Errorf("push without root of root's results = %v, want the Romanian hint to run it with sudo", err)
+	}
+	select {
+	case <-connected:
+		t.Error("push connected to the PC before it refused")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	for _, tc := range []struct{ euid, owner int }{{0, 0}, {1000, 1000}, {-1, -1}} {
+		geteuid, fileOwner = func() int { return tc.euid }, ownedBy(tc.owner)
+		if root, err := needsRoot(dir); root || err != nil {
+			t.Errorf("euid %d, results of uid %d: needsRoot = %v, %v; want false", tc.euid, tc.owner, root, err)
+		}
+	}
+}
+
+// TestResume_AfterAFailedOSStop_RunIsInvalidWithoutColdBoot: an OS stop
+// that failed leaves its run in the phase `stopping` without a reboot.
+// recspike started again finds that the host did not boot since (its uptime
+// did not fall below the stop's), so it measures no ColdBootMs and sends no
+// report: the run is invalid with its own reason, which the controller
+// hears, and the set goes on with the run again.
+func TestResume_AfterAFailedOSStop_RunIsInvalidWithoutColdBoot(t *testing.T) {
+	r := newRig(t, "pi")
+	d := r.driver(t)
+	d.Uptime = func() (time.Duration, error) { return 3 * time.Hour, nil }
+	d.OSStop = func(context.Context, controller.ShutdownKind) error {
+		return errors.New("write /proc/sysrq-trigger: operation not permitted")
+	}
+	o := SetOptions{Set: SetPiSysrq, Mode: ModeAutomated, Kind: "sysrq", Window: windowAroundNow(t)}
+	if err := d.RunSet(t.Context(), o); err == nil || !strings.Contains(err.Error(), "oprirea sysrq nu a pornit") {
+		t.Fatalf("RunSet with a failing sysrq = %v, want the failed stop", err)
+	}
+
+	d = r.driver(t)
+	d.Uptime = func() (time.Duration, error) { return 3*time.Hour + time.Minute, nil } // no reboot since
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	again := cancelAt(r.f, "run_start pi-sysrq-01-2", cancel)
+	resumed := d.Resume(ctx)
+	const reason = "gazda nu a repornit după oprirea sysrq"
+	for _, rep := range r.f.runReports() {
+		t.Errorf("report %s with ColdBootMs %v, want none: the uptime of a host that never rebooted is no cold boot", rep.RunID, ptrText(rep.ColdBootMs))
+	}
+	r.f.mu.Lock()
+	refused := append([]link.Refused(nil), r.f.refused...)
+	r.f.mu.Unlock()
+	if len(refused) != 1 || refused[0].RunID != "pi-sysrq-01-1" || !strings.Contains(refused[0].Reason, reason) {
+		t.Errorf("refusals = %+v, want pi-sysrq-01-1: %s", refused, reason)
+	}
+	st, err := LoadRunState(filepath.Join(r.results, "state", "run-state.json"))
+	if err != nil || st == nil || len(st.Done) != 1 || Counts(st.Done[0].Run) || !strings.Contains(st.Done[0].Run.InvalidReason, reason) ||
+		st.Done[0].Run.ColdBootMs != nil {
+		t.Errorf("run state = %+v, %v; want run 1 done, invalid: %s, without ColdBootMs", st, err, reason)
+	}
+	if !errors.Is(resumed, context.Canceled) {
+		t.Errorf("Resume = %v, want the test's cancel at the run's redo", resumed)
+	}
+	if err := <-again; err != nil {
+		t.Error(err)
+	}
+}
+
+// ptrText is *p, or "nil".
+func ptrText(p *int64) string {
+	if p == nil {
+		return "nil"
+	}
+	return fmt.Sprint(*p)
+}
+
+// TestBeacon_NoneUnderACutRunAfterItsStop (C16): recspike beacons a run
+// only from its first ipcam-hub, until that one stops: the ipcam-hub that
+// it restarts at once after a kill9, and the one that the resume starts
+// after a reboot, never beacon under the run that was cut, so that no late
+// beacon can move the run's stop at the controller.
+func TestBeacon_NoneUnderACutRunAfterItsStop(t *testing.T) {
+	t.Run("the restart after kill9", func(t *testing.T) {
+		r := newRig(t, "pc")
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		reported := cancelAt(r.f, "report pc-kill9-01-1", cancel)
+		if err := r.driver(t).RunSet(ctx, SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: windowAroundNow(t)}); !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunSet = %v, want the test's cancel after run 1's report", err)
+		}
+		if err := <-reported; err != nil {
+			t.Fatal(err)
+		}
+		if got := logEntries(t, r.log); len(got) < 2 || !slices.Equal(got[:2], []string{"hub", "hub"}) {
+			t.Fatalf("fake log = %v, want ipcam-hub killed and restarted", got)
+		}
+		seqs := r.f.beaconSeqs("pc-kill9-01-1")
+		if len(seqs) == 0 {
+			t.Fatal("no beacon of the run: the test proves nothing")
+		}
+		for i, seq := range seqs {
+			if seq != uint64(i) { //nolint:gosec // a short test run
+				t.Fatalf("beacons of the run = %v, want one sender counting from 0 once: a second sender started again", seqs)
+			}
+		}
+	})
+
+	t.Run("the resume after a reboot", func(t *testing.T) {
+		r := newRig(t, "pi")
+		r.cutPower(t, SetOptions{Set: SetPiSysrq, Mode: ModeAutomated, Kind: "sysrq", Window: windowAroundNow(t)},
+			func(d *Driver, down func()) {
+				d.OSStop = func(context.Context, controller.ShutdownKind) error {
+					down()
+					return nil
+				}
+			})
+		// The power cut ended the first ipcam-hub: its beacons stop.
+		atCut := r.f.beaconSeqs("pi-sysrq-01-1")
+		for {
+			time.Sleep(10 * controller.BeaconEvery)
+			now := r.f.beaconSeqs("pi-sysrq-01-1")
+			if len(now) == len(atCut) {
+				break
+			}
+			atCut = now
+		}
+		if len(atCut) == 0 {
+			t.Fatal("no beacon of the run before the cut: the test proves nothing")
+		}
+		d := r.driver(t)
+		d.Uptime = func() (time.Duration, error) { return 41 * time.Second, nil }
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		next := cancelAt(r.f, "run_start pi-sysrq-02-1", cancel)
+		if err := d.Resume(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Resume = %v, want the test's cancel at run 2", err)
+		}
+		if err := <-next; err != nil {
+			t.Fatal(err)
+		}
+		if reps := r.f.runReports(); len(reps) != 1 || reps[0].RunID != "pi-sysrq-01-1" {
+			t.Fatalf("reports = %+v, want run 1's, after the resume", reps)
+		}
+		if after := r.f.beaconSeqs("pi-sysrq-01-1"); len(after) != len(atCut) {
+			t.Errorf("the run's beacons: %d at the cut, %d after the resume; want none after the cut", len(atCut), len(after))
+		}
+	})
+}
+
+// TestSession_EndsWithPullAndByeAfterAnError (G15): a set that stops on an
+// error, with the link still up, still ends its session: the PC pulls the
+// Pi's results and says bye.
+func TestSession_EndsWithPullAndByeAfterAnError(t *testing.T) {
+	r := newRig(t, "pc")
+	r.f.verdict = func(start link.RunStart, m link.Report) results.Run {
+		return results.Run{RunID: m.RunID, InvalidReason: "controlorul a trimis neuniform", Attempt: start.Attempt, ShutdownKind: start.Kind}
+	}
+	err := r.driver(t).RunSet(t.Context(), SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: windowAroundNow(t)})
+	if err == nil || !strings.Contains(err.Error(), "nu au contat") {
+		t.Fatalf("RunSet = %v, want the set stopped after 3 runs that did not count", err)
+	}
+	if err := r.f.waitEventWithin("pull_results", 5*time.Second); err != nil {
+		t.Error(err)
+	}
+	if err := r.f.waitEventWithin("bye", 5*time.Second); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestSession_ReconnectsAfterALinkDrop: in an unattended automated set, a
+// link that drops while recspike waits for its cut, or for its verdict, is
+// connected again (with bounded retries) instead of ending the set: the run
+// repeats `ready` on the new link and gets its cut there, or sends its
+// report again and gets its verdict, and the set goes on.
+func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
+	o := func(t *testing.T) SetOptions {
+		return SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: windowAroundNow(t)}
+	}
+	t.Run("while it waits for the cut", func(t *testing.T) {
+		r := newRig(t, "pc")
+		var mu sync.Mutex
+		readies := 0
+		r.f.onReady = func(c *link.Conn, start link.RunStart) {
+			mu.Lock()
+			readies++
+			first := readies == 1
+			mu.Unlock()
+			if first {
+				_ = c.Close() // the link drops
+				return
+			}
+			_ = c.Send(link.Cut{RunID: start.RunID, Kind: start.Kind, PromptAt: time.Now()})
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		reported := cancelAt(r.f, "report pc-kill9-01-1", cancel)
+		if err := r.driver(t).RunSet(ctx, o(t)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunSet = %v, want the set going on until the test's cancel", err)
+		}
+		if err := <-reported; err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if readies != 2 {
+			t.Errorf("%d readies, want the run's ready repeated once on the new link", readies)
+		}
+		if got := logEntries(t, r.log); len(got) < 2 || !slices.Equal(got[:2], []string{"hub", "hub"}) {
+			t.Errorf("fake log = %v, want the run's ipcam-hub kept through the drop, then killed and restarted at its cut", got)
+		}
+		if !strings.Contains(r.out.String(), "Legătura cu controlorul s-a refăcut") {
+			t.Errorf("screen:\n%s\nwant the reconnection said", r.out.String())
+		}
+	})
+
+	t.Run("while it waits for the verdict", func(t *testing.T) {
+		r := newRig(t, "pc")
+		r.f.dropReports = 1
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		next := cancelAt(r.f, "run_start pc-kill9-02-1", cancel)
+		if err := r.driver(t).RunSet(ctx, o(t)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunSet = %v, want the set going on until the test's cancel", err)
+		}
+		if err := <-next; err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, rep := range r.f.runReports() {
+			ids = append(ids, rep.RunID)
+		}
+		if !slices.Equal(ids, []string{"pc-kill9-01-1", "pc-kill9-01-1"}) {
+			t.Errorf("reports = %v, want run 1's report sent again on the new link", ids)
+		}
+	})
 }

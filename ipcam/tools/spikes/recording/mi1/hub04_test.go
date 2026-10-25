@@ -240,7 +240,10 @@ func TestHub04_DriverSkipsOnlyAClearRunsStreams(t *testing.T) {
 
 // BenchmarkScanHub04 is the scan's speed on random bytes, as ciphertext,
 // and on zeros, as a fresh image's free space: the framed needles begin
-// with zeros, so the prefilter looks past them (prefilterAt).
+// with zeros, so the prefilter looks past them (prefilterAt). With
+// MEDIAGEN_DIR it also scans random bytes for the real needle set, every
+// needle of the test media as reccontroller sends them to the host (about
+// 144), which is what a run's HUB-04 scan searches.
 func BenchmarkScanHub04(b *testing.B) {
 	sps := []byte{0x67, 0x4d, 0x40, 0x1f, 0xda, 0x02, 0x80, 0xbf, 0xe5, 0x84, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x03, 0x00, 0xc8, 0x3c}
 	pps := []byte{0x68, 0xef, 0x07, 0x72}
@@ -262,10 +265,21 @@ func BenchmarkScanHub04(b *testing.B) {
 	if _, err := rand.Read(random); err != nil {
 		b.Fatal(err)
 	}
-	for _, tc := range []struct {
-		name string
-		data []byte
-	}{{"random", random}, {"zeros", make([]byte, 16<<20)}} {
+	type scan struct {
+		name    string
+		data    []byte
+		needles [][]byte
+	}
+	scans := []scan{{"random", random, needles}, {"zeros", make([]byte, 16<<20), needles}}
+	if dir := os.Getenv("MEDIAGEN_DIR"); dir != "" {
+		media, err := MediaNeedles(filepath.Join(dir, "main.h264"), filepath.Join(dir, "sub.h264"), filepath.Join(dir, "sub-256k.h264"))
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Logf("the test media's needles: %d", len(media))
+		scans = append(scans, scan{"random-real-needles", random, media})
+	}
+	for _, tc := range scans {
 		root := b.TempDir()
 		if err := os.WriteFile(filepath.Join(root, "blob"), tc.data, 0o600); err != nil {
 			b.Fatal(err)
@@ -273,7 +287,7 @@ func BenchmarkScanHub04(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			b.SetBytes(int64(len(tc.data)))
 			for b.Loop() {
-				if found, err := ScanHub04(root, nil, needles); err != nil || len(found) != 0 {
+				if found, err := ScanHub04(root, nil, tc.needles); err != nil || len(found) != 0 {
 					b.Fatalf("ScanHub04 = %+v, %v", found, err)
 				}
 			}

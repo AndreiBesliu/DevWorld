@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"testing"
@@ -697,5 +698,154 @@ func TestReport_UnwrittenEnvelopeIsRedone(t *testing.T) {
 		if again, ok := r.receive(conn).(link.Verdict); !ok || mi1.Counts(again.Run) {
 			t.Errorf("the report sent again got %+v, want no counting verdict", again.Run)
 		}
+	}
+}
+
+// running counts the goroutines that run fn, a function of this package,
+// such as "(*ctl).markEnd", somewhere in their stack.
+func running(t *testing.T, fn string) int {
+	t.Helper()
+	var b strings.Builder
+	if err := pprof.Lookup("goroutine").WriteTo(&b, 2); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, g := range strings.Split(b.String(), "\n\n") {
+		if strings.Contains(g, "/reccontroller."+fn+"(") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRun_GoroutinesEndWithTheRun: a run's goroutines at the controller,
+// the watch for its beacons' end (markEnd) and its cut's schedule
+// (scheduleCut), end with the run: at its report, at the host's refusal,
+// and, for a run whose host never beacons, a minute after its ready, when
+// the controller refuses it with «niciun semnal de la gazdă», so that
+// neither side waits for a cut that never comes.
+func TestRun_GoroutinesEndWithTheRun(t *testing.T) {
+	both := func() int { return running(t, "(*ctl).markEnd") + running(t, "(*ctl).scheduleCut") }
+	for _, end := range []string{"report", "refused", "no beacon"} {
+		waitFor(t, "the goroutines of earlier runs to end", func() bool { return both() == 0 })
+		r := newRig(t)
+		conn := r.connect("pc")
+		id := "pc-kill9-06-1"
+		r.send(conn, link.RunStart{RunID: id, Set: "pc-kill9", Kind: "kill9", Streams: []string{"cam01_main"}, Host: "pc", OS: "windows", Attempt: 1})
+		r.send(conn, link.Ready{RunID: id})
+		boot := r.clock.Now().Add(time.Second)
+		if end != "no beacon" {
+			r.beaconAt(id, 0, boot)
+			waitFor(t, "the drawn moment", func() bool { return strings.Contains(r.screen.String(), "e programată la") })
+		}
+		waitFor(t, "the run's two goroutines", func() bool { return both() == 2 })
+		switch end {
+		case "report":
+			r.send(conn, link.Report{RunID: id})
+			if _, ok := r.receive(conn).(link.Verdict); !ok {
+				t.Fatal("no verdict")
+			}
+		case "refused":
+			r.send(conn, link.Refused{RunID: id, Reason: "oprire automată cerută în afara ferestrei 22:00-06:00"})
+		case "no beacon":
+			r.clock.set(r.clock.Now().Add(firstBeaconWait + time.Second))
+			if m, ok := r.receive(conn).(link.Refused); !ok || m.RunID != id || m.Reason != "niciun semnal de la gazdă" {
+				t.Errorf("no beacon: the host got %#v, want the run refused: niciun semnal de la gazdă", m)
+			}
+		}
+		waitFor(t, end+": the run's goroutines to end", func() bool { return both() == 0 })
+		r.c.mu.Lock()
+		if n := len(r.c.runs); n != 0 {
+			t.Errorf("%s: the controller still holds %d runs", end, n)
+		}
+		r.c.mu.Unlock()
+	}
+}
+
+// TestReport_BeaconGapMidRunHasItsOwnReason: a run whose beacons stopped
+// for more than 2 s mid-run, and came back, is invalid with its own
+// Romanian reason, which points at the network, not as a stop outside the
+// window.
+func TestReport_BeaconGapMidRunHasItsOwnReason(t *testing.T) {
+	r := newRig(t)
+	conn := r.connect("pc")
+	id := "pc-kill9-07-1"
+	r.send(conn, link.RunStart{RunID: id, Set: "pc-kill9", Kind: "kill9", Streams: []string{"cam01_main"}, Host: "pc", OS: "windows", Attempt: 1})
+	boot := r.clock.Now().Add(time.Second)
+	at, seq := boot, uint64(0)
+	for ; at.Before(boot.Add(time.Minute)); at, seq = at.Add(time.Second), seq+20 {
+		r.beaconAt(id, seq, at)
+	}
+	// 3 s without a beacon, then the host's beacons again.
+	r.clock.set(at.Add(3 * time.Second))
+	for range 3 {
+		if _, err := r.beacon.Write(link.BeaconPacket(id, seq+60)); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	r.send(conn, link.Report{RunID: id, Hub04Clear: true})
+	v, ok := r.receive(conn).(link.Verdict)
+	if !ok || v.Run.Valid || v.Run.InvalidReason != "semnalul gazdei s-a întrerupt peste 2 s în timpul rulării (verificați rețeaua)" {
+		t.Errorf("verdict = %+v, want invalid with the beacon gap's own reason", v.Run)
+	}
+}
+
+// TestReady_AgainAfterTheCutGetsTheCutAgain (C16): a host whose link
+// dropped as its cut was sent reconnects and repeats `ready`; the
+// controller sends it the same cut again, on the new link, rather than
+// leaving it waiting for a cut that went out on the dead one.
+func TestReady_AgainAfterTheCutGetsTheCutAgain(t *testing.T) {
+	r := newRig(t)
+	first := r.connect("pc")
+	id := "pc-kill9-08-1"
+	r.send(first, link.RunStart{RunID: id, Set: "pc-kill9", Kind: "kill9", Streams: []string{"cam01_main"}, Host: "pc", OS: "windows", Attempt: 1})
+	r.send(first, link.Ready{RunID: id})
+	boot := r.clock.Now().Add(time.Second)
+	r.beaconAt(id, 0, boot)
+	waitFor(t, "the drawn moment", func() bool { return strings.Contains(r.screen.String(), "e programată la") })
+	r.clock.set(boot.Add(13 * time.Minute)) // past every moment the schedule may draw
+	cut, ok := r.receive(first).(link.Cut)
+	if !ok || cut.RunID != id {
+		t.Fatalf("the host got %+v, want the run's cut", cut)
+	}
+	_ = first.Close() // the cut was lost with the link
+
+	again := r.connect("pc")
+	r.send(again, link.Ready{RunID: id})
+	if got, ok := r.receive(again).(link.Cut); !ok || got.RunID != id || !got.PromptAt.Equal(cut.PromptAt) {
+		t.Errorf("after ready again the host got %+v, want the same cut %+v", got, cut)
+	}
+}
+
+// TestReport_UnwrittenEnvelopeKeepsTheRunsReason: a run that is already
+// invalid keeps its reason when its envelope cannot be written; the write
+// failure is added to it.
+func TestReport_UnwrittenEnvelopeKeepsTheRunsReason(t *testing.T) {
+	r := newRig(t)
+	file := filepath.Join(t.TempDir(), "not-a-folder")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.c.results = filepath.Join(file, "results")
+	conn := r.connect("pc")
+	r.send(conn, link.RunStart{RunID: "pc-kill9-09-1", Set: "pc-kill9", Kind: "kill9", Streams: []string{"cam01_main"}, Host: "pc", OS: "windows", Attempt: 1})
+	r.send(conn, link.Report{RunID: "pc-kill9-09-1", Hub04Clear: true})
+	v, ok := r.receive(conn).(link.Verdict)
+	if want := "niciun semnal de la gazdă; rezultatul nu s-a putut scrie la controlor"; !ok || v.Run.Valid || v.Run.InvalidReason != want {
+		t.Errorf("verdict = %+v, want invalid: %s", v.Run, want)
+	}
+}
+
+// TestReady_UnknownRunIsRefused: a host that repeats `ready` after a
+// reconnection to a controller that no longer knows the run (it was
+// started again) is refused in Romanian, instead of waiting for a cut that
+// no schedule will send.
+func TestReady_UnknownRunIsRefused(t *testing.T) {
+	r := newRig(t)
+	conn := r.connect("pc")
+	r.send(conn, link.Ready{RunID: "pc-kill9-10-1"})
+	if m, ok := r.receive(conn).(link.Refused); !ok || m.RunID != "pc-kill9-10-1" || m.Reason != "rularea nu a fost anunțată controlorului" {
+		t.Errorf("reply = %#v, want the run refused: rularea nu a fost anunțată controlorului", m)
 	}
 }

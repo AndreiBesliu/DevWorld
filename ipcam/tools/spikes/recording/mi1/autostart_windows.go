@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc/mgr"
 )
 
 // Privileged reports whether recspike runs elevated, which the boot task's
@@ -72,4 +73,59 @@ func CreateShortcut(path, target, args, dir string, runAsAdmin bool) error {
 		return RunAsAdministrator(path)
 	}
 	return nil
+}
+
+// TimeService is Windows' time service, W32Time, in the service manager:
+// `recspike install` sets it to start automatically and starts it, and
+// uninstall gives it back its start type (C1-R16). The service manager
+// needs administrator rights, which install has.
+type TimeService struct{}
+
+// timeServiceName is W32Time's service name.
+const timeServiceName = "W32Time"
+
+// withTimeService runs f on W32Time in the service manager.
+func withTimeService(f func(s *mgr.Service) error) error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = m.Disconnect() }()
+	s, err := m.OpenService(timeServiceName)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = s.Close() }()
+	return f(s)
+}
+
+// StartType is W32Time's start type: SERVICE_AUTO_START (2),
+// SERVICE_DEMAND_START (3) or SERVICE_DISABLED (4).
+func (TimeService) StartType() (uint32, error) {
+	var t uint32
+	err := withTimeService(func(s *mgr.Service) error {
+		cfg, err := s.Config()
+		t = cfg.StartType
+		return err
+	})
+	return t, err
+}
+
+// SetStartType changes W32Time's start type alone: every other setting of
+// the service stays as it is.
+func (TimeService) SetStartType(t uint32) error {
+	return withTimeService(func(s *mgr.Service) error {
+		return windows.ChangeServiceConfig(s.Handle, windows.SERVICE_NO_CHANGE, t, windows.SERVICE_NO_CHANGE,
+			nil, nil, nil, nil, nil, nil, nil)
+	})
+}
+
+// Start starts W32Time; a service that runs already is no error.
+func (TimeService) Start() error {
+	return withTimeService(func(s *mgr.Service) error {
+		if err := s.Start(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
+			return err
+		}
+		return nil
+	})
 }

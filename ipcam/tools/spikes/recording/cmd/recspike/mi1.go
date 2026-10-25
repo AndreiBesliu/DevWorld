@@ -130,21 +130,16 @@ func mi1Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	if err != nil {
 		return err
 	}
-	st, err := mi1.LoadRunState(f.results + "/state/run-state.json")
-	if err != nil {
-		return err
-	}
-	if st == nil || st.Set != set {
-		// A new set: the host as diag host reads it, with the owner's
-		// answers for an unknown Pi model and an SD card (C24, G16).
-		if d.Host, err = mi1.OwnerHost(ctx, f.hub, f.work, runtime.GOOS, in, out); err != nil {
-			return err
-		}
+	// A new set reads the host with diag host, with the owner's answers for
+	// an unknown Pi model and an SD card (C24, G16), once it is sure to
+	// start.
+	host := func(ctx context.Context) (mi1.HostState, error) {
+		return mi1.OwnerHost(ctx, f.hub, f.work, runtime.GOOS, in, out)
 	}
 	if o.real {
-		return d.RunSet(ctx, mi1.SetOptions{Set: set, Mode: mi1.ModeReal, Kind: "power", Resume: o.resume})
+		return d.RunSet(ctx, mi1.SetOptions{Set: set, Mode: mi1.ModeReal, Kind: "power", Resume: o.resume, Host: host})
 	}
-	return d.RunSet(ctx, mi1.SetOptions{Set: set, Mode: mi1.ModeAutomated, Kind: o.kind, Window: window, WaitForWindow: true})
+	return d.RunSet(ctx, mi1.SetOptions{Set: set, Mode: mi1.ModeAutomated, Kind: o.kind, Window: window, WaitForWindow: true, Host: host})
 }
 
 // resumeCommand is `recspike resume`, which the boot task or service runs
@@ -157,15 +152,13 @@ func resumeCommand(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	addr, err := f.savedController()
-	if err != nil {
-		st, _ := mi1.LoadRunState(f.results + "/state/run-state.json")
-		if st == nil {
+	d := &mi1.Driver{Hub: f.hub, Results: f.results, Work: f.work, Out: out}
+	if d.Controller, err = f.savedController(); err != nil {
+		if st, _ := d.State(); st == nil {
 			_, _ = fmt.Fprintln(out, "Nicio probă MI1 de continuat.")
 			return nil
 		}
 		return err
 	}
-	d := &mi1.Driver{Controller: addr, Hub: f.hub, Results: f.results, Work: f.work, Out: out}
 	return d.Resume(ctx)
 }

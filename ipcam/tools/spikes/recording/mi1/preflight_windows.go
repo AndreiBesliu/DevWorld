@@ -5,6 +5,7 @@ package mi1
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"time"
 	"unsafe"
@@ -132,3 +133,7 @@ func signerName(path16 *uint16) (string, error) {
 	}
 	return windows.UTF16ToString(name[:n]), nil
 }
+
+// ownerUID is -1 on Windows, which has no numeric file owners: recspike
+// push runs on the Pi.
+func ownerUID(fs.FileInfo) int { return -1 }

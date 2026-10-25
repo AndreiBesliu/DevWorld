@@ -24,3 +24,16 @@ func DesktopDir() (string, error) { return "", errNotWindows }
 
 // CreateShortcut is Windows-only.
 func CreateShortcut(string, string, string, string, bool) error { return errNotWindows }
+
+// TimeService is Windows' time service, which only the PC's install
+// changes (C1-R16).
+type TimeService struct{}
+
+// StartType is Windows-only.
+func (TimeService) StartType() (uint32, error) { return 0, errNotWindows }
+
+// SetStartType is Windows-only.
+func (TimeService) SetStartType(uint32) error { return errNotWindows }
+
+// Start is Windows-only.
+func (TimeService) Start() error { return errNotWindows }

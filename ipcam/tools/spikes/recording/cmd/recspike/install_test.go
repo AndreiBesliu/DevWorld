@@ -41,11 +41,38 @@ type fakeOS struct {
 	elevated []string
 	files    map[string][]byte
 	links    []string
+	time     *fakeService
+}
+
+// serviceDemandStart is SERVICE_DEMAND_START: W32Time's start type on a PC
+// outside a domain.
+const serviceDemandStart = 3
+
+// fakeService is Windows' time service in a fake service manager: its start
+// type, whether it runs, and what was asked of it.
+type fakeService struct {
+	startType uint32
+	running   bool
+	asked     []string
+}
+
+func (s *fakeService) StartType() (uint32, error) { return s.startType, nil }
+
+func (s *fakeService) SetStartType(t uint32) error {
+	s.asked = append(s.asked, "start type "+strconv.FormatUint(uint64(t), 10))
+	s.startType = t
+	return nil
+}
+
+func (s *fakeService) Start() error {
+	s.asked = append(s.asked, "start")
+	s.running = true
+	return nil
 }
 
 func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeOS, string) {
 	t.Helper()
-	f := &fakeOS{files: map[string][]byte{}}
+	f := &fakeOS{files: map[string][]byte{}, time: &fakeService{startType: serviceDemandStart}}
 	dir := t.TempDir()
 	desktop := filepath.Join(dir, "Desktop")
 	if err := os.MkdirAll(desktop, 0o750); err != nil {
@@ -76,9 +103,11 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 			f.links = append(f.links, strings.Join([]string{path, target, args, workDir, strconv.FormatBool(runAsAdmin)}, "|"))
 			return os.WriteFile(path, []byte("lnk"), 0o600)
 		},
-		unitPath: filepath.Join(dir, "ipcam-recspike.service"),
-		tempDir:  dir,
-		out:      io.Discard,
+		unitPath:    filepath.Join(dir, "ipcam-recspike.service"),
+		tempDir:     dir,
+		timeService: f.time,
+		savedStart:  filepath.Join(dir, "work", "w32time-start.json"),
+		out:         io.Discard,
 	}
 	return a, f, desktop
 }
@@ -220,5 +249,51 @@ func TestUninstall_RemovesTaskUnitAndShortcut(t *testing.T) {
 	}
 	if err := a.uninstall(); err != nil {
 		t.Errorf("a second uninstall: %v", err)
+	}
+}
+
+// TestInstall_TimeServiceStartsAutomatically (C1-R16): on the PC, install
+// sets Windows' time service (W32Time) to start automatically and starts
+// it, so that the clock syncs after every boot of a PC outside a domain,
+// and saves its previous start type in recspike's private folder;
+// uninstall puts that start type back. A second install keeps the first
+// one's saved type, and an uninstall without one changes nothing. The Pi
+// and an unelevated recspike touch no service.
+func TestInstall_TimeServiceStartsAutomatically(t *testing.T) {
+	a, f, _ := newAutostart(t, "windows", true)
+	if err := a.install(`C:\proba\recspike.exe`); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if f.time.startType != serviceAutoStart || !f.time.running {
+		t.Errorf("after install the time service has start type %d, running %v; want automatic (%d) and running", f.time.startType, f.time.running, serviceAutoStart)
+	}
+	if err := a.install(`C:\proba\recspike.exe`); err != nil {
+		t.Fatalf("install again: %v", err)
+	}
+	f.time.asked = nil
+	if err := a.uninstall(); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if want := []string{"start type 3"}; !slices.Equal(f.time.asked, want) || f.time.startType != serviceDemandStart {
+		t.Errorf("uninstall asked %q of the time service, start type %d; want %q: the type before the first install", f.time.asked, f.time.startType, want)
+	}
+	if _, err := os.Stat(a.savedStart); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the saved start type is still there (%v)", err)
+	}
+	f.time.asked = nil
+	if err := a.uninstall(); err != nil || len(f.time.asked) != 0 {
+		t.Errorf("a second uninstall = %v, asked %q of the time service; want nothing", err, f.time.asked)
+	}
+
+	for _, tc := range []struct {
+		goos       string
+		privileged bool
+	}{{"linux", true}, {"windows", false}} {
+		a, f, _ := newAutostart(t, tc.goos, tc.privileged)
+		_ = a.install("/home/pi/proba/recspike")
+		_ = a.uninstall()
+		if len(f.time.asked) != 0 {
+			t.Errorf("%s, privileged %v: asked %q of the time service, want nothing", tc.goos, tc.privileged, f.time.asked)
+		}
 	}
 }

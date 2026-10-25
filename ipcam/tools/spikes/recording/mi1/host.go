@@ -157,9 +157,11 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 
 // awaitCut waits for the controller's cut of cur and stops the host as its
 // kind says. A cut or a refusal of another run, one that has ended, is
-// ignored: it never stops this run (C16).
+// ignored: it never stops this run (C16). In an unattended set, a link that
+// drops meanwhile is connected again, and the run's ready repeated on it:
+// the controller delivers the cut there.
 func (d *Driver) awaitCut(ctx context.Context, s *session, st *RunState, cur *CurrentRun, vol Volume, hub *hubproc.Hub) error {
-	for {
+	for reconnects := 0; ; {
 		var m link.Message
 		select {
 		case <-ctx.Done():
@@ -168,11 +170,27 @@ func (d *Driver) awaitCut(ctx context.Context, s *session, st *RunState, cur *Cu
 			d.say("ipcam-hub s-a oprit singur în timpul rulării %s; rularea se reface.", cur.RunID)
 			return d.afterStop(ctx, s, st, cur, vol, hub)
 		case r, ok := <-s.in:
-			if !ok || r.err != nil {
-				stopHub(hub)
-				return fmt.Errorf("legătura cu controlorul s-a întrerupt: %v", r.err)
+			if ok && r.err == nil {
+				m = r.m
+				break
 			}
-			m = r.m
+			cause := errLinkDown
+			if ok {
+				cause = r.err
+			}
+			if reconnects++; reconnects > maxReconnects {
+				stopHub(hub)
+				return cause
+			}
+			if err := d.reconnect(ctx, s, st, cause); err != nil {
+				stopHub(hub)
+				return err
+			}
+			if err := s.send(link.Ready{RunID: cur.RunID}); err != nil {
+				stopHub(hub)
+				return err
+			}
+			continue
 		}
 		switch m := m.(type) {
 		case link.Refused:
@@ -249,6 +267,10 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 		return d.finish(ctx, s, st, cur, vol, again, nil)
 	}
 	cur.Phase = PhaseStopping
+	if up, err := d.uptime(); err == nil {
+		ms := up.Milliseconds()
+		cur.StopUptimeMs = &ms
+	}
 	if err := SaveRunState(d.statePath(), st); err != nil {
 		return err
 	}
@@ -286,14 +308,18 @@ func (d *Driver) refuse(ctx context.Context, s *session, st *RunState, cur *Curr
 // left: with ipcam-hub killed, it reads the files listed then; otherwise
 // it lists the files now, before ipcam-hub starts again on the run's
 // run.json, so that ipcam-hub reconciles them and records again (C07).
+// An OS stop after which the host did not reboot ends its run as invalid.
 func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState) error {
 	cur := st.Current
-	// The host booted since the OS stop that recspike asked for: ColdBootMs
-	// is measured on its boot clock.
-	booted := cur.Phase == PhaseStopping
 	vol, err := d.volumes().Reopen(ctx, cur.RunID, cur.Encrypted)
 	if err != nil {
 		return fmt.Errorf("rularea %s nu mai are dosarul de date: %w", cur.RunID, err)
+	}
+	// The host booted since the OS stop that recspike asked for: ColdBootMs
+	// is measured on its boot clock.
+	booted := cur.Phase == PhaseStopping
+	if booted && !d.rebootedSince(cur) {
+		return d.notRebooted(s, st, cur, vol)
 	}
 	if cur.Phase != PhaseStopped {
 		if err := d.listBefore(cur, vol); err != nil {
@@ -328,6 +354,26 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 		}
 	}
 	return d.finish(ctx, s, st, cur, vol, hub, coldBootMs)
+}
+
+// rebootedSince reports whether the host booted after recspike asked the
+// OS to stop for cur: its uptime is below the one at the stop.
+func (d *Driver) rebootedSince(cur *CurrentRun) bool {
+	up, err := d.uptime()
+	return err == nil && cur.StopUptimeMs != nil && up.Milliseconds() < *cur.StopUptimeMs
+}
+
+// notRebooted ends a run whose OS stop did not reboot the host (the stop
+// failed, or the host never went down): it is invalid, with no ColdBootMs
+// and no report; the controller hears why, and the run is redone.
+func (d *Driver) notRebooted(s *session, st *RunState, cur *CurrentRun, vol Volume) error {
+	reason := fmt.Sprintf("gazda nu a repornit după oprirea %s", st.Kind)
+	d.say("Rularea %s: %s; rularea se reface.", cur.RunID, reason)
+	if err := s.send(link.Refused{RunID: cur.RunID, Reason: reason}); err != nil {
+		return err
+	}
+	return d.done(st, cur, vol, results.Run{RunID: cur.RunID, InvalidReason: reason, Slot: cur.Slot, Attempt: cur.Attempt,
+		ShutdownKind: st.Kind, Encrypted: cur.Encrypted, PadLowBitrate: cur.PadLowBitrate})
 }
 
 // afterStop finishes a run whose ipcam-hub stopped without a kill: the
@@ -397,11 +443,26 @@ func (d *Driver) finish(ctx context.Context, s *session, st *RunState, cur *Curr
 	if err != nil {
 		return err
 	}
-	run, err := s.report(ctx, report)
+	run, err := d.report(ctx, s, st, report)
 	if err != nil {
 		return err
 	}
 	return d.done(st, cur, vol, run)
+}
+
+// report sends the run's report and returns its verdict. In an unattended
+// set, a link that drops meanwhile is connected again and the report sent
+// again: the controller answers a report sent again with the same verdict.
+func (d *Driver) report(ctx context.Context, s *session, st *RunState, r link.Report) (results.Run, error) {
+	for reconnects := 0; ; reconnects++ {
+		run, err := s.report(ctx, r)
+		if err == nil || !errors.Is(err, errLinkDown) || reconnects == maxReconnects {
+			return run, err
+		}
+		if err := d.reconnect(ctx, s, st, err); err != nil {
+			return results.Run{}, err
+		}
+	}
 }
 
 // done records the run's verdict in the run state and frees its folder.

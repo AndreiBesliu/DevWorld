@@ -26,9 +26,10 @@ type NTPCheck func(ctx context.Context) (bool, error)
 // asking every 5 s, and returns how long it waited and whether the clock
 // synced (Review Focus 2). The loss never depends on it: the controller
 // measures it on its own clock; the wait keeps the host's timestamps
-// plausible and is recorded. A check that fails is asked again; one whose
-// program does not exist, or that w32tm refuses until someone acts
-// (ntpFinal), ends the wait at once, unsynced.
+// plausible and is recorded. A check that fails is asked again, the time
+// service not running included (install starts it at every boot, C1-R16);
+// one whose program does not exist, or that w32tm refuses to an
+// unelevated recspike (ntpFinal), ends the wait at once, unsynced.
 func WaitNTP(ctx context.Context, check NTPCheck, clock source.Clock) (waitMs int64, synced bool) {
 	start := clock.Now()
 	tick := clock.NewTicker(ntpPoll)
@@ -52,17 +53,19 @@ func WaitNTP(ctx context.Context, check NTPCheck, clock source.Clock) (waitMs in
 	}
 }
 
-// The failures of `w32tm /query /status` that waiting does not cure: the
-// NTP wait ends at once, unsynced, and the preflight names the remedy.
+// The failures of `w32tm /query /status` that the preflight names a remedy
+// for: access denied, which waiting does not cure (the NTP wait ends at
+// once, unsynced), and the time service not running.
 var (
 	// ErrNTPNeedsAdmin is «Access is denied» (0x80070005): w32tm answers
 	// only an elevated recspike, as the boot task and the real cuts'
 	// shortcut are.
 	ErrNTPNeedsAdmin = errors.New("w32tm: access denied without administrator rights")
 	// ErrTimeServiceStopped is «The service has not been started»
-	// (0x80070426): Windows' time service (W32Time) is not running, as on a
-	// PC outside a domain after a boot, so nothing syncs the clock until it
-	// is started; recspike never starts it.
+	// (0x80070426): Windows' time service (W32Time) is not running. On a PC
+	// outside a domain it is stopped after a boot unless `recspike install`
+	// set it to start automatically (C1-R16); after a boot it may still be
+	// starting, so the NTP wait asks again.
 	ErrTimeServiceStopped = errors.New("w32tm: the Windows time service is not running")
 )
 
@@ -90,9 +93,9 @@ func w32tmError(out string, code uint32) error {
 }
 
 // ntpFinal reports whether a failed NTP check ends the wait: its program
-// does not exist, or w32tm will not answer before someone acts.
+// does not exist, or w32tm will not answer an unelevated recspike.
 func ntpFinal(err error) bool {
-	return errors.Is(err, exec.ErrNotFound) || errors.Is(err, ErrNTPNeedsAdmin) || errors.Is(err, ErrTimeServiceStopped)
+	return errors.Is(err, exec.ErrNotFound) || errors.Is(err, ErrNTPNeedsAdmin)
 }
 
 // SystemNTP is the host's own answer: `timedatectl show -p NTPSynchronized

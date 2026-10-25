@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -43,6 +45,11 @@ const (
 	stopTimeout    = 30 * time.Second // a clean stop of ipcam-hub
 	verdictTimeout = 2 * time.Minute  // the controller's verdict on a report
 	connectTimeout = 5 * time.Minute  // the link, after a boot
+	// reconnectWait bounds the reconnection after a link drop in an
+	// unattended set, and maxReconnects how many one wait (for a cut, for
+	// a verdict) may need.
+	reconnectWait = 2 * time.Minute
+	maxReconnects = 5
 	// realCutWait is how long after the prompt recspike waits for the
 	// owner's cut: past the 2 min that the cut counts for, it stops
 	// ipcam-hub and the cut is redone (Review Focus 1).
@@ -114,6 +121,11 @@ type SetOptions struct {
 	// Resume continues the set of the run state, as the real cuts'
 	// shortcut does.
 	Resume bool
+	// Host, when set, reads the host of a new set: only once the set is
+	// sure to start, so that the owner answers nothing (C24, G16) for a set
+	// that another set in progress refuses. A set in progress keeps the
+	// host that its start read.
+	Host func(ctx context.Context) (HostState, error)
 }
 
 func (d *Driver) goos() string {
@@ -207,6 +219,10 @@ func (d *Driver) runDir(id string) string {
 	return filepath.Join(d.Work, id)
 }
 
+// State is the run state in the driver's results folder; nil when there is
+// none.
+func (d *Driver) State() (*RunState, error) { return LoadRunState(d.statePath()) }
+
 // lock takes the run state's lock, telling the owner when it waits.
 func (d *Driver) lock(ctx context.Context) (func() error, error) {
 	return LockRunState(ctx, d.lockPath(), func() { d.say("%s", WaitingLine) })
@@ -225,7 +241,7 @@ func (d *Driver) RunSet(ctx context.Context, o SetOptions) error {
 	if err != nil {
 		return err
 	}
-	if st, err = d.begin(st, o); err != nil {
+	if st, err = d.begin(ctx, st, o); err != nil {
 		return err
 	}
 	release, err := KeepAwake()
@@ -240,18 +256,15 @@ func (d *Driver) RunSet(ctx context.Context, o SetOptions) error {
 	defer s.close()
 	if st.Current != nil {
 		if err := d.finishAfterReboot(ctx, s, st); err != nil {
-			return err
+			return d.end(ctx, s, err)
 		}
 	}
 	if !d.complete(st) {
 		if err := d.preflight(ctx, st.Mode, s.probes(d.ntp())); err != nil {
-			return err
+			return d.end(ctx, s, err)
 		}
 	}
-	if err := d.loop(ctx, s, st, o.WaitForWindow); err != nil {
-		return err
-	}
-	return d.endSession(ctx, s)
+	return d.end(ctx, s, d.loop(ctx, s, st, o.WaitForWindow))
 }
 
 // Resume is `recspike resume`, the boot task's command (G14): it finishes
@@ -286,26 +299,25 @@ func (d *Driver) Resume(ctx context.Context) error {
 	defer s.close()
 	if st.Current != nil {
 		if err := d.finishAfterReboot(ctx, s, st); err != nil {
-			return err
+			return d.end(ctx, s, err)
 		}
 	}
 	if st.Mode == ModeReal && d.goos() == "windows" && !d.complete(st) {
 		d.say("Continuați tăierile reale cu scurtătura de pe desktop „%s”.", RealShortcut)
 		return d.endSession(ctx, s)
 	}
-	if err := d.loop(ctx, s, st, false); err != nil {
-		return err
-	}
-	return d.endSession(ctx, s)
+	return d.end(ctx, s, d.loop(ctx, s, st, false))
 }
 
 // begin returns the run state of the set o asks for: the one in progress,
-// or a new one when the last set is complete or there is none.
+// or a new one when the last set is complete or there is none. A lab state
+// is its shard's, and a smoke run's is its own: another shard, or the full
+// shard after its smoke run, never continues it.
 // A set that is complete stays so: its run ids are taken, and its envelopes
-// are the controller's.
-func (d *Driver) begin(st *RunState, o SetOptions) (*RunState, error) {
+// are the controller's. A new set's host is o.Host's, when it has one.
+func (d *Driver) begin(ctx context.Context, st *RunState, o SetOptions) (*RunState, error) {
 	switch {
-	case st != nil && st.Set == o.Set:
+	case st != nil && st.Set == o.Set && st.Shard == o.Shard && st.Smoke == o.Smoke:
 		if o.Window != nil {
 			st.Window = o.Window.String()
 		}
@@ -314,13 +326,32 @@ func (d *Driver) begin(st *RunState, o SetOptions) (*RunState, error) {
 	case o.Resume:
 		return nil, fmt.Errorf("nu există o probă %s de continuat", o.Set)
 	case st != nil && (st.Current != nil || !d.complete(st)):
-		return nil, fmt.Errorf("proba %s nu s-a încheiat: continuați-o înainte de %s", st.Set, o.Set)
+		return nil, fmt.Errorf("proba %s nu s-a încheiat: continuați-o înainte de %s",
+			setLabel(st.Set, st.Shard, st.Smoke), setLabel(o.Set, o.Shard, o.Smoke))
+	}
+	if o.Host != nil {
+		host, err := o.Host(ctx)
+		if err != nil {
+			return nil, err
+		}
+		d.Host = host
 	}
 	st = &RunState{Set: o.Set, Mode: o.Mode, Kind: o.Kind, Shard: o.Shard, Smoke: o.Smoke, Host: d.Host}
 	if o.Window != nil {
 		st.Window = o.Window.String()
 	}
 	return st, SaveRunState(d.statePath(), st)
+}
+
+// setLabel names a set for the owner, with its lab shard and smoke run.
+func setLabel(set string, shard int, smoke bool) string {
+	switch {
+	case shard > 0 && smoke:
+		return fmt.Sprintf("%s (shard %d, smoke)", set, shard)
+	case shard > 0:
+		return fmt.Sprintf("%s (shard %d)", set, shard)
+	}
+	return set
 }
 
 // plan is the runs of the state's set that this driver records: the set's
@@ -449,6 +480,21 @@ func (d *Driver) waitWindow(ctx context.Context, w *Window) error {
 	return nil
 }
 
+// end ends the session after a set's err: with endSession when the set
+// ended well, and also after an error while the link is up, so that the PC
+// still has the Pi's results (G15); the error stays the set's.
+func (d *Driver) end(ctx context.Context, s *session, err error) error {
+	if err == nil {
+		return d.endSession(ctx, s)
+	}
+	if ctx.Err() == nil && s.up() {
+		if endErr := d.endSession(ctx, s); endErr != nil {
+			d.say("Sesiunea cu controlorul nu s-a încheiat cum trebuie: %v", endErr)
+		}
+	}
+	return err
+}
+
 // endSession ends a session with the controller (G15): on the PC, recspike
 // first brings the Pi's results folder, which the Pi's controller holds,
 // into results/pi/; on the Pi, it answers the PC's controller, which pulls
@@ -503,10 +549,57 @@ func answerPull(ctx context.Context, s *session, dir string, out io.Writer) erro
 	}
 }
 
+// geteuid and fileOwner are the system's; tests replace them.
+var (
+	geteuid   = os.Geteuid
+	fileOwner = ownerUID
+)
+
+// pushNeedsSudo is push's answer when root owns the results.
+const pushNeedsSudo = "rezultatele sunt ale lui root, fiindcă proba a rulat cu sudo: " +
+	"porniți și trimiterea cu sudo (sudo ./recspike push --controller <adresa PC-ului>)"
+
+// needsRoot reports whether recspike, run as a user other than root, cannot
+// read the results folder dir: on the Pi, MI1 runs as root, so root owns its
+// results, which only root may read. On Windows (no euid) it is false.
+func needsRoot(dir string) (bool, error) {
+	if geteuid() <= 0 {
+		return false, nil
+	}
+	root := false
+	err := filepath.WalkDir(dir, func(_ string, e fs.DirEntry, err error) error {
+		switch {
+		case errors.Is(err, fs.ErrPermission):
+			root = true
+			return filepath.SkipAll
+		case errors.Is(err, fs.ErrNotExist):
+			return nil
+		case err != nil:
+			return err
+		}
+		info, err := e.Info()
+		if err != nil {
+			return err
+		}
+		if fileOwner(info) == 0 {
+			root = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return root, err
+}
+
 // Push is `recspike push --controller <PC>` on the Pi, the final collection
 // (G15): it connects to the PC's reccontroller, which pulls the results
-// folder dir, and returns when the PC has it.
+// folder dir, and returns when the PC has it. Started without sudo on
+// results that root owns, it says so in Romanian before it connects.
 func Push(ctx context.Context, addr, dir, host string, out io.Writer) error {
+	if root, err := needsRoot(dir); err != nil {
+		return err
+	} else if root {
+		return errors.New(pushNeedsSudo)
+	}
 	s, err := dialSession(ctx, addr, host, 0)
 	if err != nil {
 		return err
@@ -539,11 +632,12 @@ func Push(ctx context.Context, addr, dir, host string, out io.Writer) error {
 }
 
 // session is the host's link to the controller: one goroutine reads its
-// messages into in.
+// messages into in, and closes broken when the link fails.
 type session struct {
 	c          *link.Conn
 	in         chan received
 	closed     chan struct{}
+	broken     chan struct{}
 	info       link.Session
 	beaconAddr string
 }
@@ -553,10 +647,38 @@ type received struct {
 	err error
 }
 
+// errLinkDown is a failed link to the controller, which an unattended set
+// connects again.
+var errLinkDown = errors.New("legătura cu controlorul s-a întrerupt")
+
 // connect connects to the controller, retrying for a while after a boot,
 // when the network may not be up yet, and receives the session.
 func (d *Driver) connect(ctx context.Context) (*session, error) {
-	s, err := dialSession(ctx, d.Controller, d.Host.Pseudonym, connectTimeout)
+	return d.connectWithin(ctx, connectTimeout)
+}
+
+// reconnect replaces the dropped link of s with a new one, in an unattended
+// set (automated or lab): it dials again for up to reconnectWait. A real
+// set's owner is at the host, and a drop ends it, as before.
+func (d *Driver) reconnect(ctx context.Context, s *session, st *RunState, cause error) error {
+	if st.Mode == ModeReal {
+		return cause
+	}
+	d.say("%v; mă reconectez…", cause)
+	fresh, err := d.connectWithin(ctx, reconnectWait)
+	if err != nil {
+		return fmt.Errorf("%w, și nu s-a refăcut: %w", cause, err)
+	}
+	s.close()
+	*s = *fresh
+	d.say("Legătura cu controlorul s-a refăcut.")
+	return nil
+}
+
+// connectWithin connects to the controller, dialing again for up to retry,
+// and receives the session.
+func (d *Driver) connectWithin(ctx context.Context, retry time.Duration) (*session, error) {
+	s, err := dialSession(ctx, d.Controller, d.Host.Pseudonym, retry)
 	if err != nil {
 		return nil, err
 	}
@@ -588,8 +710,8 @@ func dialSession(ctx context.Context, addr, host string, retry time.Duration) (*
 		c, err := link.Dial(dialCtx, addr)
 		cancel()
 		if err == nil {
-			s := &session{c: c, in: make(chan received, 16), closed: make(chan struct{})}
-			go s.read()
+			s := &session{c: c, in: make(chan received, 16), closed: make(chan struct{}), broken: make(chan struct{})}
+			go read(c, s.in, s.closed, s.broken)
 			if err := s.send(link.Hello{Role: "host", Host: host, Version: "c1"}); err != nil {
 				s.close()
 				return nil, err
@@ -610,14 +732,20 @@ func dialSession(ctx context.Context, addr, host string, retry time.Duration) (*
 	}
 }
 
-// read delivers the controller's messages, then its error, and closes in.
-func (s *session) read() {
-	defer close(s.in)
+// read delivers the controller's messages on c into in, then its error,
+// and closes in; it closes broken as soon as the link fails. It holds its
+// own channels: a reconnection gives the session new ones.
+func read(c *link.Conn, in chan<- received, closed <-chan struct{}, broken chan<- struct{}) {
+	defer close(in)
 	for {
-		m, err := s.c.Receive()
+		m, err := c.Receive()
+		if err != nil {
+			close(broken)
+			err = fmt.Errorf("%w: %w", errLinkDown, err)
+		}
 		select {
-		case s.in <- received{m, err}:
-		case <-s.closed:
+		case in <- received{m, err}:
+		case <-closed:
 			return
 		}
 		if err != nil {
@@ -626,7 +754,22 @@ func (s *session) read() {
 	}
 }
 
-func (s *session) send(m link.Message) error { return s.c.Send(m) }
+func (s *session) send(m link.Message) error {
+	if err := s.c.Send(m); err != nil {
+		return fmt.Errorf("%w: %w", errLinkDown, err)
+	}
+	return nil
+}
+
+// up reports whether the link has not failed.
+func (s *session) up() bool {
+	select {
+	case <-s.broken:
+		return false
+	default:
+		return true
+	}
+}
 
 func (s *session) close() {
 	select {
@@ -649,7 +792,7 @@ func (s *session) await(ctx context.Context, d time.Duration, typ string) (link.
 			return nil, fmt.Errorf("controlorul nu a răspuns (%s) în %v", typ, d)
 		case r, ok := <-s.in:
 			if !ok {
-				return nil, io.EOF
+				return nil, fmt.Errorf("%w: %w", errLinkDown, io.EOF)
 			}
 			if r.err != nil {
 				return nil, r.err

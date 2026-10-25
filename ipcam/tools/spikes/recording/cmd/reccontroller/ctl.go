@@ -36,6 +36,13 @@ const (
 // host's first beacon.
 const beaconCheckWait = 5 * time.Second
 
+// firstBeaconWait bounds the wait for a run's first beacon after its
+// `ready`: the host beacons from ipcam-hub's ready, when it sends its own, so
+// a run still without a beacon a minute later has no beacon path. The
+// controller refuses it, so that neither side waits for a cut that never
+// comes.
+const firstBeaconWait = time.Minute
+
 // pacer is the RTSP server's pacing of the controller's sends (R07).
 type pacer interface {
 	MarkPacing() controller.PacingMark
@@ -242,18 +249,29 @@ func (c *ctl) markEnd(r *runState) {
 }
 
 // ready schedules the run's cut once; a repeated ready, on any connection,
-// only moves the cut's delivery to that connection.
+// only moves the cut's delivery to that connection. A host that repeats it
+// after its cut went out, on a link that dropped meanwhile, gets the same
+// cut again, on the new connection. A run that the controller does not
+// know is refused.
 func (c *ctl) ready(conn *link.Conn, runID string) {
 	c.mu.Lock()
 	r := c.runs[runID]
 	scheduled := r != nil && r.scheduled
+	var sent *link.Cut
 	if r != nil {
 		r.conn, r.scheduled = conn, true
+		if scheduled && !r.cut.PromptAt.IsZero() {
+			sent = &link.Cut{RunID: runID, Kind: string(r.cut.Kind), PromptAt: r.cut.PromptAt}
+		}
 	}
 	c.mu.Unlock()
 	switch {
 	case r == nil:
 		c.say("Rularea %s nu a fost anunțată; nu se programează nicio oprire.", runID)
+		c.reply(conn, link.Refused{RunID: runID, Reason: unknownRun})
+	case sent != nil:
+		c.say("Rularea %s: gazda a trimis din nou „ready” după oprire; îi trimit oprirea din nou.", runID)
+		c.reply(conn, *sent)
 	case scheduled:
 		c.say("Rularea %s: gazda a trimis din nou „ready”; oprirea rămâne cea programată.", runID)
 	default:
@@ -266,11 +284,15 @@ func (c *ctl) ready(conn *link.Conn, runID string) {
 // real cut it shows the prompt then, whatever became of the connection. A
 // run that ended before its moment (its report, the host's refusal) gets
 // neither: its cut would stop the host's next run at a moment never drawn
-// for it.
+// for it. A run without a beacon firstBeaconWait after its ready is
+// refused.
 func (c *ctl) scheduleCut(r *runState) {
 	runID := r.start.RunID
-	boot, err := c.beacons.WaitFirst(r.ctx, runID)
+	boot, err := c.waitFirstBeacon(r)
 	if err != nil {
+		if r.ctx.Err() == nil {
+			c.refuseSilent(r)
+		}
 		return // the run ended, or the controller stops
 	}
 	c.mu.Lock()
@@ -304,6 +326,42 @@ func (c *ctl) scheduleCut(r *runState) {
 	if err := conn.Send(link.Cut{RunID: runID, Kind: string(r.cut.Kind), PromptAt: promptAt}); err != nil {
 		c.say("Rularea %s: nu pot trimite oprirea gazdei (legătura s-a întrerupt): %v", runID, err)
 	}
+}
+
+// waitFirstBeacon waits for the run's first beacon until the run ends or
+// the clock passes firstBeaconWait from now.
+func (c *ctl) waitFirstBeacon(r *runState) (controller.Beacon, error) {
+	ctx, cancel := context.WithCancel(r.ctx)
+	defer cancel()
+	deadline := c.clock.Now().Add(firstBeaconWait)
+	go func() {
+		if sleepUntil(ctx, c.clock, deadline) == nil {
+			cancel()
+		}
+	}()
+	b, err := c.beacons.WaitFirst(ctx, r.start.RunID)
+	if first, ok := c.beacons.First(r.start.RunID); err != nil && ok && r.ctx.Err() == nil {
+		return first, nil // it came as the wait ended
+	}
+	return b, err
+}
+
+// refuseSilent drops a run whose host never beaconed, and tells the host,
+// which stops waiting for its cut.
+func (c *ctl) refuseSilent(r *runState) {
+	runID := r.start.RunID
+	c.mu.Lock()
+	if c.runs[runID] != r {
+		c.mu.Unlock()
+		return
+	}
+	delete(c.runs, runID)
+	conn := r.conn
+	c.mu.Unlock()
+	r.cancel()
+	c.beacons.Forget(runID)
+	c.say("Rularea %s: %s la un minut după „ready”; rularea nu se măsoară (verificați firewall-ul pentru portul %d).", runID, noBeacon, c.beaconPort)
+	c.reply(conn, link.Refused{RunID: runID, Reason: noBeacon})
 }
 
 // tick is how often sleepUntil looks at the clock.
@@ -350,6 +408,7 @@ func (c *ctl) hostRefused(m link.Refused) {
 // The reasons why a run does not count, in Romanian.
 const (
 	noBeacon      = "niciun semnal de la gazdă"
+	beaconGap     = "semnalul gazdei s-a întrerupt peste 2 s în timpul rulării (verificați rețeaua)"
 	outsideWindow = "oprire în afara ferestrei"
 	unevenPacing  = "controlorul a trimis neuniform"
 	unknownRun    = "rularea nu a fost anunțată controlorului"
@@ -385,6 +444,7 @@ func (c *ctl) report(m link.Report) results.Run {
 		return results.Run{RunID: m.RunID, InvalidReason: unknownRun}
 	}
 	beacons := c.beacons.Beacons(m.RunID)
+	interrupted := c.beacons.Interrupted(m.RunID)
 	stopAt, errBound := controller.StopMoment(r.cut.Kind, beacons)
 	c.mu.Lock()
 	r.cut.StopAt = stopAt
@@ -398,14 +458,14 @@ func (c *ctl) report(m link.Report) results.Run {
 		end = &mark
 	}
 	pacing := c.pacer.Pacing(r.startMark, *end, stopAt)
-	run := c.judge(r, m, cut, len(beacons), errBound, pacing)
+	run := c.judge(r, m, cut, len(beacons), interrupted, errBound, pacing)
 
 	env := results.Envelope{Schema: results.Schema, Code: "MI1", RunID: m.RunID, Set: r.start.Set, Host: r.start.Host, OS: r.start.OS,
 		PiModel: r.start.PiModel, Storage: r.start.Storage, SdConfirmation: r.start.SdConfirmation, Runs: []results.Run{run}}
 	written := results.Write(c.results, env)
 	if written != nil {
 		c.say("Rularea %s: nu pot scrie rezultatul (%v); rularea nu contează.", m.RunID, written)
-		run.Valid, run.InvalidReason = false, notWritten
+		run.Valid, run.InvalidReason = false, addReason(run.InvalidReason, notWritten)
 	}
 	c.mu.Lock()
 	r.cancel()
@@ -431,10 +491,21 @@ func (c *ctl) report(m link.Report) results.Run {
 	return run
 }
 
+// addReason adds a reason why a run does not count to the ones it has.
+func addReason(reasons, reason string) string {
+	if reasons == "" {
+		return reason
+	}
+	return reasons + "; " + reason
+}
+
 // judge is the run as its envelope holds it. A stream that the host could
 // not read, or whose index has no send time, lost everything since the
-// run's first beacon.
-func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons int, errBound time.Duration, pacing controller.PacingStats) results.Run {
+// run's first beacon. A run whose beacons came back after a silence
+// (interrupted) is invalid for that reason: its stop is not its last kept
+// beacon.
+func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons int, interrupted bool, errBound time.Duration,
+	pacing controller.PacingStats) results.Run {
 	valid := controller.Valid(cut)
 	if r.start.Smoke {
 		valid = controller.ValidWithin(cut, smokeValidFrom, smokeValidTo)
@@ -449,6 +520,8 @@ func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons int,
 	switch {
 	case beacons == 0:
 		run.Valid, run.InvalidReason = false, noBeacon
+	case interrupted:
+		run.Valid, run.InvalidReason = false, beaconGap
 	case !valid:
 		run.InvalidReason = outsideWindow
 	case pacing.P99.Milliseconds() > mi1.MaxPacingP99Ms || pacing.SkippedAUs > 0:

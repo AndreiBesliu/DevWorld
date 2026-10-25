@@ -82,11 +82,15 @@ func run(ctx context.Context, args []string, in *bufio.Reader, out io.Writer) er
 		if err := parseFlags(flag.NewFlagSet(cmd, flag.ContinueOnError), rest, out); err != nil {
 			return err
 		}
-		exe, err := os.Executable()
+		exe, err := executable()
 		if err != nil {
 			return err
 		}
-		a := systemAutostart(out)
+		f, err := ownFolders()
+		if err != nil {
+			return err
+		}
+		a := systemAutostart(out, f.work)
 		if cmd == "install" {
 			return a.install(exe)
 		}
@@ -107,8 +111,11 @@ type folders struct {
 	dir, hub, results, work string
 }
 
+// executable is recspike's own path; tests put it in a folder of theirs.
+var executable = os.Executable
+
 func ownFolders() (folders, error) {
-	exe, err := os.Executable()
+	exe, err := executable()
 	if err != nil {
 		return folders{}, err
 	}
