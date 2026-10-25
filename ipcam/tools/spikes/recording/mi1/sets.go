@@ -4,9 +4,9 @@
 // composition of its sets and its check, the rules that redo a run that
 // does not count, and Judge, the one rule of the gate (C17); and recspike's
 // driver of the sets on the host under test (Driver): each run's steps
-// (host.go), the set's loop, its resume after a reboot and the link to the
-// controller (session.go), with the run state, the window, the preflight,
-// the autostart and the HUB-04 scan.
+// (host.go), the set's loop and its resume after a reboot (session.go), the
+// link to the controller and the final push (link.go), with the run state,
+// the window, the preflight, the autostart and the HUB-04 scan.
 package mi1
 
 import (
