@@ -59,14 +59,60 @@ func DesktopDir() (string, error) {
 	return windows.KnownFolderPath(windows.FOLDERID_Desktop, windows.KF_FLAG_DEFAULT)
 }
 
+// shellLinkCS saves a shortcut through the shell's own link object, with
+// its Unicode interfaces (IShellLinkW, IPersistFile). WScript.Shell's
+// shortcut object is not Unicode-safe: on the Windows CI runner, whose ANSI
+// code page (1252) lacks «ă», the shortcut it saved as «Proba înregistrare
+// – tăieri reale.lnk» was not found at that name.
+const shellLinkCS = `
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using System.Text;
+
+[ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+class ShellLink {}
+
+[ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("000214F9-0000-0000-C000-000000000046")]
+interface IShellLinkW {
+	void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder file, int max, System.IntPtr data, int flags);
+	void GetIDList(out System.IntPtr idl);
+	void SetIDList(System.IntPtr idl);
+	void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder name, int max);
+	void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string name);
+	void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder dir, int max);
+	void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string dir);
+	void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder args, int max);
+	void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string args);
+	void GetHotkey(out short key);
+	void SetHotkey(short key);
+	void GetShowCmd(out int cmd);
+	void SetShowCmd(int cmd);
+	void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path, int max, out int icon);
+	void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string path, int icon);
+	void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string path, int reserved);
+	void Resolve(System.IntPtr hwnd, int flags);
+	void SetPath([MarshalAs(UnmanagedType.LPWStr)] string file);
+}
+
+public static class RecspikeShortcut {
+	public static void Save(string path, string target, string args, string dir) {
+		IShellLinkW link = (IShellLinkW)new ShellLink();
+		link.SetPath(target);
+		link.SetArguments(args);
+		link.SetWorkingDirectory(dir);
+		((IPersistFile)link).Save(path, false);
+	}
+}
+`
+
 // CreateShortcut writes a .lnk shortcut at path that runs target with args
-// in dir, through the shell's own COM object; with runAsAdmin, the target
-// starts elevated (RunAsAdministrator).
+// in dir, through the shell's own link object (shellLinkCS); with
+// runAsAdmin, the target starts elevated (RunAsAdministrator).
 func CreateShortcut(path, target, args, dir string, runAsAdmin bool) error {
-	const script = "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK_PATH); " +
-		"$s.TargetPath = $env:LNK_TARGET; $s.Arguments = $env:LNK_ARGS; $s.WorkingDirectory = $env:LNK_DIR; $s.Save()"
+	const script = "$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition $env:LNK_CS; " +
+		"[RecspikeShortcut]::Save($env:LNK_PATH, $env:LNK_TARGET, $env:LNK_ARGS, $env:LNK_DIR)"
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
-	cmd.Env = append(os.Environ(), "LNK_PATH="+path, "LNK_TARGET="+target, "LNK_ARGS="+args, "LNK_DIR="+dir)
+	cmd.Env = append(os.Environ(), "LNK_CS="+shellLinkCS, "LNK_PATH="+path, "LNK_TARGET="+target, "LNK_ARGS="+args, "LNK_DIR="+dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("mi1: the shortcut: %w: %s", err, strings.TrimSpace(string(out)))
 	}

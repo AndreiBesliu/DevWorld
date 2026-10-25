@@ -497,6 +497,8 @@ jobs:
             {
               echo "w32time: exit ${status}; want install to leave AUTO_START, RUNNING and no trigger, and uninstall the start type and triggers of before:"
               echo "${line}"
+              echo "The desktop's shortcuts:"
+              ls "$(cygpath -u "${USERPROFILE}")/Desktop" | grep -i '\.lnk$' || true
             } >> "${log}"
             tail -n 60 "${log}" | tools/scripts/annotate.sh w32time 60
             exit 1
