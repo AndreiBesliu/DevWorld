@@ -58,14 +58,18 @@ func DesktopDir() (string, error) {
 }
 
 // CreateShortcut writes a .lnk shortcut at path that runs target with args
-// in dir, through the shell's own COM object.
-func CreateShortcut(path, target, args, dir string) error {
+// in dir, through the shell's own COM object; with runAsAdmin, the target
+// starts elevated (RunAsAdministrator).
+func CreateShortcut(path, target, args, dir string, runAsAdmin bool) error {
 	const script = "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:LNK_PATH); " +
 		"$s.TargetPath = $env:LNK_TARGET; $s.Arguments = $env:LNK_ARGS; $s.WorkingDirectory = $env:LNK_DIR; $s.Save()"
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	cmd.Env = append(os.Environ(), "LNK_PATH="+path, "LNK_TARGET="+target, "LNK_ARGS="+args, "LNK_DIR="+dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("mi1: the shortcut: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	if runAsAdmin {
+		return RunAsAdministrator(path)
 	}
 	return nil
 }

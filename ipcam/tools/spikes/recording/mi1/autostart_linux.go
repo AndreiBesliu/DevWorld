@@ -23,4 +23,4 @@ func UserSID() (string, error) { return "", errNotWindows }
 func DesktopDir() (string, error) { return "", errNotWindows }
 
 // CreateShortcut is Windows-only.
-func CreateShortcut(string, string, string, string) error { return errNotWindows }
+func CreateShortcut(string, string, string, string, bool) error { return errNotWindows }

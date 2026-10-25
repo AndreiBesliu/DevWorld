@@ -116,6 +116,11 @@ func Preflight(ctx context.Context, checks []Check) error {
 	return errors.New("Proba nu pornește: " + strings.Join(reasons, "; ") + ".")
 }
 
+// NotMyFault is Sysinternals' tool, which the owner puts next to recspike
+// (it may not be redistributed, G14): the bugcheck runs it from there and
+// the PC's preflight checks its signature there.
+const NotMyFault = "notmyfault64.exe"
+
 // PCProbes read what the PC's preflight checks.
 type PCProbes struct {
 	// NotMyFault is nil when notmyfault64.exe is next to recspike with a
@@ -226,7 +231,13 @@ func LinkChecks(p LinkProbes) []Check {
 			return ""
 		},
 		func(ctx context.Context) string {
-			if ok, err := p.NTP(ctx); err != nil || !ok {
+			ok, err := p.NTP(ctx)
+			switch {
+			case errors.Is(err, ErrNTPNeedsAdmin):
+				return "starea ceasului se poate citi doar ca administrator (porniți recspike cu „Executare ca administrator” sau din scurtătura de pe desktop)"
+			case errors.Is(err, ErrTimeServiceStopped):
+				return "serviciul de timp Windows nu rulează, deci ceasul nu se sincronizează (într-o fereastră de administrator: net start w32time, apoi w32tm /resync)"
+			case err != nil || !ok:
 				return "ceasul gazdei nu este sincronizat prin NTP"
 			}
 			return ""
@@ -292,33 +303,44 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 	return d.awaitCut(ctx, s, st, cur, vol, hub)
 }
 
-// awaitCut waits for the controller's cut and stops the host as its kind
-// says.
+// awaitCut waits for the controller's cut of cur and stops the host as its
+// kind says. A cut or a refusal of another run, one that has ended, is
+// ignored: it never stops this run (C16).
 func (d *Driver) awaitCut(ctx context.Context, s *session, st *RunState, cur *CurrentRun, vol Volume, hub *hubproc.Hub) error {
-	var m link.Message
-	select {
-	case <-ctx.Done():
-		return ctx.Err() // a power cut, or the owner's Ctrl+C: ipcam-hub stops with recspike
-	case <-hub.Exited():
-		d.say("ipcam-hub s-a oprit singur în timpul rulării %s; rularea se reface.", cur.RunID)
-		return d.afterStop(ctx, s, st, cur, vol, hub)
-	case r, ok := <-s.in:
-		if !ok || r.err != nil {
-			stopHub(hub)
-			return fmt.Errorf("legătura cu controlorul s-a întrerupt: %v", r.err)
+	for {
+		var m link.Message
+		select {
+		case <-ctx.Done():
+			return ctx.Err() // a power cut, or the owner's Ctrl+C: ipcam-hub stops with recspike
+		case <-hub.Exited():
+			d.say("ipcam-hub s-a oprit singur în timpul rulării %s; rularea se reface.", cur.RunID)
+			return d.afterStop(ctx, s, st, cur, vol, hub)
+		case r, ok := <-s.in:
+			if !ok || r.err != nil {
+				stopHub(hub)
+				return fmt.Errorf("legătura cu controlorul s-a întrerupt: %v", r.err)
+			}
+			m = r.m
 		}
-		m = r.m
-	}
-	switch m := m.(type) {
-	case link.Refused:
-		d.say("Controlorul refuză rularea %s: %s", cur.RunID, m.Reason)
-		stopHub(hub)
-		return errors.New(m.Reason)
-	case link.Cut:
-		return d.stop(ctx, s, st, cur, vol, hub)
-	default:
-		stopHub(hub)
-		return fmt.Errorf("controlorul a trimis %s în locul opririi", m.Type())
+		switch m := m.(type) {
+		case link.Refused:
+			if m.RunID != cur.RunID {
+				d.say("Controlorul refuză rularea %s, care nu este cea în curs (%s); nu țin seama.", m.RunID, cur.RunID)
+				continue
+			}
+			d.say("Controlorul refuză rularea %s: %s", cur.RunID, m.Reason)
+			stopHub(hub)
+			return errors.New(m.Reason)
+		case link.Cut:
+			if m.RunID != cur.RunID {
+				d.say("Controlorul a cerut oprirea rulării %s, care nu este cea în curs (%s); nu opresc gazda.", m.RunID, cur.RunID)
+				continue
+			}
+			return d.stop(ctx, s, st, cur, vol, hub)
+		default:
+			stopHub(hub)
+			return fmt.Errorf("controlorul a trimis %s în locul opririi", m.Type())
+		}
 	}
 }
 
@@ -338,7 +360,7 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 	}
 	switch kind {
 	case controller.KindPower, controller.KindForced:
-		d.say(">>> %s <<<", realCutPrompt)
+		d.say(">>> %s <<<", RealCutPrompt)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

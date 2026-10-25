@@ -132,3 +132,51 @@ func TestNTPWait_ParsesTheSystemsAnswers(t *testing.T) {
 		}
 	}
 }
+
+// TestNTPWait_WindowsErrorsEndTheWaitAtOnce (Review Focus 2, G14): w32tm's
+// failures that waiting cannot cure end the NTP wait at once, unsynced,
+// instead of after 10 min: access denied to a recspike without
+// administrator rights (0x80070005), and the Windows time service not
+// running (0x80070426), as on a PC outside a domain after a boot. They are
+// read from the HRESULT, which w32tm prints in hex in every language, or
+// from its exit code; any other failure is asked again.
+func TestNTPWait_WindowsErrorsEndTheWaitAtOnce(t *testing.T) {
+	for _, tc := range []struct {
+		out  string
+		code uint32
+		want error
+	}{
+		{"The following error occurred: Access is denied. (0x80070005)\r\n", 1, ErrNTPNeedsAdmin},
+		{"S-a produs următoarea eroare: Acces refuzat. (0x80070005)\r\n", 1, ErrNTPNeedsAdmin},
+		{"", 0x80070005, ErrNTPNeedsAdmin},
+		{"The following error occurred: The service has not been started. (0x80070426)\r\n", 1, ErrTimeServiceStopped},
+		{"", 0x80070426, ErrTimeServiceStopped},
+	} {
+		if err := w32tmError(tc.out, tc.code); !errors.Is(err, tc.want) {
+			t.Errorf("w32tmError(%q, %#x) = %v, want %v", tc.out, tc.code, err, tc.want)
+		}
+	}
+	other := w32tmError("The following error occurred: The RPC server is unavailable. (0x800706BA)\r\n", 0x800706ba)
+	if other == nil || errors.Is(other, ErrNTPNeedsAdmin) || errors.Is(other, ErrTimeServiceStopped) {
+		t.Errorf("another failure = %v, want an error asked again", other)
+	}
+
+	for _, final := range []error{w32tmError("Access is denied. (0x80070005)", 1), w32tmError("(0x80070426)", 1)} {
+		checks := 0
+		check := func(context.Context) (bool, error) {
+			checks++
+			return false, final
+		}
+		if ms, synced := WaitNTP(t.Context(), check, newStepClock()); ms != 0 || synced || checks != 1 {
+			t.Errorf("%v: WaitNTP = %d ms, %v after %d checks; want 0 ms, false, after 1", final, ms, synced, checks)
+		}
+	}
+	checks := 0
+	rpc := func(context.Context) (bool, error) {
+		checks++
+		return checks > 1, other
+	}
+	if ms, synced := WaitNTP(t.Context(), rpc, newStepClock()); ms != int64(ntpPoll/time.Millisecond) || !synced {
+		t.Errorf("another failure: WaitNTP = %d ms, %v; want asked again after 5 s", ms, synced)
+	}
+}

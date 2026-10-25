@@ -16,11 +16,12 @@ import (
 // microsoft is the signer that NotMyFault must carry.
 const microsoft = "Microsoft Corporation"
 
-// DeviceChecks are the PC's preflight checks (G14): NotMyFault in dir,
-// recspike's folder, the elevation, AutoReboot and Windows Update's pause.
-func DeviceChecks(dir string, _ int) []Check {
+// DeviceChecks are the PC's preflight checks (G14): NotMyFault in binDir,
+// recspike's folder, from where the bugcheck runs it; the elevation,
+// AutoReboot and Windows Update's pause. The PC checks no free space.
+func DeviceChecks(binDir, _ string, _ int) []Check {
 	return PCChecks(PCProbes{
-		NotMyFault:         func() error { return signedByMicrosoft(filepath.Join(dir, NotMyFault)) },
+		NotMyFault:         func() error { return signedByMicrosoft(filepath.Join(binDir, NotMyFault)) },
 		Elevated:           func() bool { return windows.GetCurrentProcessToken().IsElevated() },
 		AutoReboot:         autoReboot,
 		UpdatesPausedUntil: updatesPausedUntil,

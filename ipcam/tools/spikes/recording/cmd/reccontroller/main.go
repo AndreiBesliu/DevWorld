@@ -35,15 +35,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cli"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
 )
-
-// realCutPrompt is the prompt of a real cut, which recspike mirrors.
-const realCutPrompt = "Scoateți acum alimentarea"
 
 // The smoke runs' windows (R03): the prompt 20 to 40 s after the first
 // beacon, and a cut valid 10 s to 60 s after it.
@@ -100,50 +98,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("reccontroller", flag.ContinueOnError)
 	local := flags.Bool("local", false, "")
 	media := flags.String("media", filepath.Join(dir, "media"), "")
-	if err := parseFlags(flags, args, out); err != nil {
+	if err := cli.ParseFlags(flags, args, out, usage); err != nil {
 		return err
 	}
 	return serve(ctx, serveConfig{dir: dir, local: *local, media: *media, listen: controller.DefaultListenConfig(*local)}, out)
-}
-
-// parseFlags parses args and, on an error, prints it and the usage in
-// Romanian, never the flag package's English.
-func parseFlags(flags *flag.FlagSet, args []string, out io.Writer) error {
-	flags.SetOutput(io.Discard)
-	err := flags.Parse(args)
-	switch {
-	case errors.Is(err, flag.ErrHelp):
-		_, _ = fmt.Fprint(out, usage)
-		return err
-	case err != nil:
-		_, _ = fmt.Fprint(out, usage)
-		return errors.New(romanianFlagError(err))
-	case flags.NArg() > 0:
-		_, _ = fmt.Fprint(out, usage)
-		return fmt.Errorf("argument necunoscut: %s", flags.Arg(0))
-	}
-	return nil
-}
-
-// romanianFlagError translates the flag package's errors.
-func romanianFlagError(err error) string {
-	msg := err.Error()
-	for _, t := range []struct{ en, ro string }{
-		{"flag provided but not defined: ", "opțiune necunoscută: "},
-		{"flag needs an argument: ", "opțiunea cere o valoare: "},
-		{"bad flag syntax: ", "opțiune scrisă greșit: "},
-	} {
-		if rest, ok := strings.CutPrefix(msg, t.en); ok {
-			return t.ro + rest
-		}
-	}
-	if strings.HasPrefix(msg, "invalid ") {
-		if _, rest, ok := strings.Cut(msg, " for "); ok {
-			flagName, _, _ := strings.Cut(strings.TrimPrefix(rest, "flag "), ":")
-			return "valoare greșită pentru " + flagName
-		}
-	}
-	return "opțiuni greșite: " + msg
 }
 
 // serveConfig is where reccontroller serves and keeps its results.
@@ -288,7 +246,9 @@ type ctlConfig struct {
 
 // ctl is the controller's state across the host's connections: a run's
 // report arrives on a new connection after the host's reboot. Each run's
-// schedule runs under the controller's context, not a connection's.
+// schedule runs under the run's own context, a child of the controller's,
+// not under a connection's: it outlives a dropped link, and ends with the
+// run's report or the host's refusal.
 type ctl struct {
 	ctlConfig
 	ctx     context.Context
@@ -310,6 +270,11 @@ func newCtl(ctx context.Context, cfg ctlConfig) *ctl {
 
 // runState is one run, from run_start to its report.
 type runState struct {
+	// ctx ends when the run does (its report, the host's refusal, or the
+	// controller's end): the run's cut and its watch for the beacons' end
+	// stop with it.
+	ctx       context.Context
+	cancel    context.CancelFunc
 	start     link.RunStart
 	startMark controller.PacingMark
 	endMark   *controller.PacingMark // when its beacons went silent, near the stop
@@ -438,24 +403,28 @@ func (c *ctl) startRun(conn *link.Conn, m link.RunStart) {
 		return
 	}
 	c.beacons.Expect(m.RunID)
-	r := &runState{start: m, startMark: c.pacer.MarkPacing(), cut: controller.Cut{RunID: m.RunID, Kind: kind}, conn: conn}
+	ctx, cancel := context.WithCancel(c.ctx)
+	r := &runState{ctx: ctx, cancel: cancel, start: m, startMark: c.pacer.MarkPacing(), cut: controller.Cut{RunID: m.RunID, Kind: kind}, conn: conn}
 	c.mu.Lock()
+	if old := c.runs[m.RunID]; old != nil {
+		old.cancel() // announced again: the new announcement's schedule counts
+	}
 	c.runs[m.RunID] = r
 	c.mu.Unlock()
-	go c.markEnd(m.RunID)
+	go c.markEnd(r)
 	c.say("Rularea %s (%s, %s) a început.", m.RunID, m.Set, m.Kind)
 }
 
 // markEnd marks the end of the run's pacing when its beacons go silent,
 // shortly after the stop (R07).
-func (c *ctl) markEnd(runID string) {
-	if _, err := c.beacons.WaitSilence(c.ctx, runID, c.clock); err != nil {
-		return
+func (c *ctl) markEnd(r *runState) {
+	if _, err := c.beacons.WaitSilence(r.ctx, r.start.RunID, c.clock); err != nil {
+		return // the run ended first
 	}
 	mark := c.pacer.MarkPacing()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if r := c.runs[runID]; r != nil {
+	if c.runs[r.start.RunID] == r {
 		r.endMark = &mark
 	}
 }
@@ -482,12 +451,15 @@ func (c *ctl) ready(conn *link.Conn, runID string) {
 
 // scheduleCut waits for the run's first beacon (BootAt), draws the moment
 // of the cut, and sends `cut` then on the host's latest connection; for a
-// real cut it shows the prompt then, whatever became of the connection.
+// real cut it shows the prompt then, whatever became of the connection. A
+// run that ended before its moment (its report, the host's refusal) gets
+// neither: its cut would stop the host's next run at a moment never drawn
+// for it.
 func (c *ctl) scheduleCut(r *runState) {
 	runID := r.start.RunID
-	boot, err := c.beacons.WaitFirst(c.ctx, runID)
+	boot, err := c.beacons.WaitFirst(r.ctx, runID)
 	if err != nil {
-		return // the controller stops
+		return // the run ended, or the controller stops
 	}
 	c.mu.Lock()
 	var promptAt time.Time
@@ -500,17 +472,23 @@ func (c *ctl) scheduleCut(r *runState) {
 	if r.cut.Kind.Automated() {
 		c.say("Rularea %s: oprirea automată e programată la %s.", runID, promptAt.Format("15:04:05"))
 	}
-	if err := sleepUntil(c.ctx, c.clock, promptAt); err != nil {
+	if err := sleepUntil(r.ctx, c.clock, promptAt); err != nil {
 		return
+	}
+	c.mu.Lock()
+	if r.ctx.Err() != nil || c.runs[runID] != r {
+		c.mu.Unlock()
+		return // the run ended as its moment came
 	}
 	if !r.cut.Kind.Automated() {
 		promptAt = c.clock.Now()
-		c.say(">>> %s <<< (rularea %s)", realCutPrompt, runID)
 	}
-	c.mu.Lock()
 	r.cut.BootAt, r.cut.PromptAt = boot.At, promptAt
 	conn := r.conn
 	c.mu.Unlock()
+	if !r.cut.Kind.Automated() {
+		c.say(">>> %s <<< (rularea %s)", mi1.RealCutPrompt, runID)
+	}
 	if err := conn.Send(link.Cut{RunID: runID, Kind: string(r.cut.Kind), PromptAt: promptAt}); err != nil {
 		c.say("Rularea %s: nu pot trimite oprirea gazdei (legătura s-a întrerupt): %v", runID, err)
 	}
@@ -544,10 +522,14 @@ func (c *ctl) checkBeacon(conn *link.Conn, id string) {
 	c.reply(conn, link.BeaconAck{ID: id, Received: err == nil})
 }
 
-// hostRefused drops a run that the host ended without its stop.
+// hostRefused drops a run that the host ended without its stop, with its
+// schedule.
 func (c *ctl) hostRefused(m link.Refused) {
 	c.mu.Lock()
-	delete(c.runs, m.RunID)
+	if r := c.runs[m.RunID]; r != nil {
+		r.cancel()
+		delete(c.runs, m.RunID)
+	}
 	c.mu.Unlock()
 	c.beacons.Forget(m.RunID)
 	c.say("Gazda a renunțat la rularea %s: %s; rularea se reface.", m.RunID, m.Reason)
@@ -559,6 +541,7 @@ const (
 	outsideWindow = "oprire în afara ferestrei"
 	unevenPacing  = "controlorul a trimis neuniform"
 	unknownRun    = "rularea nu a fost anunțată controlorului"
+	notWritten    = "rezultatul nu s-a putut scrie la controlor"
 )
 
 // hubEvent is what the controller reads of ipcam-hub's reconcile and
@@ -575,7 +558,8 @@ type hubEvent struct {
 // from the beacons, the validity of the cut, the controller's pacing up to
 // the beacons' end, and each stream's loss from the send log; it writes
 // the run's envelope and returns the verdict. A report sent again gets the
-// same verdict.
+// same verdict. A run whose envelope cannot be written does not count: the
+// host redoes it, so no set is complete without its envelopes.
 func (c *ctl) report(m link.Report) results.Run {
 	c.mu.Lock()
 	r := c.runs[m.RunID]
@@ -606,12 +590,19 @@ func (c *ctl) report(m link.Report) results.Run {
 
 	env := results.Envelope{Schema: results.Schema, Code: "MI1", RunID: m.RunID, Set: r.start.Set, Host: r.start.Host, OS: r.start.OS,
 		PiModel: r.start.PiModel, Storage: r.start.Storage, SdConfirmation: r.start.SdConfirmation, Runs: []results.Run{run}}
-	if err := results.Write(c.results, env); err != nil {
-		c.say("Rularea %s: nu pot scrie rezultatul: %v", m.RunID, err)
+	written := results.Write(c.results, env)
+	if written != nil {
+		c.say("Rularea %s: nu pot scrie rezultatul (%v); rularea nu contează.", m.RunID, written)
+		run.Valid, run.InvalidReason = false, notWritten
 	}
 	c.mu.Lock()
-	delete(c.runs, m.RunID)
-	c.judged[m.RunID] = run
+	r.cancel()
+	if c.runs[m.RunID] == r {
+		delete(c.runs, m.RunID)
+	}
+	if written == nil {
+		c.judged[m.RunID] = run // a report sent again gets this verdict
+	}
 	c.mu.Unlock()
 	c.beacons.Forget(m.RunID)
 

@@ -27,6 +27,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cli"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 )
 
@@ -95,44 +96,9 @@ func run(ctx context.Context, args []string, in *bufio.Reader, out io.Writer) er
 	return fmt.Errorf("comandă necunoscută: %s", cmd)
 }
 
-// parseFlags parses args and, on an error, prints the usage and returns the
-// error in Romanian, never the flag package's English.
+// parseFlags parses a subcommand's flags with recspike's Romanian usage.
 func parseFlags(flags *flag.FlagSet, args []string, out io.Writer) error {
-	flags.SetOutput(io.Discard)
-	err := flags.Parse(args)
-	switch {
-	case errors.Is(err, flag.ErrHelp):
-		_, _ = fmt.Fprint(out, usage)
-		return err
-	case err != nil:
-		_, _ = fmt.Fprint(out, usage)
-		return errors.New(romanianFlagError(err))
-	case flags.NArg() > 0:
-		_, _ = fmt.Fprint(out, usage)
-		return fmt.Errorf("argument necunoscut: %s", flags.Arg(0))
-	}
-	return nil
-}
-
-// romanianFlagError translates the flag package's errors.
-func romanianFlagError(err error) string {
-	msg := err.Error()
-	for _, t := range []struct{ en, ro string }{
-		{"flag provided but not defined: ", "opțiune necunoscută: "},
-		{"flag needs an argument: ", "opțiunea cere o valoare: "},
-		{"bad flag syntax: ", "opțiune scrisă greșit: "},
-	} {
-		if rest, ok := strings.CutPrefix(msg, t.en); ok {
-			return t.ro + rest
-		}
-	}
-	if strings.HasPrefix(msg, "invalid ") {
-		if _, rest, ok := strings.Cut(msg, " for "); ok {
-			flagName, _, _ := strings.Cut(strings.TrimPrefix(rest, "flag "), ":")
-			return "valoare greșită pentru " + flagName
-		}
-	}
-	return "opțiuni greșite: " + msg
+	return cli.ParseFlags(flags, args, out, usage)
 }
 
 // folders are recspike's files: the binaries next to it, results/ and

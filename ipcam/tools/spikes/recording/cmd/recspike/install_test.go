@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -71,8 +72,8 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 		},
 		userSID: func() (string, error) { return "S-1-5-21-1004336348-1177238915-682003330-1001", nil },
 		desktop: func() (string, error) { return desktop, nil },
-		shortcut: func(path, target, args, workDir string) error {
-			f.links = append(f.links, strings.Join([]string{path, target, args, workDir}, "|"))
+		shortcut: func(path, target, args, workDir string, runAsAdmin bool) error {
+			f.links = append(f.links, strings.Join([]string{path, target, args, workDir, strconv.FormatBool(runAsAdmin)}, "|"))
 			return os.WriteFile(path, []byte("lnk"), 0o600)
 		},
 		unitPath: filepath.Join(dir, "ipcam-recspike.service"),
@@ -86,8 +87,9 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 // generated XML, UTF-16 with a BOM as schtasks reads it: a BootTrigger, the
 // owner's user with LogonType S4U (logged on or not), RunLevel
 // HighestAvailable, `recspike resume` in recspike's folder; and the
-// desktop shortcut runs `recspike mi1 --real --resume` there. Without
-// elevation, recspike asks for it once (UAC) and registers nothing itself.
+// desktop shortcut runs `recspike mi1 --real --resume` there, as
+// administrator. Without elevation, recspike asks for it once (UAC) and
+// registers nothing itself.
 func TestInstall_WindowsTaskXML(t *testing.T) {
 	exe := `C:\Users\Ana & Ion\proba\recspike.exe`
 	dir := `C:\Users\Ana & Ion\proba`
@@ -126,7 +128,9 @@ func TestInstall_WindowsTaskXML(t *testing.T) {
 	if got := string(utf16.Decode(units)); got != taskXML(exe, dir, "S-1-5-21-1004336348-1177238915-682003330-1001") {
 		t.Errorf("the task file holds\n%s", got)
 	}
-	want := filepath.Join(desktop, "Proba înregistrare – tăieri reale.lnk") + "|" + exe + "|mi1 --real --resume|" + dir
+	// The shortcut runs as administrator (one UAC prompt each time), like
+	// the boot task: w32tm's NTP status needs it (G14).
+	want := filepath.Join(desktop, "Proba înregistrare – tăieri reale.lnk") + "|" + exe + "|mi1 --real --resume|" + dir + "|true"
 	if !slices.Equal(f.links, []string{want}) {
 		t.Errorf("shortcuts = %q, want %q", f.links, want)
 	}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -358,4 +359,134 @@ func TestSession_PCPullsPiResultsAtEnd(t *testing.T) {
 			t.Errorf("the Pi pulled a results/pi folder of its own (%v)", err)
 		}
 	})
+}
+
+// TestLoop_RunsThatDoNotCountStopThisRecspikeNotTheSet (G10): runs that do
+// not count are excluded and redone; three in a row stop this recspike with
+// a Romanian line that says how to go on, instead of stopping the host
+// again and again for a cause that persists. The set stays open: the same
+// command continues it at the same position.
+func TestLoop_RunsThatDoNotCountStopThisRecspikeNotTheSet(t *testing.T) {
+	r := newRig(t, "pc")
+	var mu sync.Mutex
+	invalid := 3
+	r.f.verdict = func(start link.RunStart, m link.Report) results.Run {
+		mu.Lock()
+		defer mu.Unlock()
+		run := results.Run{RunID: m.RunID, Valid: true, Attempt: start.Attempt, ShutdownKind: start.Kind, Encrypted: start.Encrypted,
+			PadLowBitrate: start.PadLowBitrate, Reconciled: true, Hub04Clear: m.Hub04Clear}
+		if invalid > 0 {
+			invalid--
+			run.Valid, run.InvalidReason = false, "controlorul a trimis neuniform"
+		}
+		return run
+	}
+	o := SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: windowAroundNow(t)}
+	err := r.driver(t).RunSet(t.Context(), o)
+	if err == nil || !strings.Contains(err.Error(), "3 rulări la rând nu au contat") || !strings.Contains(err.Error(), "aceeași comandă") {
+		t.Fatalf("RunSet = %v, want the set stopped after 3 runs in a row that did not count, with how to go on", err)
+	}
+	var ids []string
+	for _, s := range r.f.runStarts() {
+		ids = append(ids, s.RunID)
+	}
+	if want := []string{"pc-kill9-01-1", "pc-kill9-01-2", "pc-kill9-01-3"}; !slices.Equal(ids, want) {
+		t.Fatalf("runs = %v, want %v", ids, want)
+	}
+
+	// The owner starts the same command again: run 1 is redone, counts,
+	// and the set goes on.
+	d := r.driver(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.RunSet(ctx, o) }()
+	select {
+	case err := <-done:
+		t.Fatalf("RunSet again = %v, want the set continued", err)
+	case <-waitEventCh(r.f, "run_start pc-kill9-02-1"):
+	case <-time.After(30 * time.Second):
+		t.Fatal("the set did not go on to run 2")
+	}
+	cancel()
+	<-done
+	ids = ids[:0]
+	for _, s := range r.f.runStarts() {
+		ids = append(ids, s.RunID)
+	}
+	if want := []string{"pc-kill9-01-1", "pc-kill9-01-2", "pc-kill9-01-3", "pc-kill9-01-4", "pc-kill9-02-1"}; !slices.Equal(ids, want) {
+		t.Errorf("runs = %v, want %v", ids, want)
+	}
+}
+
+// waitEventCh is closed when the fake controller has an event that starts
+// with prefix; it never fails the test from its goroutine.
+func waitEventCh(f *fakeController, prefix string) <-chan struct{} {
+	ch := make(chan struct{})
+	go func() {
+		for e := range f.events {
+			if strings.HasPrefix(e, prefix) {
+				close(ch)
+				return
+			}
+		}
+	}()
+	return ch
+}
+
+// TestAwaitCut_IgnoresACutOfAnotherRun (C16): recspike stops the host only
+// for a cut of the run it records. A late cut of a run that has ended (its
+// schedule outlived it at the controller) is ignored, and the run is
+// stopped at its own cut.
+func TestAwaitCut_IgnoresACutOfAnotherRun(t *testing.T) {
+	r := newRig(t, "pc")
+	type ready struct {
+		c     *link.Conn
+		start link.RunStart
+	}
+	readies := make(chan ready, 4)
+	r.f.onReady = func(c *link.Conn, start link.RunStart) {
+		if start.RunID == "pc-kill9-01-1" {
+			_ = c.Send(link.Cut{RunID: "pc-bugcheck-07-2", Kind: "kill9", PromptAt: time.Now()})
+		}
+		readies <- ready{c, start}
+	}
+	d := r.driver(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- d.RunSet(ctx, SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: windowAroundNow(t)})
+	}()
+	var first ready
+	select {
+	case first = <-readies:
+	case err := <-done:
+		t.Fatalf("RunSet = %v before the run was ready", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the run never got ready")
+	}
+	waitFor(t, "the stale cut on the screen", func() bool { return strings.Contains(r.out.String(), "pc-bugcheck-07-2") })
+	time.Sleep(500 * time.Millisecond)
+	if got := logEntries(t, r.log); !slices.Equal(got, []string{"hub"}) {
+		t.Errorf("after the stale cut, fake log = %v, want ipcam-hub still recording, not killed and restarted", got)
+	}
+	if reps := r.f.runReports(); len(reps) != 0 {
+		t.Errorf("reports after the stale cut = %+v, want none", reps)
+	}
+	if err := first.c.Send(link.Cut{RunID: first.start.RunID, Kind: "kill9", PromptAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-waitEventCh(r.f, "report pc-kill9-01-1"):
+	case err := <-done:
+		t.Fatalf("RunSet = %v before the run's report", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("no report after the run's own cut")
+	}
+	cancel()
+	<-done
+	if got := logEntries(t, r.log); len(got) < 2 || !slices.Equal(got[:2], []string{"hub", "hub"}) {
+		t.Errorf("fake log = %v, want ipcam-hub killed and restarted at the run's own cut", got)
+	}
 }

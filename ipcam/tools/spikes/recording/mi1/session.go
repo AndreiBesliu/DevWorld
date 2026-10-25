@@ -31,9 +31,9 @@ const (
 	// RealShortcut names the desktop shortcut that continues the real cuts
 	// on Windows.
 	RealShortcut = "Proba înregistrare – tăieri reale"
-	// realCutPrompt is the prompt of a real cut, mirrored from the
-	// controller (C16).
-	realCutPrompt = "Scoateți acum alimentarea"
+	// RealCutPrompt is the prompt of a real cut: reccontroller shows it, and
+	// recspike mirrors it on the host (C16).
+	RealCutPrompt = "Scoateți acum alimentarea"
 )
 
 // Timeouts of a run's steps.
@@ -50,9 +50,14 @@ const (
 	// hostDownWait is how long recspike waits for the host to go down after
 	// it asked the OS to stop.
 	hostDownWait = 5 * time.Minute
-	// maxRunAttempts bounds the attempts at one position of an automated
-	// set: a run that keeps failing to count stops the set.
-	maxRunAttempts = 3
+	// maxMissesInARow is how many runs in a row that do not count stop one
+	// recspike of an automated set: a cause that persists (the controller's
+	// pacing, the link) then stops this recspike instead of the host, again
+	// and again. Invalid runs are still excluded and redone without a bound
+	// (G10): the set stays open, and the owner's same command continues it.
+	// A sysrq or bugcheck run is one recspike per boot, so only the window
+	// bounds those.
+	maxMissesInARow = 3
 )
 
 // Driver runs MI1's sets on the host under test, recspike's side of T43:
@@ -87,6 +92,11 @@ type Driver struct {
 	// R08); the default runs DeviceChecks for automated sets and
 	// LinkChecks for the owner's sets, and nothing in the lab.
 	Preflight func(ctx context.Context, mode string, link LinkProbes) error
+
+	// deviceChecks and osStopIn stand in for DeviceChecks and OSStop in
+	// tests, so that the folders they get are checked on every OS.
+	deviceChecks func(binDir, dataDir string, cameras int) []Check
+	osStopIn     func(ctx context.Context, kind controller.ShutdownKind, binDir string) error
 }
 
 // SetOptions say which set a driver runs.
@@ -138,8 +148,17 @@ func (d *Driver) osStop(ctx context.Context, kind controller.ShutdownKind) error
 	if d.OSStop != nil {
 		return d.OSStop(ctx, kind)
 	}
-	return OSStop(ctx, kind, filepath.Dir(d.Hub))
+	stop := d.osStopIn
+	if stop == nil {
+		stop = OSStop
+	}
+	return stop(ctx, kind, d.binDir())
 }
+
+// binDir is recspike's folder, which holds ipcam-hub and the owner's
+// notmyfault64.exe: the bugcheck runs NotMyFault from there, and the PC's
+// preflight checks it there (G14).
+func (d *Driver) binDir() string { return filepath.Dir(d.Hub) }
 
 func (d *Driver) lastRecorded(ctx context.Context, files lastindex.Before, id age.Identity) (uint64, error) {
 	if d.LastRecorded != nil {
@@ -164,7 +183,13 @@ func (d *Driver) preflight(ctx context.Context, mode string, p LinkProbes) error
 	case ModeLab:
 		return nil
 	case ModeAutomated:
-		checks = DeviceChecks(d.Work, d.Host.Cameras)
+		device := d.deviceChecks
+		if device == nil {
+			device = DeviceChecks
+		}
+		// NotMyFault where the bugcheck runs it; the free space where the
+		// runs record.
+		checks = device(d.binDir(), d.Work, d.Host.Cameras)
 	}
 	return Preflight(ctx, append(checks, LinkChecks(p)...))
 }
@@ -318,8 +343,8 @@ func (d *Driver) plan(st *RunState) ([]RunPlan, error) {
 	return plan, nil
 }
 
-// complete reports whether the state's set has every run it needs, or has
-// stopped at its attempts.
+// complete reports whether the state's set has every run it needs, or, for
+// a real set, has stopped at MaxRealAttempts.
 func (d *Driver) complete(st *RunState) bool {
 	if st.Mode == ModeReal {
 		_, status := NextRealCut(st.runs())
@@ -346,8 +371,10 @@ func (d *Driver) window(st *RunState) *Window {
 }
 
 // loop records the set's runs, one after the other, until the set is
-// complete, a run keeps failing to count, or the window closes.
+// complete, the window closes, or maxMissesInARow runs in a row of an
+// automated set do not count.
 func (d *Driver) loop(ctx context.Context, s *session, st *RunState, waitForWindow bool) error {
+	misses := 0
 	for first := true; ; first = false {
 		var next RunPlan
 		var attempt int
@@ -372,9 +399,6 @@ func (d *Driver) loop(ctx context.Context, s *session, st *RunState, waitForWind
 				d.say("Proba %s are toate rulările.", st.Set)
 				return nil
 			}
-			if attempt > maxRunAttempts {
-				return fmt.Errorf("rularea %d a probei %s nu a contat de %d ori: proba se oprește", next.Index, st.Set, maxRunAttempts)
-			}
 		}
 		if st.Mode == ModeAutomated {
 			w := d.window(st)
@@ -394,6 +418,19 @@ func (d *Driver) loop(ctx context.Context, s *session, st *RunState, waitForWind
 		}
 		if err := d.record(ctx, s, st, next, attempt); err != nil {
 			return err
+		}
+		if st.Mode == ModeReal || len(st.Done) == 0 {
+			continue // a real set stops at MaxRealAttempts
+		}
+		last := st.Done[len(st.Done)-1].Run // the run just recorded
+		if Counts(last) {
+			misses = 0
+			continue
+		}
+		if misses++; misses >= maxMissesInARow {
+			return fmt.Errorf("%d rulări la rând nu au contat (ultima: %s), așa că proba %s se oprește aici. "+
+				"Rulările valide rămân: verificați controlorul și rețeaua, apoi porniți din nou aceeași comandă, iar proba continuă de la rularea %d",
+				misses, invalidText(last), st.Set, next.Index)
 		}
 	}
 }

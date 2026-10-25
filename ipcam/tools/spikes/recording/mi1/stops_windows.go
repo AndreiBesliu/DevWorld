@@ -11,17 +11,14 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
 )
 
-// NotMyFault is Sysinternals' tool, which the owner puts next to recspike
-// (it may not be redistributed, G14).
-const NotMyFault = "notmyfault64.exe"
-
 // OSStop stops the PC as a power cut would (G09, T43): bugcheck is
-// `notmyfault64.exe /accepteula /crash` from dir, recspike's folder; with
-// CrashControl\AutoReboot = 1, Windows restarts after the blue screen. Any
-// other kind is no Windows stop.
-func OSStop(ctx context.Context, kind controller.ShutdownKind, dir string) error {
+// `notmyfault64.exe /accepteula /crash` from binDir, recspike's folder,
+// where the preflight checked its signature; with CrashControl\AutoReboot =
+// 1, Windows restarts after the blue screen. Any other kind is no Windows
+// stop.
+func OSStop(ctx context.Context, kind controller.ShutdownKind, binDir string) error {
 	if kind != controller.KindBugcheck {
 		return fmt.Errorf("mi1: %s is no stop of a Windows host", kind)
 	}
-	return exec.CommandContext(ctx, filepath.Join(dir, NotMyFault), "/accepteula", "/crash").Start() //nolint:gosec // the owner's NotMyFault, checked by the preflight
+	return exec.CommandContext(ctx, filepath.Join(binDir, NotMyFault), "/accepteula", "/crash").Start() //nolint:gosec // the owner's NotMyFault, checked by the preflight
 }

@@ -115,7 +115,7 @@ type autostart struct {
 	run        func(name string, args ...string) error
 	userSID    func() (string, error)
 	desktop    func() (string, error)
-	shortcut   func(path, target, args, dir string) error
+	shortcut   func(path, target, args, dir string, runAsAdmin bool) error
 	unitPath   string
 	tempDir    string
 	out        io.Writer
@@ -216,10 +216,13 @@ func (a autostart) install(exe string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.shortcut(link, exe, shortcutArgs, dir); err != nil {
+	// The shortcut runs recspike as administrator, as the boot task does:
+	// w32tm reports the clock's NTP state only to an elevated process, and
+	// the shortcut's preflight and every run's NTP wait read it (G14).
+	if err := a.shortcut(link, exe, shortcutArgs, dir, true); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(a.out, "Pornirea automată este instalată, iar pe desktop este scurtătura „%s”.\n", mi1.RealShortcut)
+	_, _ = fmt.Fprintf(a.out, "Pornirea automată este instalată, iar pe desktop este scurtătura „%s”; când o deschideți, Windows cere permisiunea de administrator: răspundeți „Da”.\n", mi1.RealShortcut)
 	return nil
 }
 

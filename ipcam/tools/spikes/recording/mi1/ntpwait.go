@@ -5,6 +5,7 @@ package mi1
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"time"
@@ -26,7 +27,8 @@ type NTPCheck func(ctx context.Context) (bool, error)
 // synced (Review Focus 2). The loss never depends on it: the controller
 // measures it on its own clock; the wait keeps the host's timestamps
 // plausible and is recorded. A check that fails is asked again; one whose
-// program does not exist ends the wait, unsynced.
+// program does not exist, or that w32tm refuses until someone acts
+// (ntpFinal), ends the wait at once, unsynced.
 func WaitNTP(ctx context.Context, check NTPCheck, clock source.Clock) (waitMs int64, synced bool) {
 	start := clock.Now()
 	tick := clock.NewTicker(ntpPoll)
@@ -37,7 +39,7 @@ func WaitNTP(ctx context.Context, check NTPCheck, clock source.Clock) (waitMs in
 		switch {
 		case ok:
 			return waited.Milliseconds(), true
-		case errors.Is(err, exec.ErrNotFound), ctx.Err() != nil:
+		case ntpFinal(err), ctx.Err() != nil:
 			return waited.Milliseconds(), false
 		case waited >= MaxNTPWait:
 			return waited.Milliseconds(), false
@@ -50,12 +52,59 @@ func WaitNTP(ctx context.Context, check NTPCheck, clock source.Clock) (waitMs in
 	}
 }
 
+// The failures of `w32tm /query /status` that waiting does not cure: the
+// NTP wait ends at once, unsynced, and the preflight names the remedy.
+var (
+	// ErrNTPNeedsAdmin is «Access is denied» (0x80070005): w32tm answers
+	// only an elevated recspike, as the boot task and the real cuts'
+	// shortcut are.
+	ErrNTPNeedsAdmin = errors.New("w32tm: access denied without administrator rights")
+	// ErrTimeServiceStopped is «The service has not been started»
+	// (0x80070426): Windows' time service (W32Time) is not running, as on a
+	// PC outside a domain after a boot, so nothing syncs the clock until it
+	// is started; recspike never starts it.
+	ErrTimeServiceStopped = errors.New("w32tm: the Windows time service is not running")
+)
+
+// The HRESULTs of those failures, which w32tm prints in hex in every
+// language and returns as its exit code.
+const (
+	hresultAccessDenied      = 0x80070005
+	hresultServiceNotStarted = 0x80070426
+)
+
+// w32tmError reads why `w32tm /query /status` failed, from its output or
+// its exit code.
+func w32tmError(out string, code uint32) error {
+	text := strings.TrimSpace(out)
+	has := func(hr uint32) bool {
+		return code == hr || strings.Contains(strings.ToLower(text), fmt.Sprintf("0x%08x", hr))
+	}
+	switch {
+	case has(hresultAccessDenied):
+		return fmt.Errorf("%w: %s", ErrNTPNeedsAdmin, text)
+	case has(hresultServiceNotStarted):
+		return fmt.Errorf("%w: %s", ErrTimeServiceStopped, text)
+	}
+	return fmt.Errorf("w32tm /query /status: exit %#x: %s", code, text)
+}
+
+// ntpFinal reports whether a failed NTP check ends the wait: its program
+// does not exist, or w32tm will not answer before someone acts.
+func ntpFinal(err error) bool {
+	return errors.Is(err, exec.ErrNotFound) || errors.Is(err, ErrNTPNeedsAdmin) || errors.Is(err, ErrTimeServiceStopped)
+}
+
 // SystemNTP is the host's own answer: `timedatectl show -p NTPSynchronized
 // --value` on Linux, `w32tm /query /status` on Windows.
 func SystemNTP(goos string) NTPCheck {
 	return func(ctx context.Context) (bool, error) {
 		if goos == "windows" {
 			out, err := exec.CommandContext(ctx, "w32tm", "/query", "/status").Output()
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				return false, w32tmError(string(out)+string(exit.Stderr), uint32(exit.ExitCode())) //nolint:gosec // a Windows exit code is a DWORD
+			}
 			if err != nil {
 				return false, err
 			}

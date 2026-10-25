@@ -570,3 +570,132 @@ func TestPull_PushStoresPiFolderAndPrintsInventory(t *testing.T) {
 		}
 	}
 }
+
+// TestScheduleCut_NoStaleCutAfterTheRunEnds (C16): a run that ends before
+// its drawn moment, by its report (ipcam-hub exited by itself) or by the
+// host's refusal, has its schedule cancelled: when the moment passes, the
+// controller shows no prompt and sends no cut on the host's link, where it
+// would stop the host's next run at a moment never drawn for it.
+func TestScheduleCut_NoStaleCutAfterTheRunEnds(t *testing.T) {
+	for _, tc := range []struct{ kind, end string }{{"kill9", "report"}, {"kill9", "refused"}, {"power", "report"}, {"power", "refused"}} {
+		r := newRig(t)
+		conn := r.connect("pc")
+		id := "pc-kill9-04-1"
+		set := "pc-kill9"
+		if tc.kind == "power" {
+			id, set = "real-pc-02-3", "real-pc"
+		}
+		r.send(conn, link.RunStart{RunID: id, Set: set, Kind: tc.kind, Streams: []string{"cam01_main"}, Host: "pc", OS: "windows", Attempt: 1})
+		r.send(conn, link.Ready{RunID: id})
+		boot := r.clock.Now().Add(time.Second)
+		r.beaconAt(id, 0, boot)
+		if tc.kind == "kill9" {
+			waitFor(t, "the drawn moment", func() bool { return strings.Contains(r.screen.String(), "e programată la") })
+		} else {
+			time.Sleep(100 * time.Millisecond) // the schedule waits for its moment
+		}
+		switch tc.end {
+		case "report":
+			r.send(conn, link.Report{RunID: id})
+			if _, ok := r.receive(conn).(link.Verdict); !ok {
+				t.Fatalf("%s %s: no verdict", tc.kind, tc.end)
+			}
+		case "refused":
+			r.send(conn, link.Refused{RunID: id, Reason: "oprire automată cerută în afara ferestrei 22:00-06:00"})
+			waitFor(t, "the refusal on the screen", func() bool { return strings.Contains(r.screen.String(), "a renunțat") })
+		}
+		r.clock.set(boot.Add(13 * time.Minute)) // past every moment the schedule may have drawn
+		got := make(chan link.Message, 1)
+		go func() {
+			if m, err := conn.Receive(); err == nil {
+				got <- m
+			}
+		}()
+		select {
+		case m := <-got:
+			t.Errorf("%s %s: the controller sent %#v after the run ended", tc.kind, tc.end, m)
+		case <-time.After(500 * time.Millisecond):
+		}
+		if strings.Contains(r.screen.String(), "Scoateți acum alimentarea") {
+			t.Errorf("%s %s: the screen shows the prompt of a run that ended:\n%s", tc.kind, tc.end, r.screen.String())
+		}
+	}
+}
+
+// validKill9Run announces a kill9 run that the controller will judge
+// valid: a cut drawn 3 min after its first beacon, beacons every second up
+// to 10 ms before it, and the send time of the index that the returned
+// report says was recorded last.
+func (r *rig) validKill9Run(conn *link.Conn, id string) link.Report {
+	r.t.Helper()
+	r.send(conn, link.RunStart{RunID: id, Set: "pc-kill9", Kind: "kill9", Encrypted: true, PadLowBitrate: true,
+		Streams: []string{"cam01_main"}, Host: "pc", OS: "windows", Storage: "ssd", Attempt: 1})
+	waitFor(r.t, "the run", func() bool {
+		r.c.mu.Lock()
+		defer r.c.mu.Unlock()
+		return r.c.runs[id] != nil
+	})
+	boot := r.clock.Now().Add(time.Second)
+	prompt := boot.Add(3 * time.Minute)
+	r.c.mu.Lock()
+	r.c.runs[id].cut.BootAt, r.c.runs[id].cut.PromptAt = boot, prompt
+	r.c.mu.Unlock()
+	seq := uint64(0)
+	for at := boot; at.Before(prompt); at = at.Add(time.Second) {
+		r.beaconAt(id, seq, at)
+		seq += 20
+	}
+	stopAt := prompt.Add(-10 * time.Millisecond)
+	r.beaconAt(id, seq, stopAt)
+	r.c.sendLog.Record("cam01_main", 5000, stopAt.Add(-700*time.Millisecond))
+	return link.Report{
+		RunID:      id,
+		Streams:    []link.StreamIndex{{Stream: "cam01_main", LastRecordedIndex: 5000}},
+		Reconcile:  json.RawMessage(`{"type":"reconcile","seq":1,"final":true,"aborted":false,"unreadable":0,"tornParts":0,"catalogMismatches":0}`),
+		Verify:     json.RawMessage(`{"type":"verify","unreadable":0,"tornParts":0,"catalogMismatches":0}`),
+		Hub04Clear: true, NtpSynced: true, WriteCache: "unknown",
+	}
+}
+
+// TestReport_UnwrittenEnvelopeIsRedone (C16, G15): when the controller
+// cannot write a run's envelope (a full disk on the Pi controller, an
+// envelope that fails its checks), the run does not count: the host gets an
+// invalid verdict with the Romanian reason and redoes it, and the same
+// report sent again is not answered with a counting verdict from memory.
+// The same run with a writable folder counts, so the test is not vacuous.
+func TestReport_UnwrittenEnvelopeIsRedone(t *testing.T) {
+	for _, writable := range []bool{true, false} {
+		r := newRig(t)
+		if !writable {
+			file := filepath.Join(t.TempDir(), "not-a-folder")
+			if err := os.WriteFile(file, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r.c.results = filepath.Join(file, "results") // every write fails: its parent is a file
+		}
+		conn := r.connect("pc")
+		report := r.validKill9Run(conn, "pc-kill9-03-1")
+		r.send(conn, report)
+		v, ok := r.receive(conn).(link.Verdict)
+		if !ok {
+			t.Fatal("no verdict")
+		}
+		_, statErr := os.Stat(filepath.Join(r.c.results, "MI1", "pc-kill9", "pc-kill9-03-1.json"))
+		if writable {
+			if !mi1.Counts(v.Run) || v.Run.LossMs != 700 || statErr != nil {
+				t.Errorf("writable: verdict %+v, envelope %v; want a counting run of 700 ms and its envelope", v.Run, statErr)
+			}
+			continue
+		}
+		if v.Run.Valid || v.Run.InvalidReason != "rezultatul nu s-a putut scrie la controlor" || mi1.Counts(v.Run) {
+			t.Errorf("unwritable: verdict %+v, want invalid: rezultatul nu s-a putut scrie la controlor", v.Run)
+		}
+		if !strings.Contains(r.screen.String(), "nu pot scrie rezultatul") {
+			t.Errorf("screen:\n%s\nwant the write error shown", r.screen.String())
+		}
+		r.send(conn, report)
+		if again, ok := r.receive(conn).(link.Verdict); !ok || mi1.Counts(again.Run) {
+			t.Errorf("the report sent again got %+v, want no counting verdict", again.Run)
+		}
+	}
+}
