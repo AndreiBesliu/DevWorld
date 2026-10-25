@@ -315,6 +315,24 @@ func (o *testObserver) snapshot() testObserver {
 	}
 }
 
+// waitFinalReport waits until the reconcile update with the highest Seq is a
+// final one after the startup's, and returns its report: the report once the
+// background work is done. The update that says repairs are queued is not
+// final and still carries the report from before them.
+func waitFinalReport(t *testing.T, obs *testObserver) ReconcileReport {
+	t.Helper()
+	var last ReconcileUpdate
+	waitFor(t, 10*time.Second, "no final reconcile update after the startup's", func() bool {
+		for _, u := range obs.snapshot().updates {
+			if u.Seq > last.Seq {
+				last = u
+			}
+		}
+		return last.Seq > 1 && last.Final
+	})
+	return last.ReconcileReport
+}
+
 // startFake runs New with this test binary as a fake MediaMTX in mode, in a
 // fresh data layout, and returns the recorder and its directories. The
 // recorder stops when the test ends.

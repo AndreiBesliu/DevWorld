@@ -1186,6 +1186,12 @@ func TestRecorder_RepairsTheDeadChildsPartsWhileTheHubRuns(t *testing.T) {
 		{Cam: "cam1", Profile: "main", StartMs: deadMs + 3000, EndMs: nextStart.UnixMilli(), Reason: catalog.GapRestart},
 		{Cam: "cam3", Profile: "main", StartMs: t0.UnixMilli(), Reason: catalog.GapRestart},
 	}
+	// The final report comes once the batch's repairs are done; the gap is
+	// written before the file changes, so it alone says nothing about the file.
+	wantReport := ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 2, GapsWritten: 2, Unreadable: 1}
+	if rep := waitFinalReport(t, obs); rep != wantReport {
+		t.Errorf("report after the repair %+v, want %+v", rep, wantReport)
+	}
 	waitFor(t, 10*time.Second, "the dead child's .part has no restart gap that ends at the new segment", func() bool {
 		gaps, err := cfg.Catalog.Gaps(t.Context())
 		return err == nil && slices.Equal(gaps, want)
@@ -1199,11 +1205,6 @@ func TestRecorder_RepairsTheDeadChildsPartsWhileTheHubRuns(t *testing.T) {
 	}
 	if got := readFile(t, next); len(got) != 100 {
 		t.Errorf("the new child's .part has %d bytes, want its 100", len(got))
-	}
-	waitFor(t, 10*time.Second, "no report after the repair", func() bool { return len(obs.snapshot().reports) >= 1 })
-	wantReport := ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 2, GapsWritten: 2, Unreadable: 1}
-	if reps := obs.snapshot().reports; reps[len(reps)-1] != wantReport {
-		t.Errorf("report after the repair %+v, want %+v", reps[len(reps)-1], wantReport)
 	}
 }
 
@@ -1411,9 +1412,8 @@ func TestRecorder_LiveRepairDirSyncFails_KeepsTheGap(t *testing.T) {
 	writeFile(t, dead, f.data[:f.partStart[3]+10])
 	killChild(t, r)
 
-	waitFor(t, 10*time.Second, "no report after the repair", func() bool { return len(obs.snapshot().reports) >= 1 })
-	if rep := obs.snapshot().reports; rep[len(rep)-1] != (ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 1, GapsWritten: 1}) {
-		t.Errorf("report after the repair %+v, want the .part repaired, not unreadable", rep[len(rep)-1])
+	if rep := waitFinalReport(t, obs); rep != (ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 1, GapsWritten: 1}) {
+		t.Errorf("report after the repair %+v, want the .part repaired, not unreadable", rep)
 	}
 	deadMs := deadStart.UnixMilli()
 	requireRow(t, cfg.Catalog, relSeg("cam1", "main", deadStart, ""), deadMs, deadMs+3000, false, strings.TrimSuffix(dead, ".part"))
