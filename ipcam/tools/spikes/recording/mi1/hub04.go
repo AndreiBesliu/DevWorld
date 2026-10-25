@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -29,8 +30,18 @@ const (
 	mediaNeedle = 16
 	// minNeedle is the shortest needle: one of 4 bytes would match about one
 	// position in 2^32 of random ciphertext, a gigabyte of recordings by
-	// chance, so a NAL unit shorter than 8 bytes, as x264's PPS, is left out.
+	// chance, so a NAL unit shorter than 8 bytes, as x264's PPS, is searched
+	// framed (see MediaNeedles).
 	minNeedle = 8
+	// framing is how many bytes a NAL unit's framing on disk adds before
+	// it: an fMP4 sample's length or Annex B's long start code.
+	framing = 4
+	// prefilterAt is where in a needle, and at each position of the scanned
+	// bytes, the scan's two-byte prefilter looks: past the zeros that begin
+	// a framed needle, so that a zero-filled stretch of a file or of a raw
+	// image is ruled out by the prefilter rather than looked up at every
+	// byte.
+	prefilterAt = 2
 	// scanChunk is how much of a file the scan reads at once.
 	scanChunk = 4 << 20
 )
@@ -43,9 +54,23 @@ const (
 )
 
 // MediaNeedles is the first 16 bytes of each SPS, PPS and IDR NAL unit in
-// the Annex B files, each once, without those under 8 bytes.
+// the Annex B files, each once. A NAL unit under 8 bytes, as x264's 4- or
+// 5-byte PPS, would match random ciphertext by chance as a needle of its
+// own, so it is searched whole in the two framings that put it on disk,
+// each 4 bytes longer: an fMP4 sample's big-endian length, which is how
+// MediaMTX's recorder and reconcile write every NAL unit (the PPS of each
+// IDR access unit included), and Annex B's 4-byte start code (raw H.264,
+// MPEG-TS). In an init segment's avcC, with a 2-byte length, it sits 3
+// bytes after the whole SPS, in a file whose ftyp is a needle too. A NAL
+// unit under 4 bytes, which no framing makes 8 bytes long, is an error:
+// none is left out.
 func MediaNeedles(files ...string) ([][]byte, error) {
 	var out [][]byte
+	add := func(needle []byte) {
+		if !slices.ContainsFunc(out, func(x []byte) bool { return bytes.Equal(x, needle) }) {
+			out = append(out, needle)
+		}
+	}
 	for _, f := range files {
 		aus, err := source.ReadAnnexB(f)
 		if err != nil {
@@ -53,15 +78,22 @@ func MediaNeedles(files ...string) ([][]byte, error) {
 		}
 		for _, au := range aus {
 			for _, n := range au.NALUs {
-				if len(n) < minNeedle {
+				if len(n) == 0 {
 					continue
 				}
 				switch n[0] & 0x1f {
 				case nalIDR, nalSPS, nalPPS:
-					needle := bytes.Clone(n[:min(len(n), mediaNeedle)])
-					if !slices.ContainsFunc(out, func(x []byte) bool { return bytes.Equal(x, needle) }) {
-						out = append(out, needle)
-					}
+				default:
+					continue
+				}
+				switch {
+				case len(n) >= minNeedle:
+					add(bytes.Clone(n[:min(len(n), mediaNeedle)]))
+				case framing+len(n) >= minNeedle:
+					add(append(binary.BigEndian.AppendUint32(nil, uint32(len(n))), n...)) //nolint:gosec // len(n) < 8
+					add(append([]byte{0, 0, 0, 1}, n...))
+				default:
+					return nil, fmt.Errorf("mi1: %s: a NAL unit of type %d is %d bytes, too short for a HUB-04 needle", f, n[0]&0x1f, len(n))
 				}
 			}
 		}
@@ -82,18 +114,19 @@ type Finding struct {
 // clear streams' rec/<cam>/<profile>), searched for the structural needles
 // and for needles, the media's. An encrypted stream's files, tmp/ and the
 // run directory hold no plaintext video: each finding is clear video on
-// disk. It returns the first finding of each file.
+// disk. It returns the first finding of each file. A needle under 8 bytes
+// is an error, never left out.
 func ScanHub04(root string, skip []string, needles [][]byte) ([]Finding, error) {
 	index := &needleIndex{byPrefix: map[uint64][][]byte{}}
 	longest := len(moofNeedle) + 4 + len(mfhdNeedle)
 	for _, n := range append([][]byte{ftypNeedle}, needles...) {
 		if len(n) < minNeedle {
-			continue
+			return nil, fmt.Errorf("mi1: the HUB-04 needle %x is %d bytes, under %d", n, len(n), minNeedle)
 		}
 		k := binary.LittleEndian.Uint64(n)
 		index.byPrefix[k] = append(index.byPrefix[k], n)
-		first := binary.LittleEndian.Uint16(n)
-		index.first2[first/64] |= 1 << (first % 64)
+		pre := binary.LittleEndian.Uint16(n[prefilterAt:])
+		index.pre2[pre/64] |= 1 << (pre % 64)
 		longest = max(longest, len(n))
 	}
 	var found []Finding
@@ -130,11 +163,11 @@ func ScanHub04(root string, skip []string, needles [][]byte) ([]Finding, error) 
 	return found, err
 }
 
-// needleIndex finds the needles fast: a bit per value of their first two
-// bytes rules out almost every position at the cost of one load, and the
-// rest are looked up by their first 8 bytes.
+// needleIndex finds the needles fast: a bit per value of their two bytes
+// at prefilterAt rules out almost every position at the cost of one load,
+// and the rest are looked up by their first 8 bytes.
 type needleIndex struct {
-	first2   [1 << 16 / 64]uint64
+	pre2     [1 << 16 / 64]uint64
 	byPrefix map[uint64][][]byte
 }
 
@@ -175,7 +208,7 @@ func scanFile(path string, index *needleIndex, longest int) (Finding, bool, erro
 // findNeedle returns the first needle in b.
 func findNeedle(b []byte, index *needleIndex) (at int, what string, ok bool) {
 	for i := 0; i+minNeedle <= len(b); i++ {
-		if first := binary.LittleEndian.Uint16(b[i:]); index.first2[first/64]&(1<<(first%64)) == 0 {
+		if pre := binary.LittleEndian.Uint16(b[i+prefilterAt:]); index.pre2[pre/64]&(1<<(pre%64)) == 0 {
 			continue
 		}
 		if candidates := index.byPrefix[binary.LittleEndian.Uint64(b[i:])]; candidates != nil {
