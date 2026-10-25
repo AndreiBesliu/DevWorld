@@ -218,3 +218,23 @@ func TestLastIndex_IgnoresSegmentsAfterRestart(t *testing.T) {
 		t.Errorf("LastRecorded = %d, want 73 from the reconciled .part", got)
 	}
 }
+
+// TestLastIndex_NoParts: a decoded part list with no part, or with parts
+// and tracks but no sample, gives no index instead of panicking, so the
+// file reads as one without a complete sample (ErrNoSample when no file
+// has one).
+func TestLastIndex_NoParts(t *testing.T) {
+	for name, parts := range map[string]fmp4.Parts{
+		"no parts":                nil,
+		"an empty list":           {},
+		"a part without track":    {{SequenceNumber: 1}},
+		"a track without samples": {{SequenceNumber: 1, Tracks: []*fmp4.PartTrack{{ID: 1}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			index, ok, err := lastIndexIn(parts)
+			if ok || err != nil {
+				t.Errorf("lastIndexIn = %d, %v, %v; want no index and no error", index, ok, err)
+			}
+		})
+	}
+}

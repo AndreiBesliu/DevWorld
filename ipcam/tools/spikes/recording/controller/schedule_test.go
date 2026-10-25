@@ -34,3 +34,15 @@ func TestSchedulePrompt_Ranges(t *testing.T) {
 	}
 	check("smoke", func() time.Time { return SchedulePromptWithin(boot, 20*time.Second, 40*time.Second, rnd) }, 20*time.Second, 40*time.Second)
 }
+
+// TestSchedulePromptWithin_HiBelowLo: a window whose upper end lies below
+// its lower end is clamped to its lower end instead of panicking.
+func TestSchedulePromptWithin_HiBelowLo(t *testing.T) {
+	boot := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	rnd := rand.New(rand.NewPCG(3, 4)) //nolint:gosec // a fixed seed, so the test is reproducible
+	for _, hi := range []time.Duration{40 * time.Second, 39 * time.Second, 0, -time.Minute} {
+		if got := SchedulePromptWithin(boot, 40*time.Second, hi, rnd); !got.Equal(boot.Add(40 * time.Second)) {
+			t.Errorf("SchedulePromptWithin(lo 40s, hi %v) = %v after boot, want 40s", hi, got.Sub(boot))
+		}
+	}
+}

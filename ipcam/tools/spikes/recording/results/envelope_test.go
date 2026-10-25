@@ -1,0 +1,169 @@
+package results
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func ptr[T any](v T) *T { return &v }
+
+// sample is a two-run MI1 envelope with every field set.
+func sample() Envelope {
+	return Envelope{
+		Schema: Schema, Code: "MI1", RunID: "pi-kill9-07", Set: "pi-kill9", Host: "pi", OS: "linux",
+		PiModel: &PiModelInfo{
+			Raw: "Raspberry Pi 4 Model B Rev 1.5", Revision: "d03115", Tier: "H1b", Source: "cpuinfo",
+			Supported: true, Known: true, RecommendedMin: 4, RecommendedMax: 4,
+		},
+		Storage:        "sd",
+		SdConfirmation: &SdConfirmation{Text: "DA", AtMs: 1792000000000},
+		Runs: []Run{
+			{
+				RunID: "pi-kill9-07", Valid: true, Slot: 0, Attempt: 1, ShutdownKind: "kill9", Encrypted: true, PadLowBitrate: true,
+				Streams: []StreamLoss{
+					{Stream: "cam01_main", BitrateKbps: 4000, Encrypted: true, PadLowBitrate: true, LossMs: 820, LimitMs: 2000},
+					{Stream: "cam02_main", BitrateKbps: 4000, Encrypted: true, PadLowBitrate: true, LossMs: 1130, LimitMs: 2000},
+				},
+				LossMs: 1130, ErrBoundMs: 51, Reconciled: true, Hub04Clear: true, PacingP99Ms: 4,
+				ResumeMs: ptr[int64](2400), Cameras: 4, NtpWaitMs: 1200, NtpSynced: true, WriteCache: "on",
+			},
+			{
+				RunID: "pi-kill9-08", Valid: false, InvalidReason: "oprire în afara ferestrei", Attempt: 2, ShutdownKind: "sysrq",
+				Streams: []StreamLoss{
+					{Stream: "cam01_main", BitrateKbps: 4000, LossMs: 700, LimitMs: 2000},
+				},
+				LossMs: 700, Unreadable: 1, TornParts: 2, SkippedAUs: 3, ColdBootMs: ptr[int64](19000), Cameras: 1, WriteCache: "unknown",
+			},
+		},
+	}
+}
+
+// TestEnvelope_RoundTripAndSchema: Write puts an envelope at
+// <code>/<set>/<runId>.json and Read gives the same envelope back; an
+// envelope of another schema, or with a field the schema does not have, is
+// refused.
+func TestEnvelope_RoundTripAndSchema(t *testing.T) {
+	dir := t.TempDir()
+	want := sample()
+	if err := Write(dir, want); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	path := filepath.Join(dir, "MI1", "pi-kill9", "pi-kill9-07.json")
+	got, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Read = %+v\nwant %+v", got, want)
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // the test's own file
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"schema":"ipcam.phase0c1.result/1"`) {
+		t.Errorf("the file does not name the schema: %s", data)
+	}
+
+	t.Run("an overwrite replaces the file", func(t *testing.T) {
+		again := sample()
+		again.Runs = again.Runs[:1]
+		if err := Write(dir, again); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if got, err := Read(path); err != nil || len(got.Runs) != 1 {
+			t.Errorf("Read = %d runs, %v; want 1 run", len(got.Runs), err)
+		}
+		entries, err := os.ReadDir(filepath.Dir(path))
+		if err != nil || len(entries) != 1 {
+			t.Errorf("the set folder holds %d entries (%v), want only the envelope", len(entries), err)
+		}
+	})
+
+	for name, data := range map[string]string{
+		"another schema":   strings.Replace(string(data), Schema, "ipcam.phase0c1.result/2", 1),
+		"no schema":        strings.Replace(string(data), `"schema":"ipcam.phase0c1.result/1",`, "", 1),
+		"an unknown field": strings.Replace(string(data), `"code":`, `"extra":1,"code":`, 1),
+		"not JSON":         "{",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(data)); err == nil {
+				t.Errorf("Parse(%s) = nil error", data)
+			}
+		})
+	}
+
+	for name, mutate := range map[string]func(*Envelope){
+		"another schema":           func(e *Envelope) { e.Schema = "x" },
+		"an unknown code":          func(e *Envelope) { e.Code = "MI7" },
+		"no run id":                func(e *Envelope) { e.RunID = "" },
+		"a run id with a slash":    func(e *Envelope) { e.RunID = "a/b" },
+		"a run id of ..":           func(e *Envelope) { e.RunID = ".." },
+		"a set with a backslash":   func(e *Envelope) { e.Set = `a\b` },
+		"no set":                   func(e *Envelope) { e.Set = "" },
+		"an unknown storage":       func(e *Envelope) { e.Storage = "nvme" },
+		"a part beyond the parts":  func(e *Envelope) { e.Part, e.Parts = 22, 21 },
+		"a part without the parts": func(e *Envelope) { e.Part = 3 },
+		"parts without a part":     func(e *Envelope) { e.Parts = 21 },
+	} {
+		t.Run("Write refuses "+name, func(t *testing.T) {
+			e := sample()
+			mutate(&e)
+			if err := Write(t.TempDir(), e); err == nil {
+				t.Error("Write = nil error")
+			}
+		})
+	}
+	t.Run("a lab part is valid", func(t *testing.T) {
+		e := sample()
+		e.Part, e.Parts = 21, 21
+		if err := e.Validate(); err != nil {
+			t.Errorf("Validate = %v", err)
+		}
+	})
+}
+
+// TestEnvelope_HostIsPseudonym: only the five pseudonyms of PH0-22 name a
+// host; anything else, a host name or an address above all, is refused by
+// Validate, Write and Parse.
+func TestEnvelope_HostIsPseudonym(t *testing.T) {
+	for _, host := range []string{"pc", "pi", "lab-linux", "lab-windows", "lab-qemu"} {
+		e := sample()
+		e.Host = host
+		if err := e.Validate(); err != nil {
+			t.Errorf("host %q: Validate = %v", host, err)
+		}
+	}
+	for _, host := range []string{"", "DESKTOP-4F2K9QL", "raspberrypi", "raspberrypi.local", "192.168.1.20", "PC", "lab"} {
+		e := sample()
+		e.Host = host
+		if err := e.Validate(); err == nil {
+			t.Errorf("host %q: Validate = nil error", host)
+		}
+		dir := t.TempDir()
+		if err := Write(dir, e); err == nil {
+			t.Errorf("host %q: Write = nil error", host)
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Errorf("host %q: Write left %d entries", host, len(entries))
+		}
+		good := sample()
+		data := strings.Replace(mustMarshal(t, good), `"host":"pi"`, `"host":"`+host+`"`, 1)
+		if _, err := Parse([]byte(data)); err == nil {
+			t.Errorf("host %q: Parse = nil error", host)
+		}
+	}
+}
+
+func TestDeferred(t *testing.T) {
+	if got, want := Deferred("Pi armv6"), Verdict("amânat în Faza 0-bis: Pi armv6"); got != want {
+		t.Errorf("Deferred = %q, want %q", got, want)
+	}
+	for v, want := range map[Verdict]string{Pass: "trece", Fail: "pică", Incomplete: "fără verdict: lipsesc măsurători"} {
+		if string(v) != want {
+			t.Errorf("verdict %q, want %q", v, want)
+		}
+	}
+}

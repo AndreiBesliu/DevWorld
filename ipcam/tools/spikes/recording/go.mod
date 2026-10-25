@@ -8,6 +8,7 @@ require (
 	github.com/bluenviron/gortsplib/v5 v5.6.6
 	github.com/bluenviron/mediacommon/v2 v2.9.6
 	github.com/pion/rtp v1.10.5
+	golang.org/x/sys v0.48.0
 )
 
 require (
@@ -23,7 +24,6 @@ require (
 	github.com/pion/transport/v5 v5.1.1 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 )
 
 replace github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video => ../video

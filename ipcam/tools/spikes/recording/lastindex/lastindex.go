@@ -120,6 +120,16 @@ func lastInFile(path string, id age.Identity) (index uint64, ok bool, err error)
 	if err := parts.Unmarshal(buf); err != nil {
 		return 0, false, err
 	}
+	return lastIndexIn(parts)
+}
+
+// lastIndexIn reads the index of the last sample of the last part; ok is
+// false when there is no part or the part has no sample, so that the file
+// reads as one without a complete sample.
+func lastIndexIn(parts fmp4.Parts) (index uint64, ok bool, err error) {
+	if len(parts) == 0 {
+		return 0, false, nil
+	}
 	for _, track := range parts[len(parts)-1].Tracks {
 		if len(track.Samples) == 0 {
 			continue
