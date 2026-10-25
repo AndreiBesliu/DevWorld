@@ -27,3 +27,17 @@ func Uptime() (time.Duration, error) {
 	}
 	return time.Duration(s * float64(time.Second)), nil
 }
+
+// ThisBoot is the host's boot: the kernel's boot_id, which each boot draws
+// anew.
+func ThisBoot() (Boot, error) {
+	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return Boot{}, err
+	}
+	id := strings.TrimSpace(string(data))
+	if id == "" {
+		return Boot{}, fmt.Errorf("mi1: /proc/sys/kernel/random/boot_id is empty")
+	}
+	return Boot{ID: id}, nil
+}

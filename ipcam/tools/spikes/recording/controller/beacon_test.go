@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -242,5 +243,50 @@ func TestBeaconLog_WaitSilence(t *testing.T) {
 	cancel()
 	if _, err := beacons.WaitSilence(ctx, "lab-linux-kill9-02-1", clock); !errors.Is(err, context.Canceled) {
 		t.Errorf("WaitSilence on a cancelled context = %v, want context.Canceled", err)
+	}
+}
+
+// stallClock is a fakeClock whose first Now runs stall before it reads the
+// time: the beacons and the clock move on while the caller is held up
+// there, as a goroutine that the scheduler holds up between two reads.
+type stallClock struct {
+	*fakeClock
+	once  sync.Once
+	stall func()
+}
+
+func (c *stallClock) Now() time.Time {
+	c.once.Do(c.stall)
+	return c.fakeClock.Now()
+}
+
+// TestBeaconLog_WaitSilenceNeverSeesAFalseSilence (R07): a WaitSilence that
+// is held up between its look at the run's newest beacon and its look at
+// the clock, while a new beacon arrives and the clock moves on, does not
+// return a silence that never was: the run's newest beacon is only 1.5 s
+// old. Before, it compared the beacon it saw before the hold-up with the
+// clock after it, and the controller marked the run's pacing end mid-run
+// (the one-off TestReport_WritesTheEnvelope failure of Task 7.2b).
+func TestBeaconLog_WaitSilenceNeverSeesAFalseSilence(t *testing.T) {
+	beacons := NewBeaconLog()
+	id := "lab-linux-kill9-03-1"
+	beacons.Expect(id)
+	hash := link.RunHash(id)
+	clock := &stallClock{fakeClock: newFakeClock()}
+	start := clock.fakeClock.Now()
+	beacons.add(hash, 0, start)
+	beacons.add(hash, 20, start.Add(time.Second))
+	clock.now = start.Add(time.Second)
+	clock.stall = func() {
+		beacons.add(hash, 40, start.Add(2*time.Second))
+		clock.mu.Lock()
+		clock.now = start.Add(3*time.Second + 500*time.Millisecond)
+		clock.mu.Unlock()
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	if b, err := beacons.WaitSilence(ctx, id, clock); err == nil {
+		t.Errorf("WaitSilence = beacon %d at %v: a silence 1.5 s after the newest beacon, which came at %v",
+			b.Seq, b.At.Sub(start), 2*time.Second)
 	}
 }

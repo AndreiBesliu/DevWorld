@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
@@ -27,11 +28,17 @@ const (
 	PhaseStopped = "stopped"
 )
 
-// RunState is results/state/run-state.json (G14): where a set stands, so
-// that `recspike resume` continues it after each reboot. It lives in the
-// published results folder, so it names no address and no absolute path
-// (PH0-22): run folders are found by run id under recspike's private work
-// folder, and Before's files are relative to the run's data directory.
+// RunState is where a set stands, in results/state/run-state.json (G14),
+// so that `recspike resume` continues it after each reboot. The file keeps
+// the state of every set that ran in the results folder, by results set
+// (ResultsSet), and which one is active: the set begun last, which resume
+// continues. A set that is complete stays complete there when another set
+// runs, so that it never starts again under the run ids of its counted
+// envelopes; a lab set's two shards share their set's state, as their
+// runs share its plan. The file lives in the published results folder, so
+// it names no address and no absolute path (PH0-22): run folders are found
+// by run id under recspike's private work folder, and Before's files are
+// relative to the run's data directory.
 type RunState struct {
 	Set  string `json:"set"`
 	Mode string `json:"mode"`
@@ -43,8 +50,10 @@ type RunState struct {
 	Slot     int    `json:"slot,omitempty"`
 	Attempts int    `json:"attempts"`
 	Window   string `json:"window,omitempty"`
-	Shard    int    `json:"shard,omitempty"`
-	Smoke    bool   `json:"smoke,omitempty"`
+	// Shard is the lab shard that the set runs now; Smoke marks a lab
+	// smoke run's set.
+	Shard int  `json:"shard,omitempty"`
+	Smoke bool `json:"smoke,omitempty"`
 	// Host is what the envelopes say of the host, as the set's start read
 	// it; the owner's answers (an estimated camera count, the SD-card
 	// confirmation) are not asked again after a reboot.
@@ -87,34 +96,66 @@ type CurrentRun struct {
 	Before map[string][]string `json:"before,omitempty"`
 	// ResumeMs is the kill to the restarted ipcam-hub's recording (kill9).
 	ResumeMs *int64 `json:"resumeMs,omitempty"`
-	// StopUptimeMs is the host's uptime when recspike asked the OS to stop
-	// (sysrq, bugcheck): a later uptime below it proves the reboot.
-	StopUptimeMs *int64 `json:"stopUptimeMs,omitempty"`
+	// StopBoot is the host's boot when recspike asked the OS to stop
+	// (sysrq, bugcheck): another boot after it proves the reboot.
+	StopBoot *Boot `json:"stopBoot,omitempty"`
 }
 
-// LoadRunState reads the run state at path; nil when there is none.
+// runStates is the run state file: each set's state by results set, and
+// the active one's results set.
+type runStates struct {
+	Active string               `json:"active"`
+	Sets   map[string]*RunState `json:"sets"`
+}
+
+// key is the results set that st's state is kept under.
+func (st *RunState) key() string { return ResultsSet(st.Set, st.Smoke) }
+
+// LoadRunState reads the active set's state in the run state file at path;
+// nil when there is none.
 func LoadRunState(path string) (*RunState, error) {
+	states, err := loadRunStates(path)
+	if err != nil {
+		return nil, err
+	}
+	return states.Sets[states.Active], nil
+}
+
+// loadRunStates reads the run state file at path; empty when there is
+// none.
+func loadRunStates(path string) (*runStates, error) {
+	states := &runStates{Sets: map[string]*RunState{}}
 	data, err := os.ReadFile(path) //nolint:gosec // recspike's own run state
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return states, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var st RunState
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&st); err != nil {
+	if err := dec.Decode(states); err != nil {
 		return nil, fmt.Errorf("mi1: %s: %w", filepath.Base(path), err)
 	}
-	return &st, nil
+	if states.Sets == nil {
+		states.Sets = map[string]*RunState{}
+	}
+	return states, nil
 }
 
-// SaveRunState writes st to path whole and durably: beside its final name,
-// synced, renamed over it, and the folder synced, so that a power cut
-// leaves the old state or the new one.
+// SaveRunState writes st as the active set's state into the run state file
+// at path, beside the other sets' states, which it keeps. The file is
+// written whole and durably: beside its final name, synced, renamed over
+// it, and the folder synced, so that a power cut leaves the old file or
+// the new one.
 func SaveRunState(path string, st *RunState) error {
-	data, err := json.MarshalIndent(st, "", "  ")
+	states, err := loadRunStates(path)
+	if err != nil {
+		return err
+	}
+	states.Active = st.key()
+	states.Sets[states.Active] = st
+	data, err := json.MarshalIndent(states, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -167,11 +208,18 @@ func (st *RunState) runs() []results.Run {
 	return out
 }
 
-// nextAutomated is plan's next run after the runs done (NextRun) and its
-// attempt at that position, counted from 1; ok is false when every
-// position has a run that counts.
+// nextAutomated is plan's next run after the runs done at its positions
+// (NextRun) and its attempt at that position, counted from 1; ok is false
+// when every position has a run that counts. The runs done at other
+// positions, the other lab shard's, do not move it.
 func (st *RunState) nextAutomated(plan []RunPlan) (next RunPlan, attempt int, ok bool) {
-	next, ok = NextRun(plan, st.runs())
+	var runs []results.Run
+	for _, d := range st.Done {
+		if slices.ContainsFunc(plan, func(p RunPlan) bool { return p.Index == d.Index }) {
+			runs = append(runs, d.Run)
+		}
+	}
+	next, ok = NextRun(plan, runs)
 	if !ok {
 		return RunPlan{}, 0, false
 	}

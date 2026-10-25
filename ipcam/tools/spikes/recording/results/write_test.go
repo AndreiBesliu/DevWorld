@@ -88,3 +88,27 @@ func TestWrite_RemovesTheEnvelopeWhenTheFolderSyncFails(t *testing.T) {
 		t.Errorf("the set's folder holds %v (%v), want nothing", entries, err)
 	}
 }
+
+// TestCreate_NeverReplacesAnEnvelope (item 2): Create writes an envelope as
+// Write does, but one whose file exists already is refused with ErrExists,
+// and the file on disk stays the first one: a run id names one run, so the
+// counted envelope of a run is never replaced by another run's.
+func TestCreate_NeverReplacesAnEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	first := sample()
+	if err := Create(dir, first); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	second := sample()
+	second.Runs[0].LossMs, second.Runs[0].Valid = 99, false
+	if err := Create(dir, second); !errors.Is(err, ErrExists) {
+		t.Errorf("Create of an envelope that exists = %v, want ErrExists", err)
+	}
+	got, err := Read(filepath.Join(dir, first.Code, first.Set, first.RunID+".json"))
+	if err != nil || got.Runs[0].LossMs != first.Runs[0].LossMs || !got.Runs[0].Valid {
+		t.Errorf("the envelope on disk = %+v, %v; want the first one", got.Runs, err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, first.Code, first.Set, "*.tmp")); len(left) != 0 {
+		t.Errorf("temporary files left: %v", left)
+	}
+}

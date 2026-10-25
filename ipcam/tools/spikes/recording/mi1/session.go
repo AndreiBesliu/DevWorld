@@ -86,6 +86,7 @@ type Driver struct {
 	Clock        source.Clock
 	NTP          NTPCheck
 	Uptime       func() (time.Duration, error)
+	ThisBoot     func() (Boot, error)
 	OSStop       func(ctx context.Context, kind controller.ShutdownKind) error
 	LastRecorded func(ctx context.Context, files lastindex.Before, id age.Identity) (uint64, error)
 	Volumes      Volumes
@@ -148,6 +149,13 @@ func (d *Driver) uptime() (time.Duration, error) {
 		return d.Uptime()
 	}
 	return Uptime()
+}
+
+func (d *Driver) thisBoot() (Boot, error) {
+	if d.ThisBoot != nil {
+		return d.ThisBoot()
+	}
+	return ThisBoot()
 }
 
 func (d *Driver) osStop(ctx context.Context, kind controller.ShutdownKind) error {
@@ -213,8 +221,8 @@ func (d *Driver) runDir(id string) string {
 	return filepath.Join(d.Work, id)
 }
 
-// State is the run state in the driver's results folder; nil when there is
-// none.
+// State is the active set's run state in the driver's results folder; nil
+// when there is none.
 func (d *Driver) State() (*RunState, error) { return LoadRunState(d.statePath()) }
 
 // lock takes the run state's lock, telling the owner when it waits.
@@ -303,27 +311,43 @@ func (d *Driver) Resume(ctx context.Context) error {
 	return d.end(ctx, s, d.loop(ctx, s, st, false))
 }
 
-// begin returns the run state of the set o asks for: the one in progress,
-// or a new one when the last set is complete or there is none. A lab state
-// is its shard's, and a smoke run's is its own: another shard, or the full
-// shard after its smoke run, never continues it. A smoke run's run ids and
-// envelopes are its own too (ResultsSet), so a smoke run and its full
-// shard may follow each other in one folder, in either order.
-// A set that is complete stays so: its run ids are taken, and its envelopes
-// are the controller's. A new set's host is o.Host's, when it has one.
+// begin returns the run state of the set o asks for, given st, the active
+// set's: the active set continues; another set starts only once the active
+// one is complete, and then continues its own state, kept by results set
+// (ResultsSet) when it ran in this folder before, or starts a new one. A
+// set that is complete stays so, whatever ran since: its run ids are taken,
+// and their envelopes are the controller's. A lab set's shards share its
+// state, the shard that runs now in it; a smoke run's results set, so its
+// state, its run ids and its envelopes, are its own, and a smoke run and
+// its full shard may follow each other in one folder, in either order. A
+// new set's host is o.Host's, when it has one.
 func (d *Driver) begin(ctx context.Context, st *RunState, o SetOptions) (*RunState, error) {
+	key := ResultsSet(o.Set, o.Smoke)
 	switch {
-	case st != nil && st.Set == o.Set && st.Shard == o.Shard && st.Smoke == o.Smoke:
+	case st != nil && st.key() == key && st.Shard == o.Shard:
 		if o.Window != nil {
 			st.Window = o.Window.String()
 		}
 		d.Host = st.Host
 		return st, nil
-	case o.Resume:
-		return nil, fmt.Errorf("nu există o probă %s de continuat", o.Set)
 	case st != nil && (st.Current != nil || !d.complete(st)):
 		return nil, fmt.Errorf("proba %s nu s-a încheiat: continuați-o înainte de %s",
 			setLabel(st.Set, st.Shard, st.Smoke), setLabel(o.Set, o.Shard, o.Smoke))
+	}
+	states, err := loadRunStates(d.statePath())
+	if err != nil {
+		return nil, err
+	}
+	if own := states.Sets[key]; own != nil {
+		own.Shard = o.Shard
+		if o.Window != nil {
+			own.Window = o.Window.String()
+		}
+		d.Host = own.Host
+		return own, SaveRunState(d.statePath(), own)
+	}
+	if o.Resume {
+		return nil, fmt.Errorf("nu există o probă %s de continuat", o.Set)
 	}
 	if o.Host != nil {
 		host, err := o.Host(ctx)

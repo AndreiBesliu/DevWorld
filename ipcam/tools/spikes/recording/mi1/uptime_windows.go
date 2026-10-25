@@ -19,3 +19,15 @@ func Uptime() (time.Duration, error) {
 	ms, _, _ := getTickCount64.Call()
 	return time.Duration(ms) * time.Millisecond, nil //nolint:gosec // milliseconds since boot, far below 2^63
 }
+
+// ThisBoot is the host's boot: its wall time, the clock minus the uptime;
+// Windows has no boot id. Two readings of one boot differ by the tick's
+// resolution and the clock's corrections in between (bootTimeTolerance).
+func ThisBoot() (Boot, error) {
+	up, err := Uptime()
+	if err != nil {
+		return Boot{}, err
+	}
+	at := time.Now().Round(0).Add(-up)
+	return Boot{At: &at}, nil
+}

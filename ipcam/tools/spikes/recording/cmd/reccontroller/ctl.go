@@ -211,7 +211,11 @@ func (c *ctl) session(local net.Addr) link.Session {
 // whether the old link lost its run_start, keeps its schedule, its cut and
 // its pacing start, and only moves to the new link, as a repeated ready
 // does: a new announcement would draw its cut again and shorten its
-// pacing.
+// pacing. A run that the controller first hears of after its host began to
+// beacon (its run_start was lost with a link, or this controller was
+// started again) has lost those beacons, which the log drops for runs that
+// it does not expect: its envelope says that its timing is partial
+// (startedLate).
 func (c *ctl) startRun(conn *link.Conn, m link.RunStart) {
 	kind := controller.ShutdownKind(m.Kind)
 	var refusal string
@@ -420,13 +424,30 @@ func (c *ctl) hostRefused(m link.Refused) {
 
 // The reasons why a run does not count, in Romanian.
 const (
-	noBeacon      = "niciun semnal de la gazdă"
-	beaconGap     = "semnalul gazdei s-a întrerupt peste 2 s în timpul rulării (verificați rețeaua)"
-	outsideWindow = "oprire în afara ferestrei"
-	unevenPacing  = "controlorul a trimis neuniform"
-	unknownRun    = "rularea nu a fost anunțată controlorului"
-	notWritten    = "rezultatul nu s-a putut scrie la controlor"
+	noBeacon       = "niciun semnal de la gazdă"
+	beaconGap      = "semnalul gazdei s-a întrerupt peste 2 s în timpul rulării (verificați rețeaua)"
+	outsideWindow  = "oprire în afara ferestrei"
+	unevenPacing   = "controlorul a trimis neuniform"
+	unknownRun     = "rularea nu a fost anunțată controlorului"
+	notWritten     = "rezultatul nu s-a putut scrie la controlor"
+	envelopeExists = "există deja la controlor un rezultat cu numele acestei rulări: nu îl suprascriu"
+	lateStart      = "rularea a ajuns la controlor abia după ce pornise (după o reconectare): pornirea și ritmul ei sunt măsurate doar în parte"
 )
+
+// lostFirstBeacons is how many of a run's first beacons the network may
+// lose, BeaconSilence of them, before the controller takes the run's start
+// as missed.
+const lostFirstBeacons = uint64(controller.BeaconSilence / controller.BeaconEvery)
+
+// startedLate reports whether the controller missed the start of a run
+// whose first kept beacon is first. The host numbers a run's beacons from 0
+// at ipcam-hub's ready, and the controller keeps them only from the run's
+// run_start: a run_start that reached it after the beacons began, as one
+// that a reconnection announced again, leaves a first beacon numbered past
+// them. The run's BootAt, the draw of its cut from it (G09) and its pacing
+// (R07) then start late, so the controller cannot tell whether the cut fell
+// in its window or the pacing held: the run does not count, and is redone.
+func startedLate(first controller.Beacon) bool { return first.Seq > lostFirstBeacons }
 
 // hubEvent is what the controller reads of ipcam-hub's reconcile and
 // verify events, as the host sent them.
@@ -458,6 +479,7 @@ func (c *ctl) report(m link.Report) results.Run {
 	}
 	beacons := c.beacons.Beacons(m.RunID)
 	interrupted := c.beacons.Interrupted(m.RunID)
+	late := len(beacons) > 0 && startedLate(beacons[0])
 	stopAt, errBound := controller.StopMoment(r.cut.Kind, beacons)
 	c.mu.Lock()
 	r.cut.StopAt = stopAt
@@ -471,14 +493,19 @@ func (c *ctl) report(m link.Report) results.Run {
 		end = &mark
 	}
 	pacing := c.pacer.Pacing(r.startMark, *end, stopAt)
-	run := c.judge(r, m, cut, len(beacons), interrupted, errBound, pacing)
+	run := c.judge(r, m, cut, beaconsSeen{n: len(beacons), interrupted: interrupted, late: late}, errBound, pacing)
 
 	// A lab smoke run's envelope goes under its own results set, apart from
-	// the set's counted envelopes.
+	// the set's counted envelopes. An envelope of the same run id, on disk
+	// already, is another run's and stays: this run does not count.
 	env := results.Envelope{Schema: results.Schema, Code: "MI1", RunID: m.RunID, Set: mi1.ResultsSet(r.start.Set, r.start.Smoke), Host: r.start.Host, OS: r.start.OS,
 		PiModel: r.start.PiModel, Storage: r.start.Storage, SdConfirmation: r.start.SdConfirmation, Runs: []results.Run{run}}
-	written := results.Write(c.results, env)
-	if written != nil {
+	written := results.Create(c.results, env)
+	switch {
+	case errors.Is(written, results.ErrExists):
+		c.say("Rularea %s: rezultatul ei există deja; nu îl suprascriu, iar rularea nu contează.", m.RunID)
+		run.Valid, run.InvalidReason = false, addReason(run.InvalidReason, envelopeExists)
+	case written != nil:
 		c.say("Rularea %s: nu pot scrie rezultatul (%v); rularea nu contează.", m.RunID, written)
 		run.Valid, run.InvalidReason = false, addReason(run.InvalidReason, notWritten)
 	}
@@ -514,12 +541,21 @@ func addReason(reasons, reason string) string {
 	return reasons + "; " + reason
 }
 
+// beaconsSeen is what the controller kept of a run's beacons: how many,
+// whether they came back after a silence (interrupted), and whether its
+// first one came late (startedLate).
+type beaconsSeen struct {
+	n                 int
+	interrupted, late bool
+}
+
 // judge is the run as its envelope holds it. A stream that the host could
 // not read, or whose index has no send time, lost everything since the
 // run's first beacon. A run whose beacons came back after a silence
 // (interrupted) is invalid for that reason: its stop is not its last kept
-// beacon.
-func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons int, interrupted bool, errBound time.Duration,
+// beacon; so is a run whose start the controller missed (late), whose
+// timing is partial.
+func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons beaconsSeen, errBound time.Duration,
 	pacing controller.PacingStats) results.Run {
 	valid := controller.Valid(cut)
 	if r.start.Smoke {
@@ -533,10 +569,12 @@ func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons int,
 		NtpSynced: m.NtpSynced, WriteCache: m.WriteCache,
 	}
 	switch {
-	case beacons == 0:
+	case beacons.n == 0:
 		run.Valid, run.InvalidReason = false, noBeacon
-	case interrupted:
+	case beacons.interrupted:
 		run.Valid, run.InvalidReason = false, beaconGap
+	case beacons.late:
+		run.Valid, run.InvalidReason = false, lateStart
 	case !valid:
 		run.InvalidReason = outsideWindow
 	case pacing.P99.Milliseconds() > mi1.MaxPacingP99Ms || pacing.SkippedAUs > 0:

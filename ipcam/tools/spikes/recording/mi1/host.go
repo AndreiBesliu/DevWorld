@@ -311,9 +311,8 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 		return d.finish(ctx, s, st, cur, vol, again, nil)
 	}
 	cur.Phase = PhaseStopping
-	if up, err := d.uptime(); err == nil {
-		ms := up.Milliseconds()
-		cur.StopUptimeMs = &ms
+	if boot, err := d.thisBoot(); err == nil {
+		cur.StopBoot = &boot
 	}
 	if err := SaveRunState(d.statePath(), st); err != nil {
 		return err
@@ -341,6 +340,13 @@ func (d *Driver) refuse(ctx context.Context, s *session, st *RunState, cur *Curr
 	if err != nil {
 		return err
 	}
+	return d.dropRun(ctx, s, st, cur, vol, reason)
+}
+
+// dropRun ends a run that recspike will not report, with ipcam-hub
+// stopped: the controller hears why, and the run is done as invalid for
+// that reason, to be redone.
+func (d *Driver) dropRun(ctx context.Context, s *session, st *RunState, cur *CurrentRun, vol Volume, reason string) error {
 	refused := []link.Message{link.Refused{RunID: cur.RunID, Reason: reason}}
 	if err := d.deliver(ctx, s, st, refused, refused); err != nil {
 		return err
@@ -402,10 +408,11 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 }
 
 // rebootedSince reports whether the host booted after recspike asked the
-// OS to stop for cur: its uptime is below the one at the stop.
+// OS to stop for cur: its boot is not the stop's (Boot). A boot that is not
+// known, at the stop or now, is no reboot.
 func (d *Driver) rebootedSince(cur *CurrentRun) bool {
-	up, err := d.uptime()
-	return err == nil && cur.StopUptimeMs != nil && up.Milliseconds() < *cur.StopUptimeMs
+	boot, err := d.thisBoot()
+	return err == nil && cur.StopBoot != nil && !boot.same(*cur.StopBoot)
 }
 
 // notRebooted ends a run whose OS stop did not reboot the host (the stop
@@ -414,12 +421,7 @@ func (d *Driver) rebootedSince(cur *CurrentRun) bool {
 func (d *Driver) notRebooted(ctx context.Context, s *session, st *RunState, cur *CurrentRun, vol Volume) error {
 	reason := fmt.Sprintf("gazda nu a repornit după oprirea %s", st.Kind)
 	d.say("Rularea %s: %s; rularea se reface.", cur.RunID, reason)
-	refused := []link.Message{link.Refused{RunID: cur.RunID, Reason: reason}}
-	if err := d.deliver(ctx, s, st, refused, refused); err != nil {
-		return err
-	}
-	return d.done(st, cur, vol, results.Run{RunID: cur.RunID, InvalidReason: reason, Slot: cur.Slot, Attempt: cur.Attempt,
-		ShutdownKind: st.Kind, Encrypted: cur.Encrypted, PadLowBitrate: cur.PadLowBitrate})
+	return d.dropRun(ctx, s, st, cur, vol, reason)
 }
 
 // afterStop finishes a run whose ipcam-hub stopped without a kill: the

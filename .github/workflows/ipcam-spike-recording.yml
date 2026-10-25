@@ -441,6 +441,66 @@ jobs:
             exit 1
           fi
           tools/scripts/annotate.sh diag-host 1 notice < "${out}"
+      - name: W32Time install and uninstall
+        # C1-R16, C1-R16b: the runner is elevated, so `recspike install` changes the real
+        # Windows Time service. W32Time is first set as on a PC outside a domain (start on
+        # demand, started when the PC joins a domain and stopped when it is not in one).
+        # Then install must leave it AUTO_START, RUNNING and without triggers, and uninstall
+        # must give back the start type and the triggers exactly, as sc qc and sc
+        # qtriggerinfo print them. One line of JSON with the image's own settings, those
+        # before install, after it and after uninstall, and pass, goes out as a notice
+        # either way (C32), at most 3,500 bytes after annotate.sh's escaping; a failure
+        # also goes out as an error.
+        id: w32time
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/w32time.log"
+          dir="${RUNNER_TEMP}/recspike"
+          # W32Time's start type and state as sc names them, and its triggers: the lines
+          # after SERVICE_NAME of sc qtriggerinfo, joined with ";".
+          start_type() { sc.exe qc w32time | tr -d '\r' | sed -n 's/^ *START_TYPE *: *[0-9]* *//p' | sed 's/ *$//'; }
+          state() { sc.exe query w32time | tr -d '\r' | sed -n 's/^ *STATE *: *[0-9]* *//p' | sed 's/ *$//'; }
+          triggers() { sc.exe qtriggerinfo w32time | tr -d '\r' | sed -e '1,/SERVICE_NAME/d' -e 's/^ *//' -e 's/ *$//' -e '/^$/d' | paste -sd ';' -; }
+          snapshot() { jq -nc --arg s "$(start_type)" --arg r "$(state)" --arg t "$(triggers)" '{startType: $s, state: $r, triggers: $t}'; }
+          status=0
+          {
+            go build -o "${dir}/recspike.exe" ./tools/spikes/recording/cmd/recspike &&
+              image=$(snapshot) &&
+              sc.exe config w32time start= demand &&
+              sc.exe triggerinfo w32time start/domainjoin stop/domainleave &&
+              before=$(snapshot) &&
+              "${dir}/recspike.exe" install &&
+              installed=$(snapshot) &&
+              "${dir}/recspike.exe" uninstall &&
+              restored=$(snapshot)
+          } >> "${log}" 2>&1 || status=$?
+          pass=false
+          # A trigger is a line with a colon (its type and GUID); the line that says that
+          # there are none has none.
+          if [[ ${status} -eq 0 ]] &&
+            jq -e '.triggers | test(":")' <<< "${before}" > /dev/null &&
+            jq -e '(.startType | startswith("AUTO_START")) and .state == "RUNNING" and (.triggers | test(":") | not)' <<< "${installed}" > /dev/null &&
+            jq -e --argjson b "${before}" '.startType == $b.startType and .triggers == $b.triggers' <<< "${restored}" > /dev/null; then
+            pass=true
+          fi
+          line=$(jq -nc --argjson image "${image:-null}" --argjson before "${before:-null}" --argjson installed "${installed:-null}" \
+            --argjson restored "${restored:-null}" --argjson pass "${pass}" \
+            '{image: $image, before: $before, installed: $installed, restored: $restored, pass: $pass}')
+          escaped="${line//%/%25}"
+          if (( $(printf '%s' "${escaped}" | LC_ALL=C wc -c) > 3500 )); then
+            echo "w32time: the notice is over 3,500 bytes after escaping" >> "${log}"
+            pass=false
+          fi
+          printf '%s\n' "${line}" | tools/scripts/annotate.sh w32time 1 notice
+          if [[ ${pass} != true ]]; then
+            {
+              echo "w32time: exit ${status}; want install to leave AUTO_START, RUNNING and no trigger, and uninstall the start type and triggers of before:"
+              echo "${line}"
+            } >> "${log}"
+            tail -n 60 "${log}" | tools/scripts/annotate.sh w32time 60
+            exit 1
+          fi
       - name: Show failures as annotations
         # As in the other jobs, plus testify's Error, Messages, expected and actual
         # lines: a Windows failure cannot be rerun anywhere else.

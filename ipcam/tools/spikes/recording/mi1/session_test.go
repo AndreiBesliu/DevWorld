@@ -516,53 +516,75 @@ func TestAwaitCut_IgnoresACutOfAnotherRun(t *testing.T) {
 	}
 }
 
-// TestBegin_LabShardsAndSmokeRunsKeepTheirOwnState (R03): a lab run state
-// belongs to its set, shard and smoke flag. In the same results folder, a
-// full shard after a smoke run of it, or shard 2 after shard 1, starts a
-// state of its own instead of reporting complete from the old one, and a
-// shard still in progress refuses another in Romanian; the same shard
-// continues its own state. (A smoke run's envelopes never meet the full
-// shard's: TestLab_SmokeAndFullRunsNeverShareAnEnvelope.)
+// TestBegin_LabShardsAndSmokeRunsKeepTheirOwnState (R03, item 2): a lab
+// set's state is its results set's: its two shards share it, and a smoke
+// run's is its own. In the same results folder, a full shard after a smoke
+// run of it, a smoke run after a full shard, or shard 2 after shard 1,
+// starts at that shard's first run instead of reporting complete from the
+// state before; shard 2 keeps shard 1's runs in their set's state. A shard
+// still in progress refuses another in Romanian; the same shard continues
+// its own state. (A smoke run's envelopes never meet the full shard's:
+// TestLab_SmokeAndFullRunsNeverShareAnEnvelope.)
 func TestBegin_LabShardsAndSmokeRunsKeepTheirOwnState(t *testing.T) {
-	d := &Driver{Results: t.TempDir(), Host: LabHost("linux")}
+	template := &Driver{Host: LabHost("linux")}
 	state := func(shard int, smoke bool, counted int) *RunState {
-		st := &RunState{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: shard, Smoke: smoke, Host: d.Host}
-		plan, err := d.plan(st)
+		st := &RunState{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: shard, Smoke: smoke, Host: template.Host}
+		plan, err := template.plan(st)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, p := range plan[:min(counted, len(plan))] {
-			st.Done = append(st.Done, DoneRun{Index: p.Index, Run: results.Run{RunID: fmt.Sprintf("%s-%02d-1", st.Set, p.Index), Valid: true}})
+			st.Done = append(st.Done, DoneRun{Index: p.Index, Run: results.Run{RunID: fmt.Sprintf("%s-%02d-1", st.key(), p.Index), Valid: true}})
 		}
 		return st
 	}
 	lab := func(shard int, smoke bool) SetOptions {
 		return SetOptions{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: shard, Smoke: smoke}
 	}
+	// active saves st as the active set's state of a new results folder,
+	// and returns its driver and the state that it reads back.
+	active := func(st *RunState) (*Driver, *RunState) {
+		d := &Driver{Results: t.TempDir(), Host: LabHost("linux")}
+		if err := SaveRunState(d.statePath(), st); err != nil {
+			t.Fatal(err)
+		}
+		st, err := d.State()
+		if err != nil || st == nil {
+			t.Fatalf("the active state: %+v, %v", st, err)
+		}
+		return d, st
+	}
 	for _, tc := range []struct {
 		name string
 		old  *RunState
 		o    SetOptions
+		kept int // runs of the state before that the new one holds
 	}{
-		{"a full shard 1 after its smoke run", state(1, true, 2), lab(1, false)},
-		{"shard 2 after shard 1", state(1, false, 10), lab(2, false)},
-		{"a smoke run after a full shard 1", state(1, false, 10), lab(1, true)},
+		{"a full shard 1 after its smoke run", state(1, true, 2), lab(1, false), 0},
+		{"shard 2 after shard 1", state(1, false, 10), lab(2, false), 10},
+		{"a smoke run after a full shard 1", state(1, false, 10), lab(1, true), 0},
 	} {
-		if !d.complete(tc.old) {
+		d, old := active(tc.old)
+		if !d.complete(old) {
 			t.Fatalf("%s: the old state is not complete", tc.name)
 		}
-		st, err := d.begin(t.Context(), tc.old, tc.o)
+		st, err := d.begin(t.Context(), old, tc.o)
 		if err != nil {
 			t.Errorf("%s: begin = %v", tc.name, err)
 			continue
 		}
-		if st.Shard != tc.o.Shard || st.Smoke != tc.o.Smoke || len(st.Done) != 0 || d.complete(st) {
-			t.Errorf("%s: begin gave shard %d, smoke %v, %d runs done, complete %v; want a new state of its own",
-				tc.name, st.Shard, st.Smoke, len(st.Done), d.complete(st))
+		plan, err := d.plan(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, attempt, ok := st.nextAutomated(plan)
+		if st.Shard != tc.o.Shard || st.Smoke != tc.o.Smoke || !ok || next.Index != plan[0].Index || attempt != 1 || len(st.Done) != tc.kept {
+			t.Errorf("%s: begin gave shard %d, smoke %v, next run %d attempt %d (%v), %d runs done; want the shard's first run %d, attempt 1, and %d runs kept",
+				tc.name, st.Shard, st.Smoke, next.Index, attempt, ok, len(st.Done), plan[0].Index, tc.kept)
 		}
 	}
 
-	half := state(1, false, 3)
+	d, half := active(state(1, false, 3))
 	if _, err := d.begin(t.Context(), half, lab(2, false)); err == nil || !strings.Contains(err.Error(), "nu s-a încheiat") || !strings.Contains(err.Error(), "shard 1") {
 		t.Errorf("shard 2 while shard 1 is in progress: begin = %v, want a Romanian refusal that names shard 1", err)
 	}
@@ -577,71 +599,84 @@ func TestBegin_LabShardsAndSmokeRunsKeepTheirOwnState(t *testing.T) {
 // envelope at MI1/<results set>/<runId>.json: a smoke run's results set is
 // <set>-smoke and its run ids start with it, so a smoke window's result
 // never overwrites a counted one, never lands beside the set's envelopes,
-// and never shares a run id that Judge would merge.
+// and never shares a run id that Judge would merge. A smoke run that is
+// complete stays so: started again, it records nothing (item 2).
 func TestLab_SmokeAndFullRunsNeverShareAnEnvelope(t *testing.T) {
-	r := newRig(t, "lab-linux")
 	lab := func(smoke bool) SetOptions {
 		return SetOptions{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: 1, Smoke: smoke}
 	}
-	// A smoke run, then the full shard: its first two runs are the ones
-	// whose indexes the smoke run shares; the test ends it as its third
-	// starts.
-	if err := r.driver(t).RunSet(t.Context(), lab(true)); err != nil {
-		t.Fatalf("the smoke run: RunSet = %v\nscreen:\n%s", err, r.out.String())
+	// smokeRun is a smoke run of shard 1, to its end.
+	smokeRun := func(t *testing.T, r *rig) {
+		t.Helper()
+		if err := r.driver(t).RunSet(t.Context(), lab(true)); err != nil {
+			t.Fatalf("the smoke run: RunSet = %v\nscreen:\n%s", err, r.out.String())
+		}
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	third := cancelAt(r.f, "run_start "+SetLabLinuxKill9+"-03-1", cancel)
-	if err := r.driver(t).RunSet(ctx, lab(false)); !errors.Is(err, context.Canceled) {
-		t.Fatalf("the full shard: RunSet = %v, want the test's cancel at its third run\nscreen:\n%s", err, r.out.String())
+	// fullShard is the full shard 1: its first two runs are the ones whose
+	// indexes the smoke run shares; the test ends it as its third starts.
+	fullShard := func(t *testing.T, r *rig) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		third := cancelAt(r.f, "run_start "+SetLabLinuxKill9+"-03-1", cancel)
+		if err := r.driver(t).RunSet(ctx, lab(false)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("the full shard: RunSet = %v, want the test's cancel at its third run\nscreen:\n%s", err, r.out.String())
+		}
+		if err := <-third; err != nil {
+			t.Fatal(err)
+		}
+		killFakeHubs(t, r.log)
 	}
-	if err := <-third; err != nil {
-		t.Fatal(err)
-	}
-	// The full shard complete, then a smoke run again.
-	d := r.driver(t)
-	shard := &RunState{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: 1, Host: d.Host}
-	plan, err := d.plan(shard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range plan {
-		shard.Done = append(shard.Done, DoneRun{Index: p.Index, Run: results.Run{RunID: fmt.Sprintf("%s-%02d-1", shard.Set, p.Index), Valid: true}})
-	}
-	if err := SaveRunState(d.statePath(), shard); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.RunSet(t.Context(), lab(true)); err != nil {
-		t.Fatalf("the smoke run after the full shard: RunSet = %v\nscreen:\n%s", err, r.out.String())
+	// shardComplete saves the full shard 1 complete in its place.
+	shardComplete := func(t *testing.T, r *rig) {
+		t.Helper()
+		d := r.driver(t)
+		if err := SaveRunState(d.statePath(), completeState(t, d, &RunState{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: 1, Host: d.Host})); err != nil {
+			t.Fatal(err)
+		}
 	}
 	envelope := func(s link.RunStart) string {
 		return filepath.Join("MI1", ResultsSet(s.Set, s.Smoke), s.RunID+".json")
 	}
-	var smoke, full []link.RunStart
-	for _, s := range r.f.runStarts() {
-		if s.Smoke {
-			smoke = append(smoke, s)
-		} else {
-			full = append(full, s)
-		}
-	}
-	if len(smoke) != 4 || len(full) != 3 {
-		t.Fatalf("%d smoke runs and %d full runs, want 2 + 2 smoke runs and the full shard's first 3", len(smoke), len(full))
-	}
-	for _, s := range smoke {
-		if dir, want := filepath.Dir(envelope(s)), filepath.Join("MI1", SetLabLinuxKill9+"-smoke"); dir != want {
-			t.Errorf("smoke run %s: envelope in %s, want %s", s.RunID, dir, want)
-		}
-		for _, f := range full {
-			if s.RunID == f.RunID || envelope(s) == envelope(f) {
-				t.Errorf("smoke run %s and full run %s share the run id or the envelope %s", s.RunID, f.RunID, envelope(f))
+	for _, order := range []struct {
+		name  string
+		steps []func(*testing.T, *rig)
+	}{
+		{"the smoke run first, and again once the shard is complete", []func(*testing.T, *rig){smokeRun, fullShard, shardComplete, smokeRun}},
+		{"the full shard first", []func(*testing.T, *rig){fullShard, shardComplete, smokeRun}},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			r := newRig(t, "lab-linux")
+			for _, step := range order.steps {
+				step(t, r)
 			}
-		}
-	}
-	for _, f := range full {
-		if dir, want := filepath.Dir(envelope(f)), filepath.Join("MI1", SetLabLinuxKill9); dir != want {
-			t.Errorf("full run %s: envelope in %s, want %s", f.RunID, dir, want)
-		}
+			var smoke, full []link.RunStart
+			for _, s := range r.f.runStarts() {
+				if s.Smoke {
+					smoke = append(smoke, s)
+				} else {
+					full = append(full, s)
+				}
+			}
+			if len(smoke) != smokeRuns || len(full) != 3 {
+				t.Fatalf("%d smoke runs and %d full runs, want the smoke run's %d, once, and the full shard's first 3", len(smoke), len(full), smokeRuns)
+			}
+			for _, s := range smoke {
+				if dir, want := filepath.Dir(envelope(s)), filepath.Join("MI1", SetLabLinuxKill9+"-smoke"); dir != want {
+					t.Errorf("smoke run %s: envelope in %s, want %s", s.RunID, dir, want)
+				}
+				for _, f := range full {
+					if s.RunID == f.RunID || envelope(s) == envelope(f) {
+						t.Errorf("smoke run %s and full run %s share the run id or the envelope %s", s.RunID, f.RunID, envelope(f))
+					}
+				}
+			}
+			for _, f := range full {
+				if dir, want := filepath.Dir(envelope(f)), filepath.Join("MI1", SetLabLinuxKill9); dir != want {
+					t.Errorf("full run %s: envelope in %s, want %s", f.RunID, dir, want)
+				}
+			}
+		})
 	}
 }
 
@@ -736,13 +771,14 @@ func TestPush_WithoutRootAsksForSudo(t *testing.T) {
 
 // TestResume_AfterAFailedOSStop_RunIsInvalidWithoutColdBoot: an OS stop
 // that failed leaves its run in the phase `stopping` without a reboot.
-// recspike started again finds that the host did not boot since (its uptime
-// did not fall below the stop's), so it measures no ColdBootMs and sends no
-// report: the run is invalid with its own reason, which the controller
-// hears, and the set goes on with the run again.
+// recspike started again finds that the host did not boot since (its boot
+// is the stop's), so it measures no ColdBootMs and sends no report: the run
+// is invalid with its own reason, which the controller hears, and the set
+// goes on with the run again.
 func TestResume_AfterAFailedOSStop_RunIsInvalidWithoutColdBoot(t *testing.T) {
 	r := newRig(t, "pi")
 	d := r.driver(t)
+	boot := d.ThisBoot
 	d.Uptime = func() (time.Duration, error) { return 3 * time.Hour, nil }
 	d.OSStop = func(context.Context, controller.ShutdownKind) error {
 		return errors.New("write /proc/sysrq-trigger: operation not permitted")
@@ -753,7 +789,8 @@ func TestResume_AfterAFailedOSStop_RunIsInvalidWithoutColdBoot(t *testing.T) {
 	}
 
 	d = r.driver(t)
-	d.Uptime = func() (time.Duration, error) { return 3*time.Hour + time.Minute, nil } // no reboot since
+	d.ThisBoot = boot // no reboot since
+	d.Uptime = func() (time.Duration, error) { return 3*time.Hour + time.Minute, nil }
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	again := cancelAt(r.f, "run_start pi-sysrq-01-2", cancel)
@@ -797,6 +834,12 @@ func ptrText(p *int64) string {
 func TestBeacon_NoneUnderACutRunAfterItsStop(t *testing.T) {
 	t.Run("the restart after kill9", func(t *testing.T) {
 		r := newRig(t, "pc")
+		// The cut comes after a few beacons, so that a second sender, which
+		// would count from 0 again, would follow them.
+		r.f.onReady = func(c *link.Conn, start link.RunStart) {
+			time.Sleep(6 * controller.BeaconEvery)
+			_ = c.Send(link.Cut{RunID: start.RunID, Kind: start.Kind, PromptAt: time.Now()})
+		}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		reported := cancelAt(r.f, "report pc-kill9-01-1", cancel)
@@ -810,12 +853,14 @@ func TestBeacon_NoneUnderACutRunAfterItsStop(t *testing.T) {
 			t.Fatalf("fake log = %v, want ipcam-hub killed and restarted", got)
 		}
 		seqs := r.f.beaconSeqs("pc-kill9-01-1")
-		if len(seqs) == 0 {
-			t.Fatal("no beacon of the run: the test proves nothing")
+		if len(seqs) < 3 {
+			t.Fatalf("beacons of the run = %v, want a few before the cut: the test proves nothing", seqs)
 		}
-		for i, seq := range seqs {
-			if seq != uint64(i) { //nolint:gosec // a short test run
-				t.Fatalf("beacons of the run = %v, want one sender counting from 0 once: a second sender started again", seqs)
+		// One sender's numbers only grow, even when the network loses one;
+		// a second sender would start again from 0.
+		for i := 1; i < len(seqs); i++ {
+			if seqs[i] <= seqs[i-1] {
+				t.Fatalf("beacons of the run = %v, want one sender's numbers, strictly increasing: a second sender started again from 0", seqs)
 			}
 		}
 	})
@@ -924,14 +969,17 @@ func (t *gateTicker) C() <-chan time.Time {
 func (t *gateTicker) Stop() {}
 
 // TestSession_ReconnectsAfterALinkDrop (item 11): in an unattended
-// automated set, a link that drops is connected again (with bounded
-// retries) instead of ending the set: while the set waits for its window,
-// before a run's run_start, while ipcam-hub starts, while recspike waits
-// for the cut or for the verdict, and as it tells the controller why a run
-// was not stopped. A new link hears the whole announcement of the run in
-// progress, run_start then ready, as the old one may have lost both: the
-// run then gets its cut there; a report is sent again and gets its
-// verdict; and the set goes on.
+// automated set, a link that drops is connected again instead of ending the
+// set, in each of its subtests: while recspike waits for the cut; while the
+// set waits for its window, hours before its run; when the run_start was
+// lost with a link that dies at the run's ready; when the link dies with
+// the run_start, while ipcam-hub starts, so that recspike sends its ready
+// on no link; as recspike tells the controller why a run was not stopped;
+// and while it waits for the verdict. A new link hears the whole
+// announcement of the run in progress, run_start then ready, as the old one
+// may have lost both: the run then gets its cut there; a report is sent
+// again and gets its verdict; and the set goes on. The bounds of the
+// reconnection are TestSession_ReconnectsWithinItsBounds'.
 func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 	o := func(t *testing.T) SetOptions {
 		return SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: windowAroundNow(t)}
@@ -1035,6 +1083,34 @@ func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 		}
 	})
 
+	t.Run("while ipcam-hub starts, the link dead with the run_start", func(t *testing.T) {
+		r := newRig(t, "pc")
+		t.Setenv(fakeReadyEnv, "300ms") // recspike sees the drop before ipcam-hub is ready
+		r.f.mu.Lock()
+		r.f.dropAtStarts = 1
+		r.f.mu.Unlock()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		reported := cancelAt(r.f, "report pc-kill9-01-1", cancel)
+		if err := r.driver(t).RunSet(ctx, o(t)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunSet = %v, want the ready delivered on a new link, after the run's run_start, and the set going on\nscreen:\n%s", err, r.out.String())
+		}
+		if err := <-reported; err != nil {
+			t.Fatal(err)
+		}
+		if s := r.f.runStarts(); len(s) != 1 || s[0].RunID != "pc-kill9-01-1" {
+			t.Errorf("run starts kept = %+v, want run 1's, made again on the new link before its ready", s)
+		}
+		if n := r.f.helloCount(); n != 2 {
+			t.Errorf("the host said hello %d times, want twice", n)
+		}
+		// The ready found the link down and reconnected first; it was not
+		// lost on the dead link, then made again while waiting for the cut.
+		if !strings.Contains(r.out.String(), errLinkDown.Error()+"; mă reconectez") {
+			t.Errorf("screen:\n%s\nwant the ready's reconnection, before the wait for the cut", r.out.String())
+		}
+	})
+
 	t.Run("when it refuses a stop after its window", func(t *testing.T) {
 		r := newRig(t, "pc")
 		w, err := ParseWindow("22:00-23:00")
@@ -1078,4 +1154,116 @@ func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 			t.Errorf("reports = %v, want run 1's report sent again on the new link", ids)
 		}
 	})
+}
+
+// completeState is st with a counted run done at every position of its
+// plan, attempt 1: a set that is complete.
+func completeState(t *testing.T, d *Driver, st *RunState) *RunState {
+	t.Helper()
+	plan, err := d.plan(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range plan {
+		id := fmt.Sprintf("%s-%02d-1", ResultsSet(st.Set, st.Smoke), p.Index)
+		st.Done = append(st.Done, DoneRun{Index: p.Index, Run: results.Run{RunID: id, Valid: true, Attempt: 1}})
+	}
+	if !d.complete(st) {
+		t.Fatalf("the state of %s is not complete", st.Set)
+	}
+	return st
+}
+
+// TestRunSet_ACompleteSetStaysCompleteAfterAnother (item 2): the run state
+// keeps each set's progress, by results set. A set that is complete stays
+// so after another set ran in the same results folder: set A complete, then
+// set B, then set A again records nothing, so its run ids, whose envelopes
+// count at the controller, are never used again; and A's progress is still
+// in the run state.
+func TestRunSet_ACompleteSetStaysCompleteAfterAnother(t *testing.T) {
+	r := newRig(t, "pc")
+	d := r.driver(t)
+	a := completeState(t, d, &RunState{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: "22:00-06:00", Host: d.Host})
+	if err := SaveRunState(d.statePath(), a); err != nil {
+		t.Fatal(err)
+	}
+	// Set B starts, and the test ends it at its first run: then B is
+	// complete too.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	started := cancelAt(r.f, "run_start pc-bugcheck-01-1", cancel)
+	if err := r.driver(t).RunSet(ctx, SetOptions{Set: SetPCBugcheck, Mode: ModeAutomated, Kind: "bugcheck", Window: windowAroundNow(t)}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("set B: RunSet = %v, want the test's cancel at its first run", err)
+	}
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	killFakeHubs(t, r.log)
+	b := completeState(t, d, &RunState{Set: SetPCBugcheck, Mode: ModeAutomated, Kind: "bugcheck", Window: "22:00-06:00", Host: d.Host})
+	if err := SaveRunState(d.statePath(), b); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set A again: it is complete, and records nothing.
+	ctx, cancel = context.WithCancel(t.Context())
+	defer cancel()
+	r.f.onReady = func(c *link.Conn, start link.RunStart) {
+		if strings.HasPrefix(start.RunID, SetPCKill9+"-") {
+			cancel() // a run of A again: its envelope would replace a counted one
+		}
+		_ = c.Send(link.Cut{RunID: start.RunID, Kind: start.Kind, PromptAt: time.Now()})
+	}
+	err := r.driver(t).RunSet(ctx, SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: windowAroundNow(t)})
+	var again []string
+	for _, s := range r.f.runStarts() {
+		if strings.HasPrefix(s.RunID, SetPCKill9+"-") {
+			again = append(again, s.RunID)
+		}
+	}
+	if err != nil || len(again) != 0 {
+		t.Errorf("set A again: RunSet = %v, runs %v; want nil and none: A is complete", err, again)
+	}
+	if !strings.Contains(r.out.String(), "Proba pc-kill9 are toate rulările.") {
+		t.Errorf("screen:\n%s\nwant set A said complete", r.out.String())
+	}
+	st, err := LoadRunState(d.statePath())
+	if err != nil || st == nil || st.Set != SetPCKill9 || len(st.Done) != len(a.Done) || !d.complete(st) {
+		t.Errorf("run state after set A again = %+v, %v; want A's own, complete, with its %d runs", st, err, len(a.Done))
+	}
+}
+
+// TestSession_ReconnectsWithinItsBounds (item 11's bounds): a link that
+// keeps dropping is connected again at most maxReconnects times in one
+// wait; then the unattended set ends, with the Romanian reason of the drop
+// and ipcam-hub stopped. A real set's owner is at the host: its link is
+// never connected again, and its first drop ends the set.
+func TestSession_ReconnectsWithinItsBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		o      SetOptions
+		hellos int
+	}{
+		{"an automated set", SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9", Window: windowAroundNow(t)}, 1 + maxReconnects},
+		{"a real set", SetOptions{Set: SetRealPC, Mode: ModeReal, Kind: "power"}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, "pc")
+			r.f.onReady = func(c *link.Conn, _ link.RunStart) { _ = c.Close() } // every link drops at the run's ready
+			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+			defer cancel()
+			err := r.driver(t).RunSet(ctx, tc.o)
+			if !errors.Is(err, errLinkDown) || !strings.HasPrefix(err.Error(), "legătura cu controlorul s-a întrerupt") {
+				t.Errorf("RunSet = %v, want the set ended on the drop, in Romanian", err)
+			}
+			if n := r.f.helloCount(); n != tc.hellos {
+				t.Errorf("the host said hello %d times, want %d", n, tc.hellos)
+			}
+			if got := logEntries(t, r.log); !slices.Equal(got, []string{"hub", "stopped"}) {
+				t.Errorf("fake log = %v, want the run's ipcam-hub stopped when the set ends", got)
+			}
+			if again := strings.Count(r.out.String(), "Legătura cu controlorul s-a refăcut."); again != tc.hellos-1 {
+				t.Errorf("screen:\n%s\nwant %d reconnections", r.out.String(), tc.hellos-1)
+			}
+		})
+	}
 }

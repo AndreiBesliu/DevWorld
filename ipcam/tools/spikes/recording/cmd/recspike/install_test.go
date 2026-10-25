@@ -8,11 +8,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf16"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 )
 
 // task is what TestInstall_WindowsTaskXML reads of the task's XML.
@@ -48,10 +51,22 @@ type fakeOS struct {
 // outside a domain.
 const serviceDemandStart = 3
 
+// workgroupTriggers are W32Time's triggers on a PC outside a domain: it
+// starts when the PC joins a domain, and stops when it is not in one
+// (SERVICE_TRIGGER_TYPE_DOMAIN_JOIN with the DOMAIN_JOIN and DOMAIN_LEAVE
+// GUIDs).
+func workgroupTriggers() []mi1.ServiceTrigger {
+	return []mi1.ServiceTrigger{
+		{Type: 3, Action: 1, Subtype: "{1CE20ABA-9851-4421-9430-1DDEB766E809}"},
+		{Type: 3, Action: 2, Subtype: "{DDAF516E-58C2-4866-9574-C3B615D42EA1}", Data: []mi1.ServiceTriggerData{{Type: 2, Bytes: []byte("a\x00b\x00\x00\x00")}}},
+	}
+}
+
 // fakeService is Windows' time service in a fake service manager: its start
-// type, whether it runs, and what was asked of it.
+// type, its triggers, whether it runs, and what was asked of it.
 type fakeService struct {
 	startType uint32
+	triggers  []mi1.ServiceTrigger
 	running   bool
 	asked     []string
 }
@@ -64,6 +79,16 @@ func (s *fakeService) SetStartType(t uint32) error {
 	return nil
 }
 
+func (s *fakeService) Triggers() ([]mi1.ServiceTrigger, error) {
+	return slices.Clone(s.triggers), nil
+}
+
+func (s *fakeService) SetTriggers(triggers []mi1.ServiceTrigger) error {
+	s.asked = append(s.asked, "triggers "+strconv.Itoa(len(triggers)))
+	s.triggers = slices.Clone(triggers)
+	return nil
+}
+
 func (s *fakeService) Start() error {
 	s.asked = append(s.asked, "start")
 	s.running = true
@@ -72,7 +97,7 @@ func (s *fakeService) Start() error {
 
 func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeOS, string) {
 	t.Helper()
-	f := &fakeOS{files: map[string][]byte{}, time: &fakeService{startType: serviceDemandStart}}
+	f := &fakeOS{files: map[string][]byte{}, time: &fakeService{startType: serviceDemandStart, triggers: workgroupTriggers()}}
 	dir := t.TempDir()
 	desktop := filepath.Join(dir, "Desktop")
 	if err := os.MkdirAll(desktop, 0o750); err != nil {
@@ -274,8 +299,8 @@ func TestInstall_TimeServiceStartsAutomatically(t *testing.T) {
 	if err := a.uninstall(); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	if want := []string{"start type 3"}; !slices.Equal(f.time.asked, want) || f.time.startType != serviceDemandStart {
-		t.Errorf("uninstall asked %q of the time service, start type %d; want %q: the type before the first install", f.time.asked, f.time.startType, want)
+	if want := []string{"start type 3", "triggers 2"}; !slices.Equal(f.time.asked, want) || f.time.startType != serviceDemandStart {
+		t.Errorf("uninstall asked %q of the time service, start type %d; want %q: the type and the triggers before the first install", f.time.asked, f.time.startType, want)
 	}
 	if _, err := os.Stat(a.savedStart); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the saved start type is still there (%v)", err)
@@ -295,5 +320,84 @@ func TestInstall_TimeServiceStartsAutomatically(t *testing.T) {
 		if len(f.time.asked) != 0 {
 			t.Errorf("%s, privileged %v: asked %q of the time service, want nothing", tc.goos, tc.privileged, f.time.asked)
 		}
+	}
+}
+
+// TestInstall_TimeServiceTriggersRemovedThenRestored (C1-R16b): on a PC
+// outside a domain, W32Time's "not in a domain" trigger stops it after a
+// boot even when it starts automatically. So install also saves its
+// triggers in recspike's private folder and removes them, before it starts
+// the service; uninstall puts the start type and the triggers back exactly,
+// data items included. A second install keeps what the first one saved:
+// by then the service has no triggers. A file saved before C1-R16b holds no
+// triggers, and uninstall then leaves the service's triggers as they are.
+func TestInstall_TimeServiceTriggersRemovedThenRestored(t *testing.T) {
+	a, f, _ := newAutostart(t, "windows", true)
+	if err := a.install(`C:\proba\recspike.exe`); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if len(f.time.triggers) != 0 || f.time.startType != serviceAutoStart || !f.time.running {
+		t.Errorf("after install: triggers %+v, start type %d, running %v; want no trigger, automatic and running", f.time.triggers, f.time.startType, f.time.running)
+	}
+	if i, j := slices.Index(f.time.asked, "triggers 0"), slices.Index(f.time.asked, "start"); i < 0 || j < i {
+		t.Errorf("install asked %q of the time service, want the triggers removed before the start", f.time.asked)
+	}
+	if err := a.install(`C:\proba\recspike.exe`); err != nil {
+		t.Fatalf("install again: %v", err)
+	}
+	if err := a.uninstall(); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !reflect.DeepEqual(f.time.triggers, workgroupTriggers()) || f.time.startType != serviceDemandStart {
+		t.Errorf("after uninstall: triggers %+v, start type %d; want the triggers %+v and the start type %d of before",
+			f.time.triggers, f.time.startType, workgroupTriggers(), serviceDemandStart)
+	}
+
+	a, f, _ = newAutostart(t, "windows", true)
+	if err := os.MkdirAll(filepath.Dir(a.savedStart), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.savedStart, []byte(`{"startType":3}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.time.startType, f.time.triggers = serviceAutoStart, workgroupTriggers()[:1]
+	if err := a.uninstall(); err != nil {
+		t.Fatalf("uninstall of a file without triggers: %v", err)
+	}
+	if want := []string{"start type 3"}; !slices.Equal(f.time.asked, want) || len(f.time.triggers) != 1 {
+		t.Errorf("uninstall of a file without triggers asked %q, left triggers %+v; want %q and the trigger kept", f.time.asked, f.time.triggers, want)
+	}
+}
+
+// TestInstall_TimeServiceSettingsErrorsAreRomanian (item 9): when install
+// cannot save the time service's settings, or uninstall cannot read them
+// back, the owner reads why in Romanian, with the system's error after it.
+func TestInstall_TimeServiceSettingsErrorsAreRomanian(t *testing.T) {
+	a, f, _ := newAutostart(t, "windows", true)
+	work := filepath.Dir(a.savedStart)
+	if err := os.WriteFile(work, nil, 0o600); err != nil { // work/ is a file: nothing can be saved in it
+		t.Fatal(err)
+	}
+	err := a.install(`C:\proba\recspike.exe`)
+	if err == nil || !strings.HasPrefix(err.Error(), "nu pot salva setările de dinainte ale serviciului de timp Windows") {
+		t.Errorf("install that cannot save = %v, want a Romanian line first", err)
+	}
+	if len(f.time.asked) != 0 {
+		t.Errorf("install that cannot save asked %q of the time service, want nothing changed", f.time.asked)
+	}
+
+	a, f, _ = newAutostart(t, "windows", true)
+	if err := os.MkdirAll(filepath.Dir(a.savedStart), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.savedStart, []byte("{start"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = a.uninstall()
+	if err == nil || !strings.HasPrefix(err.Error(), "nu pot citi setările salvate ale serviciului de timp Windows") {
+		t.Errorf("uninstall of an unreadable file = %v, want a Romanian line first", err)
+	}
+	if len(f.time.asked) != 0 {
+		t.Errorf("uninstall of an unreadable file asked %q of the time service, want nothing changed", f.time.asked)
 	}
 }

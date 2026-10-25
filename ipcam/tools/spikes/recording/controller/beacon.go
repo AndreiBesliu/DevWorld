@@ -176,11 +176,17 @@ func (l *BeaconLog) WaitFirst(ctx context.Context, runID string) (Beacon, error)
 // clock is more than BeaconSilence past its newest beacon, which it returns.
 // The controller marks the end of the run's pacing then, near the stop
 // (R07). It checks at each beacon and at each BeaconEvery of the clock.
+//
+// Each check reads the clock before the newest beacon: a beacon kept in
+// between only shortens the silence. The other order would compare a
+// beacon read before a hold-up with the clock read after it, and see a
+// silence that never was if beacons and the clock moved on meanwhile.
 func (l *BeaconLog) WaitSilence(ctx context.Context, runID string, clock source.Clock) (Beacon, error) {
 	tick := clock.NewTicker(BeaconEvery)
 	defer tick.Stop()
 	hash := link.RunHash(runID)
 	for {
+		now := clock.Now()
 		l.mu.Lock()
 		arrived := l.arrived
 		var latest Beacon
@@ -189,7 +195,7 @@ func (l *BeaconLog) WaitSilence(ctx context.Context, runID string, clock source.
 			latest, seen = r.latest, true
 		}
 		l.mu.Unlock()
-		if seen && clock.Now().Sub(latest.At) > BeaconSilence {
+		if seen && now.Sub(latest.At) > BeaconSilence {
 			return latest, nil
 		}
 		select {

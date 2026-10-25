@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -629,6 +630,14 @@ func TestScheduleCut_NoStaleCutAfterTheRunEnds(t *testing.T) {
 // report says was recorded last.
 func (r *rig) validKill9Run(conn *link.Conn, id string) link.Report {
 	r.t.Helper()
+	return r.kill9RunFrom(conn, id, 0)
+}
+
+// kill9RunFrom is validKill9Run whose first beacon that the controller
+// keeps is number first: the host's earlier beacons came before the
+// controller knew the run, which dropped them.
+func (r *rig) kill9RunFrom(conn *link.Conn, id string, first uint64) link.Report {
+	r.t.Helper()
 	r.send(conn, link.RunStart{RunID: id, Set: "pc-kill9", Kind: "kill9", Encrypted: true, PadLowBitrate: true,
 		Streams: []string{"cam01_main"}, Host: "pc", OS: "windows", Storage: "ssd", Attempt: 1})
 	waitFor(r.t, "the run", func() bool {
@@ -641,7 +650,7 @@ func (r *rig) validKill9Run(conn *link.Conn, id string) link.Report {
 	r.c.mu.Lock()
 	r.c.runs[id].cut.BootAt, r.c.runs[id].cut.PromptAt = boot, prompt
 	r.c.mu.Unlock()
-	seq := uint64(0)
+	seq := first
 	for at := boot; at.Before(prompt); at = at.Add(time.Second) {
 		r.beaconAt(id, seq, at)
 		seq += 20
@@ -727,7 +736,7 @@ func running(t *testing.T, fn string) int {
 func TestRun_GoroutinesEndWithTheRun(t *testing.T) {
 	both := func() int { return running(t, "(*ctl).markEnd") + running(t, "(*ctl).scheduleCut") }
 	for _, end := range []string{"report", "refused", "no beacon"} {
-		waitFor(t, "the goroutines of earlier runs to end", func() bool { return both() == 0 })
+		waitFor(t, "the goroutines of earlier runs to end", func() bool { return both() == 0 && running(t, "sleepUntil") == 0 })
 		r := newRig(t)
 		conn := r.connect("pc")
 		id := "pc-kill9-06-1"
@@ -748,6 +757,10 @@ func TestRun_GoroutinesEndWithTheRun(t *testing.T) {
 		case "refused":
 			r.send(conn, link.Refused{RunID: id, Reason: "oprire automată cerută în afara ferestrei 22:00-06:00"})
 		case "no beacon":
+			// The minute counts from the clock when the wait for the first
+			// beacon starts: move the clock only once that wait's sleep runs
+			// (scheduleCut's own sleep comes after a first beacon only).
+			waitFor(t, "the wait for the first beacon", func() bool { return running(t, "sleepUntil") == 1 })
 			r.clock.set(r.clock.Now().Add(firstBeaconWait + time.Second))
 			if m, ok := r.receive(conn).(link.Refused); !ok || m.RunID != id || m.Reason != "niciun semnal de la gazdă" {
 				t.Errorf("no beacon: the host got %#v, want the run refused: niciun semnal de la gazdă", m)
@@ -908,5 +921,67 @@ func TestRunStart_AgainKeepsTheRun(t *testing.T) {
 	defer r.c.mu.Unlock()
 	if r.c.runs[id] != run {
 		t.Error("the run announced again was replaced: its schedule and its pacing start are lost")
+	}
+}
+
+// TestReport_LateRunStartSaysTheTimingIsPartial (item 6): a run whose
+// run_start reached the controller only after its host's beacons had begun,
+// as when the run_start was lost with a link and announced again after the
+// reconnection, lost its first beacons at the controller, which drops
+// beacons of runs that it does not know: its BootAt, the draw of its cut and
+// its pacing start late. Its first kept beacon says so, by its number, and
+// its envelope says the timing is partial; the run does not count and is
+// redone. Up to 2 s of lost first beacons is the network's, and counts.
+func TestReport_LateRunStartSaysTheTimingIsPartial(t *testing.T) {
+	const partial = "rularea a ajuns la controlor abia după ce pornise (după o reconectare): pornirea și ritmul ei sunt măsurate doar în parte"
+	for _, tc := range []struct {
+		first uint64
+		late  bool
+	}{{0, false}, {40, false}, {41, true}, {200, true}} {
+		r := newRig(t)
+		conn := r.connect("pc")
+		id := fmt.Sprintf("pc-kill9-12-%d", tc.first+1)
+		r.send(conn, r.kill9RunFrom(conn, id, tc.first))
+		v, ok := r.receive(conn).(link.Verdict)
+		if !ok {
+			t.Fatalf("first beacon %d: no verdict", tc.first)
+		}
+		env, err := results.Read(filepath.Join(r.results, "MI1", "pc-kill9", id+".json"))
+		if err != nil || len(env.Runs) != 1 {
+			t.Fatalf("first beacon %d: the envelope: %+v, %v", tc.first, env, err)
+		}
+		switch {
+		case tc.late && (v.Run.Valid || mi1.Counts(v.Run) || v.Run.InvalidReason != partial || env.Runs[0].InvalidReason != partial):
+			t.Errorf("first beacon %d: verdict %+v, envelope %+v; want invalid: %s", tc.first, v.Run, env.Runs[0], partial)
+		case !tc.late && (!mi1.Counts(v.Run) || v.Run.InvalidReason != ""):
+			t.Errorf("first beacon %d: verdict %+v, want a run that counts", tc.first, v.Run)
+		}
+	}
+}
+
+// TestReport_NeverOverwritesAnEnvelope (item 2): a run whose envelope is on
+// the controller already, a counted run of the same id (a set started
+// again from its first run, as when the host's run state was lost), is not
+// written over: the run does not count, with the Romanian reason, and the
+// envelope on disk stays the first run's. The host redoes the run under its
+// next attempt, a new id.
+func TestReport_NeverOverwritesAnEnvelope(t *testing.T) {
+	const exists = "există deja la controlor un rezultat cu numele acestei rulări: nu îl suprascriu"
+	r := newRig(t)
+	id := "pc-kill9-03-1"
+	counted := results.Envelope{Schema: results.Schema, Code: "MI1", RunID: id, Set: "pc-kill9", Host: "pc", OS: "windows", Storage: "ssd",
+		Runs: []results.Run{{RunID: id, Valid: true, Attempt: 1, ShutdownKind: "kill9", LossMs: 1234, Reconciled: true, Hub04Clear: true}}}
+	if err := results.Write(r.results, counted); err != nil {
+		t.Fatal(err)
+	}
+	conn := r.connect("pc")
+	r.send(conn, r.validKill9Run(conn, id))
+	v, ok := r.receive(conn).(link.Verdict)
+	if !ok || v.Run.Valid || mi1.Counts(v.Run) || v.Run.InvalidReason != exists {
+		t.Errorf("verdict = %+v, want invalid: %s", v.Run, exists)
+	}
+	env, err := results.Read(filepath.Join(r.results, "MI1", "pc-kill9", id+".json"))
+	if err != nil || len(env.Runs) != 1 || env.Runs[0].LossMs != 1234 {
+		t.Errorf("the envelope on disk = %+v, %v; want the first run's, 1234 ms", env.Runs, err)
 	}
 }

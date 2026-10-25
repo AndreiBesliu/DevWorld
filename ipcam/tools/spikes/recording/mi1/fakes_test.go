@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -31,12 +32,14 @@ import (
 // --config <run.json> --stop-on-stdin-eof" appends "hub <pid>" to the file
 // that fakeLogEnv names, creates one new segment file per job under its
 // data directory (named by the time, so that a later start's sorts later),
-// prints a final reconcile, ready, each job's `recording` and a verify, and
-// on the end of its stdin appends "stopped" and exits 0. It ignores signals:
-// only a kill ends it otherwise.
+// prints a final reconcile, ready (after the delay that fakeReadyEnv says,
+// if any), each job's `recording` and a verify, and on the end of its stdin
+// appends "stopped" and exits 0. It ignores signals: only a kill ends it
+// otherwise.
 const (
-	fakeHubEnv = "MI1_FAKE_HUB"
-	fakeLogEnv = "MI1_FAKE_LOG"
+	fakeHubEnv   = "MI1_FAKE_HUB"
+	fakeLogEnv   = "MI1_FAKE_LOG"
+	fakeReadyEnv = "MI1_FAKE_READY_DELAY"
 )
 
 func TestMain(m *testing.M) {
@@ -81,6 +84,9 @@ func fakeHub(args []string) int {
 		}
 	}
 	emit(map[string]any{"type": "reconcile", "seq": 1, "final": true, "aborted": false, "unreadable": 0, "tornParts": 0, "catalogMismatches": 0})
+	if delay, err := time.ParseDuration(os.Getenv(fakeReadyEnv)); err == nil {
+		time.Sleep(delay)
+	}
 	emit(map[string]any{"type": "ready", "jobs": []any{}})
 	time.Sleep(50 * time.Millisecond)
 	for _, j := range cfg.Jobs {
@@ -155,9 +161,11 @@ func killFakeHubs(t *testing.T, path string) {
 // pulled when it says bye. It keeps every beacon it receives, and drops the
 // link instead of answering the first dropReports reports. It loses the
 // first loseStarts run_starts and drops the link at their run's ready, as
-// a link that died after the run_start would; like reccontroller, it
-// refuses the ready of a run that it never kept (unknownRun). dropLinks
-// drops every link it has. Every message it gets is also an event.
+// a link that died after the run_start would, and the first dropAtStarts
+// run_starts with the link at once, as a link that died as recspike sent
+// it; like reccontroller, it refuses the ready of a run that it never kept
+// (unknownRun). dropLinks drops every link it has. Every message it gets is
+// also an event.
 type fakeController struct {
 	t           *testing.T
 	ln          net.Listener
@@ -169,16 +177,17 @@ type fakeController struct {
 	verdict     func(start link.RunStart, r link.Report) results.Run
 	dropReports int
 
-	mu         sync.Mutex
-	loseStarts int
-	lost       map[string]bool // the run_starts it lost, until their ready
-	conns      map[*link.Conn]bool
-	hellos     int
-	starts     []link.RunStart
-	reports    []link.Report
-	refused    []link.Refused
-	beacons    map[uint64][]uint64 // each run's beacon sequence numbers, as they arrived
-	events     chan string
+	mu           sync.Mutex
+	loseStarts   int
+	dropAtStarts int
+	lost         map[string]bool // the run_starts it lost, until their ready
+	conns        map[*link.Conn]bool
+	hellos       int
+	starts       []link.RunStart
+	reports      []link.Report
+	refused      []link.Refused
+	beacons      map[uint64][]uint64 // each run's beacon sequence numbers, as they arrived
+	events       chan string
 }
 
 // unknownRun is reccontroller's refusal of a ready for a run that it does
@@ -260,6 +269,12 @@ func (f *fakeController) serve(c *link.Conn) {
 			f.event("hello " + m.Host)
 		case link.RunStart:
 			f.mu.Lock()
+			if f.dropAtStarts > 0 {
+				f.dropAtStarts--
+				f.mu.Unlock()
+				f.event("dropped at run_start " + m.RunID)
+				return // the link dies with the run_start
+			}
 			lose := f.loseStarts > 0
 			if lose {
 				f.loseStarts--
@@ -411,12 +426,17 @@ func (f *fakeController) mustEvent(t *testing.T, prefix string) {
 	}
 }
 
+// boots numbers the test drivers' boots.
+var boots atomic.Int64
+
 // testDriver is a driver for a host with the given pseudonym, with the fake
 // ipcam-hub, the fake controller, its own folders, a synced clock and no
-// preflight; its screen is out.
+// preflight; its screen is out. Each test driver is a boot of its own, as
+// a recspike started after a reboot is.
 func testDriver(t *testing.T, f *fakeController, host, results, work string, out io.Writer) *Driver {
 	t.Helper()
 	t.Setenv(fakeHubEnv, "1")
+	boot := Boot{ID: fmt.Sprintf("boot-%d", boots.Add(1))}
 	return &Driver{
 		Controller: f.addr(),
 		Hub:        os.Args[0],
@@ -427,6 +447,7 @@ func testDriver(t *testing.T, f *fakeController, host, results, work string, out
 		GOOS:       "linux",
 		NTP:        func(context.Context) (bool, error) { return true, nil },
 		Uptime:     func() (time.Duration, error) { return time.Minute, nil },
+		ThisBoot:   func() (Boot, error) { return boot, nil },
 		OSStop:     func(context.Context, controller.ShutdownKind) error { return errors.New("no OS stop in this test") },
 		LastRecorded: func(context.Context, lastindex.Before, age.Identity) (uint64, error) {
 			return 100, nil

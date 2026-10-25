@@ -112,17 +112,21 @@ func utf16File(s string) []byte {
 const serviceAutoStart = 2
 
 // timeService is Windows' time service (W32Time) in the service manager
-// (C1-R16).
+// (C1-R16, C1-R16b).
 type timeService interface {
 	StartType() (uint32, error)
 	SetStartType(uint32) error
+	Triggers() ([]mi1.ServiceTrigger, error)
+	SetTriggers([]mi1.ServiceTrigger) error
 	Start() error
 }
 
-// savedStartType is the time service's start type before install changed
-// it.
-type savedStartType struct {
-	StartType uint32 `json:"startType"`
+// savedTimeService is the time service's settings before install changed
+// them: its start type and its triggers, [] for none. A file saved before
+// C1-R16b holds no triggers (nil): that install never removed them.
+type savedTimeService struct {
+	StartType uint32               `json:"startType"`
+	Triggers  []mi1.ServiceTrigger `json:"triggers"`
 }
 
 // autostart is what install and uninstall need of the OS; tests replace
@@ -138,8 +142,8 @@ type autostart struct {
 	unitPath    string
 	tempDir     string
 	timeService timeService
-	// savedStart keeps the time service's start type from before install,
-	// in recspike's private folder.
+	// savedStart keeps the time service's settings from before install, in
+	// recspike's private folder.
 	savedStart string
 	out        io.Writer
 }
@@ -250,7 +254,7 @@ func (a autostart) install(exe string) error {
 	if err := a.startTimeService(); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintln(a.out, "Serviciul de timp Windows pornește acum automat, ca ceasul să se sincronizeze după fiecare repornire; dezinstalarea îi pune la loc pornirea de dinainte.")
+	_, _ = fmt.Fprintln(a.out, "Serviciul de timp Windows pornește acum automat și nu mai are declanșatoare care să-l oprească, ca ceasul să se sincronizeze după fiecare repornire; dezinstalarea îi pune la loc setările de dinainte.")
 	_, _ = fmt.Fprintf(a.out, "Pornirea automată este instalată, iar pe desktop este scurtătura „%s”; când o deschideți, Windows cere permisiunea de administrator: răspundeți „Da”.\n", mi1.RealShortcut)
 	return nil
 }
@@ -300,31 +304,21 @@ func (a autostart) uninstall() error {
 	return nil
 }
 
-// startTimeService sets Windows' time service to start automatically and
-// starts it (C1-R16): on a PC outside a domain it is otherwise stopped after
-// every boot, and the clock never syncs. Its start type from before is
-// saved once, so that a second install keeps the original for uninstall.
+// startTimeService sets Windows' time service to start automatically,
+// removes its triggers and starts it (C1-R16, C1-R16b): on a PC outside a
+// domain it is otherwise stopped after every boot, by its start type or by
+// its "not in a domain" trigger, and the clock never syncs. Its settings
+// from before are saved once, so that a second install keeps the original
+// ones for uninstall.
 func (a autostart) startTimeService() error {
-	if _, err := os.Stat(a.savedStart); errors.Is(err, os.ErrNotExist) {
-		before, err := a.timeService.StartType()
-		if err != nil {
-			return fmt.Errorf("nu pot citi serviciul de timp Windows: %w", err)
-		}
-		data, err := json.Marshal(savedStartType{StartType: before})
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(a.savedStart), 0o700); err != nil {
-			return err
-		}
-		if err := os.WriteFile(a.savedStart, append(data, '\n'), 0o600); err != nil {
-			return err
-		}
-	} else if err != nil {
+	if err := a.saveTimeService(); err != nil {
 		return err
 	}
 	if err := a.timeService.SetStartType(serviceAutoStart); err != nil {
 		return fmt.Errorf("nu pot porni automat serviciul de timp Windows: %w", err)
+	}
+	if err := a.timeService.SetTriggers(nil); err != nil {
+		return fmt.Errorf("nu pot scoate declanșatoarele serviciului de timp Windows: %w", err)
 	}
 	if err := a.timeService.Start(); err != nil {
 		return fmt.Errorf("nu pot porni serviciul de timp Windows: %w", err)
@@ -332,23 +326,65 @@ func (a autostart) startTimeService() error {
 	return nil
 }
 
-// restoreTimeService gives the time service back the start type that
-// install saved; without one, install changed nothing.
+// saveTimeService saves the time service's start type and triggers in
+// savedStart, unless an install saved them already.
+func (a autostart) saveTimeService() error {
+	const cannotSave = "nu pot salva setările de dinainte ale serviciului de timp Windows"
+	if _, err := os.Stat(a.savedStart); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s: %w", cannotSave, err)
+	}
+	startType, err := a.timeService.StartType()
+	if err != nil {
+		return fmt.Errorf("nu pot citi serviciul de timp Windows: %w", err)
+	}
+	triggers, err := a.timeService.Triggers()
+	if err != nil {
+		return fmt.Errorf("nu pot citi declanșatoarele serviciului de timp Windows: %w", err)
+	}
+	if triggers == nil {
+		triggers = []mi1.ServiceTrigger{} // saved as none, not as a file without triggers
+	}
+	data, err := json.Marshal(savedTimeService{StartType: startType, Triggers: triggers})
+	if err == nil {
+		err = os.MkdirAll(filepath.Dir(a.savedStart), 0o700)
+	}
+	if err == nil {
+		err = os.WriteFile(a.savedStart, append(data, '\n'), 0o600)
+	}
+	if err != nil {
+		return fmt.Errorf("%s: %w", cannotSave, err)
+	}
+	return nil
+}
+
+// restoreTimeService gives the time service back the start type and the
+// triggers that install saved; without a saved file, install changed
+// nothing. A file saved before C1-R16b leaves the triggers as they are.
 func (a autostart) restoreTimeService() error {
 	data, err := os.ReadFile(a.savedStart)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if err != nil {
-		return err
+	var saved savedTimeService
+	if err == nil {
+		err = json.Unmarshal(data, &saved)
 	}
-	var saved savedStartType
-	if err := json.Unmarshal(data, &saved); err != nil {
-		return fmt.Errorf("%s: %w", filepath.Base(a.savedStart), err)
+	if err != nil {
+		return fmt.Errorf("nu pot citi setările salvate ale serviciului de timp Windows (%s): %w", filepath.Base(a.savedStart), err)
 	}
 	if err := a.timeService.SetStartType(saved.StartType); err != nil {
 		return fmt.Errorf("nu pot pune la loc pornirea serviciului de timp Windows: %w", err)
 	}
-	_, _ = fmt.Fprintln(a.out, "Serviciul de timp Windows are din nou pornirea de dinainte.")
-	return os.Remove(a.savedStart)
+	if saved.Triggers != nil {
+		if err := a.timeService.SetTriggers(saved.Triggers); err != nil {
+			return fmt.Errorf("nu pot pune la loc declanșatoarele serviciului de timp Windows: %w", err)
+		}
+	}
+	_, _ = fmt.Fprintln(a.out, "Serviciul de timp Windows are din nou setările de dinainte.")
+	if err := os.Remove(a.savedStart); err != nil {
+		return fmt.Errorf("nu pot șterge setările salvate ale serviciului de timp Windows: %w", err)
+	}
+	return nil
 }
