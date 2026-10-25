@@ -1,8 +1,8 @@
 // SPIKE-ONLY: ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md
 
 // Package mi1 is the power-cut measurement MI1 (G10, §16.4, T43): the
-// composition of its sets, the rules that redo a run that does not count,
-// and Judge, the one rule of the gate (C17).
+// composition of its sets and its check, the rules that redo a run that
+// does not count, and Judge, the one rule of the gate (C17).
 package mi1
 
 import (
@@ -46,6 +46,8 @@ const (
 	// defaultRuns is the number of default runs of an automated set; the
 	// O17-off run comes after them.
 	defaultRuns = 20
+	// encryptedRuns is the number of encrypted default runs, the odd ones.
+	encryptedRuns = defaultRuns / 2
 	// lowBitrateRun is the default run that also records the 256 kbps
 	// stream: encrypted, in the lab's first shard.
 	lowBitrateRun = 9
@@ -72,6 +74,18 @@ func BitrateKbps(stream string) int {
 		return mainKbps
 	}
 	return 0
+}
+
+// isO17Stream reports whether s is the stream that the O17-off run
+// measures: cam99_main, encrypted, with the setting off.
+func isO17Stream(s results.StreamLoss) bool {
+	return s.Stream == LowBitrateStream && s.Encrypted && !s.PadLowBitrate
+}
+
+// isO17OnStream reports whether s is the 256 kbps stream of the default run
+// that measures O17-A: cam99_main, encrypted, with the setting on.
+func isO17OnStream(s results.StreamLoss) bool {
+	return s.Stream == LowBitrateStream && s.Encrypted && s.PadLowBitrate
 }
 
 // RunPlan is one run of a set as the driver records it. Index is the run's
@@ -126,6 +140,94 @@ func realPlan() []RunPlan {
 		plan = append(plan, RunPlan{Index: slot, Encrypted: slot%2 == 1, PadLowBitrate: true, Streams: []string{MainStream}})
 	}
 	return plan
+}
+
+// automatedComposition lists, in Romanian, what keeps the counted runs of
+// an automated set from its Plan: 20 default runs, 10 of them encrypted and
+// exactly one with cam99_main encrypted and the setting on, and at least
+// one O17-off run. None when they match.
+func automatedComposition(set string, defaults, o17 []results.Run) []string {
+	var encrypted, lowBitrate int
+	for _, r := range defaults {
+		if r.Encrypted {
+			encrypted++
+			if slices.ContainsFunc(r.Streams, isO17OnStream) {
+				lowBitrate++
+			}
+		}
+	}
+	var out []string
+	if len(defaults) != defaultRuns {
+		out = append(out, set+": "+tally(len(defaults), defaultRuns, "rulare validă", "rulări valide"))
+	}
+	if encrypted != encryptedRuns {
+		out = append(out, set+": "+tally(encrypted, encryptedRuns, "rulare criptată", "rulări criptate"))
+	}
+	switch {
+	case lowBitrate == 0:
+		out = append(out, set+": "+o17OnLabel+": lipsește")
+	case lowBitrate > 1:
+		out = append(out, fmt.Sprintf("%s: %s: %d rulări, nu una", set, o17OnLabel, lowBitrate))
+	}
+	if len(o17) == 0 {
+		out = append(out, set+": "+O17OffLabel+": lipsește")
+	}
+	return out
+}
+
+// realComposition lists, in Romanian, what keeps a real set from its plan
+// (Review Focus 1, G12): its counted cuts fill slots 1 to 5 once each, with
+// the slot's encryption, in at most MaxRealAttempts attempts, the larger of
+// the set's runs and their highest Attempt. None when they match.
+func realComposition(set string, all, cuts []results.Run) []string {
+	var out []string
+	bySlot := make([][]results.Run, realSlots+1)
+	for _, r := range cuts {
+		if r.Slot < 1 || r.Slot > realSlots {
+			out = append(out, fmt.Sprintf("%s: rularea %s are tăierea %d, în afara 1–%d", set, r.RunID, r.Slot, realSlots))
+			continue
+		}
+		bySlot[r.Slot] = append(bySlot[r.Slot], r)
+	}
+	for _, p := range realPlan() {
+		in := bySlot[p.Index]
+		switch {
+		case len(in) == 0:
+			out = append(out, fmt.Sprintf("%s: lipsește tăierea validă %d", set, p.Index))
+		case len(in) > 1:
+			out = append(out, fmt.Sprintf("%s: tăierea %d apare de %d ori", set, p.Index, len(in)))
+		}
+		for _, r := range in {
+			if r.Encrypted != p.Encrypted {
+				out = append(out, fmt.Sprintf("%s: tăierea %d este %s, nu %s", set, p.Index, encryptionText(r.Encrypted), encryptionText(p.Encrypted)))
+			}
+		}
+	}
+	attempts := len(all)
+	for _, r := range all {
+		attempts = max(attempts, r.Attempt)
+	}
+	if attempts > MaxRealAttempts {
+		out = append(out, fmt.Sprintf("%s: %d încercări, peste cele %d permise", set, attempts, MaxRealAttempts))
+	}
+	return out
+}
+
+// encryptionText is a cut's encryption in Romanian.
+func encryptionText(encrypted bool) string {
+	if encrypted {
+		return "criptată"
+	}
+	return "în clar"
+}
+
+// tally says that n things fall short of a plan's want, or exceed it: "19
+// din 20 rulări valide", "21 de rulări valide, nu 20".
+func tally(n, want int, one, many string) string {
+	if n < want {
+		return fmt.Sprintf("%d din %d %s", n, want, many)
+	}
+	return fmt.Sprintf("%s, nu %d", count(n, one, many), want)
 }
 
 // Shard is a lab job's part of an automated set's plan (R03): shard 1 is

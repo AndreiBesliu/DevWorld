@@ -32,9 +32,17 @@ const PlanB = "recorder propriu pe gortsplib/mediacommon în spatele `Recorder`,
 // piDeferral is why the Pi's sets move to Faza 0-bis (G31).
 const piDeferral = "Pi armv6"
 
-// O17OffLabel names the O17-off run's row; it is reported apart and never
-// decides G10.
-const O17OffLabel = "Pierdere minimă la pană de curent: oprită (256 kbps, criptat)"
+// o17Setting is O17's per-camera setting, as the app names it.
+const o17Setting = "Pierdere minimă la pană de curent"
+
+// O17OffLabel names the O17-off run in its row, its reasons and its notes.
+// Its 256 kbps loss is reported apart and never decides G10; every other
+// failure of the run does (C1-R13).
+const O17OffLabel = o17Setting + ": oprită (256 kbps, criptat)"
+
+// o17OnLabel names the default run with the 256 kbps stream, encrypted with
+// the setting on (O17-A).
+const o17OnLabel = o17Setting + ": pornită (256 kbps, criptat)"
 
 // chunkBits is an age STREAM chunk, 64 KiB, in bits (§4.5).
 const chunkBits = 65536 * 8
@@ -123,19 +131,19 @@ func RunLossMs(r results.Run) int64 {
 // settings; a run also fails when reconcile needed intervention, a file is
 // unreadable, a torn fMP4 part remains, HUB-04 found clear bytes, or no
 // stream was measured.
-func Failures(r results.Run) []string { return failuresExcept(r, 0) }
+func Failures(r results.Run) []string { return failuresExcept(r, nil) }
 
-// failuresExcept is Failures without the losses of streams whose limit is
-// shownLimitMs, which the O17-off row already shows as its value and limit;
-// 0 leaves none out.
-func failuresExcept(r results.Run, shownLimitMs int64) []string {
+// failuresExcept is Failures without the losses of the streams that
+// excused matches (nil: none): in the O17-off run, the 256 kbps stream's,
+// which is judged apart (C1-R13).
+func failuresExcept(r results.Run, excused func(results.StreamLoss) bool) []string {
 	var out []string
 	if len(r.Streams) == 0 {
 		out = append(out, "niciun flux măsurat")
 	}
 	for _, s := range r.Streams {
-		if limit := streamLimit(s); s.LossMs > limit && limit != shownLimitMs {
-			out = append(out, fmt.Sprintf("%s a pierdut %s, peste limita de %s", s.Stream, secondsText(s.LossMs), wholeSecondsText(limit)))
+		if limit := streamLimit(s); s.LossMs > limit && (excused == nil || !excused(s)) {
+			out = append(out, lossFailure(s, limit))
 		}
 	}
 	if !r.Reconciled {
@@ -156,6 +164,11 @@ func failuresExcept(r results.Run, shownLimitMs int64) []string {
 // streamLimit is s's StreamLimitMs, recomputed from what was recorded.
 func streamLimit(s results.StreamLoss) int64 {
 	return StreamLimitMs(s.BitrateKbps*1000, s.Encrypted, s.PadLowBitrate)
+}
+
+// lossFailure says that s lost more than its limit.
+func lossFailure(s results.StreamLoss, limit int64) string {
+	return fmt.Sprintf("%s a pierdut %s, peste limita de %s", s.Stream, secondsText(s.LossMs), wholeSecondsText(limit))
 }
 
 // setInfo is how Judge treats a set: where its runs come from, the OS whose
@@ -197,38 +210,32 @@ type setResult struct {
 	reasons         []string
 }
 
-// Judge is G10 (C17). Each set counts its default runs that count (C16,
-// R07), each run de-duplicated by its id (G15). A set passes with all of
-// them in (20 automated, 5 real cuts), their median ≤ 1 s, their max ≤ 2 s
-// and no failed run (G11); every stream's limit is recomputed with
-// StreamLimitMs, never read from LimitMs. The O17-off run of an automated
-// set is judged alone, outside the set's median and max and outside the
-// verdict, in a row of its own that names why it failed; a failed O17-off
-// run's failures are also in Reasons, marked «informativ, în afara G10»,
-// and change neither the verdict nor PlanB. G10 passes only when every set
-// passes; a failed run or set fails it with PlanB; a missing Pi set defers
-// it to Faza 0-bis when the Pi is unsupported (an envelope with host "pi"
-// says so), and otherwise, like any other missing run, leaves it without a
+// Judge is G10 (C17). Each set counts its runs that count (C16, R07), each
+// run once (G15, dedup). A set is complete when they have its plan's
+// composition (Plan: 20 default runs and an O17-off run, or 5 real cuts);
+// it passes complete with its default runs' median ≤ 1 s, their max ≤ 2 s
+// and no failed run (G11). Every stream's limit is recomputed with
+// StreamLimitMs, never read from LimitMs. In the O17-off run of an
+// automated set, only the 256 kbps stream's loss is judged apart (C1-R13):
+// in a row of its own, and, over its limit, in Notes, outside the verdict
+// and its plan B; any other failure of that run fails the set like a
+// default run's. The run stays outside the set's median and max. G10
+// passes only when every set passes; a failed run or set fails it with
+// PlanB, even with other sets incomplete; a missing Pi set defers it to
+// Faza 0-bis when the Pi is unsupported (an envelope with host "pi" says
+// so), and otherwise, like any other missing run, leaves it without a
 // verdict.
 func Judge(envs []results.Envelope) results.Judgement {
 	j := results.Judgement{Gate: "G10"}
-	runs := map[string][]results.Run{}
-	seen := map[string]bool{}
 	piUnsupported := false
 	for _, e := range envs {
 		if e.Host == "pi" && e.PiModel != nil && e.PiModel.Known && !e.PiModel.Supported {
 			piUnsupported = true
 		}
-		if e.Code != "MI1" {
-			continue
-		}
-		for _, r := range e.Runs {
-			if r.RunID != "" && seen[r.RunID] {
-				continue
-			}
-			seen[r.RunID] = true
-			runs[e.Set] = append(runs[e.Set], r)
-		}
+	}
+	runs := map[string][]results.Run{}
+	for _, sr := range dedup(envs) {
+		runs[sr.set] = append(runs[sr.set], sr.run)
 	}
 
 	outcomes := map[string]setResult{}
@@ -255,37 +262,91 @@ func Judge(envs []results.Envelope) results.Judgement {
 	return j
 }
 
-// judgeSet judges one set and adds its rows to j.
-func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported bool) setResult {
-	var res setResult
-	var losses []int64
-	var o17 []results.Run
-	for _, r := range runs {
-		switch {
-		case !Counts(r):
-		case !r.PadLowBitrate && !s.real:
-			o17 = append(o17, r)
-		default:
-			res.counted++
-			losses = append(losses, RunLossMs(r))
-			if f := Failures(r); len(f) > 0 {
-				res.failed++
-				res.reasons = append(res.reasons, fmt.Sprintf("%s: rularea %s: %s", s.name, r.RunID, strings.Join(f, "; ")))
+// setRun is a run and the set of its envelope.
+type setRun struct {
+	set string
+	run results.Run
+}
+
+// dedup is the runs of the MI1 envelopes in envs, in order, each once
+// (G15): an envelope can arrive twice, from the PC's folder and from the
+// Pi's. Two runs are the same when their id and attempt are; of two
+// copies, the one that counts is kept, whatever their order. A run without
+// an id is always kept.
+func dedup(envs []results.Envelope) []setRun {
+	type key struct {
+		id      string
+		attempt int
+	}
+	var out []setRun
+	at := map[key]int{}
+	for _, e := range envs {
+		if e.Code != "MI1" {
+			continue
+		}
+		for _, r := range e.Runs {
+			k := key{r.RunID, r.Attempt}
+			switch i, seen := at[k]; {
+			case r.RunID == "" || !seen:
+				at[k] = len(out)
+				out = append(out, setRun{e.Set, r})
+			case !Counts(out[i].run) && Counts(r):
+				out[i] = setRun{e.Set, r}
 			}
 		}
 	}
-	required := defaultRuns
-	if s.real {
-		required = realSlots
+	return out
+}
+
+// judgeSet judges one set and adds its rows and notes to j.
+func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported bool) setResult {
+	var res setResult
+	var defaults, o17 []results.Run
+	var missing []string // what keeps the set from its plan
+	for _, r := range runs {
+		switch {
+		case !Counts(r):
+		case s.real || !r.Encrypted || r.PadLowBitrate:
+			defaults = append(defaults, r)
+		case slices.ContainsFunc(r.Streams, isO17Stream):
+			o17 = append(o17, r)
+		default: // marked O17-off, without what the O17-off run measures
+			missing = append(missing, o17Text(s.name, r.RunID, "nu înregistrează "+LowBitrateStream+" cu setarea oprită"))
+		}
 	}
-	complete := res.counted >= required
+	if s.real {
+		missing = append(missing, realComposition(s.name, runs, defaults)...)
+	} else {
+		missing = append(missing, automatedComposition(s.name, defaults, o17)...)
+	}
+	complete := len(missing) == 0
+
+	var losses []int64
+	for _, r := range defaults {
+		losses = append(losses, RunLossMs(r))
+		if f := Failures(r); len(f) > 0 {
+			res.failed++
+			res.reasons = append(res.reasons, fmt.Sprintf("%s: rularea %s: %s", s.name, r.RunID, strings.Join(f, "; ")))
+		}
+	}
+	res.counted = len(defaults)
+	// C1-R13: only the 256 kbps loss of the O17-off run is judged apart
+	// (o17Row); anything else that fails it fails the set.
+	o17Failed := false
+	for _, r := range o17 {
+		if f := failuresExcept(r, isO17Stream); len(f) > 0 {
+			o17Failed = true
+			res.reasons = append(res.reasons, o17Text(s.name, r.RunID, strings.Join(f, "; ")))
+		}
+	}
+
 	slices.Sort(losses)
 	median, maximum := medianMs(losses), int64(0)
 	if len(losses) > 0 {
 		maximum = losses[len(losses)-1]
 	}
 	switch {
-	case res.failed > 0:
+	case res.failed > 0 || o17Failed:
 		res.state = setFail
 	case !complete && s.pi && piUnsupported:
 		res.state = setDeferred
@@ -295,7 +356,7 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 		res.reasons = append(res.reasons, s.name+": lipsește")
 	case !complete:
 		res.state = setIncomplete
-		res.reasons = append(res.reasons, fmt.Sprintf("%s: %d din %d rulări valide", s.name, res.counted, required))
+		res.reasons = append(res.reasons, missing...)
 	case median > GeneralMedianMs:
 		res.state = setFail
 		res.reasons = append(res.reasons, fmt.Sprintf("%s: mediana %s, peste %s", s.name, secondsText(median), wholeSecondsText(GeneralMedianMs)))
@@ -324,65 +385,59 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 				Pass: verdict(res.failed == 0, complete)})
 	}
 	if !s.real {
-		row, notes := o17Row(prefix, s.name, s.source, o17)
-		j.Rows = append(j.Rows, row)
-		// After the set's own reasons; they never change its state.
-		res.reasons = append(res.reasons, notes...)
+		j.Rows = append(j.Rows, o17Row(j, prefix, s.name, s.source, o17))
 	}
 	return res
 }
 
-// o17Informative marks the reasons of a failed O17-off run: reported for
-// Task 14's decision on §4.5 (C1-R1), never part of G10's verdict.
-const o17Informative = "informativ, în afara G10: "
+// o17Text is a reason or a note about the O17-off run id of set.
+func o17Text(set, id, what string) string {
+	return fmt.Sprintf("%s: %s: rularea %s: %s", set, O17OffLabel, id, what)
+}
 
-// o17Row reports a set's O17-off runs, outside G10 (C1-R1): the loss of
-// the stream with the largest limit, the 256 kbps one, against that limit,
-// followed by every other failure of the runs, so that a failed row always
-// names its cause; it passes when no run fails. notes are each failed run's
-// Failures, marked with o17Informative, for Judgement.Reasons.
-func o17Row(prefix, set, source string, runs []results.Run) (row results.Row, notes []string) {
-	row = results.Row{Code: prefix + O17OffLabel, Source: source}
-	nominal := StreamLimitMs(lowBitrateKbps*1000, true, false)
+// o17Row reports a set's O17-off runs (C1-R1, C1-R13): the loss of the
+// 256 kbps stream recorded with the setting off against its limit, for the
+// run furthest over it, named when there are several, then every other
+// failure of the runs, so that a failed row always names its cause; it
+// passes when no run fails. A 256 kbps loss over its limit is also one of
+// j's Notes, outside G10's verdict; the other failures are the set's
+// reasons (judgeSet). Each run records an isO17Stream, as judgeSet sorts
+// them.
+func o17Row(j *results.Judgement, prefix, set, source string, runs []results.Run) results.Row {
+	row := results.Row{Code: prefix + O17OffLabel, Source: source}
 	if len(runs) == 0 {
-		row.Value, row.Limit = "lipsește", "≤ "+wholeSecondsText(nominal)
-		return row, nil
+		row.Value, row.Limit = "lipsește", "≤ "+wholeSecondsText(StreamLimitMs(lowBitrateKbps*1000, true, false))
+		return row
 	}
-	var loss, limit int64
-	for _, r := range runs {
-		for _, s := range r.Streams {
-			switch l := streamLimit(s); {
-			case l > limit:
-				limit, loss = l, s.LossMs
-			case l == limit:
-				loss = max(loss, s.LossMs)
-			}
-		}
-	}
-	var value []string
-	if limit > 0 {
-		value = append(value, secondsText(loss))
-	}
+	var shown results.StreamLoss
+	var shownRun string
+	var others []string
 	pass := true
-	for _, r := range runs {
-		f := Failures(r)
-		if len(f) == 0 {
-			continue
+	for i, r := range runs {
+		s := r.Streams[slices.IndexFunc(r.Streams, isO17Stream)]
+		limit := streamLimit(s)
+		if i == 0 || s.LossMs-limit > shown.LossMs-streamLimit(shown) {
+			shown, shownRun = s, r.RunID
 		}
-		pass = false
-		notes = append(notes, fmt.Sprintf("%s%s: rularea %s, cu „Pierdere minimă la pană de curent” oprită: %s", o17Informative, set, r.RunID, strings.Join(f, "; ")))
-		for _, other := range failuresExcept(r, limit) {
+		if s.LossMs > limit {
+			pass = false
+			j.Notes = append(j.Notes, o17Text(set, r.RunID, lossFailure(s, limit)))
+		}
+		for _, f := range failuresExcept(r, isO17Stream) {
+			pass = false
 			if len(runs) > 1 {
-				other = "rularea " + r.RunID + ": " + other
+				f = "rularea " + r.RunID + ": " + f
 			}
-			value = append(value, other)
+			others = append(others, f)
 		}
 	}
-	if limit == 0 { // no stream measured: the bound the run was planned for
-		limit = nominal
+	value := secondsText(shown.LossMs)
+	if len(runs) > 1 {
+		value += " (rularea " + shownRun + ")"
 	}
-	row.Value, row.Limit, row.Pass = strings.Join(value, "; "), "≤ "+wholeSecondsText(limit), &pass
-	return row, notes
+	row.Value = strings.Join(append([]string{value}, others...), "; ")
+	row.Limit, row.Pass = "≤ "+wholeSecondsText(streamLimit(shown)), &pass
+	return row
 }
 
 // failureRates adds the failure-rate rows: the 95 % bound per OS over the

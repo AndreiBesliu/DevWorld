@@ -1,6 +1,7 @@
 package hostinfo
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,8 +13,9 @@ import (
 
 // TestHostInfo_DeviceTreeFallback (G32): with no Model line in cpuinfo,
 // the board's device-tree model goes to `ipcam-hub diag pimodel --raw`,
-// whose row of §4.8 Read reports with Source "device-tree"; a device-tree
-// model that the table does not know still asks the owner (C24).
+// whose row of §4.8 Read reports with Source "device-tree" and cpuinfo's
+// revision; a device-tree model that the table does not know still asks the
+// owner (C24).
 func TestHostInfo_DeviceTreeFallback(t *testing.T) {
 	tree := filepath.Join(t.TempDir(), "model")
 	if err := os.WriteFile(tree, []byte("Raspberry Pi 4 Model B Rev 1.5\x00"), 0o600); err != nil {
@@ -23,11 +25,11 @@ func TestHostInfo_DeviceTreeFallback(t *testing.T) {
 	t.Setenv(fakePimodel, pi4Pimodel)
 	rec := t.TempDir()
 	var out strings.Builder
-	info, err := Read(t.Context(), Options{Hub: os.Args[0], RecDir: rec, DeviceTree: tree, In: strings.NewReader("7\n"), Out: &out})
+	info, err := Read(t.Context(), Options{Hub: os.Args[0], RecDir: rec, DeviceTree: tree, In: bufio.NewReader(strings.NewReader("7\n")), Out: &out})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	want := &results.PiModelInfo{Raw: "Raspberry Pi 4 Model B Rev 1.5", Tier: "H1b", Source: "device-tree", Supported: true, Known: true, RecommendedMin: 4, RecommendedMax: 4}
+	want := &results.PiModelInfo{Raw: "Raspberry Pi 4 Model B Rev 1.5", Revision: "d03115", Tier: "H1b", Source: "device-tree", Supported: true, Known: true, RecommendedMin: 4, RecommendedMax: 4}
 	if !reflect.DeepEqual(info.PiModel, want) || info.RecommendedCameras != 4 {
 		t.Errorf("Read = %+v (model %+v), want %+v and 4 cameras", info, info.PiModel, want)
 	}
@@ -42,7 +44,7 @@ func TestHostInfo_DeviceTreeFallback(t *testing.T) {
 		fake(t, noModelHost)
 		t.Setenv(fakePimodel, unknownPimodel)
 		var out strings.Builder
-		info, err := Read(t.Context(), Options{Hub: os.Args[0], RecDir: rec, DeviceTree: tree, In: strings.NewReader("\n"), Out: &out})
+		info, err := Read(t.Context(), Options{Hub: os.Args[0], RecDir: rec, DeviceTree: tree, In: bufio.NewReader(strings.NewReader("\n")), Out: &out})
 		if err != nil {
 			t.Fatal(err)
 		}

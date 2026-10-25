@@ -4,13 +4,17 @@ package results
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // Write validates e and writes it to <dir>/<code>/<set>/<runId>.json, as one
 // line of JSON. The file is written beside its final name, synced and
-// renamed over it, so a reader never sees half an envelope.
+// renamed over it, so a reader never sees half an envelope, and the folder
+// is synced after the rename, so the envelope keeps its name after a power
+// cut.
 func Write(dir string, e Envelope) error {
 	if err := e.Validate(); err != nil {
 		return err
@@ -40,5 +44,22 @@ func Write(dir string, e Envelope) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(folder, e.RunID+".json"))
+	if err := os.Rename(tmp, filepath.Join(folder, e.RunID+".json")); err != nil {
+		return err
+	}
+	return syncDir(folder)
+}
+
+// syncDir makes the entries of the folder dir durable: an fsync of the
+// directory, except on Windows, which has none (NTFS journals its entries).
+// Tests replace it to see when Write calls it.
+var syncDir = func(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir) //nolint:gosec // the results folder that Write made
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
 }

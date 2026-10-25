@@ -26,13 +26,14 @@ type Row struct {
 }
 
 // Judgement is a gate's verdict, its plan B when it fails, the reasons in
-// Romanian, and the rows behind it (C17). A reason that starts with
-// «informativ, în afara <gate>» reports a measurement outside the verdict
-// (MI1's O17-off runs) and never explains the verdict itself.
+// Romanian, and the rows behind it (C17). Reasons explain the verdict;
+// Notes, in Romanian too, report measurements outside it (MI1's O17-off
+// loss, C1-R13), which neither change the verdict nor call for the plan B.
 type Judgement struct {
 	Gate    string
 	Verdict Verdict
 	PlanB   string
 	Reasons []string
+	Notes   []string
 	Rows    []Row
 }

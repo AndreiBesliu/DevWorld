@@ -92,8 +92,10 @@ type Run struct {
 	Attempt int `json:"attempt,omitempty"`
 	// ShutdownKind is kill9, sysrq, bugcheck, qemu-reset, power or forced.
 	ShutdownKind string `json:"shutdownKind"`
-	// Encrypted and PadLowBitrate are the run's jobs' settings; the O17-off
-	// run is the one with PadLowBitrate false.
+	// Encrypted and PadLowBitrate are the run's jobs' settings; MI1's
+	// O17-off run is encrypted with PadLowBitrate false and records
+	// cam99_main encrypted with the setting off. A clear run's setting does
+	// not matter.
 	Encrypted     bool         `json:"encrypted"`
 	PadLowBitrate bool         `json:"padLowBitrate"`
 	Streams       []StreamLoss `json:"streams"`

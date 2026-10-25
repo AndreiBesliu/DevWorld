@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -65,7 +66,7 @@ const (
 	windowsHost = `{"schema":"ipcam.diag.host/1","os":"windows","arch":"amd64","physicalCores":6,"logicalCpus":12,"ramMb":32622,"piModel":null,"storage":"ssd","writeCache":"on","recommendedCameras":8,"cores6Plus":true}`
 	pi4Host     = `{"schema":"ipcam.diag.host/1","os":"linux","arch":"arm64","physicalCores":4,"logicalCpus":4,"ramMb":3794,"piModel":{"raw":"Raspberry Pi 4 Model B Rev 1.5","revision":"d03115","tier":"H1b","supported":true,"known":true,"recommendedMin":4,"recommendedMax":4,"source":"cpuinfo"},"storage":"sd","writeCache":"unknown","recommendedCameras":4,"cores6Plus":false}`
 	// No Model line in cpuinfo, as on a mainline kernel (G32).
-	noModelHost    = `{"schema":"ipcam.diag.host/1","os":"linux","arch":"arm64","physicalCores":4,"logicalCpus":4,"ramMb":3794,"piModel":{"raw":"","revision":"","tier":"unknown","supported":false,"known":false,"recommendedMin":0,"recommendedMax":0,"source":"cpuinfo"},"storage":"ssd","writeCache":"on","recommendedCameras":0,"cores6Plus":false}`
+	noModelHost    = `{"schema":"ipcam.diag.host/1","os":"linux","arch":"arm64","physicalCores":4,"logicalCpus":4,"ramMb":3794,"piModel":{"raw":"","revision":"d03115","tier":"unknown","supported":false,"known":false,"recommendedMin":0,"recommendedMax":0,"source":"cpuinfo"},"storage":"ssd","writeCache":"on","recommendedCameras":0,"cores6Plus":false}`
 	pi4Pimodel     = `{"schema":"ipcam.diag.pimodel/1","piModel":{"raw":"Raspberry Pi 4 Model B Rev 1.5","revision":"","tier":"H1b","supported":true,"known":true,"recommendedMin":4,"recommendedMax":4,"source":""}}`
 	unknownPimodel = `{"schema":"ipcam.diag.pimodel/1","piModel":{"raw":"Acme Board 7","revision":"","tier":"unknown","supported":false,"known":false,"recommendedMin":0,"recommendedMax":0,"source":""}}`
 )
@@ -108,7 +109,7 @@ func TestHostInfo_ReadsDiagHost(t *testing.T) {
 	args := fake(t, windowsHost)
 	rec := filepath.Join(t.TempDir(), "rec")
 	var out strings.Builder
-	info, err := Read(t.Context(), Options{Hub: os.Args[0], RecDir: rec, In: strings.NewReader("5\n"), Out: &out})
+	info, err := Read(t.Context(), Options{Hub: os.Args[0], RecDir: rec, In: bufio.NewReader(strings.NewReader("5\n")), Out: &out})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestHostInfo_UnknownModelAsksAndDefaultsTo1(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			fake(t, noModelHost)
 			var out strings.Builder
-			info, err := Read(t.Context(), Options{Hub: os.Args[0], RecDir: t.TempDir(), DeviceTree: filepath.Join(t.TempDir(), "absent"), In: strings.NewReader(c.in), Out: &out})
+			info, err := Read(t.Context(), Options{Hub: os.Args[0], RecDir: t.TempDir(), DeviceTree: filepath.Join(t.TempDir(), "absent"), In: bufio.NewReader(strings.NewReader(c.in)), Out: &out})
 			if err != nil {
 				t.Fatalf("Read: %v", err)
 			}
@@ -191,6 +192,26 @@ func TestHostInfo_UnknownModelAsksAndDefaultsTo1(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("prompts that share one input", func(t *testing.T) {
+		// recspike's console: this prompt, a second Read, then G16's «Scrieți DA».
+		in := bufio.NewReader(strings.NewReader("doi\n3\n5\nDA\n"))
+		var got []int
+		for range 2 {
+			fake(t, noModelHost)
+			info, err := Read(t.Context(), Options{Hub: os.Args[0], RecDir: t.TempDir(), DeviceTree: filepath.Join(t.TempDir(), "absent"), In: in, Out: io.Discard})
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			got = append(got, info.RecommendedCameras)
+		}
+		if !reflect.DeepEqual(got, []int{3, 5}) {
+			t.Errorf("the two prompts read %v, want [3 5]", got)
+		}
+		if rest, err := in.ReadString('\n'); rest != "DA\n" || err != nil {
+			t.Errorf("the next prompt reads %q, %v; want \"DA\\n\"", rest, err)
+		}
+	})
 
 	t.Run("no input: no prompt", func(t *testing.T) {
 		fake(t, noModelHost)

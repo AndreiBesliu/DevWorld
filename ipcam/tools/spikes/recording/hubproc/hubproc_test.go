@@ -1,6 +1,7 @@
 package hubproc
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,11 +29,14 @@ import (
 // `recording` event per job of run.json after the delays in fakeDelays
 // (milliseconds, in job order), and a verify event. It exits 0 on SIGTERM
 // or Ctrl+Break, and by itself with code 1 after fakeExitAfter
-// milliseconds, when that is set.
+// milliseconds, when that is set. With fakeLongLine set, it prints a 2 MiB
+// line after ready, then 4 MiB of events, and then creates the file that
+// fakeLongLine names; a failed write of its events exits with code 3.
 const (
 	fakeEnv       = "HUBPROC_FAKE_HUB"
 	fakeDelays    = "HUBPROC_FAKE_DELAYS"
 	fakeExitAfter = "HUBPROC_FAKE_EXIT_AFTER_MS"
+	fakeLongLine  = "HUBPROC_FAKE_LONG_LINE"
 )
 
 func TestMain(m *testing.M) {
@@ -60,11 +64,22 @@ func fakeHub(args []string) int {
 		b, _ := json.Marshal(fields)
 		mu.Lock()
 		defer mu.Unlock()
-		_, _ = os.Stdout.Write(append(b, '\n'))
+		if _, err := os.Stdout.Write(append(b, '\n')); err != nil {
+			os.Exit(3)
+		}
 	}
 	emit(map[string]any{"type": "reconcile", "seq": 2, "final": true, "aborted": false, "catalogMismatches": 0})
 	emit(map[string]any{"type": "reconcile", "seq": 1, "final": false, "aborted": false, "catalogMismatches": 0})
 	emit(map[string]any{"type": "ready", "jobs": []any{}})
+	if done := os.Getenv(fakeLongLine); done != "" {
+		emit(map[string]any{"type": "gap", "message": strings.Repeat("x", 2<<20)})
+		for range (4 << 20) / 64 {
+			emit(map[string]any{"type": "gap", "message": "after the long line"})
+		}
+		if err := os.WriteFile(done, nil, 0o600); err != nil { //nolint:gosec // the test's file
+			return 4
+		}
+	}
 	emit(map[string]any{"type": "recording", "cam": "cam77", "profile": "main"})
 	start := time.Now()
 	var delays []int
@@ -340,6 +355,52 @@ func TestHubproc_ResumeMsFromRecordingEvents(t *testing.T) {
 			t.Errorf("WaitRecording = %v, want ErrExited", err)
 		}
 	})
+}
+
+// TestHubproc_OverlongEventLine: an event line over the 1 MiB limit is the
+// error of the next wait, not ErrExited, while ipcam-hub still runs, and
+// hubproc keeps reading its stdout, so that every later write of ipcam-hub
+// succeeds (no EPIPE, and no SIGPIPE on Linux).
+func TestHubproc_OverlongEventLine(t *testing.T) {
+	written := filepath.Join(t.TempDir(), "written")
+	t.Setenv(fakeLongLine, written)
+	h := startFake(t, "0,0", nil)
+	_, err := h.WaitEvent(ctxFor(t, 10*time.Second), "verify", nil)
+	if !errors.Is(err, bufio.ErrTooLong) || errors.Is(err, ErrExited) {
+		t.Errorf("WaitEvent after a 2 MiB line = %v, want bufio.ErrTooLong", err)
+	}
+	select {
+	case <-h.Exited():
+		t.Fatalf("ipcam-hub exited with code %d after its long line", h.ExitCode())
+	default:
+	}
+	waitFor(t, "ipcam-hub's 4 MiB of events after the long line", func() bool {
+		_, err := os.Stat(written)
+		return err == nil
+	})
+	if _, err := h.WaitRecording(ctxFor(t, 10*time.Second)); !errors.Is(err, bufio.ErrTooLong) {
+		t.Errorf("WaitRecording = %v, want bufio.ErrTooLong again", err)
+	}
+	if err := h.Stop(ctxFor(t, 10*time.Second)); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if got := h.ExitCode(); got != 0 {
+		t.Errorf("ExitCode = %d, want 0: every write of ipcam-hub succeeded", got)
+	}
+}
+
+// TestHubproc_StartRefusesABadBeaconAddress: Start resolves and dials the
+// beacon's address, IPv4 UDP (R08), and returns the error; a run without its
+// beacon would only show as an invalid cut at the controller.
+func TestHubproc_StartRefusesABadBeaconAddress(t *testing.T) {
+	t.Setenv(fakeEnv, "1")
+	for _, addr := range []string{"127.0.0.1", "[::1]:7082", "127.0.0.1:99999"} {
+		h, err := Start(Options{Binary: os.Args[0], Config: writeRunJSON(t), Beacon: &Beacon{Addr: addr, RunID: "pc-kill9-01"}})
+		if err == nil {
+			_, _ = h.Kill()
+			t.Errorf("Start with the beacon address %q = nil error", addr)
+		}
+	}
 }
 
 // reapedHub is a Hub whose child has exited and been reaped, as cmd.Wait

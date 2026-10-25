@@ -254,82 +254,263 @@ func TestMI1_PaddingOff_UsesUnpaddedBound(t *testing.T) {
 		}
 	}
 
-	t.Run("a missing O17-off run decides nothing", func(t *testing.T) {
+	t.Run("a missing O17-off run leaves its set incomplete", func(t *testing.T) {
 		runs := allSets(t)
 		runs[SetPCBugcheck] = slices.DeleteFunc(runs[SetPCBugcheck], func(r results.Run) bool { return !r.PadLowBitrate })
 		j := Judge(envelopes(runs))
-		wantVerdict(t, j, results.Pass)
-		if r := o17RowOf(t, j, SetPCBugcheck); r.Pass != nil {
-			t.Errorf("row %+v, want no pass value", r)
+		wantVerdict(t, j, results.Incomplete)
+		if want := []string{SetPCBugcheck + ": " + O17OffLabel + ": lipsește"}; !slices.Equal(j.Reasons, want) {
+			t.Errorf("Reasons = %q, want %q", j.Reasons, want)
+		}
+		if r := o17RowOf(t, j, SetPCBugcheck); r.Pass != nil || r.Value != "lipsește" || r.Limit != "≤ 4 s" {
+			t.Errorf("row %+v, want lipsește ≤ 4 s and no pass value", r)
 		}
 	})
 }
 
-// TestMI1_O17OffRunFailuresReported (C1-R1): whatever fails an O17-off
-// run, its row names the cause beside the 256 kbps loss, and the reasons
-// carry the run's failures marked as information outside G10; G10's
-// verdict and plan B do not see them.
+// TestMI1_O17OffRunIsEncryptedWith256kbpsSettingOff (O17): a run is the
+// O17-off run only when it is encrypted with the setting off and records
+// cam99_main with the setting off. A clear default run whose setting is
+// left at its zero value stays a default run; a run marked O17-off without
+// that stream is an invalid composition, reported as such and never judged
+// against cam01_main's 2 s limit.
+func TestMI1_O17OffRunIsEncryptedWith256kbpsSettingOff(t *testing.T) {
+	t.Run("a clear default run with the setting at its zero value", func(t *testing.T) {
+		runs := allSets(t)
+		r := &runs[SetLabLinuxQEMUReset][1] // run 2: clear, the set's 1.9 s
+		if r.Encrypted || r.LossMs != 1900 {
+			t.Fatalf("run 2 = %+v, want the clear run at 1.9 s", r)
+		}
+		r.PadLowBitrate = false
+		for i := range r.Streams {
+			r.Streams[i].PadLowBitrate = false
+		}
+		j := Judge(envelopes(runs))
+		wantVerdict(t, j, results.Pass)
+		if mx := row(t, j, "MI1 "+SetLabLinuxQEMUReset+":", "maximul"); mx.Value != "1,90 s" || !passes(mx) {
+			t.Errorf("max row = %+v, want 1,90 s from the clear run 2, passed", mx)
+		}
+		if f := row(t, j, "MI1 "+SetLabLinuxQEMUReset+":", "eșuate"); f.Value != "0 din 20" {
+			t.Errorf("failed-runs row = %+v, want 0 din 20", f)
+		}
+		if o := o17RowOf(t, j, SetLabLinuxQEMUReset); o.Value != "3,00 s" || !passes(o) {
+			t.Errorf("O17-off row = %+v, want run 21's 3,00 s, passed", o)
+		}
+	})
+
+	for name, mutate := range map[string]func(*results.Run){
+		"without cam99_main": func(r *results.Run) {
+			r.Streams = slices.DeleteFunc(slices.Clone(r.Streams), func(s results.StreamLoss) bool { return s.Stream == LowBitrateStream })
+		},
+		"without any stream": func(r *results.Run) { r.Streams = nil },
+		"with cam99_main at the setting on": func(r *results.Run) {
+			r.Streams = slices.Clone(r.Streams)
+			for i := range r.Streams {
+				r.Streams[i].PadLowBitrate = r.Streams[i].Stream == LowBitrateStream
+			}
+		},
+	} {
+		t.Run("a run marked O17-off "+name, func(t *testing.T) {
+			runs := allSets(t)
+			r := o17Run(t, runs, SetPCKill9)
+			mutate(r)
+			setStreamLoss(r, MainStream, 1500) // within 2 s: it must not pass as the O17-off row
+			j := Judge(envelopes(runs))
+			wantVerdict(t, j, results.Incomplete)
+			reasonsMention(t, j, SetPCKill9+": "+O17OffLabel+": rularea "+r.RunID+": nu înregistrează cam99_main cu setarea oprită")
+			if o := o17RowOf(t, j, SetPCKill9); o.Pass != nil || o.Value != "lipsește" || o.Limit != "≤ 4 s" {
+				t.Errorf("O17-off row = %+v, want lipsește ≤ 4 s and no pass value", o)
+			}
+		})
+	}
+}
+
+// TestMI1_Judge_ChecksSetComposition (G10, G12, O17): a set is complete only
+// with the composition of its plan: an automated set's 20 default runs, 10
+// of them encrypted and exactly one with the 256 kbps stream encrypted and
+// the setting on, plus an O17-off run; a real set's 5 valid cuts, one per
+// slot 1 to 5, slots 1, 3 and 5 encrypted, in at most 8 attempts. Otherwise
+// it has no verdict, and the reason names what is wrong.
+func TestMI1_Judge_ChecksSetComposition(t *testing.T) {
+	const set = SetPiSysrq
+	on := set + ": Pierdere minimă la pană de curent: pornită (256 kbps, criptat): "
+	encrypt := func(r *results.Run, encrypted bool) {
+		r.Encrypted = encrypted
+		r.Streams = slices.Clone(r.Streams)
+		for i := range r.Streams {
+			r.Streams[i].Encrypted = encrypted
+		}
+	}
+	for _, c := range []struct {
+		name    string
+		set     string
+		mutate  func(runs []results.Run) []results.Run
+		reasons []string
+	}{
+		{"every default run clear", set, func(runs []results.Run) []results.Run {
+			for i := range 20 {
+				encrypt(&runs[i], false)
+			}
+			return runs
+		}, []string{set + ": 0 din 10 rulări criptate", on + "lipsește"}},
+		{"no 256 kbps run", set, func(runs []results.Run) []results.Run {
+			runs[8].Streams = runs[8].Streams[:1]
+			return runs
+		}, []string{on + "lipsește"}},
+		{"two 256 kbps runs", set, func(runs []results.Run) []results.Run {
+			runs[10].Streams = append(slices.Clone(runs[10].Streams), runs[8].Streams[1])
+			return runs
+		}, []string{on + "2 rulări, nu una"}},
+		{"11 encrypted runs", set, func(runs []results.Run) []results.Run {
+			encrypt(&runs[1], true)
+			return runs
+		}, []string{set + ": 11 rulări criptate, nu 10"}},
+		{"21 default runs", set, func(runs []results.Run) []results.Run {
+			extra := runs[1]
+			extra.RunID += "-x"
+			return append(runs, extra)
+		}, []string{set + ": 21 de rulări valide, nu 20"}},
+		{"a real slot twice and one missing", SetRealPC, func(runs []results.Run) []results.Run {
+			runs[3].Slot = 2 // slot 4's clear cut, as slot 2
+			return runs
+		}, []string{SetRealPC + ": tăierea 2 apare de 2 ori", SetRealPC + ": lipsește tăierea validă 4"}},
+		{"slot 3 clear", SetRealPC, func(runs []results.Run) []results.Run {
+			encrypt(&runs[2], false)
+			return runs
+		}, []string{SetRealPC + ": tăierea 3 este în clar, nu criptată"}},
+		{"slot 2 encrypted", SetRealPC, func(runs []results.Run) []results.Run {
+			encrypt(&runs[1], true)
+			return runs
+		}, []string{SetRealPC + ": tăierea 2 este criptată, nu în clar"}},
+		{"a slot outside 1 to 5", SetRealPC, func(runs []results.Run) []results.Run {
+			runs[4].Slot = 6
+			return runs
+		}, []string{SetRealPC + ": rularea real-pc-05 are tăierea 6, în afara 1–5", SetRealPC + ": lipsește tăierea validă 5"}},
+		{"9 attempts", SetRealPC, func(runs []results.Run) []results.Run {
+			for i := range 4 {
+				bad := runs[i]
+				bad.RunID, bad.Attempt, bad.Valid = fmt.Sprint(bad.RunID, "-redo"), i+6, false
+				runs = append(runs, bad)
+			}
+			return runs
+		}, []string{SetRealPC + ": 9 încercări, peste cele 8 permise"}},
+		{"an attempt numbered 9", SetRealPC, func(runs []results.Run) []results.Run {
+			runs[4].Attempt = 9
+			return runs
+		}, []string{SetRealPC + ": 9 încercări, peste cele 8 permise"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			runs := allSets(t)
+			runs[c.set] = c.mutate(runs[c.set])
+			j := Judge(envelopes(runs))
+			wantVerdict(t, j, results.Incomplete)
+			if !slices.Equal(j.Reasons, c.reasons) {
+				t.Errorf("Reasons = %q, want %q", j.Reasons, c.reasons)
+			}
+			if m := row(t, j, "MI1 "+c.set+":", "mediana"); m.Pass != nil {
+				t.Errorf("median row = %+v, want no pass value on an incomplete set", m)
+			}
+		})
+	}
+}
+
+// TestMI1_O17OffRunFailuresReported (C1-R1, C1-R13): in the O17-off run,
+// only the loss of the 256 kbps stream recorded with the setting off is
+// reported apart: in its row and in Notes, outside G10's verdict, with no
+// plan B. Every other G11 condition of the run fails it and G10 with plan B,
+// like a default run, with a reason named after O17OffLabel; the row names
+// every cause, and the run stays outside its set's median and max.
 func TestMI1_O17OffRunFailuresReported(t *testing.T) {
 	const set = SetLabLinuxKill9
+	if want := "Pierdere minimă la pană de curent: oprită (256 kbps, criptat)"; O17OffLabel != want {
+		t.Errorf("O17OffLabel = %q, want %q", O17OffLabel, want)
+	}
 	j := Judge(envelopes(allSets(t)))
-	if len(j.Reasons) != 0 {
-		t.Errorf("Reasons = %q, want none when every run passes", j.Reasons)
+	if len(j.Reasons) != 0 || len(j.Notes) != 0 {
+		t.Errorf("Reasons = %q, Notes = %q, want none when every run passes", j.Reasons, j.Notes)
 	}
 	if r := o17RowOf(t, j, set); !passes(r) || r.Value != "3,00 s" || r.Limit != "≤ 4 s" {
 		t.Errorf("passing O17-off row = %+v, want 3,00 s ≤ 4 s, passed", r)
 	}
 
-	note := "informativ, în afara G10: " + set + ": rularea " + set + "-21, cu „Pierdere minimă la pană de curent” oprită: "
+	about := set + ": " + O17OffLabel + ": rularea " + set + "-21: "
 	for _, c := range []struct {
-		name   string
-		mutate func(*results.Run)
-		cause  string // the run's failures, as the reason gives them
-		value  string // the row's value
+		name    string
+		mutate  func(*results.Run)
+		verdict results.Verdict
+		reason  string // the run's failures that fail G10, as Reasons gives them
+		note    string // the 256 kbps loss, as Notes gives it
+		value   string // the row's value
 	}{
-		{"the 4 Mbps stream over 2 s", func(r *results.Run) { setStreamLoss(r, MainStream, 2500) },
-			"cam01_main a pierdut 2,50 s, peste limita de 2 s", "3,00 s; cam01_main a pierdut 2,50 s, peste limita de 2 s"},
-		{"reconcile not clean", func(r *results.Run) { r.Reconciled = false },
-			"reconcilierea a cerut intervenție", "3,00 s; reconcilierea a cerut intervenție"},
-		{"unreadable files", func(r *results.Run) { r.Unreadable = 2 },
-			"2 fișiere ilizibile", "3,00 s; 2 fișiere ilizibile"},
-		{"a torn fMP4 part", func(r *results.Run) { r.TornParts = 1 },
-			"1 parte fMP4 ruptă", "3,00 s; 1 parte fMP4 ruptă"},
-		{"clear bytes on the disk", func(r *results.Run) { r.Hub04Clear = false },
-			"HUB-04: octeți video în clar pe disc", "3,00 s; HUB-04: octeți video în clar pe disc"},
-		{"no stream measured", func(r *results.Run) { r.Streams = nil },
-			"niciun flux măsurat", "niciun flux măsurat"},
+		{"the 4 Mbps stream over 2 s", func(r *results.Run) { setStreamLoss(r, MainStream, 2500) }, results.Fail,
+			"cam01_main a pierdut 2,50 s, peste limita de 2 s", "", "3,00 s; cam01_main a pierdut 2,50 s, peste limita de 2 s"},
+		{"reconcile not clean", func(r *results.Run) { r.Reconciled = false }, results.Fail,
+			"reconcilierea a cerut intervenție", "", "3,00 s; reconcilierea a cerut intervenție"},
+		{"unreadable files", func(r *results.Run) { r.Unreadable = 2 }, results.Fail,
+			"2 fișiere ilizibile", "", "3,00 s; 2 fișiere ilizibile"},
+		{"a torn fMP4 part", func(r *results.Run) { r.TornParts = 1 }, results.Fail,
+			"1 parte fMP4 ruptă", "", "3,00 s; 1 parte fMP4 ruptă"},
+		{"clear bytes on the disk", func(r *results.Run) { r.Hub04Clear = false }, results.Fail,
+			"HUB-04: octeți video în clar pe disc", "", "3,00 s; HUB-04: octeți video în clar pe disc"},
 		// The row's own value and limit show this one, so it is not repeated.
-		{"the 256 kbps stream over 4 s", func(r *results.Run) { setStreamLoss(r, LowBitrateStream, 4100) },
-			"cam99_main a pierdut 4,10 s, peste limita de 4 s", "4,10 s"},
-		{"two failures", func(r *results.Run) { setStreamLoss(r, LowBitrateStream, 4100); r.TornParts = 2 },
-			"cam99_main a pierdut 4,10 s, peste limita de 4 s; 2 părți fMP4 rupte", "4,10 s; 2 părți fMP4 rupte"},
+		{"the 256 kbps stream over 4 s", func(r *results.Run) { setStreamLoss(r, LowBitrateStream, 4100) }, results.Pass,
+			"", "cam99_main a pierdut 4,10 s, peste limita de 4 s", "4,10 s"},
+		{"the 256 kbps stream over 4 s and torn parts", func(r *results.Run) { setStreamLoss(r, LowBitrateStream, 4100); r.TornParts = 2 }, results.Fail,
+			"2 părți fMP4 rupte", "cam99_main a pierdut 4,10 s, peste limita de 4 s", "4,10 s; 2 părți fMP4 rupte"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			runs := allSets(t)
 			c.mutate(o17Run(t, runs, set))
 			j := Judge(envelopes(runs))
-			wantVerdict(t, j, results.Pass) // the brief keeps the whole O17-off run outside G10
+			wantVerdict(t, j, c.verdict)
 			if r := o17RowOf(t, j, set); r.Pass == nil || *r.Pass || r.Value != c.value || r.Limit != "≤ 4 s" {
 				t.Errorf("O17-off row = %+v, want %q ≤ 4 s, failed", r, c.value)
 			}
-			if want := []string{note + c.cause}; !slices.Equal(j.Reasons, want) {
-				t.Errorf("Reasons = %q, want %q", j.Reasons, want)
+			var reasons, notes []string
+			if c.reason != "" {
+				reasons = []string{about + c.reason}
+			}
+			if c.note != "" {
+				notes = []string{about + c.note}
+			}
+			if !slices.Equal(j.Reasons, reasons) {
+				t.Errorf("Reasons = %q, want %q", j.Reasons, reasons)
+			}
+			if !slices.Equal(j.Notes, notes) {
+				t.Errorf("Notes = %q, want %q", j.Notes, notes)
+			}
+			if mx := row(t, j, "MI1 "+set+":", "maximul"); mx.Value != "1,90 s" {
+				t.Errorf("the set's max is %s, want 1,90 s: the O17-off run stays outside it", mx.Value)
 			}
 		})
 	}
 
-	t.Run("two O17-off runs name the failed one", func(t *testing.T) {
+	t.Run("two O17-off runs name the run of the loss shown", func(t *testing.T) {
 		runs := allSets(t)
 		again := *o17Run(t, runs, set)
 		again.RunID += "-b"
+		again.Streams = slices.Clone(again.Streams)
+		setStreamLoss(&again, LowBitrateStream, 3500)
 		again.Hub04Clear = false
 		runs[set] = append(runs[set], again)
 		j := Judge(envelopes(runs))
-		wantVerdict(t, j, results.Pass)
-		if r, want := o17RowOf(t, j, set), "3,00 s; rularea "+set+"-21-b: HUB-04: octeți video în clar pe disc"; passes(r) || r.Value != want {
-			t.Errorf("O17-off row = %+v, want %q, failed", r, want)
+		wantVerdict(t, j, results.Fail)
+		want := "3,50 s (rularea " + set + "-21-b); rularea " + set + "-21-b: HUB-04: octeți video în clar pe disc"
+		if r := o17RowOf(t, j, set); passes(r) || r.Value != want || r.Limit != "≤ 4 s" {
+			t.Errorf("O17-off row = %+v, want %q ≤ 4 s, failed", r, want)
 		}
-		reasonsMention(t, j, "informativ, în afara G10: "+set+": rularea "+set+"-21-b,", "HUB-04")
+		if want := []string{set + ": " + O17OffLabel + ": rularea " + set + "-21-b: HUB-04: octeți video în clar pe disc"}; !slices.Equal(j.Reasons, want) {
+			t.Errorf("Reasons = %q, want %q", j.Reasons, want)
+		}
+
+		setStreamLoss(o17Run(t, runs, set), LowBitrateStream, 4200)
+		j = Judge(envelopes(runs))
+		if r, want := o17RowOf(t, j, set), "4,20 s (rularea "+set+"-21); rularea "+set+"-21-b: HUB-04"; passes(r) || !strings.HasPrefix(r.Value, want) {
+			t.Errorf("O17-off row = %+v, want it to start with %q", r, want)
+		}
+		if want := []string{set + ": " + O17OffLabel + ": rularea " + set + "-21: cam99_main a pierdut 4,20 s, peste limita de 4 s"}; !slices.Equal(j.Notes, want) {
+			t.Errorf("Notes = %q, want %q", j.Notes, want)
+		}
 	})
 }
 
@@ -467,6 +648,49 @@ func TestMI1_Judge_DedupsRunIDs(t *testing.T) {
 	j := Judge(envelopes(runs))
 	wantVerdict(t, j, results.Incomplete)
 	reasonsMention(t, j, SetPiSysrq)
+}
+
+// TestMI1_Judge_DedupKeepsTheCopyThatCounts (G15): runs are the same when
+// their id and attempt are; of two copies, the one that counts is kept over
+// an invalid one, whatever their order. A redo under the same id with
+// another attempt is another run.
+func TestMI1_Judge_DedupKeepsTheCopyThatCounts(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		attempt int
+	}{{"a copy of the same attempt", 1}, {"a redo under the same id", 2}} {
+		for _, invalidFirst := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, invalid first %v", c.name, invalidFirst), func(t *testing.T) {
+				runs := allSets(t)
+				valid := &runs[SetPCKill9][5]
+				invalid := *valid
+				invalid.Valid, invalid.InvalidReason = false, "oprire în afara ferestrei"
+				valid.Attempt = c.attempt
+				at := 6
+				if invalidFirst {
+					at = 5
+				}
+				runs[SetPCKill9] = slices.Insert(runs[SetPCKill9], at, invalid)
+				j := Judge(envelopes(runs))
+				wantVerdict(t, j, results.Pass)
+				if f := row(t, j, "MI1 "+SetPCKill9+":", "eșuate"); f.Value != "0 din 20" {
+					t.Errorf("failed-runs row = %+v, want 0 din 20", f)
+				}
+			})
+		}
+	}
+
+	t.Run("two counted attempts under one id are two runs", func(t *testing.T) {
+		runs := allSets(t)
+		again := runs[SetPCKill9][5]
+		again.Attempt = 2
+		runs[SetPCKill9] = append(runs[SetPCKill9], again)
+		j := Judge(envelopes(runs))
+		wantVerdict(t, j, results.Incomplete)
+		if want := []string{SetPCKill9 + ": 21 de rulări valide, nu 20"}; !slices.Equal(j.Reasons, want) {
+			t.Errorf("Reasons = %q, want %q", j.Reasons, want)
+		}
+	})
 }
 
 // TestMI1_InvalidRealCut_IsRedoneWithSameSlot (Review Focus 1, G12): an

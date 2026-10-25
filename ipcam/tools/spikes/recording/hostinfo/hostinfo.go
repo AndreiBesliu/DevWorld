@@ -66,8 +66,10 @@ type Options struct {
 	// /proc/device-tree/model. Only Linux has one.
 	DeviceTree string
 	// In and Out are the owner's console for an unknown model; with In nil,
-	// nobody is asked and the model stays unknown, as in the lab.
-	In  io.Reader
+	// nobody is asked and the model stays unknown, as in the lab. The prompt
+	// reads one line of In, so recspike shares In with its later prompts on
+	// the same input (G16's «Scrieți DA»).
+	In  *bufio.Reader
 	Out io.Writer
 }
 
@@ -132,24 +134,27 @@ func fromDeviceTree(ctx context.Context, hub, raw string, m *results.PiModelInfo
 }
 
 // askCount asks the owner for a camera count until it is 1 to 16; Enter,
-// or the end of the input, is 1.
-func askCount(in io.Reader, out io.Writer) int {
+// or the end of the input, is 1. It reads in a line at a time and no
+// further than its answer.
+func askCount(in *bufio.Reader, out io.Writer) int {
 	if out == nil {
 		out = io.Discard
 	}
-	lines := bufio.NewScanner(in)
 	_, _ = fmt.Fprint(out, askCameras)
-	for lines.Scan() {
-		answer := strings.TrimSpace(lines.Text())
+	for {
+		line, readErr := in.ReadString('\n')
+		answer := strings.TrimSpace(line)
 		if answer == "" {
 			return 1
 		}
 		if n, err := strconv.Atoi(answer); err == nil && n >= 1 && n <= maxCameras {
 			return n
 		}
+		if readErr != nil { // the end of the input after a wrong answer
+			return 1
+		}
 		_, _ = fmt.Fprint(out, askAgain)
 	}
-	return 1
 }
 
 // runHub runs ipcam-hub with args and returns its stdout; a failure quotes

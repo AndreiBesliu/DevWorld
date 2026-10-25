@@ -98,7 +98,7 @@ type Event struct {
 }
 
 // Beacon is where the run's liveness beacon goes: the controller's beacon
-// address (host:port, UDP) and the run.
+// address (host:port, IPv4 UDP, R08) and the run.
 type Beacon struct {
 	Addr, RunID string
 }
@@ -114,12 +114,16 @@ type Options struct {
 	// goroutine that reads them.
 	OnEvent func(Event)
 	// Beacon, when set, is beaconed from the child's `ready` until it exits.
+	// Start dials its address and fails when it cannot.
 	Beacon *Beacon
 }
 
 // ErrExited is returned when the child has exited: before an event that a
 // caller waits for, or before a kill.
 var ErrExited = errors.New("hubproc: ipcam-hub exited")
+
+// maxEventLine bounds one event line; ipcam-hub's are far shorter.
+const maxEventLine = 1 << 20
 
 // Hub is one ipcam-hub child.
 type Hub struct {
@@ -136,6 +140,7 @@ type Hub struct {
 	mu        sync.Mutex
 	changed   chan struct{} // closed and replaced at each event and at EOF
 	eof       bool          // stdout ended
+	readErr   error         // the events could not be read; stdout is drained
 	current   map[string]Event
 	recording map[jobKey]time.Time
 }
@@ -143,11 +148,19 @@ type Hub struct {
 type jobKey struct{ cam, profile string }
 
 // Start starts `ipcam-hub run --config <Config>`; the jobs of run.json are
-// the ones whose `recording` events WaitRecording waits for.
+// the ones whose `recording` events WaitRecording waits for. With a Beacon,
+// it first resolves and dials the beacon's address, and an address that
+// does not work is its error: no child runs without its beacon.
 func Start(o Options) (*Hub, error) {
 	cfg, err := ReadConfig(o.Config)
 	if err != nil {
 		return nil, err
+	}
+	var beaconConn net.Conn
+	if o.Beacon != nil {
+		if beaconConn, err = net.Dial("udp4", o.Beacon.Addr); err != nil {
+			return nil, fmt.Errorf("hubproc: beacon: %w", err)
+		}
 	}
 	h := &Hub{
 		opts: o, exited: make(chan struct{}), exitCode: -1, beaconDone: make(chan struct{}),
@@ -162,6 +175,7 @@ func Start(o Options) (*Hub, error) {
 	// held an end.
 	r, w, err := os.Pipe()
 	if err != nil {
+		closeConn(beaconConn)
 		return nil, err
 	}
 	h.cmd = exec.Command(o.Binary, "run", "--config", o.Config) //nolint:gosec // recspike's own ipcam-hub
@@ -169,6 +183,7 @@ func Start(o Options) (*Hub, error) {
 	ownGroup(h.cmd)
 	if err := h.cmd.Start(); err != nil {
 		_, _ = r.Close(), w.Close()
+		closeConn(beaconConn)
 		return nil, err
 	}
 	_ = w.Close() // the child holds the write end
@@ -185,19 +200,29 @@ func Start(o Options) (*Hub, error) {
 	}()
 	go func() {
 		defer close(h.beaconDone)
-		if o.Beacon != nil {
-			h.beacon(beaconCtx, *o.Beacon)
+		if beaconConn != nil {
+			h.beacon(beaconCtx, beaconConn, o.Beacon.RunID)
 		}
 	}()
 	return h, nil
 }
 
+// closeConn closes the beacon's connection, if any.
+func closeConn(c net.Conn) {
+	if c != nil {
+		_ = c.Close()
+	}
+}
+
 // read parses the child's events until its stdout ends. A line that is not
-// an event is dropped.
+// an event is dropped. When the events cannot be read (a read error, or a
+// line longer than maxEventLine), the error is every later wait's, and read
+// keeps draining stdout until it ends, so that ipcam-hub never writes into
+// a closed pipe (EPIPE; on Linux, SIGPIPE would kill it).
 func (h *Hub) read(r *os.File) {
 	defer func() { _ = r.Close() }()
 	lines := bufio.NewScanner(r)
-	lines.Buffer(make([]byte, 64<<10), 1<<20)
+	lines.Buffer(make([]byte, 64<<10), maxEventLine)
 	for lines.Scan() {
 		var e Event
 		if err := json.Unmarshal(lines.Bytes(), &e); err != nil || e.Type == "" {
@@ -208,6 +233,13 @@ func (h *Hub) read(r *os.File) {
 		if h.opts.OnEvent != nil {
 			h.opts.OnEvent(e)
 		}
+	}
+	if err := lines.Err(); err != nil {
+		h.mu.Lock()
+		h.readErr = fmt.Errorf("hubproc: reading ipcam-hub's events: %w", err)
+		h.signal()
+		h.mu.Unlock()
+		_, _ = io.Copy(io.Discard, r)
 	}
 	h.mu.Lock()
 	h.eof = true
@@ -239,13 +271,16 @@ func (h *Hub) signal() {
 }
 
 // wait calls check under h.mu at each change until it reports done, the
-// child's stdout ends, or ctx is done.
+// child's stdout ends (ErrExited), or ctx is done. Once the events could not
+// be read, it returns that error instead, the child running or not.
 func (h *Hub) wait(ctx context.Context, check func() bool) error {
 	for {
 		h.mu.Lock()
-		done, eof, changed := check(), h.eof, h.changed
+		readErr, done, eof, changed := h.readErr, check(), h.eof, h.changed
 		h.mu.Unlock()
 		switch {
+		case readErr != nil:
+			return readErr
 		case done:
 			return nil
 		case eof:
@@ -261,7 +296,8 @@ func (h *Hub) wait(ctx context.Context, check func() bool) error {
 
 // WaitEvent waits until the current event of typ satisfies ok (nil: any)
 // and returns it. The current event is the latest of its type, and for
-// reconcile the one with the highest seq.
+// reconcile the one with the highest seq. It gives ErrExited when stdout
+// ended first, and the read error once the events could not be read.
 func (h *Hub) WaitEvent(ctx context.Context, typ string, ok func(Event) bool) (Event, error) {
 	var found Event
 	err := h.wait(ctx, func() bool {
@@ -306,22 +342,19 @@ func (h *Hub) ResumeMs(ctx context.Context, killedAt time.Time) (int64, error) {
 	return last.Sub(killedAt).Milliseconds(), nil
 }
 
-// beacon sends the run's beacon every controller.BeaconEvery from the
-// child's `ready` until ctx is done: Kill and Stop end it before they act,
-// and the child's exit ends it. It never starts again under the run.
-func (h *Hub) beacon(ctx context.Context, b Beacon) {
+// beacon sends the beacon of runID on conn every controller.BeaconEvery
+// from the child's `ready` until ctx is done, and closes conn: Kill and Stop
+// end it before they act, and the child's exit ends it. It never starts
+// again under the run.
+func (h *Hub) beacon(ctx context.Context, conn net.Conn, runID string) {
+	defer closeConn(conn)
 	if _, err := h.WaitEvent(ctx, "ready", nil); err != nil {
 		return
 	}
-	conn, err := net.Dial("udp4", b.Addr)
-	if err != nil {
-		return
-	}
-	defer func() { _ = conn.Close() }()
 	tick := time.NewTicker(controller.BeaconEvery)
 	defer tick.Stop()
 	for seq := uint64(0); ctx.Err() == nil; seq++ {
-		_, _ = conn.Write(link.BeaconPacket(b.RunID, seq)) // a lost beacon is the controller's to notice
+		_, _ = conn.Write(link.BeaconPacket(runID, seq)) // a lost beacon is the controller's to notice
 		select {
 		case <-ctx.Done():
 		case <-tick.C:
