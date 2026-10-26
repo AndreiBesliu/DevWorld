@@ -183,14 +183,22 @@ func (d *Driver) announce(ctx context.Context, s *session, st *RunState, cur *Cu
 // at most maxReconnects times, and the new link hears again: what the old
 // one may have lost. A real set's drop ends it, as before (reconnect).
 func (d *Driver) deliver(ctx context.Context, s *session, st *RunState, msgs, again []link.Message) error {
-	for reconnects := 0; ; reconnects++ {
+	left := maxReconnects
+	return d.deliverWithin(ctx, s, st, msgs, again, &left)
+}
+
+// deliverWithin is deliver within the reconnections that its wait has
+// left, which it spends.
+func (d *Driver) deliverWithin(ctx context.Context, s *session, st *RunState, msgs, again []link.Message, left *int) error {
+	for {
 		err := errLinkDown
 		if s.up() {
 			err = s.sendAll(msgs)
 		}
-		if err == nil || !errors.Is(err, errLinkDown) || reconnects == maxReconnects {
+		if err == nil || !errors.Is(err, errLinkDown) || *left == 0 {
 			return err
 		}
+		*left--
 		if err := d.reconnect(ctx, s, st, err); err != nil {
 			return err
 		}
@@ -203,9 +211,11 @@ func (d *Driver) deliver(ctx context.Context, s *session, st *RunState, msgs, ag
 // ignored: it never stops this run (C16). In an unattended set, a link that
 // drops meanwhile is connected again, and the run announced again on it,
 // run_start then ready: the controller delivers the cut there, the same
-// cut if it went out on the old link.
+// cut if it went out on the old link. The wait connects again at most
+// maxReconnects times, its announcements' reconnections included.
 func (d *Driver) awaitCut(ctx context.Context, s *session, st *RunState, cur *CurrentRun, vol Volume, hub *hubproc.Hub) error {
-	for reconnects := 0; ; {
+	left := maxReconnects
+	for {
 		var m link.Message
 		select {
 		case <-ctx.Done():
@@ -222,17 +232,18 @@ func (d *Driver) awaitCut(ctx context.Context, s *session, st *RunState, cur *Cu
 			if ok {
 				cause = r.err
 			}
-			if reconnects++; reconnects > maxReconnects {
+			if left == 0 {
 				stopHub(hub)
 				return cause
 			}
+			left--
 			if err := d.reconnect(ctx, s, st, cause); err != nil {
 				stopHub(hub)
 				return err
 			}
 			start := runStart(st, cur)
 			whole := []link.Message{start, link.Ready{RunID: cur.RunID}}
-			if err := d.deliver(ctx, s, st, whole, whole); err != nil {
+			if err := d.deliverWithin(ctx, s, st, whole, whole, &left); err != nil {
 				stopHub(hub)
 				return err
 			}

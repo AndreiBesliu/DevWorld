@@ -47,10 +47,11 @@ func answerPull(ctx context.Context, s *session, dir string, out io.Writer) erro
 	}
 }
 
-// geteuid and fileOwner are the system's; tests replace them.
+// geteuid, fileOwner and dialLink are the system's; tests replace them.
 var (
 	geteuid   = os.Geteuid
 	fileOwner = ownerUID
+	dialLink  = link.Dial
 )
 
 // pushNeedsSudo is push's answer when root owns the results.
@@ -205,7 +206,7 @@ func dialSession(ctx context.Context, addr, host string, retry time.Duration) (*
 	deadline := time.Now().Add(retry)
 	for {
 		dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		c, err := link.Dial(dialCtx, addr)
+		c, err := dialLink(dialCtx, addr)
 		cancel()
 		if err == nil {
 			s := &session{c: c, in: make(chan received, 16), closed: make(chan struct{}), broken: make(chan struct{})}

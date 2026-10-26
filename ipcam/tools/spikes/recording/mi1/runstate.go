@@ -139,7 +139,10 @@ func loadRunStates(path string) (*runStates, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(states); err != nil {
-		return nil, fmt.Errorf("mi1: %s: %w", filepath.Base(path), err)
+		// The file of an older recspike, one set's state, or a damaged one:
+		// every load and save refuses it, so the owner hears how to start over.
+		return nil, fmt.Errorf("starea probelor nu se poate citi (%s: %w); poate a rămas de la o versiune mai veche a recspike. "+
+			"Ca să începeți probele de la capăt, ștergeți dosarul %s", filepath.Base(path), err, filepath.Join("results", "state"))
 	}
 	if states.Sets == nil {
 		states.Sets = map[string]*RunState{}

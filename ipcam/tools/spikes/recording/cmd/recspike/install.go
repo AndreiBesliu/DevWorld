@@ -327,26 +327,30 @@ func (a autostart) startTimeService() error {
 }
 
 // saveTimeService saves the time service's start type and triggers in
-// savedStart, unless an install saved them already.
+// savedStart, unless an install saved them already. A file saved before
+// C1-R16b holds the start type only, and that install left the triggers on
+// the service: the triggers that it has now are added to the file, which
+// keeps its start type, so that uninstall puts both back.
 func (a autostart) saveTimeService() error {
 	const cannotSave = "nu pot salva setările de dinainte ale serviciului de timp Windows"
-	if _, err := os.Stat(a.savedStart); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
+	saved, found, err := a.loadSavedTimeService()
+	switch {
+	case err != nil:
 		return fmt.Errorf("%s: %w", cannotSave, err)
+	case found && saved.Triggers != nil:
+		return nil
+	case !found:
+		if saved.StartType, err = a.timeService.StartType(); err != nil {
+			return fmt.Errorf("nu pot citi serviciul de timp Windows: %w", err)
+		}
 	}
-	startType, err := a.timeService.StartType()
-	if err != nil {
-		return fmt.Errorf("nu pot citi serviciul de timp Windows: %w", err)
-	}
-	triggers, err := a.timeService.Triggers()
-	if err != nil {
+	if saved.Triggers, err = a.timeService.Triggers(); err != nil {
 		return fmt.Errorf("nu pot citi declanșatoarele serviciului de timp Windows: %w", err)
 	}
-	if triggers == nil {
-		triggers = []mi1.ServiceTrigger{} // saved as none, not as a file without triggers
+	if saved.Triggers == nil {
+		saved.Triggers = []mi1.ServiceTrigger{} // saved as none, not as a file without triggers
 	}
-	data, err := json.Marshal(savedTimeService{StartType: startType, Triggers: triggers})
+	data, err := json.Marshal(saved)
 	if err == nil {
 		err = os.MkdirAll(filepath.Dir(a.savedStart), 0o700)
 	}
@@ -359,20 +363,29 @@ func (a autostart) saveTimeService() error {
 	return nil
 }
 
+// loadSavedTimeService reads the settings that an install saved; found is
+// false when there is no file.
+func (a autostart) loadSavedTimeService() (saved savedTimeService, found bool, err error) {
+	data, err := os.ReadFile(a.savedStart)
+	if errors.Is(err, os.ErrNotExist) {
+		return saved, false, nil
+	}
+	if err == nil {
+		err = json.Unmarshal(data, &saved)
+	}
+	return saved, err == nil, err
+}
+
 // restoreTimeService gives the time service back the start type and the
 // triggers that install saved; without a saved file, install changed
 // nothing. A file saved before C1-R16b leaves the triggers as they are.
 func (a autostart) restoreTimeService() error {
-	data, err := os.ReadFile(a.savedStart)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	var saved savedTimeService
-	if err == nil {
-		err = json.Unmarshal(data, &saved)
-	}
+	saved, found, err := a.loadSavedTimeService()
 	if err != nil {
 		return fmt.Errorf("nu pot citi setările salvate ale serviciului de timp Windows (%s): %w", filepath.Base(a.savedStart), err)
+	}
+	if !found {
+		return nil
 	}
 	if err := a.timeService.SetStartType(saved.StartType); err != nil {
 		return fmt.Errorf("nu pot pune la loc pornirea serviciului de timp Windows: %w", err)

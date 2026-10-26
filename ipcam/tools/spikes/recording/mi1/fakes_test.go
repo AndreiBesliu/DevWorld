@@ -32,15 +32,19 @@ import (
 // --config <run.json> --stop-on-stdin-eof" appends "hub <pid>" to the file
 // that fakeLogEnv names, creates one new segment file per job under its
 // data directory (named by the time, so that a later start's sorts later),
-// prints a final reconcile, ready (after the delay that fakeReadyEnv says,
-// if any), each job's `recording` and a verify, and on the end of its stdin
-// appends "stopped" and exits 0. It ignores signals: only a kill ends it
-// otherwise.
+// prints a final reconcile, ready (once the file that fakeReadyAfterEnv
+// names exists, if it names one), each job's `recording` and a verify, and
+// on the end of its stdin appends "stopped" and exits 0. It ignores
+// signals: only a kill ends it otherwise.
 const (
-	fakeHubEnv   = "MI1_FAKE_HUB"
-	fakeLogEnv   = "MI1_FAKE_LOG"
-	fakeReadyEnv = "MI1_FAKE_READY_DELAY"
+	fakeHubEnv        = "MI1_FAKE_HUB"
+	fakeLogEnv        = "MI1_FAKE_LOG"
+	fakeReadyAfterEnv = "MI1_FAKE_READY_AFTER"
 )
+
+// fakeReadyWait bounds the fake ipcam-hub's wait for fakeReadyAfterEnv's
+// file.
+const fakeReadyWait = 30 * time.Second
 
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeHubEnv) == "1" {
@@ -84,8 +88,16 @@ func fakeHub(args []string) int {
 		}
 	}
 	emit(map[string]any{"type": "reconcile", "seq": 1, "final": true, "aborted": false, "unreadable": 0, "tornParts": 0, "catalogMismatches": 0})
-	if delay, err := time.ParseDuration(os.Getenv(fakeReadyEnv)); err == nil {
-		time.Sleep(delay)
+	if after := os.Getenv(fakeReadyAfterEnv); after != "" {
+		for deadline := time.Now().Add(fakeReadyWait); ; time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(after); err == nil { //nolint:gosec // the test's own signal file
+				break
+			}
+			if time.Now().After(deadline) {
+				fmt.Fprintln(os.Stderr, "fake ipcam-hub: no", after, "after", fakeReadyWait)
+				return 1
+			}
+		}
 	}
 	emit(map[string]any{"type": "ready", "jobs": []any{}})
 	time.Sleep(50 * time.Millisecond)
@@ -163,7 +175,7 @@ func killFakeHubs(t *testing.T, path string) {
 // first loseStarts run_starts and drops the link at their run's ready, as
 // a link that died after the run_start would, and the first dropAtStarts
 // run_starts with the link at once, as a link that died as recspike sent
-// it; like reccontroller, it refuses the ready of a run that it never kept
+// it, then creates the file droppedSignal, if set; like reccontroller, it refuses the ready of a run that it never kept
 // (unknownRun). dropLinks drops every link it has. Every message it gets is
 // also an event.
 type fakeController struct {
@@ -177,17 +189,18 @@ type fakeController struct {
 	verdict     func(start link.RunStart, r link.Report) results.Run
 	dropReports int
 
-	mu           sync.Mutex
-	loseStarts   int
-	dropAtStarts int
-	lost         map[string]bool // the run_starts it lost, until their ready
-	conns        map[*link.Conn]bool
-	hellos       int
-	starts       []link.RunStart
-	reports      []link.Report
-	refused      []link.Refused
-	beacons      map[uint64][]uint64 // each run's beacon sequence numbers, as they arrived
-	events       chan string
+	mu            sync.Mutex
+	loseStarts    int
+	dropAtStarts  int
+	droppedSignal string
+	lost          map[string]bool // the run_starts it lost, until their ready
+	conns         map[*link.Conn]bool
+	hellos        int
+	starts        []link.RunStart
+	reports       []link.Report
+	refused       []link.Refused
+	beacons       map[uint64][]uint64 // each run's beacon sequence numbers, as they arrived
+	events        chan string
 }
 
 // unknownRun is reccontroller's refusal of a ready for a run that it does
@@ -271,9 +284,16 @@ func (f *fakeController) serve(c *link.Conn) {
 			f.mu.Lock()
 			if f.dropAtStarts > 0 {
 				f.dropAtStarts--
+				signal := f.droppedSignal
 				f.mu.Unlock()
+				_ = c.Close() // the link dies with the run_start
+				if signal != "" {
+					if err := os.WriteFile(signal, nil, 0o600); err != nil {
+						f.t.Errorf("fake controller: %v", err)
+					}
+				}
 				f.event("dropped at run_start " + m.RunID)
-				return // the link dies with the run_start
+				return
 			}
 			lose := f.loseStarts > 0
 			if lose {

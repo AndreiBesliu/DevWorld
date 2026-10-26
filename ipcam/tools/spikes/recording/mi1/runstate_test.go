@@ -82,3 +82,29 @@ func TestRunState_ResumesAfterReboot(t *testing.T) {
 		t.Errorf("temporary files left: %v", left)
 	}
 }
+
+// TestRunState_OldFormat_SaysTheStateFolderCanBeDeleted (Task 7.2c
+// review): a run-state.json of an older recspike (one set's state, not the
+// sets by results set) refuses every load and save; the owner reads in
+// Romanian that results/state/ can be deleted to start over.
+func TestRunState_OldFormat_SaysTheStateFolderCanBeDeleted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "results", "state", "run-state.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"set":"pi-sysrq","mode":"automated","kind":"sysrq","done":[]}` + "\n"
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	folder := filepath.Join("results", "state")
+	_, loadErr := LoadRunState(path)
+	saveErr := SaveRunState(path, &RunState{Set: SetPiKill9, Mode: ModeAutomated, Kind: "kill9"})
+	for name, err := range map[string]error{"LoadRunState": loadErr, "SaveRunState": saveErr} {
+		if err == nil || !strings.HasPrefix(err.Error(), "starea probelor") || !strings.Contains(err.Error(), "ștergeți dosarul "+folder) {
+			t.Errorf("%s of an old run state = %v; want a Romanian line that says the folder %s can be deleted", name, err, folder)
+		}
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != old { //nolint:gosec // the test's file
+		t.Errorf("the old run state changed: %q, %v", data, err)
+	}
+}

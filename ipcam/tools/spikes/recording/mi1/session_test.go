@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1085,9 +1086,12 @@ func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 
 	t.Run("while ipcam-hub starts, the link dead with the run_start", func(t *testing.T) {
 		r := newRig(t, "pc")
-		t.Setenv(fakeReadyEnv, "300ms") // recspike sees the drop before ipcam-hub is ready
+		// ipcam-hub is ready only once the controller has closed the link,
+		// so recspike sees the drop before it sends the ready.
+		dropped := filepath.Join(t.TempDir(), "dropped")
+		t.Setenv(fakeReadyAfterEnv, dropped)
 		r.f.mu.Lock()
-		r.f.dropAtStarts = 1
+		r.f.dropAtStarts, r.f.droppedSignal = 1, dropped
 		r.f.mu.Unlock()
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -1263,6 +1267,90 @@ func TestSession_ReconnectsWithinItsBounds(t *testing.T) {
 			}
 			if again := strings.Count(r.out.String(), "Legătura cu controlorul s-a refăcut."); again != tc.hellos-1 {
 				t.Errorf("screen:\n%s\nwant %d reconnections", r.out.String(), tc.hellos-1)
+			}
+		})
+	}
+}
+
+// mutedConn is a link whose writes fail once the controller's first bytes
+// (the session) have been read: the host's hello goes out, and every
+// message after it fails as recspike sends it.
+type mutedConn struct {
+	net.Conn
+	read atomic.Bool
+}
+
+func (c *mutedConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		c.read.Store(true)
+	}
+	return n, err
+}
+
+func (c *mutedConn) Write(b []byte) (int, error) {
+	if c.read.Load() {
+		return 0, errors.New("muted link")
+	}
+	return c.Conn.Write(b)
+}
+
+// muteLinksFrom makes the links of the nth dial (1-based) and of every
+// later one mutedConns.
+func muteLinksFrom(t *testing.T, n int64) {
+	t.Helper()
+	var dials atomic.Int64
+	system := dialLink
+	dialLink = func(ctx context.Context, addr string) (*link.Conn, error) {
+		var d net.Dialer
+		c, err := d.DialContext(ctx, "tcp4", addr)
+		if err != nil {
+			return nil, err
+		}
+		if dials.Add(1) >= n {
+			return link.NewConn(&mutedConn{Conn: c}), nil
+		}
+		return link.NewConn(c), nil
+	}
+	t.Cleanup(func() { dialLink = system })
+}
+
+// TestSession_ReconnectBudgets (Task 7.2c review, M4): in an unattended
+// set, each wait connects the link again at most maxReconnects times, then
+// the set ends on the drop, in Romanian: a delivery whose every send fails
+// (the run_start), a report whose verdict never comes, and the wait for the
+// cut, whose own announcements on each new link fail too: they share the
+// wait's reconnections, so one wait never makes more than maxReconnects.
+func TestSession_ReconnectBudgets(t *testing.T) {
+	o := SetOptions{Set: SetPCKill9, Mode: ModeAutomated, Kind: "kill9"}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, r *rig)
+		log   []string
+	}{
+		{"a delivery whose sends fail", func(t *testing.T, _ *rig) { muteLinksFrom(t, 1) }, nil},
+		{"a report without its verdict", func(_ *testing.T, r *rig) { r.f.dropReports = 1000 }, []string{"hub", "hub", "stopped"}},
+		{"the wait for the cut, its announcements failing", func(t *testing.T, r *rig) {
+			r.f.onReady = func(c *link.Conn, _ link.RunStart) { _ = c.Close() } // the first link drops at the ready
+			muteLinksFrom(t, 2)
+		}, []string{"hub", "stopped"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, "pc")
+			tc.setup(t, r)
+			opts := o
+			opts.Window = windowAroundNow(t)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+			defer cancel()
+			err := r.driver(t).RunSet(ctx, opts)
+			if !errors.Is(err, errLinkDown) || !strings.HasPrefix(err.Error(), "legătura cu controlorul s-a întrerupt") {
+				t.Errorf("RunSet = %v, want the set ended on the drop, in Romanian", err)
+			}
+			if n := r.f.helloCount(); n != 1+maxReconnects {
+				t.Errorf("the host said hello %d times, want %d: the first link and %d reconnections", n, 1+maxReconnects, maxReconnects)
+			}
+			if got := logEntries(t, r.log); !slices.Equal(got, tc.log) {
+				t.Errorf("fake log = %v, want %v", got, tc.log)
 			}
 		})
 	}

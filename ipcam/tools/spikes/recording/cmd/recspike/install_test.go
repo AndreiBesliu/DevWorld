@@ -369,6 +369,35 @@ func TestInstall_TimeServiceTriggersRemovedThenRestored(t *testing.T) {
 	}
 }
 
+// TestInstall_OverAFileWithoutTriggers_KeepsThemForUninstall (Task 7.2c
+// review): an install from before C1-R16b saved the start type only and
+// left the triggers on the service. An install over that file removes the
+// triggers, so it first adds them to the file, which keeps its start type:
+// uninstall then puts back both, as they were before the first install.
+func TestInstall_OverAFileWithoutTriggers_KeepsThemForUninstall(t *testing.T) {
+	a, f, _ := newAutostart(t, "windows", true)
+	if err := os.MkdirAll(filepath.Dir(a.savedStart), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.savedStart, []byte(`{"startType":3}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.time.startType = serviceAutoStart // the old install's
+	if err := a.install(`C:\proba\recspike.exe`); err != nil {
+		t.Fatalf("install over a file without triggers: %v", err)
+	}
+	if len(f.time.triggers) != 0 {
+		t.Errorf("after install: triggers %+v, want none", f.time.triggers)
+	}
+	if err := a.uninstall(); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !reflect.DeepEqual(f.time.triggers, workgroupTriggers()) || f.time.startType != serviceDemandStart {
+		t.Errorf("after uninstall: triggers %+v, start type %d; want the triggers %+v and the start type %d of before the first install",
+			f.time.triggers, f.time.startType, workgroupTriggers(), serviceDemandStart)
+	}
+}
+
 // TestInstall_TimeServiceSettingsErrorsAreRomanian (item 9): when install
 // cannot save the time service's settings, or uninstall cannot read them
 // back, the owner reads why in Romanian, with the system's error after it.
