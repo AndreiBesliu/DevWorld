@@ -185,7 +185,8 @@ func readTree(t *testing.T, dir string) map[string][]byte {
 }
 
 // TestLink_PullResultsTar (G15): the far side's results folder arrives
-// byte-equal, nested folders and binary files included.
+// byte-equal, nested folders and binary files included, without its lock
+// files.
 func TestLink_PullResultsTar(t *testing.T) {
 	controllerEnd, hostEnd := pair(t)
 	results := t.TempDir()
@@ -198,6 +199,9 @@ func TestLink_PullResultsTar(t *testing.T) {
 		"empty.txt":                    {},
 	}
 	writeTree(t, results, files)
+	// The run state's lock is no result, and Windows keeps a locked file
+	// unreadable: it stays behind.
+	writeTree(t, results, map[string][]byte{"state/run-state.lock": {}})
 
 	served := make(chan error, 1)
 	go func() {

@@ -105,8 +105,10 @@ type CurrentRun struct {
 	Hub04FoundAtStop bool `json:"hub04FoundAtStop,omitempty"`
 
 	// trace is what this recspike saw of ipcam-hub around the stop, for the
-	// diagnostics of a loss over the limit; it is not kept across a reboot.
+	// diagnostics of a loss over the limit; log is the run's open
+	// ipcam-hub log. Neither is kept across a reboot.
 	trace *cutTrace
+	log   *os.File
 }
 
 // runStates is the run state file: each set's state by results set, and
@@ -198,8 +200,9 @@ func SaveRunState(path string, st *RunState) error {
 }
 
 // syncDir makes a folder's entries durable; Windows has no directory fsync
-// (NTFS journals its entries).
-func syncDir(dir string) error {
+// (NTFS journals its entries). Tests replace it, and syncPath, to see what
+// recspike syncs.
+var syncDir = func(dir string) error {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
@@ -208,6 +211,35 @@ func syncDir(dir string) error {
 		return err
 	}
 	return errors.Join(d.Sync(), d.Close())
+}
+
+// syncPath makes the file at path durable: its bytes and its size reach
+// the disk (fsync, FlushFileBuffers).
+var syncPath = func(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // recspike's own file
+	if err != nil {
+		return err
+	}
+	return errors.Join(f.Sync(), f.Close())
+}
+
+// writeSynced writes data to the file at path and syncs it.
+func writeSynced(path string, data []byte, perm os.FileMode) error {
+	if err := os.WriteFile(path, data, perm); err != nil {
+		return err
+	}
+	return syncPath(path)
+}
+
+// WriteDurably writes a file that recspike reads again after a reboot,
+// such as the controller's address: the file is synced, and so is its
+// folder's entry, so that a stop that comes before the system writes them
+// out leaves neither empty nor gone.
+func WriteDurably(path string, data []byte, perm os.FileMode) error {
+	if err := writeSynced(path, data, perm); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
 }
 
 // runs is the runs done, as NextRun and NextRealCut take them.

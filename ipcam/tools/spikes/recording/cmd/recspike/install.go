@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -74,7 +75,8 @@ func taskXML(exe, dir, userSID string) string {
 }
 
 // systemdUnit is the Pi's boot service (G14): `recspike resume` as root,
-// once the network and the clock are up.
+// once the network and the clock are up. Its paths are Linux paths, on
+// every OS that builds it.
 func systemdUnit(exe string) string {
 	command := exe
 	if strings.ContainsAny(exe, " \t") {
@@ -88,7 +90,7 @@ After=network-online.target time-sync.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=` + filepath.Dir(exe) + `
+WorkingDirectory=` + path.Dir(exe) + `
 ExecStart=` + command + ` resume
 
 [Install]

@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -163,7 +164,8 @@ func (c *Conn) SendResultsTar(dir string) error {
 }
 
 // TarDir packs the regular files under dir, by their slash paths relative to
-// it, in lexical order.
+// it, in lexical order. A lock file (*.lock, the run state's) is no result,
+// and Windows keeps a locked one unreadable: it stays behind.
 func TarDir(dir string) ([]byte, error) {
 	var buf bytes.Buffer
 	w := tar.NewWriter(&buf)
@@ -174,7 +176,7 @@ func TarDir(dir string) ([]byte, error) {
 			}
 			return err
 		}
-		if !d.Type().IsRegular() {
+		if !d.Type().IsRegular() || strings.HasSuffix(d.Name(), ".lock") {
 			return nil
 		}
 		rel, err := filepath.Rel(dir, p)

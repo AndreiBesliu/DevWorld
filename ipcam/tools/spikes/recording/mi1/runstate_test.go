@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
@@ -107,5 +108,71 @@ func TestRunState_OldFormat_SaysTheStateFolderCanBeDeleted(t *testing.T) {
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != old { //nolint:gosec // the test's file
 		t.Errorf("the old run state changed: %q, %v", data, err)
+	}
+}
+
+// recordSyncs records each file and folder that the driver syncs, and
+// still syncs them.
+func recordSyncs(t *testing.T) *[]string {
+	t.Helper()
+	var synced []string
+	realPath, realDir := syncPath, syncDir
+	t.Cleanup(func() { syncPath, syncDir = realPath, realDir })
+	syncPath = func(path string) error {
+		synced = append(synced, "file "+path)
+		return realPath(path)
+	}
+	syncDir = func(dir string) error {
+		synced = append(synced, "folder "+dir)
+		return realDir(dir)
+	}
+	return &synced
+}
+
+// TestWriteRun_TheRunsFilesOutliveAPowerCut (G09, G14): the run's run.json
+// and RI_g, which recspike reads again after the host's reboot, reach the
+// disk before the run starts, and so do the entries of the run's folder and
+// of the folder in work/. Otherwise a stop that comes before the system has
+// written them out, a qemu-reset or sysrq 20 s into a smoke run, leaves
+// run.json empty after the reboot ("hubproc: run.json: EOF" in the
+// mi1-smoke guest).
+func TestWriteRun_TheRunsFilesOutliveAPowerCut(t *testing.T) {
+	synced := recordSyncs(t)
+	work := t.TempDir()
+	d := &Driver{Work: work}
+	cur := &CurrentRun{RunID: "pi-sysrq-01-1", Encrypted: true, PadLowBitrate: true, Streams: []string{MainStream}}
+	vol, err := Dirs{Root: work}.Prepare(t.Context(), cur.RunID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &session{info: link.Session{RTSPBase: "rtsp://127.0.0.1:8554", User: "u", Pass: "p"}, controllerHost: "127.0.0.1"}
+	config, err := d.writeRun(cur, vol, s)
+	if err != nil {
+		t.Fatalf("writeRun: %v", err)
+	}
+	run := filepath.Join(work, cur.RunID)
+	want := []string{"file " + filepath.Join(run, "ri_g.key"), "file " + config, "folder " + run, "folder " + work}
+	if !reflect.DeepEqual(*synced, want) {
+		t.Errorf("synced %q\nwant %q", *synced, want)
+	}
+}
+
+// TestWriteDurably_SyncsTheFileAndItsFolder: a file that recspike reads
+// after a reboot, such as the controller's address, is written, synced and
+// its folder's entry synced.
+func TestWriteDurably_SyncsTheFileAndItsFolder(t *testing.T) {
+	synced := recordSyncs(t)
+	path := filepath.Join(t.TempDir(), "work", "controller")
+	if err := os.Mkdir(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteDurably(path, []byte("192.0.2.1:7081\n"), 0o600); err != nil {
+		t.Fatalf("WriteDurably: %v", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "192.0.2.1:7081\n" { //nolint:gosec // the test's own file
+		t.Errorf("the file holds %q (%v)", data, err)
+	}
+	if want := []string{"file " + path, "folder " + filepath.Dir(path)}; !reflect.DeepEqual(*synced, want) {
+		t.Errorf("synced %q, want %q", *synced, want)
 	}
 }

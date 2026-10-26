@@ -538,7 +538,8 @@ func (d *Driver) report(ctx context.Context, s *session, st *RunState, r link.Re
 	}
 }
 
-// done records the run's verdict in the run state and frees its folder.
+// done records the run's verdict in the run state and frees its folder,
+// once its ipcam-hub log is closed: Windows removes no file that is open.
 func (d *Driver) done(st *RunState, cur *CurrentRun, vol Volume, run results.Run) error {
 	st.Done = append(st.Done, DoneRun{Index: cur.Index, Run: run})
 	st.Current = nil
@@ -549,6 +550,9 @@ func (d *Driver) done(st *RunState, cur *CurrentRun, vol Volume, run results.Run
 		d.say("Rularea %s: validă, pierdere %s.", run.RunID, secondsText(RunLossMs(run)))
 	} else {
 		d.say("Rularea %s: nu contează (%s); se reface.", run.RunID, invalidText(run))
+	}
+	if cur.log != nil {
+		_ = cur.log.Close()
 	}
 	return errors.Join(vol.Release(), os.RemoveAll(d.runDir(cur.RunID)))
 }
@@ -621,9 +625,9 @@ func jobOf(stream string) (cam, profile string) {
 	return cam, profile
 }
 
-// writeRun writes the run's identity and run.json: each stream is a job
-// that pulls the controller's camera, encrypted to a fresh RI_g and RK
-// when the run is (C11, PH0-22); RK's identity is never kept.
+// writeRun writes the run's identity and run.json, durably: each stream is
+// a job that pulls the controller's camera, encrypted to a fresh RI_g and
+// RK when the run is (C11, PH0-22); RK's identity is never kept.
 func (d *Driver) writeRun(cur *CurrentRun, vol Volume, s *session) (string, error) {
 	dir := d.runDir(cur.RunID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -643,7 +647,7 @@ func (d *Driver) writeRun(cur *CurrentRun, vol Volume, s *session) (string, erro
 			return "", err
 		}
 		cfg.IdentityFile = filepath.Join(dir, "ri_g.key")
-		if err := os.WriteFile(cfg.IdentityFile, []byte(riG.String()+"\n"), 0o600); err != nil {
+		if err := writeSynced(cfg.IdentityFile, []byte(riG.String()+"\n"), 0o600); err != nil {
 			return "", err
 		}
 		recipients = []string{riG.Recipient().String(), rk.Recipient().String()}
@@ -658,7 +662,13 @@ func (d *Driver) writeRun(cur *CurrentRun, vol Volume, s *session) (string, erro
 		cfg.Jobs = append(cfg.Jobs, hubproc.Job{Cam: cam, Profile: profile, RestreamURL: u, Recipients: recipients, PadLowBitrate: &pad})
 	}
 	config := filepath.Join(dir, "run.json")
-	return config, hubproc.WriteConfig(config, cfg)
+	if err := hubproc.WriteConfig(config, cfg); err != nil {
+		return "", err
+	}
+	// After a stop, resume reads the run again: its files, and the
+	// entries of its folder and of the folder in work/, must be on the
+	// disk before the run starts, a stop 20 s later included.
+	return config, errors.Join(syncPath(config), syncDir(dir), syncDir(d.Work))
 }
 
 // identity reads the run's RI_g; nil for a clear run.
@@ -680,9 +690,11 @@ func (d *Driver) identity(cur *CurrentRun) (age.Identity, error) {
 
 // openLog opens the run's ipcam-hub log, beside its run.json: ipcam-hub's
 // errors and MediaMTX's lines, of every start of the run. It stays open
-// until the run is finished, as each restart writes to it too.
+// until the run is done, as each restart writes to it too.
 func (d *Driver) openLog(cur *CurrentRun) (*os.File, error) {
-	return os.OpenFile(filepath.Join(d.runDir(cur.RunID), "ipcam-hub.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the run's own folder
+	log, err := os.OpenFile(filepath.Join(d.runDir(cur.RunID), "ipcam-hub.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the run's own folder
+	cur.log = log
+	return log, err
 }
 
 // segmentSuffixes are the names of the segment files that ipcam-hub's

@@ -3,6 +3,7 @@
 package hubproc
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
@@ -19,5 +20,14 @@ func ownGroup(cmd *exec.Cmd) {
 }
 
 // kill ends p at once, as a crash would: os.Process.Kill is
-// TerminateProcess on Windows.
-func kill(p *os.Process) error { return p.Kill() }
+// TerminateProcess on Windows. A child that has ended already, as Linux's
+// os.ErrProcessDone says: TerminateProcess answers a process that has
+// exited with ERROR_ACCESS_DENIED, and a process that cmd.Wait has
+// released gives EINVAL.
+func kill(p *os.Process) error {
+	err := p.Kill()
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, syscall.EINVAL) {
+		return os.ErrProcessDone
+	}
+	return err
+}

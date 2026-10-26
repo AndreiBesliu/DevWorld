@@ -165,7 +165,7 @@ func TestQEMU_SeedInstallsAndRunsTheShard(t *testing.T) {
 	for _, want := range []string{
 		"mount -o ro LABEL=" + binLabel + " /mnt/ipcam-bin",
 		"cp /mnt/ipcam-bin/recspike /mnt/ipcam-bin/ipcam-hub /mnt/ipcam-bin/mediamtx /opt/recspike/",
-		"/opt/recspike/recspike install",
+		"/opt/recspike/recspike install > /dev/virtio-ports/" + OutPort + " 2>&1 || fail\n      sync || fail\n",
 		`"$@" > /dev/virtio-ports/` + OutPort + ` 2>&1`,
 		`echo "exit $status" > /dev/virtio-ports/` + LabPort,
 		"systemctl poweroff",

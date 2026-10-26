@@ -29,6 +29,7 @@ import (
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cli"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 )
 
 // usage is the command's help, in Romanian.
@@ -137,14 +138,15 @@ func ownFolders() (folders, error) {
 }
 
 // controllerFile keeps the controller's address in the private folder,
-// for resume: results/ is published and names no address (PH0-22).
+// for resume, durably: results/ is published and names no address
+// (PH0-22).
 func (f folders) controllerFile() string { return filepath.Join(f.work, "controller") }
 
 func (f folders) saveController(addr string) error {
 	if err := os.MkdirAll(f.work, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(f.controllerFile(), []byte(addr+"\n"), 0o600)
+	return mi1.WriteDurably(f.controllerFile(), []byte(addr+"\n"), 0o600)
 }
 
 func (f folders) savedController() (string, error) {

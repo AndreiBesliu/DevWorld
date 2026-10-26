@@ -267,7 +267,8 @@ func (q *QEMU) args() []string {
 
 // userData is the NoCloud seed's cloud-config. The first boot runs
 // start.sh: it copies the binaries from their read-only disk, runs
-// `recspike install` and runs the shard through lab.sh. lab.sh sends
+// `recspike install`, syncs, so that the binaries and the service outlive
+// the first reset, and runs the shard through lab.sh. lab.sh sends
 // recspike's output to the runner (the out port), then its exit status
 // (the lab port), and powers the guest off. The drop-in makes the installed
 // service's `recspike resume` run through lab.sh too after each reset.
@@ -308,6 +309,7 @@ write_files:
       cp /mnt/ipcam-bin/recspike /mnt/ipcam-bin/ipcam-hub /mnt/ipcam-bin/mediamtx /opt/recspike/ || fail
       umount /mnt/ipcam-bin || fail
       /opt/recspike/recspike install > /dev/virtio-ports/` + OutPort + ` 2>&1 || fail
+      sync || fail
       exec /opt/recspike-lab/lab.sh "$@"
   - path: /etc/systemd/system/ipcam-recspike.service.d/lab.conf
     content: |
