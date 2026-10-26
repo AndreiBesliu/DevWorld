@@ -46,6 +46,10 @@ const (
 // file.
 const fakeReadyWait = 30 * time.Second
 
+// fakeRecordingAfter is how long after its ready the fake ipcam-hub prints
+// its jobs' `recording` events.
+const fakeRecordingAfter = 50 * time.Millisecond
+
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeHubEnv) == "1" {
 		os.Exit(fakeHub(os.Args[1:]))
@@ -100,7 +104,7 @@ func fakeHub(args []string) int {
 		}
 	}
 	emit(map[string]any{"type": "ready", "jobs": []any{}})
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(fakeRecordingAfter)
 	for _, j := range cfg.Jobs {
 		emit(map[string]any{"type": "recording", "cam": j.Cam, "profile": j.Profile})
 	}

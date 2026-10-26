@@ -308,7 +308,8 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 			}
 			cur.trace.kill(killedAt, logSize)
 		}
-		if err := d.stopped(cur, vol, s.info.Needles); err != nil {
+		scan, err := d.stopped(cur, vol, s.info.Needles)
+		if err != nil {
 			return err
 		}
 		cur.Phase = PhaseStopped
@@ -320,8 +321,11 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 			return err
 		}
 		if !killedAt.IsZero() {
+			// The raw scan is the harness's, not ipcam-hub's: on the Linux
+			// lab's encrypted runs it reads a whole image between the kill
+			// and the restart, and ResumeMs leaves its time out (C07, G13).
 			resumeCtx, cancel := context.WithTimeout(ctx, readyTimeout)
-			ms, err := again.ResumeMs(resumeCtx, killedAt)
+			ms, err := again.ResumeMs(resumeCtx, killedAt.Add(scan))
 			cancel()
 			if err == nil {
 				cur.ResumeMs = &ms
@@ -392,7 +396,7 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 		return d.notRebooted(ctx, s, st, cur, vol)
 	}
 	if cur.Phase != PhaseStopped {
-		if err := d.stopped(cur, vol, s.info.Needles); err != nil {
+		if _, err := d.stopped(cur, vol, s.info.Needles); err != nil {
 			return err
 		}
 		cur.Phase = PhaseStopped
@@ -450,7 +454,7 @@ func (d *Driver) afterStop(ctx context.Context, s *session, st *RunState, cur *C
 		return ctx.Err()
 	}
 	<-hub.Exited()
-	if err := d.stopped(cur, vol, s.info.Needles); err != nil {
+	if _, err := d.stopped(cur, vol, s.info.Needles); err != nil {
 		return err
 	}
 	cur.Phase = PhaseStopped
@@ -594,13 +598,15 @@ func (d *Driver) hub04(cur *CurrentRun, vol Volume, needles [][]byte) bool {
 // stopped lists the files of the stop (listBefore) and scans the run's own
 // device raw, if it has one, before ipcam-hub starts again and reconciles
 // (G08): clear video that this scan finds fails HUB-04 even when the scan
-// after the reconcile no longer finds it.
-func (d *Driver) stopped(cur *CurrentRun, vol Volume, needles [][]byte) error {
+// after the reconcile no longer finds it. It returns how long the raw scan
+// took, on the monotonic clock, for a kill9 run's ResumeMs to leave out.
+func (d *Driver) stopped(cur *CurrentRun, vol Volume, needles [][]byte) (time.Duration, error) {
 	if err := d.listBefore(cur, vol); err != nil {
-		return err
+		return 0, err
 	}
+	start := time.Now()
 	cur.Hub04FoundAtStop = !d.rawClear(cur, vol, needles)
-	return nil
+	return time.Since(start), nil
 }
 
 // rawClear scans the run's own device raw, if it has one, and reports

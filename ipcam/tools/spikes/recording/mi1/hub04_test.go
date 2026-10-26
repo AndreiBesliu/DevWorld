@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
@@ -332,6 +333,46 @@ func TestHub04_ScansWithIpcamHubStopped(t *testing.T) {
 	// one started; then the scan after the reconcile.
 	if want := []string{"hub", "stopped", "hub", "stopped"}; !slices.Equal(last, want) {
 		t.Errorf("the fake ipcam-hub's last log entry at each scan: %q, want %q", last, want)
+	}
+}
+
+// TestResume_Kill9WithoutTheRawScanAtTheStop (C07, G13): a kill9 run's
+// ResumeMs is ipcam-hub's resume alone, from the kill to the restarted
+// child's last `recording` event. The raw scan of the run's own device runs
+// between the kill and the restart, before ipcam-hub reconciles (G08), and
+// on the Linux lab's encrypted runs it reads a whole 1 GiB image: that time
+// is the harness's, and ResumeMs leaves it out.
+func TestResume_Kill9WithoutTheRawScanAtTheStop(t *testing.T) {
+	const scanTime = 3 * time.Second
+	r := newRig(t, "lab-linux")
+	d := r.driver(t)
+	scans := &atomic.Int32{}
+	d.Volumes = watchedVolumes{Dirs: Dirs{Root: d.Work}, onScan: func() {
+		// A run's first raw scan is the one at the stop, its second the one
+		// after the reconcile (TestHub04_RawScanAtTheStopCounts).
+		if scans.Add(1)%2 == 1 {
+			time.Sleep(scanTime)
+		}
+	}}
+	if err := d.RunSet(t.Context(), SetOptions{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: 1, Smoke: true}); err != nil {
+		t.Fatalf("RunSet: %v\nscreen:\n%s", err, r.out.String())
+	}
+	reports := r.f.runReports()
+	if len(reports) != smokeRuns {
+		t.Fatalf("%d reports, want %d", len(reports), smokeRuns)
+	}
+	for _, rep := range reports {
+		if rep.ResumeMs == nil {
+			t.Errorf("run %s: no ResumeMs", rep.RunID)
+			continue
+		}
+		// The restarted fake ipcam-hub records fakeRecordingAfter after its
+		// ready, and it starts only once the scan has ended.
+		if ms := *rep.ResumeMs; ms < fakeRecordingAfter.Milliseconds() || ms >= scanTime.Milliseconds() {
+			t.Errorf("run %s: ResumeMs = %d ms, want at least %v (the fake's own resume) and under the %v scan at the stop",
+				rep.RunID, ms, fakeRecordingAfter, scanTime)
+		}
+		t.Logf("run %s: ResumeMs %d ms after a %v scan at the stop", rep.RunID, *rep.ResumeMs, scanTime)
 	}
 }
 
