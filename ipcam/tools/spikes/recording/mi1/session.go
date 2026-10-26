@@ -99,6 +99,10 @@ type Driver struct {
 	// tests, so that the folders they get are checked on every OS.
 	deviceChecks func(binDir, dataDir string, cameras int) []Check
 	osStopIn     func(ctx context.Context, kind controller.ShutdownKind, binDir string) error
+	// linkDown, when set, runs each time a link to the controller has
+	// failed and its session reports it down: tests wait for it instead of
+	// sleeping.
+	linkDown func()
 }
 
 // SetOptions say which set a driver runs.

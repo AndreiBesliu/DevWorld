@@ -429,7 +429,9 @@ func TestReport_WritesTheEnvelope(t *testing.T) {
 // run's diagnostics: the stop moment, and when the last access unit that
 // the host recorded of each such stream was sent, both on the controller's
 // clock; a stream within its limit, or one without a send time, is not in
-// it.
+// it. A report that the host sends again after a reconnection gets the
+// timing too, with the same verdict, whether the run is still being judged
+// or judged already: its mi1-diag line keeps the stop and the last send.
 func TestReport_OverItsLimitCarriesTheTiming(t *testing.T) {
 	r := newRig(t)
 	conn := r.connect("lab-linux")
@@ -445,10 +447,28 @@ func TestReport_OverItsLimitCarriesTheTiming(t *testing.T) {
 	lastSent := stopAt.Add(-10850 * time.Millisecond)
 	r.c.sendLog.Record("cam01_main", 7000, lastSent)
 	r.c.sendLog.Record("cam02_main", 7001, stopAt.Add(-600*time.Millisecond))
-	r.send(conn, link.Report{RunID: "lab-linux-kill9-smoke-02-1", Streams: []link.StreamIndex{
+	// The judgement waits until the report has been sent again.
+	judging, release := make(chan struct{}, 1), make(chan struct{})
+	r.pacer.mu.Lock()
+	r.pacer.onPacing = func() {
+		judging <- struct{}{}
+		<-release
+	}
+	r.pacer.mu.Unlock()
+	report := link.Report{RunID: "lab-linux-kill9-smoke-02-1", Streams: []link.StreamIndex{
 		{Stream: "cam01_main", LastRecordedIndex: 7000},
 		{Stream: "cam02_main", LastRecordedIndex: 7001},
-	}})
+	}}
+	r.send(conn, report)
+	select {
+	case <-judging:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the report never judged its run")
+	}
+	again := r.connect("lab-linux") // a reconnection
+	r.send(again, report)
+	waitFor(t, "the report sent again", func() bool { return strings.Contains(r.screen.String(), "gazda a trimis din nou raportul") })
+	close(release)
 	v, ok := r.receive(conn).(link.Verdict)
 	if !ok || len(v.Run.Streams) != 3 || v.Run.Streams[0].LossMs != 10850 {
 		t.Fatalf("verdict = %+v, want cam01_main lost 10.85 s", v)
@@ -456,6 +476,19 @@ func TestReport_OverItsLimitCarriesTheTiming(t *testing.T) {
 	want := &link.Timing{StopAtMs: stopAt.UnixMilli(), LastSentMs: map[string]int64{"cam01_main": lastSent.UnixMilli()}}
 	if !reflect.DeepEqual(v.Timing, want) {
 		t.Errorf("timing = %+v, want %+v: the stop and cam01_main's last recorded send time only", v.Timing, want)
+	}
+	// The report sent again, while the run was judged and once it is, gets
+	// the same timing with the same verdict (Task 7.2e, M5).
+	whileJudged, ok1 := r.receive(again).(link.Verdict)
+	r.send(again, report)
+	judged, ok2 := r.receive(again).(link.Verdict)
+	if !ok1 || !ok2 {
+		t.Fatalf("verdicts %+v, %+v; want one for each report sent again", whileJudged, judged)
+	}
+	for name, got := range map[string]link.Verdict{"while the run was judged": whileJudged, "once it was judged": judged} {
+		if !reflect.DeepEqual(got.Run, v.Run) || !reflect.DeepEqual(got.Timing, want) {
+			t.Errorf("the report sent again %s got timing %+v (same verdict: %v), want %+v", name, got.Timing, reflect.DeepEqual(got.Run, v.Run), want)
+		}
 	}
 }
 
@@ -1135,8 +1168,8 @@ func TestReport_SentAgainWhileJudgedGetsTheSameVerdict(t *testing.T) {
 				if err != nil || len(env.Runs) != 1 || !reflect.DeepEqual(env.Runs[0], v1.Run) {
 					t.Errorf("the envelope = %+v, %v; want the verdict sent, %+v", env.Runs, err, v1.Run)
 				}
-				if !remembered || !reflect.DeepEqual(judged, v1.Run) {
-					t.Errorf("the controller remembers %+v (%v), want the verdict sent, %+v", judged, remembered, v1.Run)
+				if !remembered || !reflect.DeepEqual(judged.Run, v1.Run) {
+					t.Errorf("the controller remembers %+v (%v), want the verdict sent, %+v", judged.Run, remembered, v1.Run)
 				}
 			} else if _, err := os.Stat(r.c.results); err == nil || remembered {
 				t.Errorf("results folder %v, verdict remembered %v (%+v); want nothing written and nothing remembered", err, remembered, judged)

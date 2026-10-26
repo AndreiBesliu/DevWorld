@@ -80,12 +80,21 @@ func (d *diskWriter) send(op diskOp) error {
 	return d.err
 }
 
+// diskFailed runs once a disk writer has noted its first failure, which
+// the recording then returns at its next part or segment close. It does
+// nothing; the tests replace it to wait for that moment.
+var diskFailed = func(error) {}
+
 // fail notes a failure of the disk, which the next send returns.
 func (d *diskWriter) fail(err error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.err == nil {
+	first := d.err == nil
+	if first {
 		d.err = err
+	}
+	d.mu.Unlock()
+	if first {
+		diskFailed(err)
 	}
 }
 

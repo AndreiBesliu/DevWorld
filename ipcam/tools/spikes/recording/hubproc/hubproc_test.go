@@ -32,9 +32,9 @@ import (
 // when its stdin ends, and ignores SIGTERM, Ctrl+C and Ctrl+Break, so that
 // a clean stop that needs a signal or a console never reaches it; it exits
 // by itself with code 1 after fakeExitAfter milliseconds, when that is set.
-// With fakeLongLine set, it prints a 2 MiB line after ready, then 4 MiB of
-// events, and then creates the file that fakeLongLine names; a failed write
-// of its events exits with code 3.
+// Every event carries the fake's pid. With fakeLongLine set, it prints a
+// 2 MiB line after ready, then 4 MiB of events, and then creates the file
+// that fakeLongLine names; a failed write of its events exits with code 3.
 const (
 	fakeEnv       = "HUBPROC_FAKE_HUB"
 	fakeDelays    = "HUBPROC_FAKE_DELAYS"
@@ -67,7 +67,7 @@ func fakeHub(args []string) int {
 	}()
 	var mu sync.Mutex
 	emit := func(fields map[string]any) {
-		fields["atMs"] = time.Now().UnixMilli()
+		fields["atMs"], fields["pid"] = time.Now().UnixMilli(), os.Getpid()
 		b, _ := json.Marshal(fields)
 		mu.Lock()
 		defer mu.Unlock()
@@ -519,5 +519,51 @@ func TestHubproc_WaitEvent(t *testing.T) {
 	}
 	if _, err := h.WaitEvent(ctx, "gap", nil); !errors.Is(err, ErrExited) {
 		t.Errorf("WaitEvent after the exit = %v, want ErrExited", err)
+	}
+}
+
+// TestHubproc_RestartedChildReportsToNoOnEvent: OnEvent watches the child
+// that Start started. The child that Restart starts after a kill reports its
+// events to its own waits only, so a watcher of the first child, recspike's
+// trace of a cut, keeps every event of that child, however late it is
+// read, and gets none of the next one's.
+func TestHubproc_RestartedChildReportsToNoOnEvent(t *testing.T) {
+	var mu sync.Mutex
+	var pids []int
+	t.Setenv(fakeEnv, "1")
+	t.Setenv(fakeDelays, "0,0")
+	h, err := Start(Options{Binary: os.Args[0], Config: writeRunJSON(t), OnEvent: func(e Event) {
+		var fields struct {
+			Pid int `json:"pid"`
+		}
+		_ = json.Unmarshal(e.Line, &fields)
+		mu.Lock()
+		defer mu.Unlock()
+		pids = append(pids, fields.Pid)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := h.cmd.Process.Pid
+	if _, err := h.WaitEvent(ctxFor(t, 10*time.Second), "verify", nil); err != nil {
+		t.Fatalf("WaitEvent(verify): %v", err)
+	}
+	if _, err := h.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := h.Restart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = again.Kill() })
+	if _, err := again.WaitEvent(ctxFor(t, 10*time.Second), "verify", nil); err != nil {
+		t.Fatalf("restarted child: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, pid := range pids {
+		if pid != first {
+			t.Fatalf("OnEvent got events of pids %v, want the first child's (%d) only", pids, first)
+		}
 	}
 }

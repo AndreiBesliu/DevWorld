@@ -86,9 +86,10 @@ func TestRunState_ResumesAfterReboot(t *testing.T) {
 // TestRunState_OldFormat_SaysTheStateFolderCanBeDeleted (Task 7.2c
 // review): a run-state.json of an older recspike (one set's state, not the
 // sets by results set) refuses every load and save; the owner reads in
-// Romanian that results/state/ can be deleted to start over.
+// Romanian that its state folder can be deleted to start over, the folder
+// that the run state is in, wherever the results folder was given.
 func TestRunState_OldFormat_SaysTheStateFolderCanBeDeleted(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "results", "state", "run-state.json")
+	path := filepath.Join(t.TempDir(), "proba-pc", "state", "run-state.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +97,7 @@ func TestRunState_OldFormat_SaysTheStateFolderCanBeDeleted(t *testing.T) {
 	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	folder := filepath.Join("results", "state")
+	folder := filepath.Dir(path)
 	_, loadErr := LoadRunState(path)
 	saveErr := SaveRunState(path, &RunState{Set: SetPiKill9, Mode: ModeAutomated, Kind: "kill9"})
 	for name, err := range map[string]error{"LoadRunState": loadErr, "SaveRunState": saveErr} {

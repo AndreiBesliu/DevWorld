@@ -57,7 +57,8 @@ const testPathName = "mypath"
 // with what the recording looked like at that moment.
 type durabilityEvent struct {
 	// op is "create" (OnSegmentCreate), "syncAsked" (a part's fsync asked
-	// for), "syncFile", "rename", "syncDir" or "complete" (OnSegmentComplete).
+	// for), "syncFile", "rename", "syncDir", "complete" (OnSegmentComplete)
+	// or "diskFailed" (the disk writer's first failure).
 	op string
 	// path is the file that is synced or whose fsync is asked for, the
 	// rename's target, the directory that is synced or the path that a hook
@@ -116,10 +117,15 @@ func (l *durabilityLog) count(op string) int {
 func recordDurability(t *testing.T) *durabilityLog {
 	l := &durabilityLog{}
 
-	realSyncFile, realSyncDir, realRenameFinal, realSyncAsked := syncFile, syncDir, renameFinal, syncAsked
+	realSyncFile, realSyncDir, realRenameFinal, realSyncAsked, realDiskFailed := syncFile, syncDir, renameFinal, syncAsked, diskFailed
 	t.Cleanup(func() {
-		syncFile, syncDir, renameFinal, syncAsked = realSyncFile, realSyncDir, realRenameFinal, realSyncAsked
+		syncFile, syncDir, renameFinal, syncAsked, diskFailed = realSyncFile, realSyncDir, realRenameFinal, realSyncAsked, realDiskFailed
 	})
+
+	diskFailed = func(err error) {
+		l.add(durabilityEvent{op: "diskFailed"})
+		realDiskFailed(err)
+	}
 
 	syncAsked = func(f segmentFile) {
 		content, err := os.ReadFile(f.Name())
@@ -851,6 +857,9 @@ func TestMTX1_SlowCreationDirSyncKeepsRecording(t *testing.T) {
 // fails stops the recorder at the next part's close, as a failed write does:
 // MediaMTX logs the error and starts the recorder again, rather than
 // recording on to the segment's end into a file that keeps its .part name.
+// The disk writer writes no part into that file once its fsync has failed:
+// after a failed fsync, what the page cache holds of a file may no longer
+// be what reaches the disk.
 func TestMTX1_FailedPartSyncStopsTheRecorderAtTheNextPart(t *testing.T) {
 	errs := make(chan string, 16)
 	r := startRecordingWith(t, time.Date(2008, 5, 20, 22, 15, 25, 0, time.UTC), test.FormatH264, func(rec *Recorder) {
@@ -869,14 +878,13 @@ func TestMTX1_FailedPartSyncStopsTheRecorderAtTheNextPart(t *testing.T) {
 	syncFile = func(f segmentFile) error {
 		err := recorded(f)
 		if calls.Add(1) == 1 {
-			r.log.add(durabilityEvent{op: "failed"})
 			return errors.New("injected fsync failure")
 		}
 		return err
 	}
 
 	r.writeFrames(30) // part 1 closes at 1 s, and its fsync fails
-	r.waitFor("the failed fsync of the first part", func(l *durabilityLog) bool { return l.count("failed") == 1 })
+	r.waitFor("the disk writer's failure", func(l *durabilityLog) bool { return l.count("diskFailed") == 1 })
 	r.writeFrames(20) // the frame at 2 s closes part 2: the first part close since the failure
 	select {
 	case msg := <-errs:
@@ -886,8 +894,14 @@ func TestMTX1_FailedPartSyncStopsTheRecorderAtTheNextPart(t *testing.T) {
 	}
 	r.stop()
 
-	require.Zero(t, r.log.count("complete"), "events: %v", eventOps(r.log.snapshot()))
-	require.Equal(t, []string{"2008-05-20_22-15-25-000000.mp4.part"}, dirEntries(t, r.dir))
+	events := r.log.snapshot()
+	require.Zero(t, r.log.count("complete"), "events: %v", eventOps(events))
+	require.Equal(t, 1, r.log.count("syncAsked"), "parts written; events: %v", eventOps(events))
+	part := filepath.Join(r.dir, "2008-05-20_22-15-25-000000.mp4.part")
+	require.Equal(t, []string{filepath.Base(part)}, dirEntries(t, r.dir))
+	content, err := os.ReadFile(part)
+	require.NoError(t, err)
+	require.Len(t, mdatEnds(t, content), 1, "parts in the segment after its first part's fsync failed")
 }
 
 // TestMTX1_QueuedPartsAreBounded (Task 7.2d): while the disk writer is held,

@@ -110,8 +110,9 @@ type Options struct {
 	// Stderr receives the child's stderr (its errors and MediaMTX's log);
 	// nil discards it.
 	Stderr io.Writer
-	// OnEvent, when set, is called with every event, in order, from the
-	// goroutine that reads them.
+	// OnEvent, when set, is called with every event of this child, in
+	// order, from the goroutine that reads them, also after the child has
+	// exited. The child that Restart starts calls no OnEvent.
 	OnEvent func(Event)
 	// Beacon, when set, is beaconed from the child's `ready` until it exits.
 	// Start dials its address and fails when it cannot.
@@ -451,8 +452,10 @@ func (h *Hub) Stop(ctx context.Context) error {
 	}
 }
 
-// Restart starts ipcam-hub again on the same run.json, without the beacon:
-// the run's beacon ended with this child. The child must have exited.
+// Restart starts ipcam-hub again on the same run.json, without the beacon
+// and without OnEvent: the run's beacon ended with this child, and OnEvent
+// watches this child's events, which its reader may still be handing over
+// after the restart. The child must have exited.
 func (h *Hub) Restart() (*Hub, error) {
 	select {
 	case <-h.exited:
@@ -460,6 +463,6 @@ func (h *Hub) Restart() (*Hub, error) {
 		return nil, errors.New("hubproc: restart of a running ipcam-hub")
 	}
 	o := h.opts
-	o.Beacon = nil
+	o.Beacon, o.OnEvent = nil, nil
 	return Start(o)
 }

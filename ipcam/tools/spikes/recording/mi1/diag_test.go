@@ -90,18 +90,19 @@ func diagRun(t *testing.T) (*Driver, *CurrentRun, Volume, time.Time) {
 	cur.trace.event(hubproc.Event{Type: "status", At: kill.Add(-2 * time.Second), Line: json.RawMessage(`{"type":"status","lastPartAgoMs":8100}`)})
 	cur.trace.event(hubproc.Event{Type: "status", At: kill.Add(-time.Second), Line: json.RawMessage(`{"type":"status","lastPartAgoMs":9100}`)})
 	cur.trace.kill(kill, int64(len(before)))
-	cur.trace.event(hubproc.Event{Type: "ready", At: kill.Add(time.Second)}) // the restarted child's
+	// The first child's last event, read only after the kill was noted.
+	cur.trace.event(hubproc.Event{Type: "error", At: kill.Add(5 * time.Millisecond), Message: "recorder: MediaMTX exited"})
 	return d, cur, dirVolume(data), kill
 }
 
 // TestLossDiag_ExplainsAStreamOverItsLimit (Task 7.2d): a stream that lost
 // more than its limit gets one line, mi1-diag: <json>, with its newest
 // segment files and their last parts (names relative to the stream's
-// folder, sizes, SEI indexes), ipcam-hub's events up to the kill (the
-// newest status last), the warnings and errors that MediaMTX and ipcam-hub
-// logged before the kill, redacted (no URL, address or user path, PH0-22),
-// and the stop, the last recorded send and the kill, UTC. A stream within
-// its limit gets none.
+// folder, sizes, SEI indexes), the events of the ipcam-hub that was killed,
+// one read after the kill was noted included (the newest status last), the
+// warnings and errors that MediaMTX and ipcam-hub logged before the kill,
+// redacted (no URL, address or user path, PH0-22), and the stop, the last
+// recorded send and the kill, UTC. A stream within its limit gets none.
 func TestLossDiag_ExplainsAStreamOverItsLimit(t *testing.T) {
 	d, cur, vol, kill := diagRun(t)
 	stopAt := kill.Add(-20 * time.Millisecond)
@@ -139,8 +140,9 @@ func TestLossDiag_ExplainsAStreamOverItsLimit(t *testing.T) {
 			t.Errorf("part %d = %+v, want %+v", i, p, wantParts[i])
 		}
 	}
-	if len(got.Events) != 2 || !strings.HasSuffix(got.Events[0], " recording") || got.Events[1] != "22:55:30.250 status lastPartAgoMs=9100" {
-		t.Errorf("events = %q, want the recording and the newest status before the kill", got.Events)
+	if len(got.Events) != 3 || !strings.HasSuffix(got.Events[0], " recording") || got.Events[1] != "22:55:31.255 error recorder: MediaMTX exited" ||
+		got.Events[2] != "22:55:30.250 status lastPartAgoMs=9100" {
+		t.Errorf("events = %q, want the first child's: the recording, the error read after the kill, and the newest status", got.Events)
 	}
 	if len(got.Log) != 3 || !strings.Contains(got.Log[0], "WAR [path cam01/main] [recorder] reader is too slow, discarding 405 frames") ||
 		!strings.Contains(lines[0], "[RTSP source] <url> EOF") {

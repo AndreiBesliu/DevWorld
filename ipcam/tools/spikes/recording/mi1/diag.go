@@ -55,8 +55,10 @@ const (
 const diagTime = "15:04:05.000"
 
 // cutTrace is what recspike saw of ipcam-hub around a run's stop, in memory
-// only: its newest events, the newest status apart, and the kill with the
-// size of the run's ipcam-hub.log then, the first child's lines.
+// only: the newest events of the ipcam-hub that the run started, the newest
+// status apart, and the kill with the size of the run's ipcam-hub.log then,
+// that child's lines. The ipcam-hub that hubproc restarts after the stop
+// reports no events here (Hub.Restart).
 type cutTrace struct {
 	mu      sync.Mutex
 	events  []string
@@ -65,8 +67,9 @@ type cutTrace struct {
 	logSize int64
 }
 
-// event keeps e, a hubproc.Options.OnEvent, until the kill: the restarted
-// child's events come after the stop.
+// event keeps e, a hubproc.Options.OnEvent, also when it is read after the
+// kill was noted: the child's reader may still be handing over its last
+// events then.
 func (t *cutTrace) event(e hubproc.Event) {
 	line := e.At.UTC().Format(diagTime) + " " + e.Type
 	switch e.Type {
@@ -85,9 +88,6 @@ func (t *cutTrace) event(e hubproc.Event) {
 	line = redact(line)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if !t.killAt.IsZero() {
-		return
-	}
 	if e.Type == "status" {
 		t.status = line
 		return

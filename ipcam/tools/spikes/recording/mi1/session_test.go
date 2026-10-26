@@ -991,8 +991,11 @@ func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 		readies := 0
 		r.f.onReady = func(c *link.Conn, start link.RunStart) {
 			mu.Lock()
-			readies++
-			first := readies == 1
+			first := false
+			if start.RunID == "pc-kill9-01-1" { // run 2's, if the set gets there before the cancel, is not counted
+				readies++
+				first = readies == 1
+			}
 			mu.Unlock()
 			if first {
 				_ = c.Close() // the link drops
@@ -1012,7 +1015,7 @@ func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		if readies != 2 {
-			t.Errorf("%d readies, want the run's ready repeated once on the new link", readies)
+			t.Errorf("%d readies of run 1, want its ready repeated once on the new link", readies)
 		}
 		if got := logEntries(t, r.log); len(got) < 2 || !slices.Equal(got[:2], []string{"hub", "hub"}) {
 			t.Errorf("fake log = %v, want the run's ipcam-hub kept through the drop, then killed and restarted at its cut", got)
@@ -1027,6 +1030,9 @@ func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 		clock := newGateClock(at("21:00"))
 		d := r.driver(t)
 		d.Clock = clock
+		seen := make(chan struct{})
+		var seenOnce sync.Once
+		d.linkDown = func() { seenOnce.Do(func() { close(seen) }) }
 		w, err := ParseWindow("22:00-23:00")
 		if err != nil {
 			t.Fatal(err)
@@ -1044,8 +1050,12 @@ func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 		case <-time.After(30 * time.Second):
 			t.Fatal("the set never waited for its window")
 		}
-		r.f.dropLinks()                    // the link drops during the wait, hours before the run
-		time.Sleep(200 * time.Millisecond) // recspike's reader sees it
+		r.f.dropLinks() // the link drops during the wait, hours before the run
+		select {
+		case <-seen: // recspike's session reports it down
+		case <-time.After(30 * time.Second):
+			t.Fatal("recspike never saw the link drop")
+		}
 		reported := cancelAt(r.f, "report pc-kill9-01-1", cancel)
 		clock.open <- at("22:00")
 		if err := <-done; !errors.Is(err, context.Canceled) {
@@ -1057,8 +1067,11 @@ func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 		if n := r.f.helloCount(); n != 2 {
 			t.Errorf("the host said hello %d times, want twice: at the start and once after the drop", n)
 		}
-		if s := r.f.runStarts(); len(s) != 1 || s[0].RunID != "pc-kill9-01-1" {
-			t.Errorf("run starts = %+v, want run 1 announced once, on the new link", s)
+		if s := r.f.runStartsOf("pc-kill9-01-1"); len(s) != 1 {
+			t.Errorf("run 1's starts = %+v, want it announced once, on the new link", s)
+		}
+		if !strings.Contains(r.out.String(), "Legătura cu controlorul s-a refăcut.\nRularea pc-kill9-01-1") {
+			t.Errorf("screen:\n%s\nwant the link connected again before run 1 begins", r.out.String())
 		}
 	})
 
@@ -1076,8 +1089,8 @@ func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 		if err := <-reported; err != nil {
 			t.Fatal(err)
 		}
-		if s := r.f.runStarts(); len(s) != 1 || s[0].RunID != "pc-kill9-01-1" || s[0].Kind != "kill9" || len(s[0].Streams) != 1 {
-			t.Errorf("run starts kept = %+v, want run 1's announcement, made again in full on the new link", s)
+		if s := r.f.runStartsOf("pc-kill9-01-1"); len(s) != 1 || s[0].Kind != "kill9" || len(s[0].Streams) != 1 {
+			t.Errorf("run 1's starts kept = %+v, want its announcement, made again in full on the new link", s)
 		}
 		if n := r.f.helloCount(); n != 2 {
 			t.Errorf("the host said hello %d times, want twice", n)
@@ -1102,8 +1115,8 @@ func TestSession_ReconnectsAfterALinkDrop(t *testing.T) {
 		if err := <-reported; err != nil {
 			t.Fatal(err)
 		}
-		if s := r.f.runStarts(); len(s) != 1 || s[0].RunID != "pc-kill9-01-1" {
-			t.Errorf("run starts kept = %+v, want run 1's, made again on the new link before its ready", s)
+		if s := r.f.runStartsOf("pc-kill9-01-1"); len(s) != 1 {
+			t.Errorf("run 1's starts kept = %+v, want it made again on the new link before its ready", s)
 		}
 		if n := r.f.helloCount(); n != 2 {
 			t.Errorf("the host said hello %d times, want twice", n)

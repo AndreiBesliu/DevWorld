@@ -99,7 +99,7 @@ func Push(ctx context.Context, addr, dir, host string, out io.Writer) error {
 	} else if root {
 		return errors.New(pushNeedsSudo)
 	}
-	s, err := dialSession(ctx, addr, host, 0)
+	s, err := dialSession(ctx, addr, host, 0, nil)
 	if err != nil {
 		return err
 	}
@@ -177,7 +177,7 @@ func (d *Driver) reconnect(ctx context.Context, s *session, st *RunState, cause 
 // connectWithin connects to the controller, dialing again for up to retry,
 // and receives the session.
 func (d *Driver) connectWithin(ctx context.Context, retry time.Duration) (*session, error) {
-	s, err := dialSession(ctx, d.Controller, d.Host.Pseudonym, retry)
+	s, err := dialSession(ctx, d.Controller, d.Host.Pseudonym, retry, d.linkDown)
 	if err != nil {
 		return nil, err
 	}
@@ -201,8 +201,9 @@ func (d *Driver) connectWithin(ctx context.Context, retry time.Duration) (*sessi
 }
 
 // dialSession dials the controller, retrying for up to retry, and says
-// hello as the host.
-func dialSession(ctx context.Context, addr, host string, retry time.Duration) (*session, error) {
+// hello as the host. down, when not nil, runs once the link has failed and
+// the session reports it down.
+func dialSession(ctx context.Context, addr, host string, retry time.Duration, down func()) (*session, error) {
 	deadline := time.Now().Add(retry)
 	for {
 		dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -210,7 +211,7 @@ func dialSession(ctx context.Context, addr, host string, retry time.Duration) (*
 		cancel()
 		if err == nil {
 			s := &session{c: c, in: make(chan received, 16), closed: make(chan struct{}), broken: make(chan struct{})}
-			go read(c, s.in, s.closed, s.broken)
+			go read(c, s.in, s.closed, s.broken, down)
 			if err := s.send(link.Hello{Role: "host", Host: host, Version: "c1"}); err != nil {
 				s.close()
 				return nil, err
@@ -232,14 +233,18 @@ func dialSession(ctx context.Context, addr, host string, retry time.Duration) (*
 }
 
 // read delivers the controller's messages on c into in, then its error,
-// and closes in; it closes broken as soon as the link fails. It holds its
-// own channels: a reconnection gives the session new ones.
-func read(c *link.Conn, in chan<- received, closed <-chan struct{}, broken chan<- struct{}) {
+// and closes in; it closes broken as soon as the link fails, then runs
+// down, if any. It holds its own channels: a reconnection gives the session
+// new ones.
+func read(c *link.Conn, in chan<- received, closed <-chan struct{}, broken chan<- struct{}, down func()) {
 	defer close(in)
 	for {
 		m, err := c.Receive()
 		if err != nil {
 			close(broken)
+			if down != nil {
+				down()
+			}
 			err = fmt.Errorf("%w: %w", errLinkDown, err)
 		}
 		select {

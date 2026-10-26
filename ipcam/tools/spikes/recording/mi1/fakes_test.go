@@ -175,9 +175,9 @@ func killFakeHubs(t *testing.T, path string) {
 // first loseStarts run_starts and drops the link at their run's ready, as
 // a link that died after the run_start would, and the first dropAtStarts
 // run_starts with the link at once, as a link that died as recspike sent
-// it, then creates the file droppedSignal, if set; like reccontroller, it refuses the ready of a run that it never kept
-// (unknownRun). dropLinks drops every link it has. Every message it gets is
-// also an event.
+// it, then creates the file droppedSignal, if set. Like reccontroller, it
+// refuses the ready of a run that it never kept (unknownRun). dropLinks
+// drops every link it has. Every message it gets is also an event.
 type fakeController struct {
 	t           *testing.T
 	ln          net.Listener
@@ -401,6 +401,19 @@ func (f *fakeController) runStarts() []link.RunStart {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]link.RunStart(nil), f.starts...)
+}
+
+// runStartsOf is the run_starts kept of runID. A test that cancels the set
+// at a run's report checks that run's: the set announces its next run
+// before it sees the cancel when the verdict reaches it first.
+func (f *fakeController) runStartsOf(runID string) []link.RunStart {
+	var out []link.RunStart
+	for _, s := range f.runStarts() {
+		if s.RunID == runID {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (f *fakeController) runReports() []link.Report {

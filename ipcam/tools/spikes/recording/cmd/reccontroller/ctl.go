@@ -76,14 +76,14 @@ type ctl struct {
 	mu     sync.Mutex
 	rnd    *rand.Rand
 	runs   map[string]*runState
-	judged map[string]results.Run // the verdicts sent, for a report sent again
+	judged map[string]link.Verdict // the verdicts sent, for a report sent again
 }
 
 func newCtl(ctx context.Context, cfg ctlConfig) *ctl {
 	return &ctl{
 		ctlConfig: cfg, ctx: ctx, beacons: controller.NewBeaconLog(),
 		rnd:  rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())), //nolint:gosec // schedules cuts, not secrets
-		runs: map[string]*runState{}, judged: map[string]results.Run{},
+		runs: map[string]*runState{}, judged: map[string]link.Verdict{},
 	}
 }
 
@@ -105,7 +105,7 @@ type runState struct {
 	// on another link, waits for it and gets that verdict, so the run is
 	// judged, and its envelope written, once.
 	judging chan struct{}
-	verdict results.Run
+	verdict link.Verdict
 }
 
 // say prints one line on the controller's screen.
@@ -141,8 +141,7 @@ func (c *ctl) serve(ctx context.Context, conn *link.Conn, local net.Addr) {
 		case link.Ready:
 			c.ready(conn, m.RunID)
 		case link.Report:
-			run, timing := c.report(m)
-			c.reply(conn, link.Verdict{Run: run, Timing: timing})
+			c.reply(conn, c.report(m))
 		case link.Refused:
 			c.hostRefused(m)
 		case link.BeaconCheck:
@@ -477,10 +476,10 @@ type hubEvent struct {
 // first report's envelope and call the run invalid on the new link, the
 // one the host listens to, while that envelope stays counted. A run whose
 // envelope cannot be written does not count: the host redoes it, so no set
-// is complete without its envelopes. The first judgement of a run whose
-// stream lost more than its limit also returns the controller's side of the
-// run's diagnostics (lossTiming).
-func (c *ctl) report(m link.Report) (results.Run, *link.Timing) {
+// is complete without its envelopes. The verdict of a run whose stream lost
+// more than its limit also carries the controller's side of the run's
+// diagnostics (lossTiming), a report sent again included.
+func (c *ctl) report(m link.Report) link.Verdict {
 	c.mu.Lock()
 	r := c.runs[m.RunID]
 	judged, again := c.judged[m.RunID]
@@ -494,25 +493,24 @@ func (c *ctl) report(m link.Report) (results.Run, *link.Timing) {
 	c.mu.Unlock()
 	switch {
 	case r == nil && again:
-		return judged, nil
+		return judged
 	case r == nil:
 		c.say("Raport pentru rularea necunoscută %s: rularea se reface.", m.RunID)
-		return results.Run{RunID: m.RunID, InvalidReason: unknownRun}, nil
+		return link.Verdict{Run: results.Run{RunID: m.RunID, InvalidReason: unknownRun}}
 	case judging != nil:
 		c.say("Rularea %s: gazda a trimis din nou raportul, după o reconectare; primește același verdict.", m.RunID)
 		<-judging
-		return r.verdict, nil // set before judging closed
+		return r.verdict // set before judging closed
 	}
-	run, timing := c.judgeReport(r, m)
-	r.verdict = run // read only once done is closed
+	r.verdict = c.judgeReport(r, m) // read only once done is closed
 	close(done)
-	return run, timing
+	return r.verdict
 }
 
 // judgeReport is report's judgement of run r, by the run's first report:
 // it writes the envelope, ends the run and returns its verdict, with the
 // diagnostics' timing of a stream over its limit.
-func (c *ctl) judgeReport(r *runState, m link.Report) (results.Run, *link.Timing) {
+func (c *ctl) judgeReport(r *runState, m link.Report) link.Verdict {
 	beacons := c.beacons.Beacons(m.RunID)
 	interrupted := c.beacons.Interrupted(m.RunID)
 	late := len(beacons) > 0 && startedLate(beacons[0])
@@ -545,13 +543,14 @@ func (c *ctl) judgeReport(r *runState, m link.Report) (results.Run, *link.Timing
 		c.say("Rularea %s: nu pot scrie rezultatul (%v); rularea nu contează.", m.RunID, written)
 		run.Valid, run.InvalidReason = false, addReason(run.InvalidReason, notWritten)
 	}
+	v := link.Verdict{Run: run, Timing: c.lossTiming(run, m, stopAt)}
 	c.mu.Lock()
 	r.cancel()
 	if c.runs[m.RunID] == r {
 		delete(c.runs, m.RunID)
 	}
 	if written == nil {
-		c.judged[m.RunID] = run // a report sent again gets this verdict
+		c.judged[m.RunID] = v // a report sent again gets this verdict
 	}
 	c.mu.Unlock()
 	c.beacons.Forget(m.RunID)
@@ -566,7 +565,7 @@ func (c *ctl) judgeReport(r *runState, m link.Report) (results.Run, *link.Timing
 	}
 	c.say("Rularea %s: %s; pierdere %s (± %d ms); ritm p99 %d ms, cadre sărite %d.",
 		m.RunID, verdict, strings.Join(losses, ", "), errBound.Milliseconds(), pacing.P99.Milliseconds(), pacing.SkippedAUs)
-	return run, c.lossTiming(run, m, stopAt)
+	return v
 }
 
 // lossTiming is the controller's side of the diagnostics of run, judged
