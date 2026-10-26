@@ -591,8 +591,11 @@ func TestMTX2_FinalChunkSyncedBeforeRename(t *testing.T) {
 }
 
 // TestMTX2_FlushAtEachPartFsync: at each part's syncFile, the file holds the
-// header, the payload nonce and every complete chunk of the plaintext so far,
-// and nothing more: len(header) + 16 + n·65552, n = ⌊plaintext ÷ 65536⌋.
+// header, the payload nonce and every complete chunk of the plaintext up to
+// that part, sealed before the part's fsync was asked for, and whole chunks
+// only: len(header) + 16 + n·65552, n ≥ ⌊plaintext ÷ 65536⌋. The fsync runs
+// beside the recording (MTX-1's partSyncer), so the next parts' chunks may be
+// in the file by then.
 func TestMTX2_FlushAtEachPartFsync(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -617,10 +620,12 @@ func TestMTX2_FlushAtEachPartFsync(t *testing.T) {
 			require.Len(t, syncs, len(l.parts)+1, "a syncFile per part and one at the close")
 
 			for i, part := range l.parts {
-				content := syncs[i].content
-				require.Equal(t, sealedSize(headerLen, part.padEnd), int64(len(content)),
+				content := int64(len(syncs[i].content))
+				require.GreaterOrEqual(t, content, sealedSize(headerLen, part.padEnd),
 					"file size at part %d's syncFile, with %d bytes of plaintext", i+1, part.padEnd)
-				require.True(t, bytes.HasPrefix(file, content), "the file at part %d's syncFile is not a prefix of the final file", i+1)
+				require.Zero(t, (content-sealedSize(headerLen, 0))%(crypto.ChunkSize+16),
+					"file size at part %d's syncFile: %d bytes, not the header and whole chunks", i+1, content)
+				require.True(t, bytes.HasPrefix(file, syncs[i].content), "the file at part %d's syncFile is not a prefix of the final file", i+1)
 			}
 			require.Equal(t, len(file), len(syncs[len(syncs)-1].content), "file size at the close's syncFile")
 		})

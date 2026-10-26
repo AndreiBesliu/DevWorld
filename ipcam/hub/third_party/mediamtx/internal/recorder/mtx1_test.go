@@ -379,8 +379,10 @@ func mvhdDuration(t *testing.T, content []byte) time.Duration {
 }
 
 // TestMTX1_FsyncOnEachPartClose: a segment of 3 parts gets 4 syncFile calls,
-// one when each part has been written and before the next part's first write,
-// and one after the close's last write (the mvhd duration) and before Close.
+// one asked for when each part has been written, so that the file holds that
+// part at its fsync (the fsync runs beside the recording, which may have
+// written the next parts by then), and one after the close's last write (the
+// mvhd duration) and before Close.
 func TestMTX1_FsyncOnEachPartClose(t *testing.T) {
 	r := recordOneSegment(t)
 
@@ -398,9 +400,7 @@ func TestMTX1_FsyncOnEachPartClose(t *testing.T) {
 		require.True(t, ev.fileOpen, "syncFile %d ran on a closed file", i+1)
 	}
 	for i, end := range partEnds {
-		// The file ends exactly where the part ends: the next part has not been
-		// written yet.
-		require.Equal(t, end, int64(len(syncs[i].content)), "file size at syncFile %d", i+1)
+		require.GreaterOrEqual(t, int64(len(syncs[i].content)), end, "file size at syncFile %d, the fsync of part %d", i+1, i+1)
 	}
 
 	last := syncs[3]
@@ -605,4 +605,60 @@ func TestMTX1_SeamFailureFiresNoHook(t *testing.T) {
 			require.Equal(t, []string{tc.want}, dirEntries(t, r.dir), "events: %v", eventOps(events))
 		})
 	}
+}
+
+// TestMTX1_SlowPartFsyncKeepsRecording (Task 7.2d): a part's fsync runs
+// beside the recording, not in its way. While the first part's fsync is
+// held, as a busy disk holds it for seconds, the recorder goes on writing:
+// the second part reaches the file. Once the fsync returns, every part has
+// had its own fsync and the segment closes in MTX-1's order. A recorder that
+// waited for each fsync would write nothing more during it, and a cut then
+// would lose every frame since the fsync began.
+func TestMTX1_SlowPartFsyncKeepsRecording(t *testing.T) {
+	r := startRecording(t, time.Date(2008, 5, 20, 22, 15, 25, 0, time.UTC))
+	part := filepath.Join(r.dir, "2008-05-20_22-15-25-000000.mp4.part")
+
+	held, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFsync := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseFsync() // before the recorder's stop, on a failure too
+	recorded := syncFile
+	var holdOnce sync.Once
+	syncFile = func(f segmentFile) error {
+		holdOnce.Do(func() {
+			close(held)
+			<-release
+		})
+		return recorded(f)
+	}
+
+	r.writeFrames(50) // parts 1 and 2 close; the frame at 2.45 s is in part 3
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first part's fsync never started")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		content, err := os.ReadFile(part)
+		require.NoError(t, err)
+		if len(mdatEnds(t, content)) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("while the first part's fsync was held, the file kept %d part(s), want the second one written too", len(mdatEnds(t, content)))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	releaseFsync()
+	r.writeFrames(oneSegmentFrames - 50)
+	r.waitFor("the segment-complete hook", func(l *durabilityLog) bool { return l.count("complete") == 1 })
+	r.stop()
+
+	events := r.log.snapshot()
+	require.Len(t, eventsOf(events, "syncFile"), 4, "a syncFile per part and one at the close; events: %v", eventOps(events))
+	rename := slices.IndexFunc(events, func(ev durabilityEvent) bool { return ev.op == "rename" })
+	require.GreaterOrEqual(t, rename, 1, "events: %v", eventOps(events))
+	require.Equal(t, []string{"syncFile", "rename", "syncDir", "complete"}, eventOps(events[rename-1:]))
 }

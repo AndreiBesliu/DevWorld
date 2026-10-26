@@ -110,6 +110,7 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 	if st.Mode == ModeReal {
 		cur.Slot = p.Index
 	}
+	cur.trace = &cutTrace{}
 	vol, err := d.volumes().Prepare(ctx, cur.RunID, cur.Encrypted)
 	if err != nil {
 		return err
@@ -132,7 +133,8 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 		return err
 	}
 	defer func() { _ = log.Close() }()
-	hub, err := hubproc.Start(hubproc.Options{Binary: d.Hub, Config: config, Stderr: log, Beacon: &hubproc.Beacon{Addr: s.beaconAddr, RunID: cur.RunID}})
+	hub, err := hubproc.Start(hubproc.Options{Binary: d.Hub, Config: config, Stderr: log, OnEvent: cur.trace.event,
+		Beacon: &hubproc.Beacon{Addr: s.beaconAddr, RunID: cur.RunID}})
 	if err != nil {
 		return err
 	}
@@ -288,6 +290,13 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 		killedAt, err := hub.Kill()
 		if err != nil && !errors.Is(err, hubproc.ErrExited) {
 			return err
+		}
+		if !killedAt.IsZero() && cur.trace != nil {
+			logSize := int64(-1)
+			if info, err := os.Stat(filepath.Join(d.runDir(cur.RunID), "ipcam-hub.log")); err == nil {
+				logSize = info.Size()
+			}
+			cur.trace.kill(killedAt, logSize)
 		}
 		if err := d.listBefore(cur, vol); err != nil {
 			return err
@@ -491,24 +500,30 @@ func (d *Driver) finish(ctx context.Context, s *session, st *RunState, cur *Curr
 	if err != nil {
 		return err
 	}
-	run, err := d.report(ctx, s, st, report)
+	v, err := d.report(ctx, s, st, report)
 	if err != nil {
 		return err
 	}
-	return d.done(st, cur, vol, run)
+	// A lab run explains a stream that lost more than its limit (Task 7.2d).
+	if st.Mode == ModeLab {
+		for _, line := range d.lossDiags(cur, vol, v, id) {
+			d.say("%s", line)
+		}
+	}
+	return d.done(st, cur, vol, v.Run)
 }
 
 // report sends the run's report and returns its verdict. In an unattended
 // set, a link that drops meanwhile is connected again and the report sent
 // again: the controller answers a report sent again with the same verdict.
-func (d *Driver) report(ctx context.Context, s *session, st *RunState, r link.Report) (results.Run, error) {
+func (d *Driver) report(ctx context.Context, s *session, st *RunState, r link.Report) (link.Verdict, error) {
 	for reconnects := 0; ; reconnects++ {
-		run, err := s.report(ctx, r)
+		v, err := s.report(ctx, r)
 		if err == nil || !errors.Is(err, errLinkDown) || reconnects == maxReconnects {
-			return run, err
+			return v, err
 		}
 		if err := d.reconnect(ctx, s, st, err); err != nil {
-			return results.Run{}, err
+			return link.Verdict{}, err
 		}
 	}
 }

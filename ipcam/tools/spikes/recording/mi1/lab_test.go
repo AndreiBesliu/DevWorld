@@ -3,6 +3,7 @@ package mi1
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,7 +106,15 @@ func TestMI1_LabKill9Smoke(t *testing.T) {
 		NTP:        func(context.Context) (bool, error) { return true, nil },
 	}
 	set := LabSet(runtime.GOOS, "kill9")
-	if err := d.RunSet(ctx, SetOptions{Set: set, Mode: ModeLab, Kind: "kill9", Shard: 1, Smoke: true}); err != nil {
+	err = d.RunSet(ctx, SetOptions{Set: set, Mode: ModeLab, Kind: "kill9", Shard: 1, Smoke: true})
+	// A run whose stream lost more than its limit explains itself (Task
+	// 7.2d): the recorder job turns these lines into notices.
+	for line := range strings.SplitSeq(out.String(), "\n") {
+		if strings.HasPrefix(line, DiagPrefix) {
+			fmt.Println(line)
+		}
+	}
+	if err != nil {
 		t.Fatalf("RunSet: %v\nrecspike:\n%s\nreccontroller:\n%s", err, out.String(), screen.String())
 	}
 

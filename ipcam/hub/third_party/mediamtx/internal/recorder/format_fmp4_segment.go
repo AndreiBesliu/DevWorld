@@ -139,6 +139,9 @@ type formatFMP4Segment struct {
 	// MTX-1: the first failed write or fsync of a part. The segment then keeps
 	// its .part name.
 	partErr error
+
+	// MTX-1: the fsyncs of the parts, beside the recording.
+	syncer *partSyncer
 }
 
 func (s *formatFMP4Segment) initialize() {
@@ -155,9 +158,14 @@ func (s *formatFMP4Segment) close() error {
 	if s.fi != nil {
 		s.f.ri.Log(logger.Debug, "closing segment %s", s.path)
 
-		// MTX-1: a part that failed earlier is a failure of the close.
+		// MTX-1: every part's fsync has run before the close's last writes, and
+		// a part that failed earlier, or its fsync, is a failure of the close.
+		syncErr := s.syncer.wait()
 		if err == nil {
 			err = s.partErr
+		}
+		if err == nil {
+			err = syncErr
 		}
 
 		duration := s.endDTS - s.startDTS
@@ -263,6 +271,7 @@ func (s *formatFMP4Segment) closeCurPart() error {
 		s.fi = fi
 		s.age = age
 		s.w = w
+		s.syncer = newPartSyncer(fi)
 	}
 
 	var partStart int64
@@ -276,8 +285,10 @@ func (s *formatFMP4Segment) closeCurPart() error {
 		err = s.age.endPart(partStart)
 	}
 	if err == nil {
-		// MTX-1: every part is durable once it is closed.
-		err = syncFile(s.fi)
+		// MTX-1: every part is fsynced once it is written, beside the
+		// recording (partSyncer); a part fsync that failed fails this part.
+		s.syncer.sync()
+		err = s.syncer.failed()
 	}
 	if err != nil && s.partErr == nil {
 		s.partErr = err

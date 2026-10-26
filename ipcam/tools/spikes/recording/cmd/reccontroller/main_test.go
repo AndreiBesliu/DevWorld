@@ -402,6 +402,9 @@ func TestReport_WritesTheEnvelope(t *testing.T) {
 		env.SdConfirmation == nil || *env.SdConfirmation != *sd || len(env.Runs) != 1 || env.Runs[0].LossMs != 1200 {
 		t.Errorf("envelope = %+v", env)
 	}
+	if v.Timing != nil {
+		t.Errorf("a run within its limits got the diagnostics' timing %+v", v.Timing)
+	}
 	r.send(conn, report)
 	if again, ok := r.receive(conn).(link.Verdict); !ok || again.Run.LossMs != run.LossMs || !again.Run.Valid {
 		t.Errorf("the report sent again got %+v, want the same verdict", again)
@@ -419,6 +422,41 @@ func TestReport_WritesTheEnvelope(t *testing.T) {
 			t.Errorf("verdict = %+v, want cam01_main lost from its first beacon, and not reconciled without the events", v.Run)
 		}
 	})
+}
+
+// TestReport_OverItsLimitCarriesTheTiming (Task 7.2d): when a stream lost
+// more than its limit, the verdict carries the controller's side of the
+// run's diagnostics: the stop moment, and when the last access unit that
+// the host recorded of each such stream was sent, both on the controller's
+// clock; a stream within its limit, or one without a send time, is not in
+// it.
+func TestReport_OverItsLimitCarriesTheTiming(t *testing.T) {
+	r := newRig(t)
+	conn := r.connect("lab-linux")
+	r.send(conn, link.RunStart{RunID: "lab-linux-kill9-smoke-02-1", Set: "lab-linux-kill9", Kind: "kill9",
+		Streams: []string{"cam01_main", "cam02_main", "cam03_main"}, Host: "lab-linux", Attempt: 1, Smoke: true})
+	boot := r.clock.Now()
+	r.beaconAt("lab-linux-kill9-smoke-02-1", 0, boot)
+	stopAt := boot.Add(30 * time.Second)
+	r.beaconAt("lab-linux-kill9-smoke-02-1", 1, boot.Add(time.Second)) // the beacons' start
+	for seq, at := uint64(2), boot.Add(2*time.Second); !at.After(stopAt); seq, at = seq+1, at.Add(time.Second) {
+		r.beaconAt("lab-linux-kill9-smoke-02-1", seq, at)
+	}
+	lastSent := stopAt.Add(-10850 * time.Millisecond)
+	r.c.sendLog.Record("cam01_main", 7000, lastSent)
+	r.c.sendLog.Record("cam02_main", 7001, stopAt.Add(-600*time.Millisecond))
+	r.send(conn, link.Report{RunID: "lab-linux-kill9-smoke-02-1", Streams: []link.StreamIndex{
+		{Stream: "cam01_main", LastRecordedIndex: 7000},
+		{Stream: "cam02_main", LastRecordedIndex: 7001},
+	}})
+	v, ok := r.receive(conn).(link.Verdict)
+	if !ok || len(v.Run.Streams) != 3 || v.Run.Streams[0].LossMs != 10850 {
+		t.Fatalf("verdict = %+v, want cam01_main lost 10.85 s", v)
+	}
+	want := &link.Timing{StopAtMs: stopAt.UnixMilli(), LastSentMs: map[string]int64{"cam01_main": lastSent.UnixMilli()}}
+	if !reflect.DeepEqual(v.Timing, want) {
+		t.Errorf("timing = %+v, want %+v: the stop and cam01_main's last recorded send time only", v.Timing, want)
+	}
 }
 
 // TestBeaconCheck_AcknowledgesOverTCP (R08): the preflight's beacon check

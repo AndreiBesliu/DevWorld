@@ -126,6 +126,10 @@ func RunLossMs(r results.Run) int64 {
 	return loss
 }
 
+// OverLimit reports whether s lost more than its limit, as the verdict gave
+// it: such a stream fails its run, and a lab run explains it (Task 7.2d).
+func OverLimit(s results.StreamLoss) bool { return s.LossMs > s.LimitMs }
+
 // Failures are why a run fails (G11), in Romanian; none when it passes. A
 // stream fails above its StreamLimitMs, recomputed from its bitrate and
 // settings; a run also fails when reconcile needed intervention, a file is

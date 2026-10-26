@@ -231,7 +231,9 @@ jobs:
       - name: Test
         # -count=1: a result restored from the Go build cache would hide a flaky test. The
         # variables make the tests that need the fork or the media fail instead of skipping;
-        # the job's env and the age-tools step do the same for the age tools.
+        # the job's env and the age-tools step do the same for the age tools. A run of the MI1
+        # smoke whose stream lost more than its limit prints one "mi1-diag: <json>" line that
+        # explains it (Task 7.2d); each goes out as a notice, at most 10 (C32).
         id: test
         env:
           MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx
@@ -240,7 +242,13 @@ jobs:
           SPIKE_REQUIRE_MEDIA: '1'
         run: |
           set -o pipefail
-          go test -count=1 -race ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${RUNNER_TEMP}/test.log"
+          log="${RUNNER_TEMP}/test.log"
+          status=0
+          go test -count=1 -race ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${log}" || status=$?
+          sed -n 's/^mi1-diag: //p' "${log}" | head -n 10 | while IFS= read -r line; do
+            printf '%s\n' "${line}" | tools/scripts/annotate.sh mi1-diag 1 notice
+          done || true
+          exit "${status}"
       - name: ENC-06
         # The golden files and a resealed torn file decrypt with each age CLI and with rage,
         # using only the recovery key (ENC-06). The test prints one "enc06: <json>" line,

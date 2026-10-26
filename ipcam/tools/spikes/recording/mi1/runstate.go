@@ -99,6 +99,10 @@ type CurrentRun struct {
 	// StopBoot is the host's boot when recspike asked the OS to stop
 	// (sysrq, bugcheck): another boot after it proves the reboot.
 	StopBoot *Boot `json:"stopBoot,omitempty"`
+
+	// trace is what this recspike saw of ipcam-hub around the stop, for the
+	// diagnostics of a loss over the limit; it is not kept across a reboot.
+	trace *cutTrace
 }
 
 // runStates is the run state file: each set's state by results set, and

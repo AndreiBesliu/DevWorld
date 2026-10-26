@@ -17,7 +17,6 @@ import (
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
-	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
 )
 
@@ -314,17 +313,17 @@ func (s *session) await(ctx context.Context, d time.Duration, typ string) (link.
 }
 
 // report sends a run's report and returns the controller's verdict.
-func (s *session) report(ctx context.Context, r link.Report) (results.Run, error) {
+func (s *session) report(ctx context.Context, r link.Report) (link.Verdict, error) {
 	if err := s.send(r); err != nil {
-		return results.Run{}, err
+		return link.Verdict{}, err
 	}
 	for {
 		m, err := s.await(ctx, verdictTimeout, "verdict")
 		if err != nil {
-			return results.Run{}, err
+			return link.Verdict{}, err
 		}
 		if v := m.(link.Verdict); v.Run.RunID == r.RunID {
-			return v.Run, nil
+			return v, nil
 		}
 	}
 }

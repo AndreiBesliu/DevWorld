@@ -100,9 +100,20 @@ type Report struct {
 
 // Verdict answers a report: the run as the controller judged it and wrote
 // it into its envelope (C16), so that the host knows whether it counts or
-// is redone.
+// is redone. Timing is set when a stream lost more than its limit: the
+// controller's side of the run's diagnostics (Task 7.2d).
 type Verdict struct {
-	Run results.Run `json:"run"`
+	Run    results.Run `json:"run"`
+	Timing *Timing     `json:"timing,omitempty"`
+}
+
+// Timing is when, on the controller's clock, in Unix milliseconds, the host
+// stopped (StopAt, its last beacon), and when the last access unit that the
+// host recorded was sent, for each stream that lost more than its limit and
+// whose last recorded index has a send time.
+type Timing struct {
+	StopAtMs   int64            `json:"stopAtMs"`
+	LastSentMs map[string]int64 `json:"lastSentMs"`
 }
 
 // Refused says, in Romanian, why the controller does not measure a run.

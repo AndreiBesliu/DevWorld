@@ -141,7 +141,8 @@ func (c *ctl) serve(ctx context.Context, conn *link.Conn, local net.Addr) {
 		case link.Ready:
 			c.ready(conn, m.RunID)
 		case link.Report:
-			c.reply(conn, link.Verdict{Run: c.report(m)})
+			run, timing := c.report(m)
+			c.reply(conn, link.Verdict{Run: run, Timing: timing})
 		case link.Refused:
 			c.hostRefused(m)
 		case link.BeaconCheck:
@@ -476,8 +477,10 @@ type hubEvent struct {
 // first report's envelope and call the run invalid on the new link, the
 // one the host listens to, while that envelope stays counted. A run whose
 // envelope cannot be written does not count: the host redoes it, so no set
-// is complete without its envelopes.
-func (c *ctl) report(m link.Report) results.Run {
+// is complete without its envelopes. The first judgement of a run whose
+// stream lost more than its limit also returns the controller's side of the
+// run's diagnostics (lossTiming).
+func (c *ctl) report(m link.Report) (results.Run, *link.Timing) {
 	c.mu.Lock()
 	r := c.runs[m.RunID]
 	judged, again := c.judged[m.RunID]
@@ -491,24 +494,25 @@ func (c *ctl) report(m link.Report) results.Run {
 	c.mu.Unlock()
 	switch {
 	case r == nil && again:
-		return judged
+		return judged, nil
 	case r == nil:
 		c.say("Raport pentru rularea necunoscută %s: rularea se reface.", m.RunID)
-		return results.Run{RunID: m.RunID, InvalidReason: unknownRun}
+		return results.Run{RunID: m.RunID, InvalidReason: unknownRun}, nil
 	case judging != nil:
 		c.say("Rularea %s: gazda a trimis din nou raportul, după o reconectare; primește același verdict.", m.RunID)
 		<-judging
-		return r.verdict // set before judging closed
+		return r.verdict, nil // set before judging closed
 	}
-	run := c.judgeReport(r, m)
+	run, timing := c.judgeReport(r, m)
 	r.verdict = run // read only once done is closed
 	close(done)
-	return run
+	return run, timing
 }
 
 // judgeReport is report's judgement of run r, by the run's first report:
-// it writes the envelope, ends the run and returns its verdict.
-func (c *ctl) judgeReport(r *runState, m link.Report) results.Run {
+// it writes the envelope, ends the run and returns its verdict, with the
+// diagnostics' timing of a stream over its limit.
+func (c *ctl) judgeReport(r *runState, m link.Report) (results.Run, *link.Timing) {
 	beacons := c.beacons.Beacons(m.RunID)
 	interrupted := c.beacons.Interrupted(m.RunID)
 	late := len(beacons) > 0 && startedLate(beacons[0])
@@ -562,7 +566,33 @@ func (c *ctl) judgeReport(r *runState, m link.Report) results.Run {
 	}
 	c.say("Rularea %s: %s; pierdere %s (± %d ms); ritm p99 %d ms, cadre sărite %d.",
 		m.RunID, verdict, strings.Join(losses, ", "), errBound.Milliseconds(), pacing.P99.Milliseconds(), pacing.SkippedAUs)
-	return run
+	return run, c.lossTiming(run, m, stopAt)
+}
+
+// lossTiming is the controller's side of the diagnostics of run, judged
+// from m, when one of its streams lost more than its limit (mi1.OverLimit):
+// the stop moment and the send times of those streams' last recorded
+// access units, on the controller's clock; nil when every stream kept
+// within its limit.
+func (c *ctl) lossTiming(run results.Run, m link.Report, stopAt time.Time) *link.Timing {
+	var timing *link.Timing
+	for _, s := range run.Streams {
+		if !mi1.OverLimit(s) {
+			continue
+		}
+		if timing == nil {
+			timing = &link.Timing{StopAtMs: stopAt.UnixMilli(), LastSentMs: map[string]int64{}}
+		}
+		for _, index := range m.Streams {
+			if index.Stream != s.Stream {
+				continue
+			}
+			if sent, ok := c.sendLog.SendTime(s.Stream, index.LastRecordedIndex); ok {
+				timing.LastSentMs[s.Stream] = sent.UnixMilli()
+			}
+		}
+	}
+	return timing
 }
 
 // addReason adds a reason why a run does not count to the ones it has.
