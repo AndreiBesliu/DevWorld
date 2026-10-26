@@ -952,3 +952,146 @@ func TestMTX1_QueuedPartsAreBounded(t *testing.T) {
 		})
 	}
 }
+
+// TestMTX1_QueueCapWaitsAndReportsTheDiscards (C1-R17): the disk writer
+// holds at most maxQueuedBytes of parts per recorder, 8 MiB. The test lowers
+// the bound to two parts of its frames: under the race detector a recorder
+// fed 8 MiB of frames through a short reader queue falls behind for reasons
+// of its own. While the creation of the first segment's file is held, as a
+// busy disk holds it, two parts wait in memory and the third makes the
+// recording wait for the disk. MediaMTX's reader queue, 16 frames here, then
+// discards the frames past it and reports them ("reader is too slow"), as it
+// does for any reader that falls behind. Nothing is lost silently and
+// nothing is torn: every frame sent is in a segment, whole and in order, or
+// was reported discarded, or is the one that the recorder holds at its
+// stop. Each segment's close logs the most bytes of parts that waited for
+// the disk since the previous one, which Task 9 (MI3) reads: here two parts.
+func TestMTX1_QueueCapWaitsAndReportsTheDiscards(t *testing.T) {
+	require.Equal(t, 8<<20, maxQueuedBytes, "the disk writer's bound per recorder (C1-R17)")
+	const idrSize = 1024
+	partBytes := framesPerPart * (idrSize + mtx2FrameOverhead)
+	realBound := maxQueuedBytes
+	t.Cleanup(func() { maxQueuedBytes = realBound })
+	maxQueuedBytes = 2*partBytes + partBytes/2 // two parts and their boxes fit, three do not
+
+	var mu sync.Mutex
+	var logs []string
+	r := startRecordingQueue(t, time.Date(2008, 5, 20, 22, 15, 25, 0, time.UTC), mtx2Format, 16, func(rec *Recorder) {
+		rec.Parent = test.Logger(func(_ logger.Level, format string, args ...any) {
+			mu.Lock()
+			defer mu.Unlock()
+			logs = append(logs, fmt.Sprintf(format, args...))
+		})
+	})
+	logged := func(prefix string) []int {
+		mu.Lock()
+		defer mu.Unlock()
+		var counts []int
+		for _, l := range logs {
+			var n int
+			if _, err := fmt.Sscanf(l, prefix+"%d", &n); err == nil {
+				counts = append(counts, n)
+			}
+		}
+		return counts
+	}
+	discarded := r.recorder.currentInstance.reader.OutboundFramesDiscarded
+
+	held, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseCreate := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseCreate() // before the recorder's stop, on a failure too
+	realCreateFile := createFile
+	t.Cleanup(func() { createFile = realCreateFile })
+	var holdOnce sync.Once
+	createFile = func(name string) (segmentFile, error) {
+		holdOnce.Do(func() {
+			close(held)
+			<-release
+		})
+		return realCreateFile(name)
+	}
+
+	writeFrames := func(n int) {
+		for range n {
+			r.writeAgeFrame(idrSize)
+			time.Sleep(time.Millisecond)
+		}
+	}
+	writeFrames(30) // part 1 closes, and its segment's creation is held
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first segment's file was never created")
+	}
+	writeFrames(70) // parts 2 and 3: the recording waits at the third
+	require.Positive(t, discarded(), "frames discarded while the recording waited for the disk")
+
+	// Once the disk is back, the frames before 6 s, the end of the second
+	// segment. A frame that the reader's queue takes from 6 s on closes that
+	// segment and is the last one sent, so once the segment is complete the
+	// queue is empty, and that frame is the one the recorder holds.
+	releaseCreate()
+	writeFrames(2*(oneSegmentFrames-1) - r.frames)
+	for {
+		before := discarded()
+		r.writeAgeFrame(idrSize)
+		if discarded() == before {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	r.waitFor("the second segment's hook", func(l *durabilityLog) bool { return l.count("complete") == 2 })
+	lost := discarded()
+	deadline := time.Now().Add(10 * time.Second)
+	for sum(logged("[recorder] reader is too slow, discarding ")) < int(lost) {
+		if time.Now().After(deadline) {
+			t.Fatalf("MediaMTX reported %d discarded frames, want %d", sum(logged("[recorder] reader is too slow, discarding ")), lost)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	r.stop()
+
+	var recorded []int
+	for _, name := range dirEntries(t, r.dir) {
+		content, err := os.ReadFile(filepath.Join(r.dir, name))
+		require.NoError(t, err)
+		mdatEnds(t, content) // whole boxes up to the end
+		frames := idrFrames(content)
+		require.Equal(t, sampleCount(t, content), len(frames), "samples of %s", name)
+		recorded = append(recorded, frames...)
+	}
+	require.True(t, slices.IsSorted(recorded) && len(slices.Compact(slices.Clone(recorded))) == len(recorded),
+		"the recorded frames are not in order: %v", recorded)
+	require.Equal(t, r.frames, len(recorded)+int(lost)+1,
+		"frames sent = recorded (%d) + reported discarded (%d) + the one held at the stop", len(recorded), lost)
+
+	peaks := logged("[recorder] disk queue peak: ")
+	require.Len(t, peaks, 2, "a disk queue peak per segment")
+	require.GreaterOrEqual(t, peaks[0], 2*partBytes, "the first segment's peak: two parts waited")
+	require.LessOrEqual(t, slices.Max(peaks), maxQueuedBytes, "the disk queue's peak")
+}
+
+// idrFrames returns the frame numbers of the mtx2IDR NAL units in content,
+// in the order of the file.
+func idrFrames(content []byte) []int {
+	marker := []byte{0x65, 'M', 'T', 'X', '2', '-', 'I', 'D', 'R'}
+	var frames []int
+	for i := 0; ; {
+		j := bytes.Index(content[i:], marker)
+		if j < 0 || i+j+len(marker)+4 > len(content) {
+			return frames
+		}
+		i += j + len(marker)
+		frames = append(frames, int(binary.BigEndian.Uint32(content[i:])))
+	}
+}
+
+// sum returns the sum of ns.
+func sum(ns []int) int {
+	s := 0
+	for _, n := range ns {
+		s += n
+	}
+	return s
+}

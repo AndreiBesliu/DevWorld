@@ -319,8 +319,9 @@ func (s *formatFMP4Segment) fail(err error) {
 
 // finish closes the segment's file, after its last part, in MTX-1's order:
 // the syncer's last sync, the last write, one more fsync, Close, the rename
-// and the directory sync, then MTX-3's hook. It runs on the disk writer,
-// which creates the next segment's file only after it.
+// and the directory sync, then MTX-3's hook; and it logs the disk writer's
+// peak (C1-R17). It runs on the disk writer, which creates the next
+// segment's file only after it.
 func (s *formatFMP4Segment) finish(duration time.Duration) {
 	if s.fi == nil {
 		return
@@ -375,6 +376,7 @@ func (s *formatFMP4Segment) finish(duration time.Duration) {
 	} else {
 		s.f.disk.fail(err)
 	}
+	s.f.disk.logPeak()
 }
 
 func (s *formatFMP4Segment) write(track *formatFMP4Track, sample *formatFMP4Sample, dts time.Duration) error {

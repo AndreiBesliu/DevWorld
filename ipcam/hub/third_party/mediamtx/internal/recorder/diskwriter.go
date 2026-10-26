@@ -3,13 +3,17 @@ package recorder
 import (
 	"sync"
 	"time"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/logger"
 )
 
 // maxQueuedBytes bounds the parts that wait in memory for the disk writer,
-// per recorder: 32 s of a 4 Mbps stream. Past it the recording waits for the
-// disk, as it did before MTX-1's disk writer, and MediaMTX's reader queue
-// then discards the frames that do not fit. A variable for the tests.
-var maxQueuedBytes = 16 << 20
+// per recorder (C1-R17): 16 s of a 4 Mbps stream, longer than the 12.7 s
+// stalls measured in Task 7.2d. Past it the recording waits for the disk, as
+// it did before MTX-1's disk writer, and MediaMTX's reader queue then
+// discards the frames that do not fit and reports them. A variable for the
+// tests.
+var maxQueuedBytes = 8 << 20
 
 // diskOp is one piece of work for the disk writer: a part of a segment, or
 // the segment's close.
@@ -40,17 +44,20 @@ func (op diskOp) size() int { return len(op.init) + len(op.part) }
 // up MediaMTX's reader queue, which would discard every frame past it
 // (Task 7.2d): the parts wait in memory meanwhile, up to maxQueuedBytes.
 type diskWriter struct {
+	log logger.Writer
+
 	mu       sync.Mutex
 	cond     *sync.Cond // signalled when an op is queued, when one is done and at the stop
 	ops      []diskOp
 	queued   int // the bytes of the ops queued or being written
+	peak     int // the most bytes queued since logPeak last ran
 	stopping bool
 	err      error // the first failure of a write, a sync or a close
 	done     chan struct{}
 }
 
-func newDiskWriter() *diskWriter {
-	d := &diskWriter{done: make(chan struct{})}
+func newDiskWriter(log logger.Writer) *diskWriter {
+	d := &diskWriter{log: log, done: make(chan struct{})}
 	d.cond = sync.NewCond(&d.mu)
 	go d.run()
 	return d
@@ -68,6 +75,7 @@ func (d *diskWriter) send(op diskOp) error {
 	}
 	d.ops = append(d.ops, op)
 	d.queued += op.size()
+	d.peak = max(d.peak, d.queued)
 	d.cond.Broadcast()
 	return d.err
 }
@@ -118,4 +126,17 @@ func (d *diskWriter) run() {
 		d.cond.Broadcast()
 		d.mu.Unlock()
 	}
+}
+
+// logPeak logs, once a segment's file is closed, the most bytes of parts
+// that waited for the disk writer since the previous segment's file was
+// closed, the part being written included, and starts the next count from
+// the bytes queued now. The hub's load test (MI3, Task 9) reads these lines
+// against §4.8's RAM budgets (C1-R17).
+func (d *diskWriter) logPeak() {
+	d.mu.Lock()
+	peak := d.peak
+	d.peak = d.queued
+	d.mu.Unlock()
+	d.log.Log(logger.Info, "disk queue peak: %d bytes", peak)
 }

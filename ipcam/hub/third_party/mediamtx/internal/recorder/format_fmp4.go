@@ -141,7 +141,7 @@ type formatFMP4 struct {
 // writer returns the recorder's disk writer, which it starts the first time.
 func (f *formatFMP4) writer() *diskWriter {
 	if f.disk == nil {
-		f.disk = newDiskWriter()
+		f.disk = newDiskWriter(f.ri)
 	}
 	return f.disk
 }
