@@ -590,12 +590,13 @@ func TestMTX2_FinalChunkSyncedBeforeRename(t *testing.T) {
 	}
 }
 
-// TestMTX2_FlushAtEachPartFsync: at each part's syncFile, the file holds the
-// header, the payload nonce and every complete chunk of the plaintext up to
-// that part, sealed before the part's fsync was asked for, and whole chunks
-// only: len(header) + 16 + n·65552, n ≥ ⌊plaintext ÷ 65536⌋. The fsync runs
-// beside the recording (MTX-1's partSyncer), so the next parts' chunks may be
-// in the file by then.
+// TestMTX2_FlushAtEachPartFsync: when each part's fsync is asked for, right
+// after the part is written and before the next part's first write, the file
+// holds the header, the payload nonce and every complete chunk of the
+// plaintext up to that part's end, and nothing more: len(header) + 16 +
+// n·65552 bytes, n = ⌊plaintext ÷ 65536⌋. The fsync itself runs beside the
+// writes (MTX-1's partSyncer), so the file then holds at least that and is a
+// prefix of the final file.
 func TestMTX2_FlushAtEachPartFsync(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -615,16 +616,18 @@ func TestMTX2_FlushAtEachPartFsync(t *testing.T) {
 			file := r.readSegment(0)
 			headerLen := ageHeaderLen(t, file)
 			l := parseAgeLayout(t, keys.decrypt(t, file))
-			syncs := eventsOf(r.log.snapshot(), "syncFile")
+			events := r.log.snapshot()
+			asks := eventsOf(events, "syncAsked")
+			syncs := eventsOf(events, "syncFile")
 			require.Len(t, l.parts, 3)
+			require.Len(t, asks, len(l.parts), "a part fsync asked for per part")
 			require.Len(t, syncs, len(l.parts)+1, "a syncFile per part and one at the close")
 
 			for i, part := range l.parts {
-				content := int64(len(syncs[i].content))
-				require.GreaterOrEqual(t, content, sealedSize(headerLen, part.padEnd),
-					"file size at part %d's syncFile, with %d bytes of plaintext", i+1, part.padEnd)
-				require.Zero(t, (content-sealedSize(headerLen, 0))%(crypto.ChunkSize+16),
-					"file size at part %d's syncFile: %d bytes, not the header and whole chunks", i+1, content)
+				sealed := sealedSize(headerLen, part.padEnd)
+				require.Equal(t, sealed, int64(len(asks[i].content)),
+					"file size when part %d's fsync was asked for, with %d bytes of plaintext", i+1, part.padEnd)
+				require.GreaterOrEqual(t, int64(len(syncs[i].content)), sealed, "file size at part %d's syncFile", i+1)
 				require.True(t, bytes.HasPrefix(file, syncs[i].content), "the file at part %d's syncFile is not a prefix of the final file", i+1)
 			}
 			require.Equal(t, len(file), len(syncs[len(syncs)-1].content), "file size at the close's syncFile")

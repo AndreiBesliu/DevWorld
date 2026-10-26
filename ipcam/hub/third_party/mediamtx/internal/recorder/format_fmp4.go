@@ -132,6 +132,18 @@ type formatFMP4 struct {
 	hasVideo          bool
 	currentSegment    *formatFMP4Segment
 	nextSegmentNumber uint64
+
+	// MTX-1: the goroutine that writes the segments, started with the first
+	// part (diskwriter.go).
+	disk *diskWriter
+}
+
+// writer returns the recorder's disk writer, which it starts the first time.
+func (f *formatFMP4) writer() *diskWriter {
+	if f.disk == nil {
+		f.disk = newDiskWriter()
+	}
+	return f.disk
 }
 
 func (f *formatFMP4) initialize() bool {
@@ -931,5 +943,9 @@ func (f *formatFMP4) updateCodecParams() {
 func (f *formatFMP4) close() {
 	if f.currentSegment != nil {
 		f.currentSegment.close() //nolint:errcheck
+	}
+	// MTX-1: the recorder stops once every segment is closed on disk.
+	if f.disk != nil {
+		f.disk.stop()
 	}
 }
