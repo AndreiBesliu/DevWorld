@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hostinfo"
@@ -98,6 +99,12 @@ func mi1Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	if err := os.MkdirAll(f.work, 0o700); err != nil {
 		return err
 	}
+	if o.lab && o.kind == "qemu-reset" && o.controller == "" {
+		// This runner boots the guest that runs the shard against its
+		// reccontroller (R03).
+		q := &mi1.QEMU{Dir: filepath.Join(f.work, "qemu"), Bins: f.dir, Shard: o.shard, Smoke: o.smoke, Out: out}
+		return q.Run(ctx)
+	}
 	d := &mi1.Driver{Hub: f.hub, Results: f.results, Work: f.work, Out: out}
 	switch {
 	case o.resume:
@@ -124,6 +131,7 @@ func mi1Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 		}
 		host.Storage, host.WriteCache = info.Storage, info.WriteCache
 		d.Host = host
+		d.Volumes = mi1.LabVolumes(o.kind, f.work)
 		return d.RunSet(ctx, mi1.SetOptions{Set: set, Mode: mi1.ModeLab, Kind: o.kind, Shard: o.shard, Smoke: o.smoke})
 	}
 	set, err := mi1.SetFor(ownerHost(), o.kind, o.real)

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -309,7 +308,7 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 			}
 			cur.trace.kill(killedAt, logSize)
 		}
-		if err := d.listBefore(cur, vol); err != nil {
+		if err := d.stopped(cur, vol, s.info.Needles); err != nil {
 			return err
 		}
 		cur.Phase = PhaseStopped
@@ -393,7 +392,7 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 		return d.notRebooted(ctx, s, st, cur, vol)
 	}
 	if cur.Phase != PhaseStopped {
-		if err := d.listBefore(cur, vol); err != nil {
+		if err := d.stopped(cur, vol, s.info.Needles); err != nil {
 			return err
 		}
 		cur.Phase = PhaseStopped
@@ -451,7 +450,7 @@ func (d *Driver) afterStop(ctx context.Context, s *session, st *RunState, cur *C
 		return ctx.Err()
 	}
 	<-hub.Exited()
-	if err := d.listBefore(cur, vol); err != nil {
+	if err := d.stopped(cur, vol, s.info.Needles); err != nil {
 		return err
 	}
 	cur.Phase = PhaseStopped
@@ -565,9 +564,9 @@ func invalidText(r results.Run) string {
 	return "oprire nevalidă"
 }
 
-// hub04 scans the run's data directory (and its own device, if it has one)
-// for clear video in the encrypted streams' files, tmp/ and the run
-// directory (G08).
+// hub04 scans the run's data directory for clear video in the encrypted
+// streams' files, tmp/ and the run directory, and the run's own device, if
+// it has one, raw (G08). What the raw scan at the stop found fails it too.
 func (d *Driver) hub04(cur *CurrentRun, vol Volume, needles [][]byte) bool {
 	var skip []string
 	if !cur.Encrypted {
@@ -581,15 +580,39 @@ func (d *Driver) hub04(cur *CurrentRun, vol Volume, needles [][]byte) bool {
 		d.say("Rularea %s: verificarea HUB-04 a eșuat: %v", cur.RunID, err)
 		return false
 	}
+	d.sayFindings(cur, found)
+	return d.rawClear(cur, vol, needles) && len(found) == 0 && !cur.Hub04FoundAtStop
+}
+
+// stopped lists the files of the stop (listBefore) and scans the run's own
+// device raw, if it has one, before ipcam-hub starts again and reconciles
+// (G08): clear video that this scan finds fails HUB-04 even when the scan
+// after the reconcile no longer finds it.
+func (d *Driver) stopped(cur *CurrentRun, vol Volume, needles [][]byte) error {
+	if err := d.listBefore(cur, vol); err != nil {
+		return err
+	}
+	cur.Hub04FoundAtStop = !d.rawClear(cur, vol, needles)
+	return nil
+}
+
+// rawClear scans the run's own device raw, if it has one, and reports
+// whether it holds no clear video; a scan that fails is no clear scan.
+func (d *Driver) rawClear(cur *CurrentRun, vol Volume, needles [][]byte) bool {
 	raw, err := vol.ScanRaw(needles)
 	if err != nil {
 		d.say("Rularea %s: verificarea HUB-04 a discului a eșuat: %v", cur.RunID, err)
 		return false
 	}
-	for _, f := range append(found, raw...) {
+	d.sayFindings(cur, raw)
+	return len(raw) == 0
+}
+
+// sayFindings shows each of HUB-04's findings on the owner's screen.
+func (d *Driver) sayFindings(cur *CurrentRun, found []Finding) {
+	for _, f := range found {
 		d.say("Rularea %s: HUB-04: %s în clar în %s, la %d.", cur.RunID, f.What, f.Path, f.Offset)
 	}
-	return len(found) == 0 && len(raw) == 0
 }
 
 // jobOf is the ipcam-hub job of a stream: cam01_main is cam01, main.
@@ -625,15 +648,14 @@ func (d *Driver) writeRun(cur *CurrentRun, vol Volume, s *session) (string, erro
 		}
 		recipients = []string{riG.Recipient().String(), rk.Recipient().String()}
 	}
-	base, err := url.Parse(s.info.RTSPBase)
-	if err != nil {
-		return "", fmt.Errorf("controlorul a trimis o adresă RTSP greșită: %w", err)
-	}
 	for _, stream := range cur.Streams {
 		cam, profile := jobOf(stream)
-		u := url.URL{Scheme: base.Scheme, User: url.UserPassword(s.info.User, s.info.Pass), Host: base.Host, Path: "/" + stream}
+		u, err := s.cameraURL(stream)
+		if err != nil {
+			return "", err
+		}
 		pad := cur.PadLowBitrate
-		cfg.Jobs = append(cfg.Jobs, hubproc.Job{Cam: cam, Profile: profile, RestreamURL: u.String(), Recipients: recipients, PadLowBitrate: &pad})
+		cfg.Jobs = append(cfg.Jobs, hubproc.Job{Cam: cam, Profile: profile, RestreamURL: u, Recipients: recipients, PadLowBitrate: &pad})
 	}
 	config := filepath.Join(dir, "run.json")
 	return config, hubproc.WriteConfig(config, cfg)

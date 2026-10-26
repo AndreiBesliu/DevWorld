@@ -44,9 +44,16 @@ const usage = `Folosire:
   recspike mi1 --controller ADRESA --real [--resume]
       cele 5 tăieri reale de alimentare; --resume continuă după o repornire.
   recspike mi1 --lab --kind kill9|qemu-reset --shard 1|2 [--smoke] [--controller ADRESA]
-      o jumătate de set în laborator (GitHub), pe 127.0.0.1 dacă nu se dă alt controlor.
+      o jumătate de set în laborator (GitHub), pe 127.0.0.1 dacă nu se dă alt controlor; qemu-reset fără --controller
+      pornește mașina virtuală care rulează shardul și o resetează la fiecare oprire.
   recspike push --controller ADRESA_PC
       trimite rezultatele Pi-ului către reccontroller pull de pe PC.
+  recspike annotate split PLIC.json… --first PARTEA --out DOSAR
+      în laborator: câte o linie pe rulare validă a shardului, cu partea ei din set, de cel mult 3.500 de octeți.
+  recspike annotate emit DOSAR --batch K
+      tipărește liniile 10(K−1)+1 … 10K din DOSAR: cel mult 10 notificări GitHub pe pas.
+  recspike annotate read DOSAR|FIȘIER
+      citește notificările salvate cu gh api …/annotations și arată, pe set, câte părți au venit.
 `
 
 func main() {
@@ -78,6 +85,8 @@ func run(ctx context.Context, args []string, in *bufio.Reader, out io.Writer) er
 		return resumeCommand(ctx, rest, out)
 	case "push":
 		return pushCommand(ctx, rest, out)
+	case "annotate":
+		return annotateCommand(rest, out)
 	case "install", "uninstall":
 		if err := parseFlags(flag.NewFlagSet(cmd, flag.ContinueOnError), rest, out); err != nil {
 			return err

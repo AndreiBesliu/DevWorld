@@ -969,7 +969,8 @@ func TestMTX1_QueuedPartsAreBounded(t *testing.T) {
 
 // TestMTX1_QueueCapWaitsAndReportsTheDiscards (C1-R17): the disk writer
 // holds at most maxQueuedBytes of parts per recorder, 8 MiB. The test lowers
-// the bound to two parts of its frames: under the race detector a recorder
+// the bound to two and a half parts of its frames, so that two parts and
+// their boxes fit and a third does not: under the race detector a recorder
 // fed 8 MiB of frames through a short reader queue falls behind for reasons
 // of its own. While the creation of the first segment's file is held, as a
 // busy disk holds it, two parts wait in memory and the third makes the
@@ -1047,11 +1048,16 @@ func TestMTX1_QueueCapWaitsAndReportsTheDiscards(t *testing.T) {
 	// queue is empty, and that frame is the one the recorder holds.
 	releaseCreate()
 	writeFrames(2*(oneSegmentFrames-1) - r.frames)
+	drained := time.Now().Add(10 * time.Second)
 	for {
 		before := discarded()
 		r.writeAgeFrame(idrSize)
 		if discarded() == before {
 			break
+		}
+		if time.Now().After(drained) {
+			t.Fatalf("the recorder never drained its queue once the disk was back: %d frames discarded; events: %v",
+				discarded(), eventOps(r.log.snapshot()))
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -1064,6 +1070,8 @@ func TestMTX1_QueueCapWaitsAndReportsTheDiscards(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	require.Equal(t, int(lost), sum(logged("[recorder] reader is too slow, discarding ")),
+		"the discards that MediaMTX reported add up to the reader's counter")
 	r.stop()
 
 	var recorded []int

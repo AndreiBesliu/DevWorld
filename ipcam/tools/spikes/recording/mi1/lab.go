@@ -10,12 +10,12 @@ import (
 
 // The lab's sets run on GitHub's runners (R03): `recspike mi1 --lab --kind
 // kill9 --shard 1|2 [--smoke]` runs one shard of lab-linux-kill9 or
-// lab-windows-kill9 against reccontroller --local on loopback, with no
-// window, preflight or owner. Its envelopes are reccontroller's, which the
-// lab workflow turns into annotations (C32, Task 7.3). The qemu-reset
-// shards run the same driver in a guest that the lab resets from outside;
-// their QMP driver and the kill9 shards' per-run disk image (G08) are Task
-// 7.3's Volumes.
+// lab-windows-kill9 against reccontroller -local on loopback, with no
+// window, preflight or owner; on Linux each encrypted run records on an
+// image of its own (Images, G08). Its envelopes are reccontroller's, which
+// the lab workflow turns into annotations (C32, `recspike annotate`). A
+// qemu-reset shard runs the same driver in a guest, which mi1.QEMU boots on
+// the runner and resets at each cut.
 
 // smokeRuns is how many runs of its shard a smoke run records: the first
 // two, one encrypted and one in clear.
@@ -40,6 +40,11 @@ type Volumes interface {
 	Prepare(ctx context.Context, runID string, encrypted bool) (Volume, error)
 	Reopen(ctx context.Context, runID string, encrypted bool) (Volume, error)
 }
+
+// LabVolumes is where a lab shard of kind records its runs under root: on
+// a Linux kill9 shard each encrypted run on an image of its own (Images),
+// every other run in a plain folder (Dirs).
+func LabVolumes(kind, root string) Volumes { return labVolumes(kind, root) }
 
 // Dirs gives each run a plain folder under Root: <Root>/<runId>/data. The
 // owner's devices and the lab's clear runs record there.

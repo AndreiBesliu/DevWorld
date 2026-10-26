@@ -1368,3 +1368,26 @@ func TestSession_ReconnectBudgets(t *testing.T) {
 		})
 	}
 }
+
+// TestSession_CamerasAtTheControllersAddress (R03): ipcam-hub pulls the
+// cameras at the address that recspike dialed for the controller, on the
+// RTSP port that the controller names. A lab guest reaches the runner's
+// reccontroller at 10.0.2.2 through QEMU's user network, while the
+// controller sees the link arrive on its own loopback address and names
+// that one.
+func TestSession_CamerasAtTheControllersAddress(t *testing.T) {
+	f := startFakeController(t) // it names rtsp://127.0.0.1:1
+	_, port, err := net.SplitHostPort(f.addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Driver{Controller: net.JoinHostPort("localhost", port), Host: HostState{Pseudonym: "lab-qemu"}}
+	s, err := d.connect(t.Context())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer s.close()
+	if got, err := s.cameraURL(MainStream); err != nil || got != "rtsp://u:p@localhost:1/cam01_main" { //nolint:gosec // the fake controller's test credentials
+		t.Errorf("cameraURL = %q, %v; want the camera at the dialed address", got, err)
+	}
+}

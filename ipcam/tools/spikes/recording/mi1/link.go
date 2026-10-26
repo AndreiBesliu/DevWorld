@@ -139,6 +139,8 @@ type session struct {
 	broken     chan struct{}
 	info       link.Session
 	beaconAddr string
+	// controllerHost is the controller's host as recspike dialed it.
+	controllerHost string
 }
 
 type received struct {
@@ -197,7 +199,23 @@ func (d *Driver) connectWithin(ctx context.Context, retry time.Duration) (*sessi
 		port = link.BeaconPort
 	}
 	s.beaconAddr = net.JoinHostPort(host, strconv.Itoa(port))
+	s.controllerHost = host
 	return s, nil
+}
+
+// cameraURL is the RTSP address of a stream, with the session's
+// credentials: the controller's RTSP port, at the controller's host as
+// recspike dialed it, as the beacon's address is. The session names the
+// address on which the controller saw the link arrive, which is not the
+// host's way to it through QEMU's user network: a lab guest dials 10.0.2.2,
+// and the runner's controller sees its own loopback address (R03).
+func (s *session) cameraURL(stream string) (string, error) {
+	base, err := url.Parse(s.info.RTSPBase)
+	if err != nil || base.Port() == "" {
+		return "", fmt.Errorf("controlorul a trimis o adresă RTSP greșită: %q", s.info.RTSPBase)
+	}
+	u := url.URL{Scheme: base.Scheme, User: url.UserPassword(s.info.User, s.info.Pass), Host: net.JoinHostPort(s.controllerHost, base.Port()), Path: "/" + stream}
+	return u.String(), nil
 }
 
 // dialSession dials the controller, retrying for up to retry, and says
@@ -340,14 +358,13 @@ func (s *session) probes(ntp NTPCheck) LinkProbes {
 	return LinkProbes{
 		Beacon: s.checkBeacon,
 		RTSP: func(ctx context.Context) error {
-			base, err := url.Parse(s.info.RTSPBase)
+			u, err := s.cameraURL(MainStream)
 			if err != nil {
 				return err
 			}
-			u := url.URL{Scheme: base.Scheme, User: url.UserPassword(s.info.User, s.info.Pass), Host: base.Host, Path: "/" + MainStream}
 			ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
-			src, err := source.NewRTSP(ctx, "preflight", u.String())
+			src, err := source.NewRTSP(ctx, "preflight", u)
 			if err != nil {
 				return err
 			}

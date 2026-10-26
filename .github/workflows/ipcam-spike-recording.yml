@@ -3,7 +3,8 @@ name: ipcam-spike-recording
 # The Phase 0 (c1) recorder spike (ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md):
 # the hub module, the MediaMTX fork in hub/third_party/mediamtx (a nested module outside
 # go.work, built, tested and checked with GOWORK=off from its directory) and the spike
-# module tools/spikes/recording. Later tasks add the mi1-smoke and mi9 jobs.
+# module tools/spikes/recording, and mi1-smoke, MI1's lab shards in small (Task 7). Task 11
+# adds the mi9 job.
 
 on:
   push:
@@ -159,6 +160,7 @@ jobs:
             ipcam/go.work.sum
             ipcam/tools/go.sum
             ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
             ipcam/hub/third_party/mediamtx/go.sum
       - name: Download media
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -233,13 +235,15 @@ jobs:
         # variables make the tests that need the fork or the media fail instead of skipping;
         # the job's env and the age-tools step do the same for the age tools. A run of the MI1
         # smoke whose stream lost more than its limit prints one "mi1-diag: <json>" line that
-        # explains it (Task 7.2d); each goes out as a notice, at most 10 (C32).
+        # explains it (Task 7.2d); each goes out as a notice, at most 10 (C32). The lab image's
+        # test needs the runner's loop devices through sudo, and fails instead of skipping.
         id: test
         env:
           MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx
           RECSPIKE_REQUIRE_MEDIAMTX: '1'
           MEDIAGEN_DIR: ${{ runner.temp }}/media
           SPIKE_REQUIRE_MEDIA: '1'
+          RECSPIKE_REQUIRE_LOOP: '1'
         run: |
           set -o pipefail
           log="${RUNNER_TEMP}/test.log"
@@ -382,6 +386,7 @@ jobs:
             ipcam/go.work.sum
             ipcam/tools/go.sum
             ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
             ipcam/hub/third_party/mediamtx/go.sum
       - name: Download media
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -409,6 +414,28 @@ jobs:
         run: |
           set -o pipefail
           go test -count=1 ./hub/... 2>&1 | tee "${RUNNER_TEMP}/hub-test.log"
+      - name: Test the recorder spike
+        # The recording module's Windows paths, which a cross-compile only builds: hubproc's
+        # TerminateProcess and graceful stop, the run state's lock, the keep-awake, and the lab
+        # kill9 smoke on loopback with the fork and the media. A test that needs Linux tools
+        # (ffmpeg's band check, loop devices) skips. A smoke run whose stream lost more than its
+        # limit prints a "mi1-diag: <json>" line; each goes out as a notice, at most 10 (C32).
+        id: recording-test
+        if: ${{ !cancelled() && steps.fork-build.outcome == 'success' }}
+        env:
+          MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx.exe
+          RECSPIKE_REQUIRE_MEDIAMTX: '1'
+          MEDIAGEN_DIR: ${{ runner.temp }}/media
+          SPIKE_REQUIRE_MEDIA: '1'
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/recording-test.log"
+          status=0
+          go test -count=1 ./tools/spikes/recording/... 2>&1 | tee "${log}" || status=$?
+          sed -n 's/^mi1-diag: //p' "${log}" | head -n 10 | while IFS= read -r line; do
+            printf '%s\n' "${line}" | tools/scripts/annotate.sh mi1-diag 1 notice
+          done || true
+          exit "${status}"
       - name: Test the MediaMTX fork's patches
         # Every patch test, MTX-0's in the root package included: ipcam/.gitattributes
         # checks the fork out without line-ending changes. The -run pattern still
@@ -522,6 +549,7 @@ jobs:
           OUTCOMES: >-
             fork-build=${{ steps.fork-build.outcome }}
             hub-test=${{ steps.hub-test.outcome }}
+            recording-test=${{ steps.recording-test.outcome }}
             fork-test=${{ steps.fork-test.outcome }}
         run: |
           for step in ${OUTCOMES}; do
@@ -535,3 +563,186 @@ jobs:
               tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
             fi
           done
+
+  mi1-smoke:
+    # MI1's lab shards in small (R03, Task 7): the first two runs of each kind's shard 1, an
+    # encrypted run and a clear one, with --smoke (the prompt 20 to 40 s after the first beacon,
+    # a cut valid 10 to 60 s after it), the lab workflow's own way (tools/scripts/mi1-lab.sh with
+    # the built binaries): Linux kill9, each encrypted run on an image of its own (G08); Linux
+    # qemu-reset, in a guest under KVM that QMP resets at each cut; Windows kill9. Each run that
+    # counts goes out as a notice and must pass G11. The Linux leg also checks with ffmpeg that
+    # the SEI index of a clear run's last recorded frame is the frame of its band (C15).
+    needs: media
+    name: mi1-smoke ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: linux, runner: ubuntu-24.04, kinds: kill9 qemu-reset}
+          - {os: windows, runner: windows-latest, kinds: kill9}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    env:
+      EXE: ${{ matrix.os == 'windows' && '.exe' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
+      - name: Download media
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-recording-media
+          path: ${{ runner.temp }}/media
+      - name: Prepare the runner
+        # LAB and MEDIA for the steps after it, as bash paths: on Windows a glob does not match
+        # under RUNNER_TEMP's backslashes. On Linux: ffmpeg for the band check (lab tools only,
+        # never shipped), and QEMU, cloud-localds and KVM for the qemu-reset smoke (TST-09).
+        id: prepare
+        run: |
+          set -o pipefail
+          tmp="${RUNNER_TEMP}"
+          if [[ "${RUNNER_OS}" == Windows ]]; then
+            tmp=$(cygpath -u "${RUNNER_TEMP}")
+          fi
+          {
+            echo "LAB=${tmp}/lab"
+            echo "MEDIA=${tmp}/media"
+          } >> "${GITHUB_ENV}"
+          if [[ "${RUNNER_OS}" == Linux ]]; then
+            {
+              if [[ ! -e /dev/kvm ]]; then
+                echo "KVM is not available on this runner (/dev/kvm is missing): the qemu-reset smoke needs it (TST-09)."
+                exit 1
+              fi
+              sudo apt-get update &&
+                sudo apt-get install --yes --no-install-recommends ffmpeg qemu-system-x86 qemu-utils cloud-image-utils &&
+                echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+                sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null &&
+                sudo udevadm control --reload-rules &&
+                sudo udevadm trigger --name-match=kvm &&
+                sudo udevadm settle &&
+                ffmpeg -version | sed -n 1p &&
+                qemu-system-x86_64 --version | sed -n 1p || exit 1
+              if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+                echo "KVM is not usable by this runner's user: $(ls -l /dev/kvm)"
+                exit 1
+              fi
+            } 2>&1 | tee "${RUNNER_TEMP}/prepare.log"
+          fi
+      - name: Build
+        # As the lab workflow's build job builds them.
+        id: build
+        run: |
+          set -o pipefail
+          {
+            go build -o "${LAB}/" ./hub/cmd/ipcam-hub ./tools/spikes/recording/cmd/recspike \
+              ./tools/spikes/recording/cmd/reccontroller &&
+              (cd hub/third_party/mediamtx && GOWORK=off go build -o "${LAB}/mediamtx${EXE}" .)
+          } 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: Band check
+        # C15: TestMI1_SmokeBandCrossCheck, which fails instead of skipping without ffmpeg.
+        id: band
+        if: ${{ matrix.os == 'linux' }}
+        env:
+          RECSPIKE_REQUIRE_FFMPEG: '1'
+          RECSPIKE_REQUIRE_MEDIAMTX: '1'
+          SPIKE_REQUIRE_MEDIA: '1'
+        run: |
+          set -o pipefail
+          MEDIAMTX_BIN="${LAB}/mediamtx" MEDIAGEN_DIR="${MEDIA}" \
+            go test -count=1 -v -run '^TestMI1_SmokeBandCrossCheck$' ./tools/spikes/recording/mi1/ 2>&1 |
+            tee "${RUNNER_TEMP}/band.log"
+      - name: Smoke runs
+        # Each kind's smoke, one after the other on the same loopback ports; recspike's output
+        # stays as it is, so that its mi1-diag lines start a line.
+        id: smoke
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/smoke.log"
+          status=0
+          for kind in ${{ matrix.kinds }}; do
+            echo "== ${kind}" | tee -a "${log}"
+            tools/scripts/mi1-lab.sh "${LAB}" "${MEDIA}" "${kind}" 1 --smoke 2>&1 | tee -a "${log}" || status=1
+          done
+          exit "${status}"
+      - name: Smoke results
+        # Each kind's runs that count, as the lab sends them (recspike annotate split): one
+        # notice per run, and each must pass G11 (reconciled, HUB-04 clear, nothing unreadable
+        # or torn, every stream within its limit); two must count.
+        id: results
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/results.log"
+          status=0
+          for kind in ${{ matrix.kinds }}; do
+            set="lab-${{ matrix.os }}-${kind}-smoke"
+            lines="${LAB}/lines/${set}"
+            if ! "${LAB}/recspike${EXE}" annotate split "${LAB}/results/MI1/${set}"/*.json --first 1 --out "${lines}" 2>&1 |
+              tee -a "${log}"; then
+              status=1
+              continue
+            fi
+            count=0
+            for line in "${lines}"/*.json; do
+              tools/scripts/annotate.sh "${set}" 1 notice < "${line}"
+              count=$((count + 1))
+              if ! jq -e '.runs[0] | .reconciled and .hub04Clear and .unreadable == 0 and .tornParts == 0 and
+                (.streams | length > 0) and all(.streams[]; .lossMs <= .limitMs)' "${line}" > /dev/null; then
+                echo "${set}: run $(jq -r .runId "${line}") fails G11: $(cat "${line}")" | tee -a "${log}"
+                status=1
+              fi
+            done
+            if [[ ${count} -ne 2 ]]; then
+              echo "${set}: ${count} runs count, want 2" | tee -a "${log}"
+              status=1
+            fi
+          done
+          exit "${status}"
+      - name: Explain the losses over their limit
+        # A run whose stream lost more than its limit printed one "mi1-diag: <json>" line
+        # (Task 7.2d); each goes out as a notice, at most 10, in a step of its own (C32). It
+        # never changes the job's result.
+        if: always()
+        run: |
+          cat "${RUNNER_TEMP}/band.log" "${RUNNER_TEMP}/smoke.log" 2> /dev/null |
+            sed -n 's/^mi1-diag: //p' | head -n 10 | while IFS= read -r line; do
+              printf '%s\n' "${line}" | tools/scripts/annotate.sh mi1-diag 1 notice
+            done || true
+      - name: Show failures as annotations
+        # The failed step's log, testify's lines of a go test first; for the smoke runs, also
+        # the controller's screen and the end of the guest's console.
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            fi
+            if [[ ${id} == smoke ]]; then
+              [[ -f "${LAB}/reccontroller.out" ]] && tail -n 40 "${LAB}/reccontroller.out" | tools/scripts/annotate.sh reccontroller 40
+              console="${LAB}/work/qemu/console.log"
+              [[ -f "${console}" ]] && tail -n 60 "${console}" | tools/scripts/annotate.sh "guest console" 60
+            fi
+          done
+          true

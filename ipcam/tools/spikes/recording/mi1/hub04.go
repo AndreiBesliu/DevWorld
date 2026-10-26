@@ -117,20 +117,12 @@ type Finding struct {
 // disk. It returns the first finding of each file. A needle under 8 bytes
 // is an error, never left out.
 func ScanHub04(root string, skip []string, needles [][]byte) ([]Finding, error) {
-	index := &needleIndex{byPrefix: map[uint64][][]byte{}}
-	longest := len(moofNeedle) + 4 + len(mfhdNeedle)
-	for _, n := range append([][]byte{ftypNeedle}, needles...) {
-		if len(n) < minNeedle {
-			return nil, fmt.Errorf("mi1: the HUB-04 needle %x is %d bytes, under %d", n, len(n), minNeedle)
-		}
-		k := binary.LittleEndian.Uint64(n)
-		index.byPrefix[k] = append(index.byPrefix[k], n)
-		pre := binary.LittleEndian.Uint16(n[prefilterAt:])
-		index.pre2[pre/64] |= 1 << (pre % 64)
-		longest = max(longest, len(n))
+	index, longest, err := newNeedleIndex(needles)
+	if err != nil {
+		return nil, err
 	}
 	var found []Finding
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil
@@ -163,12 +155,51 @@ func ScanHub04(root string, skip []string, needles [][]byte) ([]Finding, error) 
 	return found, err
 }
 
+// ScanRaw is HUB-04's raw scan of a lab run's own device (G08): every byte
+// of the file or device at path, live files, freed blocks and the file
+// system's own blocks alike, searched for the same needles as ScanHub04. It
+// returns the first finding, named name.
+func ScanRaw(path, name string, needles [][]byte) ([]Finding, error) {
+	index, longest, err := newNeedleIndex(needles)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, err // a device that is gone is no clean scan
+	}
+	f, ok, err := scanFile(path, index, longest)
+	if err != nil || !ok {
+		return nil, err
+	}
+	f.Path = name
+	return []Finding{f}, nil
+}
+
 // needleIndex finds the needles fast: a bit per value of their two bytes
 // at prefilterAt rules out almost every position at the cost of one load,
 // and the rest are looked up by their first 8 bytes.
 type needleIndex struct {
 	pre2     [1 << 16 / 64]uint64
 	byPrefix map[uint64][][]byte
+}
+
+// newNeedleIndex indexes ftyp's needle and needles, and returns the length
+// of the longest thing that the scan looks for. A needle under 8 bytes is
+// an error, never left out.
+func newNeedleIndex(needles [][]byte) (*needleIndex, int, error) {
+	index := &needleIndex{byPrefix: map[uint64][][]byte{}}
+	longest := len(moofNeedle) + 4 + len(mfhdNeedle)
+	for _, n := range append([][]byte{ftypNeedle}, needles...) {
+		if len(n) < minNeedle {
+			return nil, 0, fmt.Errorf("mi1: the HUB-04 needle %x is %d bytes, under %d", n, len(n), minNeedle)
+		}
+		k := binary.LittleEndian.Uint64(n)
+		index.byPrefix[k] = append(index.byPrefix[k], n)
+		pre := binary.LittleEndian.Uint16(n[prefilterAt:])
+		index.pre2[pre/64] |= 1 << (pre % 64)
+		longest = max(longest, len(n))
+	}
+	return index, longest, nil
 }
 
 // scanFile looks for the needles of index and for a moof with its mfhd in

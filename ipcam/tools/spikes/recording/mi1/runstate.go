@@ -99,6 +99,10 @@ type CurrentRun struct {
 	// StopBoot is the host's boot when recspike asked the OS to stop
 	// (sysrq, bugcheck): another boot after it proves the reboot.
 	StopBoot *Boot `json:"stopBoot,omitempty"`
+	// Hub04FoundAtStop is true when the raw scan of the run's own device
+	// right after the stop, before ipcam-hub reconciled, found clear video
+	// or failed (G08).
+	Hub04FoundAtStop bool `json:"hub04FoundAtStop,omitempty"`
 
 	// trace is what this recspike saw of ipcam-hub around the stop, for the
 	// diagnostics of a loss over the limit; it is not kept across a reboot.

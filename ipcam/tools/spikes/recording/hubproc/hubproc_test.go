@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -561,6 +562,11 @@ func TestHubproc_RestartedChildReportsToNoOnEvent(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	// The first child's events before its verify reached OnEvent before
+	// the wait for its verify returned.
+	if !slices.Contains(pids, first) {
+		t.Fatalf("OnEvent got events of pids %v, none of the first child's (%d)", pids, first)
+	}
 	for _, pid := range pids {
 		if pid != first {
 			t.Fatalf("OnEvent got events of pids %v, want the first child's (%d) only", pids, first)

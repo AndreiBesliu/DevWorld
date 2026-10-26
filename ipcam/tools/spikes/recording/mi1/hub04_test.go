@@ -2,11 +2,13 @@ package mi1
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"filippo.io/age"
@@ -235,6 +237,90 @@ func TestHub04_DriverSkipsOnlyAClearRunsStreams(t *testing.T) {
 		if got := d.hub04(cur, dirVolume(root), nil); got == encrypted {
 			t.Errorf("an encrypted run %v: Hub04Clear = %v, want %v", encrypted, got, !encrypted)
 		}
+	}
+}
+
+// dirtyAtStopVolumes give every run a plain folder whose raw scan finds
+// clear bytes the first time only: at the first run's stop, before
+// ipcam-hub reconciles, as on a device whose clear bytes the reconcile
+// overwrote.
+type dirtyAtStopVolumes struct {
+	Dirs
+	scans *atomic.Int32
+}
+
+func (v dirtyAtStopVolumes) Prepare(ctx context.Context, runID string, encrypted bool) (Volume, error) {
+	vol, err := v.Dirs.Prepare(ctx, runID, encrypted)
+	return dirtyAtStop{Volume: vol, scans: v.scans}, err
+}
+
+type dirtyAtStop struct {
+	Volume
+	scans *atomic.Int32
+}
+
+func (v dirtyAtStop) ScanRaw([][]byte) ([]Finding, error) {
+	if v.scans.Add(1) == 1 {
+		return []Finding{{Path: "imagine", Offset: 4096, What: "media"}}, nil
+	}
+	return nil, nil
+}
+
+// TestHub04_RawScanAtTheStopCounts (G08): a run on an image of its own is
+// scanned raw right after its stop, before ipcam-hub starts again and
+// reconciles, and again after the reconcile; clear bytes that only the
+// first scan finds fail HUB-04 all the same, and the owner's screen names
+// them.
+func TestHub04_RawScanAtTheStopCounts(t *testing.T) {
+	r := newRig(t, "lab-linux")
+	d := r.driver(t)
+	scans := &atomic.Int32{}
+	d.Volumes = dirtyAtStopVolumes{Dirs: Dirs{Root: d.Work}, scans: scans}
+	if err := d.RunSet(t.Context(), SetOptions{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: 1, Smoke: true}); err != nil {
+		t.Fatalf("RunSet: %v\nscreen:\n%s", err, r.out.String())
+	}
+	reports := r.f.runReports()
+	if len(reports) != smokeRuns || reports[0].Hub04Clear || !reports[1].Hub04Clear {
+		t.Errorf("reports %+v: want the first run's HUB-04 failed by its scan at the stop, the second clear", reports)
+	}
+	if got := scans.Load(); got != 2*smokeRuns {
+		t.Errorf("%d raw scans, want 2 per run: at the stop and after the reconcile", got)
+	}
+	if !strings.Contains(r.out.String(), "HUB-04: media în clar în imagine, la 4096") {
+		t.Errorf("the screen does not name the finding:\n%s", r.out.String())
+	}
+}
+
+// TestHub04_ScanRawReadsTheWholeDevice (G08): the raw scan of a run's own
+// image, a plain file standing in for the device, finds a needle in its
+// freed blocks anywhere, across the scan's chunks too, and names the
+// device; a zero-filled image is clean.
+func TestHub04_ScanRawReadsTheWholeDevice(t *testing.T) {
+	needle := []byte{0x65, 0x88, 0x84, 0x11, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c}
+	device := filepath.Join(t.TempDir(), "loop")
+	if err := os.WriteFile(device, make([]byte, 3*scanChunk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := ScanRaw(device, "imagine", [][]byte{needle}); err != nil || len(found) != 0 {
+		t.Fatalf("ScanRaw of zeros = %+v, %v; want clean", found, err)
+	}
+	f, err := os.OpenFile(device, os.O_WRONLY, 0) //nolint:gosec // the test's own file
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := int64(2*scanChunk - 5) // across two chunks
+	if _, err := f.WriteAt(needle, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	found, err := ScanRaw(device, "imagine", [][]byte{needle})
+	if err != nil || len(found) != 1 || found[0] != (Finding{Path: "imagine", Offset: at, What: "media"}) {
+		t.Errorf("ScanRaw = %+v, %v; want the needle at %d in imagine", found, err, at)
+	}
+	if _, err := ScanRaw(device, "imagine", [][]byte{needle[:4]}); err == nil {
+		t.Error("ScanRaw with a 4-byte needle: no error, want one")
 	}
 }
 
