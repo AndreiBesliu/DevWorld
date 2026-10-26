@@ -291,6 +291,50 @@ func TestHub04_RawScanAtTheStopCounts(t *testing.T) {
 	}
 }
 
+// watchedVolumes give every run a plain folder whose raw scans call onScan.
+type watchedVolumes struct {
+	Dirs
+	onScan func()
+}
+
+func (v watchedVolumes) Prepare(ctx context.Context, runID string, encrypted bool) (Volume, error) {
+	vol, err := v.Dirs.Prepare(ctx, runID, encrypted)
+	return watchedVolume{Volume: vol, onScan: v.onScan}, err
+}
+
+type watchedVolume struct {
+	Volume
+	onScan func()
+}
+
+func (v watchedVolume) ScanRaw(needles [][]byte) ([]Finding, error) {
+	v.onScan()
+	return v.Volume.ScanRaw(needles)
+}
+
+// TestHub04_ScansWithIpcamHubStopped (G08): the scan after the reconcile
+// runs once ipcam-hub has stopped, so that no file changes under it and
+// none is locked. On Windows, SQLite locks bytes of the catalog's WAL index
+// while ipcam-hub writes to it, and a read of those bytes fails: the
+// windows job's lab smoke lost a clear run's HUB-04 that way.
+func TestHub04_ScansWithIpcamHubStopped(t *testing.T) {
+	r := newRig(t, "lab-linux")
+	d := r.driver(t)
+	var last []string
+	d.Volumes = watchedVolumes{Dirs: Dirs{Root: d.Work}, onScan: func() {
+		entries := logEntries(t, r.log)
+		last = append(last, entries[len(entries)-1])
+	}}
+	if err := d.RunSet(t.Context(), SetOptions{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: 1, Smoke: true}); err != nil {
+		t.Fatalf("RunSet: %v\nscreen:\n%s", err, r.out.String())
+	}
+	// Each kill9 run: the scan at the stop, the killed ipcam-hub the last
+	// one started; then the scan after the reconcile.
+	if want := []string{"hub", "stopped", "hub", "stopped"}; !slices.Equal(last, want) {
+		t.Errorf("the fake ipcam-hub's last log entry at each scan: %q, want %q", last, want)
+	}
+}
+
 // TestHub04_ScanRawReadsTheWholeDevice (G08): the raw scan of a run's own
 // image, a plain file standing in for the device, finds a needle in its
 // freed blocks anywhere, across the scan's chunks too, and names the

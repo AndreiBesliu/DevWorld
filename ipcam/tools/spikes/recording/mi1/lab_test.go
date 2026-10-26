@@ -179,7 +179,7 @@ func TestMI1_LabKill9Smoke(t *testing.T) {
 		}
 		counted++
 		if !r.Reconciled || !r.Hub04Clear || r.Unreadable != 0 || r.TornParts != 0 || len(r.Streams) == 0 || r.ResumeMs == nil {
-			t.Errorf("run %s: %+v", r.RunID, r)
+			t.Errorf("run %s: %+v\nrecspike about it:\n%s", r.RunID, r, linesOf(out.String(), r.RunID))
 			continue
 		}
 		t.Logf("run %s (%s): loss %d ms, resume %d ms, pacing p99 %d ms", r.RunID, encryptionText(r.Encrypted), r.LossMs, *r.ResumeMs, r.PacingP99Ms)
@@ -192,6 +192,17 @@ func TestMI1_LabKill9Smoke(t *testing.T) {
 	if counted != 2 {
 		t.Errorf("%d runs count, want the 2 smoke runs\nrecspike:\n%s\nreccontroller:\n%s", counted, out.String(), screen.String())
 	}
+}
+
+// linesOf is the lines of screen that name runID.
+func linesOf(screen, runID string) string {
+	var out []string
+	for line := range strings.SplitSeq(screen, "\n") {
+		if strings.Contains(line, runID) {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // mainFrames is the number of frames of main.h264, cam01_main's loop: the

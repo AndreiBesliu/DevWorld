@@ -466,9 +466,9 @@ func (d *Driver) afterStop(ctx context.Context, s *session, st *RunState, cur *C
 
 // finish is the end of every run after its stop, with ipcam-hub running
 // again (G09): the NTP wait, ipcam-hub's reconcile and verify, the last
-// recorded index of each stream from the files of the stop, HUB-04, the
-// clean stop of ipcam-hub, and the report, whose verdict says whether the
-// run counts.
+// recorded index of each stream from the files of the stop, the clean stop
+// of ipcam-hub, HUB-04, and the report, whose verdict says whether the run
+// counts.
 func (d *Driver) finish(ctx context.Context, s *session, st *RunState, cur *CurrentRun, vol Volume, hub *hubproc.Hub, coldBootMs *int64) error {
 	defer stopHub(hub)
 	ntpMs, synced := WaitNTP(ctx, d.ntp(), d.clock())
@@ -503,13 +503,16 @@ func (d *Driver) finish(ctx context.Context, s *session, st *RunState, cur *Curr
 		}
 		report.Streams = append(report.Streams, link.StreamIndex{Stream: stream, LastRecordedIndex: index})
 	}
-	report.Hub04Clear = d.hub04(cur, vol, s.info.Needles)
 	stopCtx, stopCancel := context.WithTimeout(ctx, stopTimeout)
 	err = hub.Stop(stopCtx)
 	stopCancel()
 	if err != nil {
 		return err
 	}
+	// With ipcam-hub stopped, no file changes under the scan and none is
+	// locked: on Windows, SQLite locks bytes of the catalog's WAL index
+	// while ipcam-hub writes, and a read of them fails.
+	report.Hub04Clear = d.hub04(cur, vol, s.info.Needles)
 	v, err := d.report(ctx, s, st, report)
 	if err != nil {
 		return err
