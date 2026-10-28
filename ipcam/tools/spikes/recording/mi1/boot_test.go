@@ -88,7 +88,7 @@ func TestThisBoot_ReadTwiceIsOneBoot(t *testing.T) {
 	a, errA := ThisBoot()
 	time.Sleep(20 * time.Millisecond)
 	b, errB := ThisBoot()
-	if errA != nil || errB != nil || (a.ID == "" && a.At == nil) || !a.same(b) {
+	if errA != nil || errB != nil || (a.ID == "" && a.At == nil) || !a.Same(b) {
 		t.Errorf("ThisBoot = %+v, %v, then %+v, %v; want one known boot", a, errA, b, errB)
 	}
 }

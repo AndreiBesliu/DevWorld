@@ -83,11 +83,23 @@ type listing struct {
 	segs     []segFile // sorted by path: by stream, then by start
 	rewrites []string  // the .rewrite siblings that a cut left
 	// unreadable are the directories that could not be read, relative to
-	// rec/ with "/", and errs the errors of the listing, each naming its
-	// directory by its base name.
+	// rec/ with "/", and errs the entries that the listing could not read.
 	unreadable []string
-	errs       []error
+	errs       []listError
 }
+
+// listError is an entry under rec/ that a listing could not read: a
+// directory, such as a date directory with an I/O error after a cut, or a
+// file.
+type listError struct {
+	rel  string // relative to rec/, with "/"
+	path string
+	err  error
+}
+
+// as is the error as what reports it (fileError): it names the entry by its
+// base name.
+func (e listError) as(what string) error { return fileError(what, e.path, e.err) }
 
 // hidden reports whether rel, a path relative to rec/ with "/", lies in a
 // directory that could not be read: whether its file is there is unknown,
@@ -110,11 +122,14 @@ func scanRecDir(recDir string) (l listing, err error) {
 			case path == recDir:
 				return err
 			}
-			l.errs = append(l.errs, fileError("list", path, err))
+			rel, rerr := filepath.Rel(recDir, path)
+			if rerr != nil {
+				return rerr
+			}
+			rel = filepath.ToSlash(rel)
+			l.errs = append(l.errs, listError{rel: rel, path: path, err: err})
 			if d != nil && d.IsDir() {
-				if rel, rerr := filepath.Rel(recDir, path); rerr == nil {
-					l.unreadable = append(l.unreadable, filepath.ToSlash(rel))
-				}
+				l.unreadable = append(l.unreadable, rel)
 				return fs.SkipDir
 			}
 			return nil
@@ -153,6 +168,9 @@ type pendingRewrite struct {
 	kept          *crypto.KeptTail
 	interimEndMs  int64
 	salvagedEndMs int64
+	// gapReason is the reason of the file's tail gap, which the rewrite
+	// moves from interimEndMs to salvagedEndMs.
+	gapReason catalog.GapReason
 }
 
 // repair is reconcile's plan for one file: a .part, or the newest
@@ -355,7 +373,9 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 		return res, fmt.Errorf("recorder: reconcile: %w", err)
 	}
 	segs := l.segs
-	res.errs = l.errs
+	for _, e := range l.errs {
+		res.errs = append(res.errs, e.as("list"))
+	}
 	rows, err := cat.Segments(ctx)
 	if err != nil {
 		return res, err
@@ -389,7 +409,9 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 			noRecording[rp.seg.abs] = true
 		}
 	}
-	var written []*catalog.Gap // the restart gaps that this start wrote, as they end up
+	// changed are the restart gaps that this start wrote or moved, as they
+	// end up: each goes out as a gap event.
+	var changed []*catalog.Gap
 	for _, rp := range repairs {
 		if rp.failed != nil {
 			res.report.Unreadable++
@@ -397,20 +419,23 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 			continue
 		}
 		var g catalog.Gap
+		gapChanged := false
 		if rp.lostTail() {
 			// The gap first, before the file changes: a cut before the change
 			// finds the gap again at the next start, one after it would lose
 			// the gap. A .part that an earlier MediaMTX left, older than other
 			// segments of its stream, has a gap that ended when the next one
 			// started.
-			g = restartGap(rp.seg, rp.keptMs(), nextStartMs(segs, rp.seg, noRecording))
-			isNew, err := putRestartGap(ctx, cat, rp.seg, g)
+			g = tailGap(rp.seg, rp.keptMs(), nextStartMs(segs, rp.seg, noRecording), catalog.GapRestart)
+			isNew, moved, err := putTailGap(ctx, cat, rp.seg, rp.keptMs(), g)
 			if err != nil {
 				return res, err
 			}
 			if isNew {
-				written = append(written, &g)
 				res.report.GapsWritten++
+			}
+			if gapChanged = isNew || moved; gapChanged {
+				changed = append(changed, &g)
 			}
 			res.report.LostTails++
 		}
@@ -430,8 +455,12 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 			if !errors.As(err, new(*dirSyncError)) {
 				res.report.Unreadable++
 				if rp.lostTail() {
-					if err := failedRepairGap(ctx, cat, rp.seg, &g); err != nil {
+					moved, err := failedRepairGap(ctx, cat, rp.seg, &g)
+					if err != nil {
 						return res, err
+					}
+					if moved && !gapChanged {
+						changed = append(changed, &g)
 					}
 				}
 				continue
@@ -442,7 +471,7 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 		}
 		durations[rp.seg.final()] = durationMs
 	}
-	for _, g := range written {
+	for _, g := range changed {
 		res.gaps = append(res.gaps, *g)
 	}
 
@@ -451,57 +480,60 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 	return res, err
 }
 
-// restartGap is the gap after the lost tail of s, whose file now holds
-// durationMs: it ends at nextMs, where the stream's next segment starts, or
-// stays open when nextMs is 0 (the first part after a restart closes it).
-func restartGap(s segFile, durationMs, nextMs int64) catalog.Gap {
-	g := catalog.Gap{Cam: string(s.key.cam), Profile: string(s.key.profile), StartMs: s.start.UnixMilli() + durationMs, Reason: catalog.GapRestart}
+// tailGap is the gap of reason after the lost tail of s, whose file now
+// holds durationMs: it ends at nextMs, where the stream's next segment
+// starts, or stays open when nextMs is 0 (the first part after a restart
+// closes it). Its reason is restart, or card when MediaMTX could not write
+// the file on an SD card (T40, Recorder.WriteFailed).
+func tailGap(s segFile, durationMs, nextMs int64, reason catalog.GapReason) catalog.Gap {
+	g := catalog.Gap{Cam: string(s.key.cam), Profile: string(s.key.profile), StartMs: s.start.UnixMilli() + durationMs, Reason: reason}
 	if nextMs != 0 {
 		g.EndMs = max(nextMs, g.StartMs)
 	}
 	return g
 }
 
-// putRestartGap writes g, the restart gap of the lost tail of s, unless an
-// earlier start wrote it: a restart gap of the stream that starts where g
-// does, or at the start of s, where a failed repair left it
-// (failedRepairGap), is that gap, and one at the start of s moves to where
-// g starts, as the repair to come expects. isNew reports whether g is a new
-// row. So however many starts a cut ends between the gap and the repair, or
-// a repair that keeps failing, the file has one gap (PutGap is a plain
+// putTailGap writes g, the tail gap of s, whose file keeps keptMs, unless an
+// earlier start wrote it: a gap of the stream and of g's reason that starts
+// within the file's recording, [the start of s, + keptMs], is that gap. It
+// is at g's start, or at the start of s, where a failed repair left it
+// (failedRepairGap), or where an earlier start that kept another length put
+// it; the repair to come expects it at g's start, so it moves there. A gap
+// of another reason, such as an SD card's (T40), is never taken for it, and
+// one that starts after the file's recording is another file's. isNew
+// reports whether g is a new row, and moved whether an existing gap moved.
+// So however many starts a cut ends between the gap and the repair, or a
+// repair that keeps failing, the file has one gap (PutGap is a plain
 // INSERT).
-func putRestartGap(ctx context.Context, cat *catalog.DB, s segFile, g catalog.Gap) (isNew bool, err error) {
+func putTailGap(ctx context.Context, cat *catalog.DB, s segFile, keptMs int64, g catalog.Gap) (isNew, moved bool, err error) {
 	cam, profile, fileStart := string(s.key.cam), string(s.key.profile), s.start.UnixMilli()
-	found, err := cat.HasGap(ctx, cam, profile, g.StartMs, catalog.GapRestart)
-	if err != nil || found {
-		return false, err
+	start, found, err := cat.FindGap(ctx, cam, profile, g.Reason, fileStart, fileStart+keptMs)
+	switch {
+	case err != nil:
+		return false, false, err
+	case found && start == g.StartMs:
+		return false, false, nil
+	case found:
+		return false, true, cat.MoveGapStart(ctx, cam, profile, g.Reason, start, g.StartMs)
 	}
-	if fileStart != g.StartMs {
-		if found, err = cat.HasGap(ctx, cam, profile, fileStart, catalog.GapRestart); err != nil {
-			return false, err
-		}
-		if found {
-			return false, cat.MoveGapStart(ctx, cam, profile, fileStart, g.StartMs)
-		}
-	}
-	return true, cat.PutGap(ctx, g)
+	return true, false, cat.PutGap(ctx, g)
 }
 
-// failedRepairGap moves g, the restart gap of s that putRestartGap left at
-// g's start, to the start of s once the repair of s failed for another
-// reason than its directory's sync: the file stays as it was, so none of its
+// failedRepairGap moves g, the tail gap of s that putTailGap left at g's
+// start, to the start of s once the repair of s failed for another reason
+// than its directory's sync: the file stays as it was, so none of its
 // recording can be read until a later start repairs it, and the gap covers
-// it whole.
-func failedRepairGap(ctx context.Context, cat *catalog.DB, s segFile, g *catalog.Gap) error {
+// it whole. moved reports whether it moved.
+func failedRepairGap(ctx context.Context, cat *catalog.DB, s segFile, g *catalog.Gap) (moved bool, err error) {
 	fileStart := s.start.UnixMilli()
 	if g.StartMs == fileStart {
-		return nil
+		return false, nil
 	}
-	if err := cat.MoveGapStart(ctx, string(s.key.cam), string(s.key.profile), g.StartMs, fileStart); err != nil {
-		return err
+	if err := cat.MoveGapStart(ctx, string(s.key.cam), string(s.key.profile), g.Reason, g.StartMs, fileStart); err != nil {
+		return false, err
 	}
 	g.StartMs = fileStart
-	return nil
+	return true, nil
 }
 
 // nextStartMs returns the start, in ms, of the first of segs that belongs
@@ -671,7 +703,7 @@ func (rp *repair) apply(ctx context.Context, report *ReconcileReport) (int64, *p
 			seg := rp.seg
 			seg.abs, seg.rel, seg.part = seg.final(), seg.finalRel(), false
 			pending = &pendingRewrite{seg: seg, keep: s.keep, patches: s.patches, kept: kept,
-				interimEndMs: start + s.partEndMs, salvagedEndMs: start + s.durationMs}
+				interimEndMs: start + s.partEndMs, salvagedEndMs: start + s.durationMs, gapReason: catalog.GapRestart}
 		}
 		if s.cut {
 			report.Truncated++
@@ -750,7 +782,8 @@ func streamSegments(recDir string, k streamKey) []segFile {
 // same process (MTX-1). Each is repaired as Reconcile repairs a .part at
 // startup, without its abort, which judges a start (HUB-09): it keeps its
 // complete parts and the whole samples of a torn last one, gets its final
-// name, a catalog row and a restart gap that ends where the stream's next
+// name, a catalog row and a restart gap (a card gap after a write that
+// failed on an SD card, WriteFailed) that ends where the stream's next
 // segment that holds a recording starts, and a salvage that changes bytes
 // before its last kept chunk gets the background rewrite (C1-R9); an
 // unreadable one gets its gap and is set aside. The whole batch is planned
@@ -846,16 +879,21 @@ func (r *rec) repairPart(ctx context.Context, rp *repair, none map[string]bool, 
 	// is there; otherwise the stream's first part closes it. gapMu keeps that
 	// first part from closing the stream's gaps between the two steps.
 	r.gapMu.Lock()
-	g := restartGap(s, rp.keptMs(), nextStartMs(streamSegments(r.cfg.RecDir, s.key), s, none))
-	isNew, err := putRestartGap(ctx, r.cfg.Catalog, s, g)
+	g := tailGap(s, rp.keptMs(), nextStartMs(streamSegments(r.cfg.RecDir, s.key), s, none), r.takeTailReason(s.abs))
+	isNew, moved, err := putTailGap(ctx, r.cfg.Catalog, s, rp.keptMs(), g)
 	r.gapMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	if isNew {
-		defer func() { r.notifyGap(g) }() // as it ends up: a failed repair moves it
 		report.GapsWritten++
 	}
+	announce := isNew || moved
+	defer func() {
+		if announce {
+			r.notifyGap(g) // as it ends up: a failed repair moves it
+		}
+	}()
 	report.LostTails++
 	if rp.unreadable {
 		report.Unreadable++
@@ -863,9 +901,14 @@ func (r *rec) repairPart(ctx context.Context, rp *repair, none map[string]bool, 
 		return nil, quarantine(s)
 	}
 	durationMs, pending, err := rp.apply(ctx, report)
+	if pending != nil {
+		pending.gapReason = g.Reason
+	}
 	if err != nil && !errors.As(err, new(*dirSyncError)) {
 		report.Unreadable++
-		return nil, errors.Join(err, failedRepairGap(ctx, r.cfg.Catalog, s, &g))
+		moved, merr := failedRepairGap(ctx, r.cfg.Catalog, s, &g)
+		announce = announce || moved
+		return nil, errors.Join(err, merr)
 	}
 	if removed := !rp.complete && rp.salvage.empty; !removed {
 		info, serr := os.Stat(s.final())

@@ -44,9 +44,10 @@ type verifier struct {
 //
 // A directory under rec/ that cannot be read, such as a date directory on a
 // failing card, does not stop the pass: the rows under it are left out of
-// the comparison, and its error, which names it, comes back in listErrs for
-// the caller to report. err is what stopped the pass.
-func (v *verifier) pass(ctx context.Context) (report ReconcileReport, listErrs []error, err error) {
+// the comparison, and the entries that the listing could not read come back
+// in listErrs for the caller to report. err is what stopped the pass; the
+// listing is its last step, so listErrs are those of a whole pass.
+func (v *verifier) pass(ctx context.Context) (report ReconcileReport, listErrs []listError, err error) {
 	segs, err := v.cat.Segments(ctx)
 	if err != nil {
 		return report, nil, err

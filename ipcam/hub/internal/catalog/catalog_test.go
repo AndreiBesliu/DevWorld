@@ -195,7 +195,7 @@ func TestCatalog_GapsOpenAndClose(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := db.MoveGapStart(ctx, "c1", "main", 100, 120); err != nil {
+	if err := db.MoveGapStart(ctx, "c1", "main", GapRestart, 100, 120); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.CloseGap(ctx, "c1", "main", 900); err != nil {
@@ -214,10 +214,10 @@ func TestCatalog_GapsOpenAndClose(t *testing.T) {
 	}
 	// Moving the start of a closed gap past its end ends it there too; an
 	// open gap stays open.
-	if err := db.MoveGapStart(ctx, "c1", "main", 120, 950); err != nil {
+	if err := db.MoveGapStart(ctx, "c1", "main", GapRestart, 120, 950); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.MoveGapStart(ctx, "c1", "sub", 150, 160); err != nil {
+	if err := db.MoveGapStart(ctx, "c1", "sub", GapCard, 150, 160); err != nil {
 		t.Fatal(err)
 	}
 	if gaps, err = db.Gaps(ctx); err != nil {
@@ -230,24 +230,63 @@ func TestCatalog_GapsOpenAndClose(t *testing.T) {
 	if !slices.Equal(gaps, want) {
 		t.Errorf("after the moves, Gaps = %+v, want %+v", gaps, want)
 	}
-	// HasGap finds a gap by its stream, start and reason.
-	for _, tc := range []struct {
-		profile string
-		startMs int64
-		reason  GapReason
-		want    bool
-	}{
-		{"main", 950, GapRestart, true},
-		{"main", 120, GapRestart, false},
-		{"sub", 160, GapCard, true},
-		{"sub", 160, GapRestart, false},
-	} {
-		if got, err := db.HasGap(ctx, "c1", tc.profile, tc.startMs, tc.reason); err != nil || got != tc.want {
-			t.Errorf("HasGap(c1/%s at %d, %s) = %v, %v; want %v", tc.profile, tc.startMs, tc.reason, got, err, tc.want)
-		}
-	}
 	if err := db.PutGap(ctx, Gap{Cam: "c1", Profile: "main", StartMs: 1, Reason: "power"}); err == nil {
 		t.Error("PutGap accepted an unknown reason")
+	}
+}
+
+// TestCatalog_GapsOfOneReason (Task 8, 8a M1): FindGap finds a stream's gap
+// of one reason that starts in a range, the earliest, and MoveGapStart
+// moves only the gaps of its reason: a card gap (T40) that starts where a
+// restart gap does is never found or moved for it.
+func TestCatalog_GapsOfOneReason(t *testing.T) {
+	db := openTest(t)
+	ctx := t.Context()
+	for _, g := range []Gap{
+		{Cam: "c1", Profile: "main", StartMs: 100, Reason: GapCard},
+		{Cam: "c1", Profile: "main", StartMs: 100, Reason: GapRestart},
+		{Cam: "c1", Profile: "main", StartMs: 300, Reason: GapRestart},
+		{Cam: "c1", Profile: "sub", StartMs: 200, Reason: GapRestart},
+	} {
+		if err := db.PutGap(ctx, g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		profile  string
+		reason   GapReason
+		from, to int64
+		start    int64
+		found    bool
+	}{
+		{"main", GapRestart, 100, 300, 100, true},
+		{"main", GapRestart, 101, 300, 300, true},
+		{"main", GapRestart, 101, 299, 0, false},
+		{"main", GapCard, 0, 1000, 100, true},
+		{"main", GapHubStopped, 0, 1000, 0, false},
+		{"sub", GapRestart, 200, 200, 200, true},
+		{"sub", GapCard, 0, 1000, 0, false},
+	} {
+		start, found, err := db.FindGap(ctx, "c1", tc.profile, tc.reason, tc.from, tc.to)
+		if err != nil || start != tc.start || found != tc.found {
+			t.Errorf("FindGap(c1/%s, %s, [%d, %d]) = %d, %v, %v; want %d, %v", tc.profile, tc.reason, tc.from, tc.to, start, found, err, tc.start, tc.found)
+		}
+	}
+	if err := db.MoveGapStart(ctx, "c1", "main", GapRestart, 100, 150); err != nil {
+		t.Fatal(err)
+	}
+	gaps, err := db.Gaps(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Gap{
+		{Cam: "c1", Profile: "main", StartMs: 100, Reason: GapCard},
+		{Cam: "c1", Profile: "main", StartMs: 150, Reason: GapRestart},
+		{Cam: "c1", Profile: "main", StartMs: 300, Reason: GapRestart},
+		{Cam: "c1", Profile: "sub", StartMs: 200, Reason: GapRestart},
+	}
+	if !slices.Equal(gaps, want) {
+		t.Errorf("after moving the restart gap, Gaps = %+v, want %+v: the card gap stays", gaps, want)
 	}
 }
 

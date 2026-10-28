@@ -3,7 +3,8 @@
 // Command recspike is the recorder spike's program on the host under test
 // (T43). It runs ipcam-hub next to it, connects out to reccontroller on the
 // other device (R08), and runs MI1's sets: the automated stops inside the
-// owner's window, the owner's real cuts, and the lab's shards; it installs
+// owner's window, the owner's real cuts, and the lab's shards, and MI2's
+// 72 h run against a reccontroller on the same device; it installs
 // the autostart that continues a set after each reboot (G14), and pushes
 // the Pi's results to the PC at the end (G15). Its results folder,
 // results/ next to it, is published; its private folder, work/, holds the
@@ -47,6 +48,9 @@ const usage = `Folosire:
   recspike mi1 --lab --kind kill9|qemu-reset --shard 1|2 [--smoke] [--controller ADRESA]
       o jumătate de set în laborator (GitHub), pe 127.0.0.1 dacă nu se dă alt controlor; qemu-reset fără --controller
       pornește mașina virtuală care rulează shardul și o resetează la fiecare oprire.
+  recspike mi2 --controller 127.0.0.1 [--hours 72]
+      proba de 72 h (MI2): înregistrează numărul recomandat de camere al gazdei, de la reccontroller -local
+      pornit pe același dispozitiv; lăsați dispozitivul pornit tot timpul.
   recspike push --controller ADRESA_PC
       trimite rezultatele Pi-ului către reccontroller pull de pe PC.
   recspike annotate split PLIC.json… --first PARTEA --out DOSAR
@@ -82,6 +86,8 @@ func run(ctx context.Context, args []string, in *bufio.Reader, out io.Writer) er
 		return flag.ErrHelp
 	case "mi1":
 		return mi1Command(ctx, rest, in, out)
+	case "mi2":
+		return mi2Command(ctx, rest, in, out)
 	case "resume":
 		return resumeCommand(ctx, rest, out)
 	case "push":

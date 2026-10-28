@@ -167,3 +167,37 @@ func TestDeferred(t *testing.T) {
 		}
 	}
 }
+
+// TestEnvelope_MI2 (G11): an MI2 envelope carries its 72 h run in mi2, and
+// reads back the same; an MI2 envelope without it, or another code's with
+// it, is refused.
+func TestEnvelope_MI2(t *testing.T) {
+	dir := t.TempDir()
+	want := Envelope{
+		Schema: Schema, Code: "MI2", RunID: "pi-72h-2", Set: "pi-72h", Host: "pi", OS: "linux", Storage: "sd",
+		SdConfirmation: &SdConfirmation{Text: "DA", AtMs: 1792000000000},
+		MI2: &Mi2Data{Hours: 72.02, Cameras: 4, Crashes72h: 0, ChildRestarts: 1, OnSdCard: true,
+			CardStates:  []CardState{{State: "ok", AtMs: 1792000001000}, {State: "degraded", AtMs: 1792100000000}},
+			WindowHours: 3.47, Invalidated: []string{"pi-72h-1: gazda a repornit în timpul probei"}},
+	}
+	if err := Write(dir, want); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got, err := Read(filepath.Join(dir, "MI2", "pi-72h", "pi-72h-2.json"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Read = %+v\nwant %+v", got, want)
+	}
+	without := want
+	without.MI2 = nil
+	if err := without.Validate(); err == nil {
+		t.Error("an MI2 envelope without mi2 is valid")
+	}
+	misplaced := sample()
+	misplaced.MI2 = want.MI2
+	if err := misplaced.Validate(); err == nil {
+		t.Error("an MI1 envelope with mi2 is valid")
+	}
+}

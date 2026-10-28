@@ -36,7 +36,6 @@ const (
 const (
 	readyTimeout   = 2 * time.Minute  // ipcam-hub's ready
 	eventTimeout   = 10 * time.Minute // the reconcile and verify after a stop
-	stopTimeout    = 30 * time.Second // a clean stop of ipcam-hub
 	verdictTimeout = 2 * time.Minute  // the controller's verdict on a report
 	connectTimeout = 5 * time.Minute  // the link, after a boot
 	// reconnectWait bounds the reconnection after a link drop in an
@@ -60,6 +59,13 @@ const (
 	// bounds those.
 	maxMissesInARow = 3
 )
+
+// StopTimeout is how long recspike waits for a clean stop of ipcam-hub
+// before it kills it. On a throttled disk, as an SD card under load, Task
+// 7.2d measured stops over 30 s (MediaMTX closing its segments, reconcile's
+// and the catalog's fsyncs): a shorter wait would kill a stop that was
+// going well, abort an MI1 set and, in MI2, end a run with a kill.
+const StopTimeout = 5 * time.Minute
 
 // Driver runs MI1's sets on the host under test, recspike's side of T43:
 // it starts ipcam-hub for each run, stops the host when the controller

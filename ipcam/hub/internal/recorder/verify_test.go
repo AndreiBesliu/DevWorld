@@ -187,10 +187,14 @@ func TestVerify_UnreadableDirectoryLeavesItsRows(t *testing.T) {
 		t.Errorf("%d verify reports, want 1", len(got))
 	}
 	bad := filepath.Dir(hidden)
-	if len(listErrs) != 1 || !strings.Contains(listErrs[0].Error(), filepath.Base(bad)) {
-		t.Fatalf("listing errors %v, want one that names %s", listErrs, filepath.Base(bad))
+	if rel := filepath.ToSlash(strings.TrimPrefix(bad, recDir+string(filepath.Separator))); len(listErrs) != 1 || listErrs[0].rel != rel {
+		t.Fatalf("listing errors %+v, want one of %s", listErrs, rel)
 	}
-	if e := listErrs[0].Error(); strings.Contains(e, filepath.Dir(bad)) {
+	e := listErrs[0].as("verification: list").Error()
+	if !strings.HasPrefix(e, "recorder: verification: list "+filepath.Base(bad)+": ") {
+		t.Errorf("the error %q does not name the directory by its base name", e)
+	}
+	if strings.Contains(e, filepath.Dir(bad)) {
 		t.Errorf("the error %q names the directory's parents", e)
 	}
 }

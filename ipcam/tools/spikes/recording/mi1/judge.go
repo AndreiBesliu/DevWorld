@@ -179,7 +179,7 @@ func streamLimit(s results.StreamLoss) int64 {
 
 // lossFailure says that s lost more than its limit.
 func lossFailure(s results.StreamLoss, limit int64) string {
-	return fmt.Sprintf("%s a pierdut %s, peste limita de %s", s.Stream, secondsText(s.LossMs), wholeSecondsText(limit))
+	return fmt.Sprintf("%s a pierdut %s, peste limita de %s", s.Stream, SecondsText(s.LossMs), WholeSecondsText(limit))
 }
 
 // setInfo is how Judge treats a set: where its runs come from, the OS whose
@@ -276,6 +276,23 @@ func Judge(envs []results.Envelope) results.Judgement {
 	return j
 }
 
+// DefaultRuns are the counted default runs of set in envs, each once (G15):
+// the runs that G10 judges for the set's median and maximum, without its
+// O17-off run. MI2 takes its 20 resumes from the owner kill9 sets' (G13).
+func DefaultRuns(envs []results.Envelope, set string) []results.Run {
+	var out []results.Run
+	for _, sr := range dedup(envs) {
+		if sr.set == set && Counts(sr.run) && isDefault(sr.run) {
+			out = append(out, sr.run)
+		}
+	}
+	return out
+}
+
+// isDefault reports whether r is one of an automated set's default runs:
+// not its O17-off run, encrypted with the setting off.
+func isDefault(r results.Run) bool { return !r.Encrypted || r.PadLowBitrate }
+
 // setRun is a run and the set of its envelope.
 type setRun struct {
 	set string
@@ -320,7 +337,7 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 	for _, r := range runs {
 		switch {
 		case !Counts(r):
-		case s.real || !r.Encrypted || r.PadLowBitrate:
+		case s.real || isDefault(r):
 			defaults = append(defaults, r)
 		case slices.ContainsFunc(r.Streams, isO17Stream):
 			o17 = append(o17, r)
@@ -385,10 +402,10 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 		res.reasons = append(res.reasons, missing...)
 	case median > GeneralMedianMs:
 		res.state = setFail
-		res.reasons = append(res.reasons, fmt.Sprintf("%s: mediana %s, peste %s", s.name, secondsText(median), wholeSecondsText(GeneralMedianMs)))
+		res.reasons = append(res.reasons, fmt.Sprintf("%s: mediana %s, peste %s", s.name, SecondsText(median), WholeSecondsText(GeneralMedianMs)))
 	case maximum > GeneralMaxMs:
 		res.state = setFail
-		res.reasons = append(res.reasons, fmt.Sprintf("%s: maximul %s, peste %s", s.name, secondsText(maximum), wholeSecondsText(GeneralMaxMs)))
+		res.reasons = append(res.reasons, fmt.Sprintf("%s: maximul %s, peste %s", s.name, SecondsText(maximum), WholeSecondsText(GeneralMaxMs)))
 	}
 
 	prefix := "MI1 " + s.name + ": "
@@ -403,9 +420,9 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 	} else {
 		j.Rows = append(j.Rows,
 			// An incomplete set's median decides nothing yet.
-			results.Row{Code: prefix + "mediana", Value: secondsText(median), Limit: "≤ " + wholeSecondsText(GeneralMedianMs), Source: s.source,
+			results.Row{Code: prefix + "mediana", Value: SecondsText(median), Limit: "≤ " + WholeSecondsText(GeneralMedianMs), Source: s.source,
 				Pass: verdict(median <= GeneralMedianMs || !complete, complete)},
-			results.Row{Code: prefix + "maximul", Value: secondsText(maximum), Limit: "≤ " + wholeSecondsText(GeneralMaxMs), Source: s.source,
+			results.Row{Code: prefix + "maximul", Value: SecondsText(maximum), Limit: "≤ " + WholeSecondsText(GeneralMaxMs), Source: s.source,
 				Pass: verdict(maximum <= GeneralMaxMs, complete)},
 			results.Row{Code: prefix + "rulări eșuate", Value: fmt.Sprintf("%d din %d", res.failed, res.counted), Limit: "0", Source: s.source,
 				Pass: verdict(res.failed == 0, complete)})
@@ -437,7 +454,7 @@ func o17Text(set, id, what string) string {
 func o17Row(j *results.Judgement, prefix, set, source string, runs []results.Run) results.Row {
 	row := results.Row{Code: prefix + O17OffLabel, Source: source}
 	if len(runs) == 0 {
-		row.Value, row.Limit = "lipsește", "≤ "+wholeSecondsText(StreamLimitMs(lowBitrateKbps*1000, true, false))
+		row.Value, row.Limit = "lipsește", "≤ "+WholeSecondsText(StreamLimitMs(lowBitrateKbps*1000, true, false))
 		return row
 	}
 	var shown results.StreamLoss
@@ -466,7 +483,7 @@ func o17Row(j *results.Judgement, prefix, set, source string, runs []results.Run
 	}
 	value, limit := "lipsește", StreamLimitMs(lowBitrateKbps*1000, true, false)
 	if found {
-		value, limit = secondsText(shown.LossMs), streamLimit(shown)
+		value, limit = SecondsText(shown.LossMs), streamLimit(shown)
 		if len(runs) > 1 {
 			value += " (rularea " + shownRun + ")"
 		}
@@ -474,7 +491,7 @@ func o17Row(j *results.Judgement, prefix, set, source string, runs []results.Run
 		pass = false
 	}
 	row.Value = strings.Join(append([]string{value}, others...), "; ")
-	row.Limit, row.Pass = "≤ "+wholeSecondsText(limit), &pass
+	row.Limit, row.Pass = "≤ "+WholeSecondsText(limit), &pass
 	return row
 }
 
@@ -533,19 +550,19 @@ func medianMs(sorted []int64) int64 {
 	return (sorted[n/2-1] + sorted[n/2]) / 2
 }
 
-// secondsText renders a measured time in seconds with two decimals and a
+// SecondsText renders a measured time in seconds with two decimals and a
 // decimal comma: "1,90 s".
-func secondsText(ms int64) string {
+func SecondsText(ms int64) string {
 	return strings.Replace(strconv.FormatFloat(float64(ms)/1000, 'f', 2, 64), ".", ",", 1) + " s"
 }
 
-// wholeSecondsText renders a limit, without decimals when it is whole
+// WholeSecondsText renders a limit, without decimals when it is whole
 // seconds: "2 s", "3,50 s".
-func wholeSecondsText(ms int64) string {
+func WholeSecondsText(ms int64) string {
 	if ms%1000 == 0 {
 		return fmt.Sprintf("%d s", ms/1000)
 	}
-	return secondsText(ms)
+	return SecondsText(ms)
 }
 
 // count renders n things in Romanian: "1 eșec", "0 eșecuri", "80 de

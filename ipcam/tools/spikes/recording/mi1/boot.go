@@ -23,11 +23,11 @@ type Boot struct {
 // 3 min or more (G09).
 const bootTimeTolerance = time.Minute
 
-// same reports whether b and o may be one boot: the same boot id, or boot
+// Same reports whether b and o may be one boot: the same boot id, or boot
 // times within bootTimeTolerance. Boots that cannot be told apart, one of
 // them unknown, are the same: recspike never assumes a reboot, which would
-// measure a ColdBootMs without one.
-func (b Boot) same(o Boot) bool {
+// measure a ColdBootMs without one, or invalidate MI2's run for nothing.
+func (b Boot) Same(o Boot) bool {
 	switch {
 	case b.ID != "" && o.ID != "":
 		return b.ID == o.ID

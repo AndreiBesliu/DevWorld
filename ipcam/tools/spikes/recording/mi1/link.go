@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 
@@ -128,6 +129,30 @@ func Push(ctx context.Context, addr, dir, host string, out io.Writer) error {
 			}
 		}
 	}
+}
+
+// CameraURLs connects to the controller at addr as host, dialing again for
+// up to a minute, reads its session, says goodbye, and returns the RTSP
+// address of each of streams, with the session's credentials: MI2's 72 h
+// run records the cameras of a reccontroller on the same device (G18, G19).
+// The addresses hold the credentials: they go only to the private run.json.
+func CameraURLs(ctx context.Context, addr, host string, streams []string) (map[string]string, error) {
+	d := &Driver{Controller: addr, Host: HostState{Pseudonym: host}}
+	s, err := d.connectWithin(ctx, time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	defer s.close()
+	urls := map[string]string{}
+	for _, stream := range streams {
+		if !slices.Contains(s.info.Streams, stream) {
+			return nil, fmt.Errorf("controlorul nu servește camera %s", stream)
+		}
+		if urls[stream], err = s.cameraURL(stream); err != nil {
+			return nil, err
+		}
+	}
+	return urls, s.send(link.Bye{})
 }
 
 // session is the host's link to the controller: one goroutine reads its

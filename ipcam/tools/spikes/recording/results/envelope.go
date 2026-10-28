@@ -56,6 +56,32 @@ type Envelope struct {
 	Part  int   `json:"part,omitempty"`
 	Parts int   `json:"parts,omitempty"`
 	Runs  []Run `json:"runs"`
+	// MI2 is an MI2 envelope's 72 h run (G11), and only an MI2 envelope's.
+	MI2 *Mi2Data `json:"mi2,omitempty"`
+}
+
+// Mi2Data is MI2's 72 h run on a host (G11, HUB-31, G19): the hours it
+// ran, its cameras (the host's recommended count), the unexpected exits of
+// ipcam-hub (crashes) and MediaMTX's restarts (HUB-13), the card monitor's
+// states when rec/ was on an SD card (T40), the rolling window's hours, and
+// the runs before it that a reboot or an interruption invalidated, each as
+// "<run id>: <why>", in Romanian.
+type Mi2Data struct {
+	Hours         float64     `json:"hours"`
+	Cameras       int         `json:"cameras"`
+	Crashes72h    int         `json:"crashes72h"`
+	ChildRestarts int         `json:"childRestarts"`
+	OnSdCard      bool        `json:"onSdCard"`
+	CardStates    []CardState `json:"cardStates,omitempty"`
+	WindowHours   float64     `json:"windowHours"`
+	Invalidated   []string    `json:"invalidated,omitempty"`
+}
+
+// CardState is one state of the card monitor, as ipcam-hub's card event
+// gave it ("ok", "degraded", "failed"), and when (the host's Unix ms).
+type CardState struct {
+	State string `json:"state"`
+	AtMs  int64  `json:"atMs"`
 }
 
 // PiModelInfo mirrors the piModel of `ipcam-hub diag host` (tools cannot
@@ -151,6 +177,8 @@ func (e Envelope) Validate() error {
 		return fmt.Errorf("results: unknown storage %q", e.Storage)
 	case e.Part < 0 || e.Part > e.Parts || (e.Parts > 0) != (e.Part > 0):
 		return fmt.Errorf("results: part %d of %d", e.Part, e.Parts)
+	case (e.Code == "MI2") != (e.MI2 != nil):
+		return fmt.Errorf("results: an %s envelope with mi2 %v: only MI2's has it, always", e.Code, e.MI2 != nil)
 	}
 	if !fileName(e.Set) {
 		return fmt.Errorf("results: set %q is not a file name", e.Set)

@@ -90,3 +90,27 @@ func TestIsSdCard_UnreadableMountinfo(t *testing.T) {
 		t.Error("IsSdCard is true for an empty mountinfo path")
 	}
 }
+
+// TestIsReadOnly_MountOrSuperblock (T40, §13.1): the card monitor's
+// read-only remount is the mount that holds rec/ read-only, by its own
+// options (mount -o remount,ro) or by its superblock's, as after ext4's
+// errors=remount-ro, which leaves the mount's own options rw.
+func TestIsReadOnly_MountOrSuperblock(t *testing.T) {
+	fixturePaths(t)
+	for _, tc := range []struct {
+		name, mountinfo, recDir string
+		want                    bool
+	}{
+		{"the card's superblock remounted ro", "mountinfo-pi-sd-ro", "/home/pi/ipcam/data/rec", true},
+		{"a mount ro by its own options", "mountinfo-pi-sd-ro", "/mnt/ssd/data/rec", true},
+		{"a rw mount beside them", "mountinfo-pi-sd-ro", "/mnt/nvme/data/rec", false},
+		{"the card rw", "mountinfo-pi-sd", "/home/pi/ipcam/data/rec", false},
+		{"no mount table", "absent", "/home/pi/ipcam/data/rec", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsReadOnly(filepath.Join("testdata", tc.mountinfo), tc.recDir); got != tc.want {
+				t.Errorf("IsReadOnly(%s, %s) = %v, want %v", tc.mountinfo, tc.recDir, got, tc.want)
+			}
+		})
+	}
+}

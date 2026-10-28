@@ -36,6 +36,11 @@ import (
 //   - status: cam, profile, lastPartAgoMs, lastSegmentAgoMs, running; every
 //     1 s per job.
 //   - error: message.
+//   - card: state ("ok", "degraded" or "failed"), only while rec/ is on an
+//     SD card (T40, §13.1): the card's state as ipcam-hub starts, then each
+//     change. At failed, every job stops with a card gap.
+//   - alert: kind ("card"), when the card's state leaves ok (§13.3); once,
+//     until the card has been ok for 2 min.
 //   - sd_card_unconfirmed: rec/ is on an SD card and run.json does not
 //     confirm the wear warning (HUB-17, T40); ipcam-hub has changed nothing
 //     and exits 4.
@@ -71,10 +76,12 @@ func statusFields(cam recorder.CameraID, p recorder.Profile, s recorder.RecStatu
 }
 
 // observer turns what the recorder reports into events; the child's log
-// goes to stderr, never to the events.
+// goes to stderr, never to the events. The child's log and the errors go
+// to the card monitor too, while rec/ is on an SD card.
 type observer struct {
 	ev     *events
 	stderr io.Writer
+	card   *cardSampler // nil when rec/ is not on an SD card
 	logMu  sync.Mutex
 }
 
@@ -82,8 +89,11 @@ func (o *observer) ChildRestarted(time.Time) { o.ev.emit("child_restart", nil) }
 
 func (o *observer) ChildLog(line string) {
 	o.logMu.Lock()
-	defer o.logMu.Unlock()
 	_, _ = fmt.Fprintln(o.stderr, "mediamtx:", line)
+	o.logMu.Unlock()
+	if o.card != nil {
+		o.card.childLog(line)
+	}
 }
 
 func (o *observer) FirstPart(cam recorder.CameraID, p recorder.Profile, _ time.Time) {
@@ -108,4 +118,9 @@ func (o *observer) Gap(g catalog.Gap) {
 	o.ev.emit("gap", map[string]any{"cam": g.Cam, "profile": g.Profile, "startMs": g.StartMs, "endMs": g.EndMs, "reason": g.Reason})
 }
 
-func (o *observer) Error(err error) { o.ev.emit("error", map[string]any{"message": err.Error()}) }
+func (o *observer) Error(err error) {
+	o.ev.emit("error", map[string]any{"message": err.Error()})
+	if o.card != nil {
+		o.card.hubError(err)
+	}
+}

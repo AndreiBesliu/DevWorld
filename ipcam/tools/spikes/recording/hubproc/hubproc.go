@@ -92,6 +92,11 @@ type Event struct {
 	TornParts         int    `json:"tornParts"`
 	CatalogMismatches int    `json:"catalogMismatches"`
 	Message           string `json:"message"`
+	// Path is a segment_verified's segment; State a card event's state, and
+	// Kind an alert's kind (T40).
+	Path  string `json:"path"`
+	State string `json:"state"`
+	Kind  string `json:"kind"`
 
 	Line json.RawMessage `json:"-"`
 	At   time.Time       `json:"-"`

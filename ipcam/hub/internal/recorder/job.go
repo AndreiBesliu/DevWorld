@@ -9,6 +9,7 @@
 package recorder
 
 import (
+	"strings"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
@@ -60,6 +61,24 @@ func NewJob(cam CameraID, p Profile, restreamURL string, scope *crypto.KeyScope)
 // rec/<cam>/<profile>/.
 func (j Job) pathName() string { return string(j.Cam) + "/" + string(j.Profile) }
 
+// LogStream returns the stream that a line of MediaMTX's log is about: the
+// one that its path tag, "[path <cam>/<profile>]", names (pathName).
+func LogStream(line string) (CameraID, Profile, bool) {
+	_, rest, found := strings.Cut(line, "[path ")
+	if !found {
+		return "", "", false
+	}
+	name, _, found := strings.Cut(rest, "]")
+	if !found {
+		return "", "", false
+	}
+	cam, profile, found := strings.Cut(name, "/")
+	if !found || !namePattern.MatchString(cam) || (Profile(profile) != ProfileMain && Profile(profile) != ProfileSub) {
+		return "", "", false
+	}
+	return CameraID(cam), Profile(profile), true
+}
+
 func (j Job) key() streamKey { return streamKey{j.Cam, j.Profile} }
 
 // streamKey names a stream.
@@ -94,7 +113,7 @@ type RecStatus struct {
 type ReconcileReport struct {
 	Finalized   int // .part files given their final name
 	Truncated   int // files cut back to their durable end, their last part salvaged
-	LostTails   int // streams that lost the end of a segment: each is a restart gap
+	LostTails   int // streams that lost the end of a segment: each is a restart gap, or a card gap (WriteFailed)
 	GapsWritten int
 	Rewritten   int // salvages rewritten under a fresh file key in the background (C1-R9)
 	// Unreadable counts files that could not be decrypted or parsed, TornParts

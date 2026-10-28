@@ -47,6 +47,13 @@ type Recorder interface {
 	// Stop takes the stream out of the configuration and writes an open gap
 	// with reason.
 	Stop(ctx context.Context, cam CameraID, p Profile, reason catalog.GapReason) error
+	// WriteFailed tells the recorder that MediaMTX could not write the .part
+	// that the stream writes now, for reason: catalog.GapCard when rec/ is
+	// on an SD card (T40). MediaMTX keeps that file's name and starts the
+	// stream's next segment; the repair of the file then writes its tail
+	// gap, from the end of its last good part to the start of the next
+	// segment, with reason instead of restart. Recording goes on.
+	WriteFailed(cam CameraID, p Profile, reason catalog.GapReason)
 }
 
 // ErrorObserver is implemented by an Observer that wants the errors of the
@@ -107,6 +114,9 @@ type rec struct {
 	// left: each is repaired at most once while the hub runs.
 	parts []string
 	tried map[string]bool
+	// tailReasons holds the reason of the tail gap of each .part that
+	// MediaMTX could not write (WriteFailed), until its repair takes it.
+	tailReasons map[string]catalog.GapReason
 
 	// gapMu is held while a stream's open gaps are closed, and while a repair
 	// finds where its gap ends and writes it.
@@ -182,7 +192,7 @@ func New(ctx context.Context, cfg Config) (Recorder, ReconcileReport, error) {
 		watch: newPartWatcher(cfg.RecDir), closed: make(chan SegmentClosed, 1024),
 		verifyKick: make(chan struct{}, 1), jobsKick: make(chan struct{}, 1), partsKick: make(chan struct{}, 1),
 		jobs: map[streamKey]Job{}, stopped: map[streamKey]bool{}, report: report, pending: res.pending, busy: map[string]bool{},
-		tried: map[string]bool{}, seq: 1, lastFinal: len(res.pending) == 0,
+		tried: map[string]bool{}, tailReasons: map[string]catalog.GapReason{}, seq: 1, lastFinal: len(res.pending) == 0,
 	}
 	for _, p := range leftParts(cfg.RecDir) {
 		r.tried[p] = true // reconcile could not repair it
@@ -511,6 +521,29 @@ func (r *rec) Stop(ctx context.Context, cam CameraID, p Profile, reason catalog.
 	return nil
 }
 
+func (r *rec) WriteFailed(cam CameraID, p Profile, reason catalog.GapReason) {
+	path, _, ok := newestOf(partFiles(r.watch.streamDir(streamKey{cam, p})))
+	if !ok {
+		return // the failed write was the creation of the next segment: no .part holds its tail
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tailReasons[path] = reason
+}
+
+// takeTailReason returns the reason of the tail gap of the .part at path:
+// the one that WriteFailed noted for it, else restart.
+func (r *rec) takeTailReason(path string) catalog.GapReason {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reason, ok := r.tailReasons[path]
+	if !ok {
+		return catalog.GapRestart
+	}
+	delete(r.tailReasons, path)
+	return reason
+}
+
 func (r *rec) Status(_ context.Context, cam CameraID, p Profile) RecStatus {
 	k := streamKey{cam, p}
 	s := r.watch.status(k, time.Now())
@@ -731,22 +764,35 @@ func (r *rec) pollLoop(ctx context.Context) {
 }
 
 // verifyLoop runs a verification pass each time it is kicked: after the
-// start, after each SegmentClosed and after each rewrite. It reports each
-// directory that a pass could not read, as well as what stopped a pass.
+// start, after each SegmentClosed and after each rewrite. It reports what
+// stopped a pass, and each entry under rec/ that a pass could not read, once
+// while it stays so: a directory on a failing card that stays unreadable is
+// one I/O error, which the SD-card monitor counts once (T40), not one per
+// pass. An entry that a later pass reads again is reported again when it
+// fails again.
 func (r *rec) verifyLoop(ctx context.Context) {
 	defer r.wg.Done()
+	reported := map[string]bool{} // the entries that the last whole pass could not read
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-r.verifyKick:
 			_, listErrs, err := r.verify.pass(ctx)
-			for _, listErr := range listErrs {
-				r.notifyError(fmt.Errorf("recorder: verification: %w", listErr))
+			if err != nil {
+				if ctx.Err() == nil {
+					r.notifyError(fmt.Errorf("recorder: verification: %w", err))
+				}
+				continue
 			}
-			if err != nil && ctx.Err() == nil {
-				r.notifyError(fmt.Errorf("recorder: verification: %w", err))
+			failing := map[string]bool{}
+			for _, e := range listErrs {
+				failing[e.rel] = true
+				if !reported[e.rel] {
+					r.notifyError(e.as("verification: list"))
+				}
 			}
+			reported = failing
 		}
 	}
 }
@@ -929,7 +975,7 @@ func (r *rec) runRewrite(ctx context.Context, p *pendingRewrite, scope crypto.Ke
 		r.notifyError(err)
 		return
 	}
-	if err := cat.MoveGapStart(ctx, string(k.cam), string(k.profile), p.interimEndMs, p.salvagedEndMs); err != nil {
+	if err := cat.MoveGapStart(ctx, string(k.cam), string(k.profile), p.gapReason, p.interimEndMs, p.salvagedEndMs); err != nil {
 		r.notifyError(err)
 		return
 	}

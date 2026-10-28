@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1763,4 +1764,173 @@ func TestRecorder_LiveRepair_TornThenUnreadablePart_GapEndsAtTheNextReadable(t *
 		return err == nil && len(gaps) == 2 && gaps[0].EndMs != 0 && gaps[1].EndMs != 0
 	})
 	requireGaps(t, cfg.Catalog, want)
+}
+
+// TestRecorder_WriteFailed_TailGapHasTheReason (T40, G17): when ipcam-hub
+// tells the recorder that MediaMTX could not write a stream's open .part
+// because of the SD card, the gap of that file's lost tail, from the end of
+// its last good part to the start of the stream's next segment, which the
+// repair writes once the next segment has started, has reason card instead
+// of restart, and goes out as a gap event; recording goes on.
+func TestRecorder_WriteFailed_TailGapHasTheReason(t *testing.T) {
+	obs := &testObserver{}
+	r, cfg := startFake(t, "sleep", Config{Observer: obs})
+	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil)}); err != nil {
+		t.Fatal(err)
+	}
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
+	failedStart := time.Now().Add(-10 * time.Second)
+	failed := segPath(cfg.RecDir, "cam1", "main", failedStart, ".part")
+	writeFile(t, failed, f.data[:f.partStart[2]+10])
+	waitFor(t, 10*time.Second, "the .part was not seen", func() bool { return len(obs.snapshot().firsts) >= 1 })
+	r.WriteFailed("cam1", "main", catalog.GapCard)
+	nextStart := time.Now()
+	writeFile(t, segPath(cfg.RecDir, "cam1", "main", nextStart, ".part"), []byte("the segment that MediaMTX writes now"))
+
+	if rep := waitFinalReport(t, obs); rep != (ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 1, GapsWritten: 1}) {
+		t.Errorf("report after the repair %+v, want the failed .part repaired with its gap", rep)
+	}
+	want := catalog.Gap{Cam: "cam1", Profile: "main", StartMs: failedStart.UnixMilli() + 2000, EndMs: nextStart.UnixMilli(), Reason: catalog.GapCard}
+	requireGaps(t, cfg.Catalog, []catalog.Gap{want})
+	if gaps := obs.snapshot().gaps; !slices.Contains(gaps, want) {
+		t.Errorf("gap events %+v, want %+v", gaps, want)
+	}
+	if s := r.Status(t.Context(), "cam1", "main"); !s.Running {
+		t.Error("the stream stopped recording")
+	}
+}
+
+// TestReconcile_TailGapKeepsOtherReasonsAndFiles (8a M1, M2): the gap of a
+// lost tail is this file's when a gap of its reason starts within the
+// file's recording, [its start, its start + what it keeps]: a failed
+// repair's at the file's start, or an earlier start's at another kept end,
+// which moves to the kept end and goes out again as a gap event. A gap of
+// another reason, such as an SD card's (T40), is never taken for it or
+// moved, and a restart gap after the file's recording belongs to another.
+func TestReconcile_TailGapKeepsOtherReasonsAndFiles(t *testing.T) {
+	start := t0.UnixMilli()
+	gap := func(startMs int64, reason catalog.GapReason) catalog.Gap {
+		return catalog.Gap{Cam: "cam1", Profile: "main", StartMs: startMs, Reason: reason}
+	}
+	for _, tc := range []struct {
+		name        string
+		prior, want []catalog.Gap
+		announced   []catalog.Gap
+		gapsWritten int
+	}{
+		{"a card gap at the file's start", []catalog.Gap{gap(start, catalog.GapCard)},
+			[]catalog.Gap{gap(start, catalog.GapCard), gap(start+2000, catalog.GapRestart)},
+			[]catalog.Gap{gap(start+2000, catalog.GapRestart)}, 1},
+		{"a card gap beside the failed repair's", []catalog.Gap{gap(start, catalog.GapCard), gap(start, catalog.GapRestart)},
+			[]catalog.Gap{gap(start, catalog.GapCard), gap(start+2000, catalog.GapRestart)},
+			[]catalog.Gap{gap(start+2000, catalog.GapRestart)}, 0},
+		{"an earlier start's gap at another kept end", []catalog.Gap{gap(start+1000, catalog.GapRestart)},
+			[]catalog.Gap{gap(start+2000, catalog.GapRestart)},
+			[]catalog.Gap{gap(start+2000, catalog.GapRestart)}, 0},
+		{"a restart gap after the file's recording", []catalog.Gap{gap(start+5000, catalog.GapRestart)},
+			[]catalog.Gap{gap(start+2000, catalog.GapRestart), gap(start+5000, catalog.GapRestart)},
+			[]catalog.Gap{gap(start+2000, catalog.GapRestart)}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recDir, cat := t.TempDir(), openCatalog(t)
+			f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
+			writeFile(t, segPath(recDir, "cam1", "main", t0, ".part"), f.data[:f.partStart[2]+10])
+			for _, g := range tc.prior {
+				if err := cat.PutGap(t.Context(), g); err != nil {
+					t.Fatal(err)
+				}
+			}
+			res, err := reconcile(t.Context(), recDir, nil, cat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := (ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 1, GapsWritten: tc.gapsWritten}); res.report != want {
+				t.Errorf("report %+v, want %+v", res.report, want)
+			}
+			requireGaps(t, cat, tc.want)
+			if !slices.Equal(res.gaps, tc.announced) {
+				t.Errorf("gap events %+v, want %+v", res.gaps, tc.announced)
+			}
+		})
+	}
+}
+
+// TestRecorder_UnreadableDirectoryReportedOnce (Task 8, 8a I1 follow-up):
+// a directory under rec/ that stays unreadable is reported by the first
+// verification pass that meets it, with one «recorder:» prefix, and not by
+// each later pass, so that the SD-card monitor, which counts I/O errors,
+// counts it once; once it can be read again and fails again, it is
+// reported again.
+func TestRecorder_UnreadableDirectoryReportedOnce(t *testing.T) {
+	recDir := filepath.Join(t.TempDir(), "rec")
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
+	bad := filepath.Dir(segPath(recDir, "cam2", "main", t0, ""))
+	writeFile(t, segPath(recDir, "cam2", "main", t0, ""), f.data)
+	var hide atomic.Bool
+	hide.Store(true)
+	unreadable := unreadableDir(bad)
+	defer setWalkRecDir(func(root string, fn fs.WalkDirFunc) error {
+		if hide.Load() {
+			return unreadable(root, fn)
+		}
+		return filepath.WalkDir(root, fn)
+	})()
+	obs := &testObserver{}
+	r, _ := startFake(t, "sleep", Config{RecDir: recDir, Observer: obs})
+	pass := func() {
+		n := len(obs.snapshot().verified)
+		r.kickVerify()
+		waitFor(t, 10*time.Second, "no verification pass", func() bool { return len(obs.snapshot().verified) > n })
+	}
+	reports := func() []string {
+		var out []string
+		for _, e := range obs.snapshot().errs {
+			if strings.HasPrefix(e, "recorder: verification: ") && strings.Contains(e, filepath.Base(bad)) {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	waitFor(t, 10*time.Second, "the first pass did not report the directory", func() bool { return len(reports()) == 1 })
+	for range 3 {
+		pass()
+	}
+	if got := reports(); len(got) != 1 {
+		t.Errorf("after 4 passes, %d reports of the directory, want 1: %q", len(got), got)
+	}
+	for _, e := range obs.snapshot().errs {
+		if strings.Count(e, "recorder:") != 1 {
+			t.Errorf("error %q: want one «recorder:» prefix", e)
+		}
+	}
+	hide.Store(false)
+	pass()
+	hide.Store(true)
+	pass()
+	if got := reports(); len(got) != 2 {
+		t.Errorf("after the directory failed again, %d reports, want 2: %q", len(got), got)
+	}
+}
+
+// TestLogStream: the stream of a MediaMTX log line is the one its path tag
+// names, <cam>/<profile>, as the recorder names MediaMTX's paths.
+func TestLogStream(t *testing.T) {
+	for _, tc := range []struct {
+		line    string
+		cam     CameraID
+		profile Profile
+		ok      bool
+	}{
+		{"2026/10/28 12:00:00 ERR [path cam1/main] [recorder] write /data/rec/cam1/main/x.mp4.part: input/output error", "cam1", "main", true},
+		{"2026/10/28 12:00:00 INF [path cam_2.b/sub] [RTSP source] ready: 1 track (H264)", "cam_2.b", "sub", true},
+		{"2026/10/28 12:00:00 INF [RTSP] listener opened on :8554", "", "", false},
+		{"2026/10/28 12:00:00 ERR [path cam1] [recorder] oops", "", "", false},
+		{"2026/10/28 12:00:00 ERR [path cam1/other] [recorder] oops", "", "", false},
+		{"[path cam1/main", "", "", false},
+	} {
+		cam, profile, ok := LogStream(tc.line)
+		if cam != tc.cam || profile != tc.profile || ok != tc.ok {
+			t.Errorf("LogStream(%q) = %q, %q, %v; want %q, %q, %v", tc.line, cam, profile, ok, tc.cam, tc.profile, tc.ok)
+		}
+	}
 }

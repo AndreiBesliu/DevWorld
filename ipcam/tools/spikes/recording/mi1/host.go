@@ -276,9 +276,9 @@ func (d *Driver) awaitCut(ctx context.Context, s *session, st *RunState, cur *Cu
 }
 
 // stopHub stops ipcam-hub cleanly when a run is abandoned, killing it after
-// stopTimeout.
+// StopTimeout.
 func stopHub(hub *hubproc.Hub) {
-	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
 	defer cancel()
 	_ = hub.Stop(ctx)
 }
@@ -362,7 +362,7 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 // controller hears why, and the run is redone.
 func (d *Driver) refuse(ctx context.Context, s *session, st *RunState, cur *CurrentRun, vol Volume, hub *hubproc.Hub, reason string) error {
 	d.say("Rularea %s: %s; nu opresc gazda, rularea se reface.", cur.RunID, reason)
-	stopCtx, cancel := context.WithTimeout(ctx, stopTimeout)
+	stopCtx, cancel := context.WithTimeout(ctx, StopTimeout)
 	err := hub.Stop(stopCtx)
 	cancel()
 	if err != nil {
@@ -440,7 +440,7 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 // known, at the stop or now, is no reboot.
 func (d *Driver) rebootedSince(cur *CurrentRun) bool {
 	boot, err := d.thisBoot()
-	return err == nil && cur.StopBoot != nil && !boot.same(*cur.StopBoot)
+	return err == nil && cur.StopBoot != nil && !boot.Same(*cur.StopBoot)
 }
 
 // notRebooted ends a run whose OS stop did not reboot the host (the stop
@@ -512,7 +512,7 @@ func (d *Driver) finish(ctx context.Context, s *session, st *RunState, cur *Curr
 		}
 		report.Streams = append(report.Streams, link.StreamIndex{Stream: stream, LastRecordedIndex: index})
 	}
-	stopCtx, stopCancel := context.WithTimeout(ctx, stopTimeout)
+	stopCtx, stopCancel := context.WithTimeout(ctx, StopTimeout)
 	err = hub.Stop(stopCtx)
 	stopCancel()
 	if err != nil {
@@ -559,7 +559,7 @@ func (d *Driver) done(st *RunState, cur *CurrentRun, vol Volume, run results.Run
 		return err
 	}
 	if Counts(run) {
-		d.say("Rularea %s: validă, pierdere %s.", run.RunID, secondsText(RunLossMs(run)))
+		d.say("Rularea %s: validă, pierdere %s.", run.RunID, SecondsText(RunLossMs(run)))
 	} else {
 		d.say("Rularea %s: nu contează (%s); se reface.", run.RunID, invalidText(run))
 	}

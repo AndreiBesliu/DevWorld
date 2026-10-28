@@ -167,7 +167,8 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// HUB-17, T40: no segment goes to an SD card before the owner confirmed
 	// the wear warning, so nothing under the data directory changes first:
 	// no reconcile, no catalog, no MediaMTX.
-	if !cfg.SDCardConfirmed && health.IsSdCard(mountInfoPath, filepath.Join(cfg.DataDir, "rec")) {
+	onSdCard := health.IsSdCard(mountInfoPath, filepath.Join(cfg.DataDir, "rec"))
+	if !cfg.SDCardConfirmed && onSdCard {
 		ev.emit("sd_card_unconfirmed", nil)
 		_, _ = fmt.Fprintln(stderr, "ipcam-hub: rec/ is on an SD card, and run.json does not confirm the SD-card warning (sdCardConfirmed)")
 		return exitSdCardUnconfirmed
@@ -221,7 +222,13 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = cat.Close() }()
 	rc.Catalog = cat
-	rc.Observer = &observer{ev: ev, stderr: stderr}
+	// While rec/ is on an SD card, the card monitor watches it (T40, G17).
+	var card *cardSampler
+	if onSdCard {
+		card = newCardSampler(rc.RecDir, mountInfoPath, ev)
+		card.begin()
+	}
+	rc.Observer = &observer{ev: ev, stderr: stderr, card: card}
 
 	// New gives the reconcile event out (observer.Reconciled), as later updates.
 	rec, _, err := recorder.New(ctx, rc)
@@ -231,6 +238,9 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		return fail(err)
+	}
+	if card != nil {
+		card.attach(rec)
 	}
 	if err := rec.Apply(ctx, jobs); err != nil {
 		stop()
@@ -243,6 +253,9 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		ready = append(ready, map[string]any{"cam": j.Cam, "profile": j.Profile, "encrypted": j.Scope != nil, "padLowBitrate": j.PadLowBitrate})
 	}
 	ev.emit("ready", map[string]any{"jobs": ready})
+	if card != nil {
+		go card.run(ctx, jobs)
+	}
 
 	tick := time.NewTicker(statusInterval)
 	defer tick.Stop()

@@ -16,6 +16,9 @@ type mount struct {
 	major, minor uint64
 	point        string // where it is mounted, unescaped
 	source       string // the mount source, such as /dev/mmcblk0p2 or /dev/root
+	// readOnly is true when the mount's own options or its superblock's
+	// say ro.
+	readOnly bool
 }
 
 // sdCard reports whether the mount comes from an SD card: a /dev/mmcblk*
@@ -34,6 +37,16 @@ func (m mount) sdCard() bool {
 func IsSdCard(mountinfoPath, recDir string) bool {
 	m, ok := mountOf(mountinfoPath, recDir)
 	return ok && m.sdCard()
+}
+
+// IsReadOnly reports whether the mount that holds recDir, in mountinfoPath
+// (/proc/self/mountinfo), is read-only: by its own options (mount -o
+// remount,ro) or by its superblock's, as after ext4's errors=remount-ro,
+// which leaves the mount's own options rw. The SD-card monitor polls it
+// (T40, §13.1). It is false when the mount table cannot be read.
+func IsReadOnly(mountinfoPath, recDir string) bool {
+	m, ok := mountOf(mountinfoPath, recDir)
+	return ok && m.readOnly
 }
 
 // mountOf returns the mount of mountinfoPath that holds dir: the one with
@@ -62,7 +75,7 @@ func mountOf(mountinfoPath, dir string) (mount, bool) {
 
 // parseMountInfo reads a mountinfo line: "<id> <parent> <major>:<minor>
 // <root> <mount point> <options> [<optional fields>…] - <type> <source>
-// <super options>".
+// <super options>". Both options start with rw or ro.
 func parseMountInfo(line string) (mount, bool) {
 	fields := strings.Fields(line)
 	sep := -1
@@ -84,7 +97,15 @@ func parseMountInfo(line string) (mount, bool) {
 	if err1 != nil || err2 != nil {
 		return mount{}, false
 	}
-	return mount{major: major, minor: minor, point: filepath.Clean(unescapeMountInfo(fields[4])), source: unescapeMountInfo(fields[sep+2])}, true
+	readOnly := firstOption(fields[5]) == "ro" || (sep+3 < len(fields) && firstOption(fields[sep+3]) == "ro")
+	return mount{major: major, minor: minor, point: filepath.Clean(unescapeMountInfo(fields[4])), source: unescapeMountInfo(fields[sep+2]), readOnly: readOnly}, true
+}
+
+// firstOption is the first of a mountinfo field's comma-separated options,
+// where the kernel puts rw or ro.
+func firstOption(options string) string {
+	first, _, _ := strings.Cut(options, ",")
+	return first
 }
 
 // unescapeMountInfo undoes the kernel's octal escapes of a mountinfo field:

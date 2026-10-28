@@ -244,15 +244,15 @@ func (db *DB) PutGap(ctx context.Context, g Gap) error {
 	return nil
 }
 
-// HasGap reports whether the stream has a gap of reason that starts at
-// startMs.
-func (db *DB) HasGap(ctx context.Context, cam, profile string, startMs int64, reason GapReason) (bool, error) {
-	var n int
-	if err := db.sql.QueryRowContext(ctx, "SELECT count(*) FROM gaps WHERE camera_id = ? AND profile = ? AND start_ms = ? AND reason = ?",
-		cam, profile, startMs, string(reason)).Scan(&n); err != nil {
-		return false, fmt.Errorf("catalog: look for a gap of %s/%s: %w", cam, profile, err)
+// FindGap returns the start of the stream's earliest gap of reason that
+// starts in [fromMs, toMs], and whether there is one.
+func (db *DB) FindGap(ctx context.Context, cam, profile string, reason GapReason, fromMs, toMs int64) (startMs int64, found bool, err error) {
+	var start sql.NullInt64
+	if err := db.sql.QueryRowContext(ctx, "SELECT min(start_ms) FROM gaps WHERE camera_id = ? AND profile = ? AND reason = ? AND start_ms BETWEEN ? AND ?",
+		cam, profile, string(reason), fromMs, toMs).Scan(&start); err != nil {
+		return 0, false, fmt.Errorf("catalog: look for a gap of %s/%s: %w", cam, profile, err)
 	}
-	return n > 0, nil
+	return start.Int64, start.Valid, nil
 }
 
 // CloseGap ends every open gap of the stream at endMs, or at its start if
@@ -265,14 +265,16 @@ func (db *DB) CloseGap(ctx context.Context, cam, profile string, endMs int64) er
 	return nil
 }
 
-// MoveGapStart moves the start of the stream's gaps that start at fromMs to
-// toMs: reconcile's background rewrite recovers more of a lost tail than
-// its interim file kept (C1-R9). A closed gap ends no earlier than its new
-// start; an open gap stays open.
-func (db *DB) MoveGapStart(ctx context.Context, cam, profile string, fromMs, toMs int64) error {
+// MoveGapStart moves the start of the stream's gaps of reason that start
+// at fromMs to toMs: reconcile's tail gap moves between the file's start and
+// what the file keeps, and the background rewrite recovers more of a lost
+// tail than its interim file kept (C1-R9). A gap of another reason, such as
+// an SD card's (T40), stays where it is. A closed gap ends no earlier than
+// its new start; an open gap stays open.
+func (db *DB) MoveGapStart(ctx context.Context, cam, profile string, reason GapReason, fromMs, toMs int64) error {
 	if _, err := db.sql.ExecContext(ctx,
-		"UPDATE gaps SET start_ms = ?, end_ms = CASE WHEN end_ms = 0 THEN 0 ELSE max(end_ms, ?) END WHERE camera_id = ? AND profile = ? AND start_ms = ?",
-		toMs, toMs, cam, profile, fromMs); err != nil {
+		"UPDATE gaps SET start_ms = ?, end_ms = CASE WHEN end_ms = 0 THEN 0 ELSE max(end_ms, ?) END WHERE camera_id = ? AND profile = ? AND reason = ? AND start_ms = ?",
+		toMs, toMs, cam, profile, string(reason), fromMs); err != nil {
 		return fmt.Errorf("catalog: move a gap of %s/%s: %w", cam, profile, err)
 	}
 	return nil
