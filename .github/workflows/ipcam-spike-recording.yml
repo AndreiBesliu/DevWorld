@@ -609,7 +609,8 @@ jobs:
       - name: Prepare the runner
         # LAB and MEDIA for the steps after it, as bash paths: on Windows a glob does not match
         # under RUNNER_TEMP's backslashes. On Linux: ffmpeg for the band check (lab tools only,
-        # never shipped), and QEMU, cloud-localds and KVM for the qemu-reset smoke (TST-09).
+        # never shipped), and QEMU, cloud-localds and KVM for the qemu-reset smoke (TST-09),
+        # as the lab's qemu-reset shards get them (tools/scripts/mi1-qemu-setup.sh).
         id: prepare
         run: |
           set -o pipefail
@@ -623,23 +624,8 @@ jobs:
           } >> "${GITHUB_ENV}"
           if [[ "${RUNNER_OS}" == Linux ]]; then
             {
-              if [[ ! -e /dev/kvm ]]; then
-                echo "KVM is not available on this runner (/dev/kvm is missing): the qemu-reset smoke needs it (TST-09)."
-                exit 1
-              fi
-              sudo apt-get update &&
-                sudo apt-get install --yes --no-install-recommends ffmpeg qemu-system-x86 qemu-utils cloud-image-utils &&
-                echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
-                sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null &&
-                sudo udevadm control --reload-rules &&
-                sudo udevadm trigger --name-match=kvm &&
-                sudo udevadm settle &&
-                ffmpeg -version | sed -n 1p &&
-                qemu-system-x86_64 --version | sed -n 1p || exit 1
-              if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
-                echo "KVM is not usable by this runner's user: $(ls -l /dev/kvm)"
-                exit 1
-              fi
+              tools/scripts/mi1-qemu-setup.sh ffmpeg &&
+                ffmpeg -version | sed -n 1p
             } 2>&1 | tee "${RUNNER_TEMP}/prepare.log"
           fi
       - name: Build
@@ -682,7 +668,8 @@ jobs:
       - name: Smoke results
         # Each kind's runs that count, as the lab sends them (recspike annotate split): one
         # notice per run, and each must pass G11 (reconciled, HUB-04 clear, nothing unreadable
-        # or torn, every stream within its limit); two must count.
+        # or torn, every stream's loss under 2 s, as TestMI1_LabKill9Smoke: the smoke streams
+        # are 4 Mbps, and the stored limitMs is never trusted); two must count.
         id: results
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
@@ -702,7 +689,7 @@ jobs:
               tools/scripts/annotate.sh "${set}" 1 notice < "${line}"
               count=$((count + 1))
               if ! jq -e '.runs[0] | .reconciled and .hub04Clear and .unreadable == 0 and .tornParts == 0 and
-                (.streams | length > 0) and all(.streams[]; .lossMs <= .limitMs)' "${line}" > /dev/null; then
+                (.streams | length > 0) and all(.streams[]; .lossMs < 2000)' "${line}" > /dev/null; then
                 echo "${set}: run $(jq -r .runId "${line}") fails G11: $(cat "${line}")" | tee -a "${log}"
                 status=1
               fi

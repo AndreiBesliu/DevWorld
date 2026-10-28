@@ -344,15 +344,18 @@ func (h *Hub) WaitRecording(ctx context.Context) (time.Time, error) {
 	return last, err
 }
 
-// ResumeMs is how long after killedAt every job of this child, restarted
-// after the kill, was recording again: the arrival of the last job's
-// `recording` event, on the monotonic clock (C07, G13).
-func (h *Hub) ResumeMs(ctx context.Context, killedAt time.Time) (int64, error) {
+// ResumeMs is how long after killedAtPlusScan every job of this child,
+// restarted after the kill, was recording again: the arrival of the last
+// job's `recording` event, on the monotonic clock (C07, G13).
+// killedAtPlusScan is the kill's moment moved later by the time the caller
+// spent between the kill and Restart on its own work, mi1's raw HUB-04 scan
+// at the stop, which is not ipcam-hub's resume.
+func (h *Hub) ResumeMs(ctx context.Context, killedAtPlusScan time.Time) (int64, error) {
 	last, err := h.WaitRecording(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return last.Sub(killedAt).Milliseconds(), nil
+	return last.Sub(killedAtPlusScan).Milliseconds(), nil
 }
 
 // beacon sends the beacon of runID on conn every controller.BeaconEvery

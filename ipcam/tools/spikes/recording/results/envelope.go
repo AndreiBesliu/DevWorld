@@ -113,7 +113,9 @@ type Run struct {
 	// PacingP99Ms and SkippedAUs are the controller's pacing (R07).
 	PacingP99Ms int64 `json:"pacingP99Ms"`
 	SkippedAUs  int   `json:"skippedAUs"`
-	// ResumeMs is the kill to the last job's `recording` event (kill9).
+	// ResumeMs is the kill to the last job's `recording` event (kill9),
+	// without the harness's raw HUB-04 scan at the stop, which runs between
+	// the kill and the restart (G08).
 	ResumeMs *int64 `json:"resumeMs,omitempty"`
 	Cameras  int    `json:"cameras"`
 	// ColdBootMs is, on sysrq and bugcheck runs, the host's uptime at the

@@ -5,8 +5,8 @@ name: ipcam-spike-recording-lab
 # default runs and the O17-off run, in two shards of up to 3 h on GitHub's runners. Each
 # run's envelope goes out as one notice (C32), which recreport reads with
 # gh api repos/<owner>/<repo>/check-runs/<job id>/annotations. The jobs run only on a
-# dispatch, or when the head commit's message holds [lab]; the push trigger registers the
-# workflow on its first push.
+# dispatch, or when the head commit's subject (its first line) holds [lab]; the push trigger
+# registers the workflow on its first push.
 
 on:
   workflow_dispatch:
@@ -42,10 +42,33 @@ env:
 # logs cannot be read from everywhere and annotations can.
 
 jobs:
+  gate:
+    # Whether the lab runs: on a dispatch, or when the head commit's subject holds [lab]. A
+    # commit body that mentions it does not count: a squash merge joins the bodies of the
+    # branch's commits into the head commit's message on main.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      lab: ${{ steps.subject.outputs.lab }}
+    steps:
+      - name: Read the subject
+        id: subject
+        env:
+          EVENT: ${{ github.event_name }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          subject="${MESSAGE%%$'\n'*}"
+          lab=false
+          if [[ "${EVENT}" == workflow_dispatch || "${subject}" == *'[lab]'* ]]; then
+            lab=true
+          fi
+          echo "lab=${lab}" | tee -a "${GITHUB_OUTPUT}"
+
   build:
     # The media, and ipcam-hub, the MediaMTX fork, recspike and reccontroller for linux/amd64
     # and windows/amd64.
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[lab]')
+    needs: gate
+    if: needs.gate.outputs.lab == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
@@ -174,8 +197,7 @@ jobs:
       - name: Prepare the runner
         # LAB, MEDIA and LINES for the steps after it, as bash paths: on Windows a glob does not
         # match under RUNNER_TEMP's backslashes. Artifacts lose the executable bit. A qemu-reset
-        # shard needs QEMU, cloud-localds and KVM (TST-09), which the runner's user gets through
-        # a udev rule.
+        # shard needs QEMU, cloud-localds and KVM (TST-09): tools/scripts/mi1-qemu-setup.sh.
         id: prepare
         run: |
           set -o pipefail
@@ -193,22 +215,7 @@ jobs:
               chmod +x "${tmp}/lab"/*
             fi
             if [[ "${{ matrix.kind }}" == qemu-reset ]]; then
-              if [[ ! -e /dev/kvm ]]; then
-                echo "KVM is not available on this runner (/dev/kvm is missing): a qemu-reset shard needs it (TST-09)."
-                exit 1
-              fi
-              sudo apt-get update &&
-                sudo apt-get install --yes --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils &&
-                echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
-                sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null &&
-                sudo udevadm control --reload-rules &&
-                sudo udevadm trigger --name-match=kvm &&
-                sudo udevadm settle &&
-                qemu-system-x86_64 --version | sed -n 1p || exit 1
-              if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
-                echo "KVM is not usable by this runner's user: $(ls -l /dev/kvm)"
-                exit 1
-              fi
+              tools/scripts/mi1-qemu-setup.sh
             fi
           } 2>&1 | tee "${RUNNER_TEMP}/prepare.log"
       - name: Run the shard

@@ -346,16 +346,21 @@ func TestResume_Kill9WithoutTheRawScanAtTheStop(t *testing.T) {
 	const scanTime = 3 * time.Second
 	r := newRig(t, "lab-linux")
 	d := r.driver(t)
-	scans := &atomic.Int32{}
+	atStop := &atomic.Int32{}
 	d.Volumes = watchedVolumes{Dirs: Dirs{Root: d.Work}, onScan: func() {
-		// A run's first raw scan is the one at the stop, its second the one
-		// after the reconcile (TestHub04_RawScanAtTheStopCounts).
-		if scans.Add(1)%2 == 1 {
+		// The scan at the stop follows the kill of ipcam-hub, whose last
+		// log entry is still "hub"; the one after the reconcile follows its
+		// clean stop (TestHub04_ScansWithIpcamHubStopped).
+		if entries := logEntries(t, r.log); entries[len(entries)-1] == "hub" {
+			atStop.Add(1)
 			time.Sleep(scanTime)
 		}
 	}}
 	if err := d.RunSet(t.Context(), SetOptions{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: 1, Smoke: true}); err != nil {
 		t.Fatalf("RunSet: %v\nscreen:\n%s", err, r.out.String())
+	}
+	if got := atStop.Load(); got != smokeRuns {
+		t.Errorf("%d raw scans at the stop, want one per run", got)
 	}
 	reports := r.f.runReports()
 	if len(reports) != smokeRuns {

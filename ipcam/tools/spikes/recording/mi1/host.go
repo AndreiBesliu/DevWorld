@@ -114,14 +114,19 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 	if err != nil {
 		return err
 	}
+	// Until the run state holds the run, nothing finishes it, and its next
+	// attempt has the same run id: the volume is released, so that the next
+	// one is fresh (Images.Prepare refuses a leftover image). Once the run
+	// state holds it, a later recspike finishes it on this volume
+	// (finishAfterReboot), and its report releases it.
 	config, err := d.writeRun(cur, vol, s)
 	if err != nil {
-		return err
+		return errors.Join(err, vol.Release())
 	}
 	st.Current, st.NextRun, st.Slot = cur, p.Index, cur.Slot
 	st.Attempts++
 	if err := SaveRunState(d.statePath(), st); err != nil {
-		return err
+		return errors.Join(err, vol.Release())
 	}
 	if err := d.announce(ctx, s, st, cur, false); err != nil {
 		return err

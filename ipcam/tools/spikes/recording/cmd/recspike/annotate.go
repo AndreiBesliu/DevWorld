@@ -202,8 +202,9 @@ func annotateEmit(args []string, out io.Writer) error {
 // saved with `gh api …/check-runs/<id>/annotations --paginate`, a file per
 // job, and prints for each set how many of its parts came back:
 // "<set>: <n>/<parts>". A file that does not parse, an envelope of more
-// than one run or of no part, a part outside the set's parts and a part
-// that comes twice are errors.
+// than one run or of no part, an envelope whose Parts differs from its
+// set's first envelope's, a part outside the set's parts and a part that
+// comes twice are errors.
 func annotateRead(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("annotate read", flag.ContinueOnError)
 	rest, err := parseInterleaved(flags, args, out)
@@ -255,9 +256,11 @@ func annotateRead(args []string, out io.Writer) error {
 				s = &set{parts: e.Parts, seen: map[int]bool{}}
 				sets[e.Set] = s
 			}
+			// results.Parse keeps Part within 1..Parts, so within the set's.
 			switch {
-			case e.Part < 1 || e.Part > s.parts:
-				return fmt.Errorf("%s: partea %d a setului %s nu este între 1 și %d", filepath.Base(file), e.Part, e.Set, s.parts)
+			case e.Parts != s.parts:
+				return fmt.Errorf("%s: plicul %s dă numărul de părți %d setului %s, iar primul plic al setului dă %d",
+					filepath.Base(file), e.RunID, e.Parts, e.Set, s.parts)
 			case s.seen[e.Part]:
 				return fmt.Errorf("%s: partea %d a setului %s apare de două ori", filepath.Base(file), e.Part, e.Set)
 			}

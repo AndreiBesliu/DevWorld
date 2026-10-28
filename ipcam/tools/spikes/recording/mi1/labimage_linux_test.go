@@ -227,3 +227,43 @@ func TestLabImage_RealLoopDevice(t *testing.T) {
 		t.Errorf("the image is still there after Release: %v", err)
 	}
 }
+
+// TestLabImage_ReleasedWhenTheRunIsNotSaved: once Prepare has mounted an
+// encrypted run's image, a run that fails before the run state holds it
+// releases the image, as the run's report would. The next attempt has the
+// same run id, and its fresh image must not collide with the leftover
+// (O_EXCL): it records.
+func TestLabImage_ReleasedWhenTheRunIsNotSaved(t *testing.T) {
+	r := newRig(t, "lab-linux")
+	d := r.driver(t)
+	tools := &fakeImageTools{}
+	d.Volumes = &Images{Root: d.Work, tools: tools, size: testImageSize}
+	// A folder where the run's identity file goes: writeRun fails.
+	runDir := filepath.Join(d.Work, ResultsSet(SetLabLinuxKill9, true)+"-01-1")
+	block := filepath.Join(runDir, "ri_g.key")
+	if err := os.MkdirAll(block, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	o := SetOptions{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: 1, Smoke: true}
+	if err := d.RunSet(t.Context(), o); err == nil {
+		t.Fatalf("RunSet with the identity file blocked = nil, want writeRun's error\nscreen:\n%s", r.out.String())
+	}
+	formatted, attached, mounted, unmounted, detached := tools.calls()
+	if len(formatted) != 1 || len(attached) != 1 || len(mounted) != 1 || len(unmounted) != 1 || len(detached) != 1 {
+		t.Errorf("the failed run's image: formatted %v, attached %v, mounted %v, unmounted %v, detached %v; want it released",
+			formatted, attached, mounted, unmounted, detached)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, imageFile)); !os.IsNotExist(err) {
+		t.Errorf("the failed run's image is still there: %v", err)
+	}
+
+	if err := os.Remove(block); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RunSet(t.Context(), o); err != nil {
+		t.Fatalf("RunSet again: %v\nscreen:\n%s", err, r.out.String())
+	}
+	if reports := r.f.runReports(); len(reports) != smokeRuns || reports[0].RunID != filepath.Base(runDir) {
+		t.Errorf("reports %+v: want the smoke's %d runs, the first as %s", reports, smokeRuns, filepath.Base(runDir))
+	}
+}

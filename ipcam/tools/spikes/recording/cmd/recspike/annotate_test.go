@@ -214,7 +214,9 @@ func ghAnnotations(t *testing.T, title string, lines []string) string {
 // back from results.ReadAnnotations as the same envelopes; `annotate read`
 // reports lab-linux-kill9: 21/21 for both shards' annotations together,
 // and refuses a part that appears twice, a part outside 1..Parts, an
-// envelope of more than one run, and annotations that do not parse.
+// envelope of no parts or whose Parts differs from its set's first
+// envelope's, an envelope of more than one run, and annotations that do
+// not parse.
 func TestReadAnnotations_RoundTrip(t *testing.T) {
 	const set = "lab-linux-kill9"
 	ann := t.TempDir()
@@ -282,8 +284,28 @@ func TestReadAnnotations_RoundTrip(t *testing.T) {
 	}
 	refused("a part twice", ghAnnotations(t, set, []string{line(want[4])}), "partea 5")
 	outside := want[0]
-	outside.Part, outside.Parts = 22, 22
-	refused("a part outside the set's parts", ghAnnotations(t, set, []string{line(outside)}), "între 1 și 21")
+	outside.Part = 22
+	refused("a part outside the set's parts", ghAnnotations(t, set, []string{line(outside)}), "part 22 of 21")
+	noParts := want[0]
+	noParts.Part, noParts.Parts = 0, 0
+	refused("an envelope of no parts", ghAnnotations(t, set, []string{line(noParts)}), "nu este o parte")
+	// Part 22 of 22 would widen the set's bound if the first envelope's
+	// Parts were not the set's.
+	moreParts := want[0]
+	moreParts.Part, moreParts.Parts = 22, 22
+	refused("an envelope whose Parts differs from its set's", ghAnnotations(t, set, []string{line(moreParts)}), "numărul de părți 22")
+	firstWrong := t.TempDir()
+	if err := os.WriteFile(filepath.Join(firstWrong, "job0.json"), []byte(ghAnnotations(t, set, []string{line(moreParts)})), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i, j := range jobs {
+		if err := os.WriteFile(filepath.Join(firstWrong, fmt.Sprintf("job%d.json", i+1)), []byte(j), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if printed, err := recspikeOut(t, "annotate", "read", firstWrong); err == nil || !strings.Contains(err.Error(), "numărul de părți 21") {
+		t.Errorf("annotate read with a first envelope of 22 parts = %v, printed %q; want a refusal of the next envelope's 21 parts", err, printed)
+	}
 	two := want[0] // part 1, which the envelope of one run holds too
 	two.Runs = append(two.Runs, want[1].Runs...)
 	refused("an envelope of two runs", ghAnnotations(t, set, []string{line(two)}), "2 rulări")

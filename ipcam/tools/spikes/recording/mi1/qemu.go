@@ -272,6 +272,10 @@ func (q *QEMU) args() []string {
 // recspike's output to the runner (the out port), then its exit status
 // (the lab port), and powers the guest off. The drop-in makes the installed
 // service's `recspike resume` run through lab.sh too after each reset.
+// systemd-timesyncd's drop-in tries the NTP servers again after 1 s, not
+// its default 30 s, when its first try at boot fails: each run's NTP wait
+// after its reset used to last 30 to 40 s. Only an NTP answer syncs the
+// clock, so an unsynced clock still shows (ntpSynced).
 func (q *QEMU) userData() string {
 	shard := "['/opt/recspike-lab/start.sh'"
 	for _, a := range q.guestCommand() {
@@ -316,6 +320,10 @@ write_files:
       [Service]
       ExecStart=
       ExecStart=/opt/recspike-lab/lab.sh resume
+  - path: /etc/systemd/timesyncd.conf.d/ipcam-lab.conf
+    content: |
+      [Time]
+      ConnectionRetrySec=1
 runcmd:
   - ` + shard + `
 `
@@ -379,18 +387,31 @@ func checkKVM() error {
 	return f.Close()
 }
 
+// imageHeaderTimeout bounds the wait for the image server's answer, and
+// imageDeadline the whole download: a stalled download would otherwise
+// hold the shard until its step's timeout. Tests shorten them.
+var (
+	imageHeaderTimeout = time.Minute
+	imageDeadline      = 15 * time.Minute
+)
+
 // fetchImage downloads the image at url into path and keeps it only when
 // its SHA-256 is sum; an image already there with that SHA-256 is kept.
 func fetchImage(ctx context.Context, url, sum, path string) error {
 	if got, err := fileSHA256(path); err == nil && got == sum {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, imageDeadline)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", userAgent)
-	resp, err := http.DefaultClient.Do(req)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = imageHeaderTimeout
+	defer transport.CloseIdleConnections()
+	resp, err := (&http.Client{Transport: transport}).Do(req)
 	if err != nil {
 		return fmt.Errorf("descărcarea imaginii: %w", err)
 	}

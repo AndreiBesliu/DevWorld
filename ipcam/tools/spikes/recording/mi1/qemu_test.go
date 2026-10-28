@@ -92,6 +92,57 @@ func TestQEMU_FetchImageChecksTheSHA256(t *testing.T) {
 	}
 }
 
+// TestQEMU_FetchImageGivesUpOnAStalledServer: a server that never answers,
+// or that stops sending the image halfway, fails the download within its
+// limits (an answer within imageHeaderTimeout, the whole image within
+// imageDeadline), leaving no file, instead of holding the shard until its
+// step's timeout.
+func TestQEMU_FetchImageGivesUpOnAStalledServer(t *testing.T) {
+	header, deadline := imageHeaderTimeout, imageDeadline
+	t.Cleanup(func() { imageHeaderTimeout, imageDeadline = header, deadline })
+	imageHeaderTimeout, imageDeadline = 200*time.Millisecond, 600*time.Millisecond
+	for _, tc := range []struct {
+		name  string
+		serve func(w http.ResponseWriter)
+	}{
+		{"no answer", func(http.ResponseWriter) {}},
+		{"the image stops halfway", func(w http.ResponseWriter) {
+			w.Header().Set("Content-Length", "1048576")
+			_, _ = w.Write(make([]byte, 4096))
+			w.(http.Flusher).Flush()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stall := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				tc.serve(w)
+				select { // stalled until the client gives up, or the test ends
+				case <-r.Context().Done():
+				case <-stall:
+				}
+			}))
+			t.Cleanup(srv.Close)
+			t.Cleanup(func() { close(stall) }) // before srv.Close, which waits for the handler
+			path := filepath.Join(t.TempDir(), "base.img")
+			done := make(chan error, 1)
+			start := time.Now()
+			go func() { done <- fetchImage(t.Context(), srv.URL+"/image.img", strings.Repeat("0", 64), path) }()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("fetchImage = nil, want an error")
+				}
+				t.Logf("fetchImage gave up after %v: %v", time.Since(start).Round(time.Millisecond), err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("fetchImage still waits after 10 s")
+			}
+			if leftovers, _ := filepath.Glob(path + "*"); len(leftovers) != 0 {
+				t.Errorf("files left: %v", leftovers)
+			}
+		})
+	}
+}
+
 // labQEMU is a QEMU driver of shard 2's smoke run in dir.
 func labQEMU(dir string) *QEMU {
 	return &QEMU{Dir: dir, Bins: filepath.Join(dir, "bin"), Shard: 2, Smoke: true}
@@ -155,7 +206,9 @@ func TestQEMU_BootsUnderKVMWithTheLabsDisksAndPorts(t *testing.T) {
 // runner's reccontroller at 10.0.2.2. Its drop-in runs the installed
 // service's `recspike resume` the same way after each reset: the output
 // on the out port, then "exit <status>" on the lab port and a power-off,
-// which ends the driver.
+// which ends the driver. After each reset, systemd-timesyncd tries its NTP
+// servers again within a second when its first try at boot fails, not
+// after its default 30 s, which every run's NTP wait used to show.
 func TestQEMU_SeedInstallsAndRunsTheShard(t *testing.T) {
 	q := labQEMU(t.TempDir())
 	ud := q.userData()
@@ -170,6 +223,8 @@ func TestQEMU_SeedInstallsAndRunsTheShard(t *testing.T) {
 		`echo "exit $status" > /dev/virtio-ports/` + LabPort,
 		"systemctl poweroff",
 		"ExecStart=\n      ExecStart=/opt/recspike-lab/lab.sh resume\n",
+		"  - path: /etc/systemd/timesyncd.conf.d/ipcam-lab.conf\n",
+		"      [Time]\n      ConnectionRetrySec=1\n",
 		"['/opt/recspike-lab/start.sh', 'mi1', '--lab', '--kind', 'qemu-reset', '--shard', '2', '--controller', '" + guestController + "', '--smoke']",
 	} {
 		if !strings.Contains(ud, want) {

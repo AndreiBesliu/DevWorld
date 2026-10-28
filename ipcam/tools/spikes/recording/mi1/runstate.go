@@ -94,7 +94,8 @@ type CurrentRun struct {
 	// Before is each stream's segment files at the stop, relative to the
 	// run's data directory (lastindex.Before), once listed.
 	Before map[string][]string `json:"before,omitempty"`
-	// ResumeMs is the kill to the restarted ipcam-hub's recording (kill9).
+	// ResumeMs is the kill to the restarted ipcam-hub's recording (kill9),
+	// without the harness's raw HUB-04 scan at the stop.
 	ResumeMs *int64 `json:"resumeMs,omitempty"`
 	// StopBoot is the host's boot when recspike asked the OS to stop
 	// (sysrq, bugcheck): another boot after it proves the reboot.
