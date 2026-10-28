@@ -226,7 +226,7 @@ func New(ctx context.Context, cfg Config) (Recorder, ReconcileReport, error) {
 	}
 	r.wg.Add(4)
 	go r.pollLoop(ctx)
-	go r.verifyLoop(ctx)
+	go r.verifyLoop(ctx, res.unlisted)
 	go r.rewriteLoop(ctx)
 	go r.repairLoop(ctx)
 	r.kickVerify()
@@ -768,11 +768,16 @@ func (r *rec) pollLoop(ctx context.Context) {
 // stopped a pass, and each entry under rec/ that a pass could not read, once
 // while it stays so: a directory on a failing card that stays unreadable is
 // one I/O error, which the SD-card monitor counts once (T40), not one per
-// pass. An entry that a later pass reads again is reported again when it
-// fails again.
-func (r *rec) verifyLoop(ctx context.Context) {
+// pass. unlisted are the entries that reconcile's listing could not read at
+// the start, which reconcile reported: the passes take them as reported, so
+// the start's first pass does not count them a second time. An entry that a
+// later pass reads again is reported again when it fails again.
+func (r *rec) verifyLoop(ctx context.Context, unlisted []string) {
 	defer r.wg.Done()
-	reported := map[string]bool{} // the entries that the last whole pass could not read
+	reported := map[string]bool{} // the entries that the last whole listing could not read
+	for _, rel := range unlisted {
+		reported[rel] = true
+	}
 	for {
 		select {
 		case <-ctx.Done():

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -315,4 +316,132 @@ func TestStability_ReportsCardStates(t *testing.T) {
 			t.Errorf("onSdCard %v, card states %+v; want neither", d.OnSdCard, d.CardStates)
 		}
 	})
+}
+
+// fakeDisk is the free space of a disk of capacity bytes that holds what
+// is under work/mi2, each byte there standing for 1 MB: a test writes
+// kilobytes for the gigabytes that a run records.
+func fakeDisk(t *testing.T, work string, capacity uint64) func() (uint64, error) {
+	t.Helper()
+	return func() (uint64, error) {
+		var used uint64
+		err := filepath.WalkDir(filepath.Join(work, "mi2"), func(_ string, d fs.DirEntry, err error) error {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			if err != nil || d.IsDir() {
+				return err
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			used += uint64(info.Size()) * 1_000_000 //nolint:gosec // a test file's size
+			return nil
+		})
+		return capacity - min(used, capacity), err
+	}
+}
+
+// record writes gb gigabytes of recordings, on fakeDisk's scale, into the
+// data folder of the run runID.
+func record(t *testing.T, work, runID string, gb int) {
+	t.Helper()
+	path := filepath.Join(work, "mi2", runID, "data", "rec", "cam01", "main", "2026-10-28", "2026-10-28_12-00-00-000000.mp4")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, make([]byte, gb*1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStability_StaleRecordingsDoNotShrinkTheWindow (G19; Task 8 review
+// I2): the free space that sets the window is measured once the runs left
+// in work/mi2 are gone, since recspike removes them anyway: a reboot's
+// recordings never refuse, nor shrink, the redo. A run's recordings go when
+// it ends, finished or interrupted, so that they keep no space from MI3 and
+// MI4; its ipcam-hub log stays until the next run.
+func TestStability_StaleRecordingsDoNotShrinkTheWindow(t *testing.T) {
+	pi := mi1.HostState{Pseudonym: "pi", OS: "linux", Storage: "sd", WriteCache: "unknown", Cameras: 4,
+		SdConfirmation: &results.SdConfirmation{Text: "da", AtMs: 1}}
+	const capacity = 20e9 // 4 cameras: N = 1,39 h
+	want, err := Window(capacity, pi.Cameras)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("the redo after a reboot", func(t *testing.T) {
+		dir := t.TempDir()
+		work := filepath.Join(dir, "work")
+		// The reboot: pi-72h-1 is still open, and its recordings hold 10 GB.
+		if _, err := beginRun(filepath.Join(dir, "results", "state", "mi2-pi-72h.json"), "pi-72h", mi1.Boot{ID: "boot-1"}, true); err != nil {
+			t.Fatal(err)
+		}
+		record(t, work, "pi-72h-1", 10)
+		disk := fakeDisk(t, work, capacity)
+		if free, err := disk(); err != nil || free != 10e9 {
+			t.Fatalf("the fake disk has %d bytes free (%v), want 10 GB", free, err)
+		}
+		if _, err := Window(10e9, pi.Cameras); !errors.Is(err, ErrWindowTooSmall) {
+			t.Fatalf("Window(10 GB): %v, want ErrWindowTooSmall: the scenario needs a stale run that refuses the redo", err)
+		}
+
+		h := newHarness(t, dir, pi, "boot-2")
+		h.opts.FreeBytes = disk
+		h.start()
+		h.nextHub()
+		record(t, work, "pi-72h-2", 1)
+		h.finish()
+		e := h.envelope("pi-72h-2")
+		if e.MI2.WindowHours != want.Hours() {
+			t.Errorf("window %v h, want %v h: the free space without the stale run", e.MI2.WindowHours, want.Hours())
+		}
+		if inv := e.MI2.Invalidated; len(inv) != 1 || !strings.HasPrefix(inv[0], "pi-72h-1: gazda a repornit") {
+			t.Errorf("invalidated %q, want pi-72h-1 after the reboot", inv)
+		}
+		if !strings.Contains(h.out.String(), "Spațiu liber aici: 20 GB") {
+			t.Errorf("the run printed:\n%s\nwant «Spațiu liber aici: 20 GB»", h.out)
+		}
+		requireCleared(t, work, "pi-72h-2", disk)
+	})
+
+	t.Run("an interrupted run", func(t *testing.T) {
+		dir := t.TempDir()
+		work := filepath.Join(dir, "work")
+		disk := fakeDisk(t, work, capacity)
+		h := newHarness(t, dir, pi, "boot-1")
+		h.opts.FreeBytes = disk
+		h.start()
+		hub := h.nextHub()
+		record(t, work, "pi-72h-1", 1)
+		h.cancel()
+		if err := h.wait(); !errors.Is(err, context.Canceled) {
+			t.Fatalf("the interrupted run: %v, want context.Canceled", err)
+		}
+		if !hub.stopped.Load() {
+			t.Error("the interrupted run left ipcam-hub running")
+		}
+		requireCleared(t, work, "pi-72h-1", disk)
+	})
+}
+
+// requireCleared fails t unless the run runID's folder holds only its
+// ipcam-hub log, and the fake disk is empty again.
+func requireCleared(t *testing.T, work, runID string, disk func() (uint64, error)) {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(work, "mi2", runID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !slices.Equal(names, []string{"ipcam-hub.log"}) {
+		t.Errorf("after the run, its folder holds %q, want only ipcam-hub.log", names)
+	}
+	if free, err := disk(); err != nil || free != 20e9 {
+		t.Errorf("after the run, %d bytes free (%v), want all 20 GB", free, err)
+	}
 }

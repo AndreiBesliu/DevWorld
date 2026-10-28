@@ -42,7 +42,8 @@ type cardRecorder interface {
 // every mountEvery it reads the read-only flag of rec/'s mount; a line of
 // MediaMTX's log, or an error of ipcam-hub's own, that holds «input/output
 // error» or «read-only file system» is an I/O error (the recorder reports a
-// directory that stays unreadable once, so it is one). Each change of the
+// directory that stays unreadable once, at the start's reconcile or at the
+// first verification pass that meets it, so it is one). Each change of the
 // card's state is a card event, and the card alert an alert event.
 //
 // Below FAILED, recording goes on: a write that MediaMTX could not make

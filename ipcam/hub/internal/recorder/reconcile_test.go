@@ -1385,8 +1385,11 @@ func TestRecorder_ReconcileUpdatesAreNumbered(t *testing.T) {
 // under rec/ that cannot be read, such as a date directory with an I/O
 // error after a cut on an SD card, does not fail New: it is skipped, an
 // error names it by its base name only, the other streams are repaired and
-// recording starts. The verification pass after the start goes out too, and
-// reports the directory through the same errors.
+// recording starts. The verification pass after the start goes out too,
+// and does not report the directory a second time: reconcile reported it,
+// and the SD-card monitor counts each report as an I/O error (Task 8 review
+// I1; TestRecorder_UnreadableDirectoryReportedOnce counts them, and
+// reports a directory that a later pass cannot read).
 func TestRecorder_UnreadableDirectoryDoesNotStopRecording(t *testing.T) {
 	recDir := filepath.Join(t.TempDir(), "rec")
 	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
@@ -1421,18 +1424,13 @@ func TestRecorder_UnreadableDirectoryDoesNotStopRecording(t *testing.T) {
 	if !named {
 		t.Errorf("errors %q, want one that names %s", obs.snapshot().errs, filepath.Base(bad))
 	}
-	// The verification after the start goes out, and reports the directory
-	// that it could not read as well (8a C2 follow-up).
-	waitFor(t, 10*time.Second, "the verification after the start did not report the directory it could not read", func() bool {
-		s := obs.snapshot()
-		return len(s.verified) > 0 && slices.ContainsFunc(s.errs, func(e string) bool {
-			return strings.HasPrefix(e, "recorder: verification: ") && strings.Contains(e, filepath.Base(bad))
-		})
-	})
-	for _, e := range obs.snapshot().errs {
-		if strings.HasPrefix(e, "recorder: verification: ") && strings.Contains(e, filepath.Dir(bad)) {
-			t.Errorf("the error %q names the directory's parents", e)
-		}
+	// The verification after the start goes out (8a C2 follow-up), and
+	// leaves the directory that reconcile reported to that one report.
+	waitFor(t, 10*time.Second, "the verification after the start did not go out", func() bool { return len(obs.snapshot().verified) > 0 })
+	r.kickVerify() // one more pass: the start's has reported all that it reports
+	waitFor(t, 10*time.Second, "no second verification pass", func() bool { return len(obs.snapshot().verified) > 1 })
+	if n := len(slices.DeleteFunc(obs.snapshot().errs, func(e string) bool { return !strings.Contains(e, filepath.Base(bad)) })); n != 1 {
+		t.Errorf("errors %q: %d name %s, want 1, reconcile's", obs.snapshot().errs, n, filepath.Base(bad))
 	}
 }
 
@@ -1855,12 +1853,14 @@ func TestReconcile_TailGapKeepsOtherReasonsAndFiles(t *testing.T) {
 	}
 }
 
-// TestRecorder_UnreadableDirectoryReportedOnce (Task 8, 8a I1 follow-up):
-// a directory under rec/ that stays unreadable is reported by the first
-// verification pass that meets it, with one «recorder:» prefix, and not by
-// each later pass, so that the SD-card monitor, which counts I/O errors,
-// counts it once; once it can be read again and fails again, it is
-// reported again.
+// TestRecorder_UnreadableDirectoryReportedOnce (Task 8, 8a I1 follow-up;
+// Task 8 review I1): a directory under rec/ that stays unreadable is
+// reported once, with one «recorder:» prefix: by reconcile's listing when
+// ipcam-hub starts, and by none of the verification passes after it, the
+// start's first among them. The SD-card monitor counts every error of
+// ipcam-hub that holds an I/O error, so the directory is one I/O error, not
+// one at the start and one more at the first pass. Once it can be read
+// again and fails again, it is reported again.
 func TestRecorder_UnreadableDirectoryReportedOnce(t *testing.T) {
 	recDir := filepath.Join(t.TempDir(), "rec")
 	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
@@ -1882,21 +1882,28 @@ func TestRecorder_UnreadableDirectoryReportedOnce(t *testing.T) {
 		r.kickVerify()
 		waitFor(t, 10*time.Second, "no verification pass", func() bool { return len(obs.snapshot().verified) > n })
 	}
+	// reports are the errors that the card monitor counts as I/O errors
+	// (cardSampler.hubError, ioErrorText): every one, whoever reported it.
 	reports := func() []string {
 		var out []string
 		for _, e := range obs.snapshot().errs {
-			if strings.HasPrefix(e, "recorder: verification: ") && strings.Contains(e, filepath.Base(bad)) {
+			if low := strings.ToLower(e); strings.Contains(low, "input/output error") || strings.Contains(low, "read-only file system") {
 				out = append(out, e)
 			}
 		}
 		return out
 	}
-	waitFor(t, 10*time.Second, "the first pass did not report the directory", func() bool { return len(reports()) == 1 })
+	// The start's own pass, which New kicks.
+	waitFor(t, 10*time.Second, "the start's verification pass did not run", func() bool { return len(obs.snapshot().verified) > 0 })
 	for range 3 {
 		pass()
 	}
-	if got := reports(); len(got) != 1 {
-		t.Errorf("after 4 passes, %d reports of the directory, want 1: %q", len(got), got)
+	got := reports()
+	if len(got) != 1 {
+		t.Errorf("after the start and 4 passes, %d I/O errors, want 1: %q", len(got), got)
+	}
+	if want := "recorder: list " + filepath.Base(bad) + ": "; len(got) > 0 && !strings.HasPrefix(got[0], want) {
+		t.Errorf("the start's report %q, want reconcile's, %q…", got[0], want)
 	}
 	for _, e := range obs.snapshot().errs {
 		if strings.Count(e, "recorder:") != 1 {
@@ -1907,8 +1914,17 @@ func TestRecorder_UnreadableDirectoryReportedOnce(t *testing.T) {
 	pass()
 	hide.Store(true)
 	pass()
-	if got := reports(); len(got) != 2 {
-		t.Errorf("after the directory failed again, %d reports, want 2: %q", len(got), got)
+	got = reports()
+	if len(got) != 2 {
+		t.Errorf("after the directory failed again, %d I/O errors, want 2: %q", len(got), got)
+	}
+	if want := "recorder: verification: list " + filepath.Base(bad) + ": "; len(got) == 2 && !strings.HasPrefix(got[1], want) {
+		t.Errorf("the report after it failed again %q, want the verification's, %q…", got[1], want)
+	}
+	for _, e := range got {
+		if strings.Contains(e, filepath.Dir(bad)) {
+			t.Errorf("the error %q names the directory's parents", e)
+		}
 	}
 }
 

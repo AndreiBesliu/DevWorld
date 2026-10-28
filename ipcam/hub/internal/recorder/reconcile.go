@@ -358,12 +358,16 @@ func Reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 
 // reconciled is what reconcile did: its report, the rewrites that its
 // salvages still need, the gaps that it wrote, and the errors of the files
-// that it could not repair.
+// that it could not repair. unlisted are the entries under rec/ that its
+// listing could not read (listError.rel), whose errors are in errs: the
+// verification passes after it report them again only once a pass has read
+// them, so that one unreadable directory is one error (T40).
 type reconciled struct {
-	report  ReconcileReport
-	pending []*pendingRewrite
-	gaps    []catalog.Gap
-	errs    []error
+	report   ReconcileReport
+	pending  []*pendingRewrite
+	gaps     []catalog.Gap
+	errs     []error
+	unlisted []string
 }
 
 func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *catalog.DB) (reconciled, error) {
@@ -375,6 +379,7 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 	segs := l.segs
 	for _, e := range l.errs {
 		res.errs = append(res.errs, e.as("list"))
+		res.unlisted = append(res.unlisted, e.rel)
 	}
 	rows, err := cat.Segments(ctx)
 	if err != nil {

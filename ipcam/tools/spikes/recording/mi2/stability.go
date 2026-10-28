@@ -85,6 +85,13 @@ const (
 // (C07). A run that an OS reboot, or the end of recspike, interrupted is
 // invalid: the next Run redoes it under the next run id, removes its
 // recordings, and lists it in Invalidated; it never counts as a crash.
+//
+// One run at a time: the runs left in Work's mi2 folder go before the free
+// space is measured. Each is finished, its envelope written, or invalid, so
+// none is needed, and an OS reboot's leftovers would otherwise shrink the
+// redo's window, or refuse it on a small SD card. A run's recordings go
+// when it ends, finished or interrupted, so that they keep no space from
+// MI3 and MI4; its ipcam-hub log stays until the next run.
 func Run(ctx context.Context, o Options) error {
 	if o.CameraURLs == nil {
 		return errors.New("mi2: no controller for the cameras")
@@ -92,6 +99,10 @@ func Run(ctx context.Context, o Options) error {
 	set := SetFor(o.Host.Pseudonym)
 	cameras := max(o.Host.Cameras, 1)
 	if err := os.MkdirAll(o.Work, 0o700); err != nil {
+		return err
+	}
+	runs := filepath.Join(o.Work, "mi2")
+	if err := os.RemoveAll(runs); err != nil {
 		return err
 	}
 	free, err := o.freeBytes()
@@ -125,11 +136,7 @@ func Run(ctx context.Context, o Options) error {
 	if n := len(st.Invalidated); n > 0 {
 		o.say("Rularea %s; se reface ca %s.", st.Invalidated[n-1], runID)
 	}
-	// One run at a time: the recordings of the runs before it go.
-	if err := os.RemoveAll(filepath.Join(o.Work, "mi2")); err != nil {
-		return err
-	}
-	dir := filepath.Join(o.Work, "mi2", runID)
+	dir := filepath.Join(runs, runID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -142,11 +149,18 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	defer release()
-	log, err := os.OpenFile(filepath.Join(dir, "ipcam-hub.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the run's own folder
+	log, err := os.OpenFile(filepath.Join(dir, logName), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the run's own folder
 	if err != nil {
 		return err
 	}
-	defer func() { _ = log.Close() }()
+	// After the envelope and the run state, or after the interruption: the
+	// run's recordings are no longer needed.
+	defer func() {
+		_ = log.Close() // Windows removes no file that is open
+		if err := clearRun(dir); err != nil {
+			o.say("Înregistrările probei %s nu s-au putut șterge (%v); se șterg la următorul recspike mi2.", runID, err)
+		}
+	}()
 
 	o.say("Proba MI2 %s începe: %s h, %d camere. Lăsați dispozitivul pornit, cu reccontroller -local pornit tot timpul.", runID, decimal(o.Hours, -1), cameras)
 	data, err := o.record(ctx, config, log, window)
@@ -234,6 +248,26 @@ func (o Options) record(ctx context.Context, config string, stderr io.Writer, wi
 			}
 		}
 	}
+}
+
+// logName is the run's ipcam-hub log, in its folder.
+const logName = "ipcam-hub.log"
+
+// clearRun removes what the run in dir left but its ipcam-hub log: its
+// recordings and ipcam-hub's catalog in data/, run.json, and the RI_g
+// identity.
+func clearRun(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, e := range entries {
+		if e.Name() != logName {
+			errs = append(errs, os.RemoveAll(filepath.Join(dir, e.Name())))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // tally is what the run counts of ipcam-hub's events and exits.
