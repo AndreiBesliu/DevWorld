@@ -19,10 +19,6 @@ import (
 // reads (the reference cpuinfo below is read before health's reads fail).
 func TestDiagPimodel_RawUsesSameTableAndReadsNoFile(t *testing.T) {
 	defer setHostProbe(func(string) hostFacts { t.Error("diag pimodel read the host"); return hostFacts{} })()
-	readNothing := func(name string) ([]byte, error) {
-		t.Errorf("diag pimodel read %s", name)
-		return nil, errors.New("this test reads no file")
-	}
 	for _, raw := range []string{
 		"Raspberry Pi 5 Model B Rev 1.0", "Raspberry Pi 500 Rev 1.0", "Raspberry Pi Compute Module 5 Rev 1.0",
 		"Raspberry Pi 4 Model B Rev 1.5", "Raspberry Pi 400 Rev 1.1", "Raspberry Pi Compute Module 4 Rev 1.1",
@@ -43,9 +39,13 @@ func TestDiagPimodel_RawUsesSameTableAndReadsNoFile(t *testing.T) {
 			}
 			want.Source = ""
 
-			restore := health.SetReadFile(readNothing)
+			// Restored however the subtest ends, so that a failure here
+			// leaves the reads of the later tests as they were (8a M3).
+			t.Cleanup(health.SetReadFile(func(name string) ([]byte, error) {
+				t.Errorf("diag pimodel read %s", name)
+				return nil, errors.New("this test reads no file")
+			}))
 			code, line := diag(t, "diag", "pimodel", "--raw", raw)
-			restore()
 			if code != exitOK {
 				t.Fatalf("diag pimodel exited %d", code)
 			}

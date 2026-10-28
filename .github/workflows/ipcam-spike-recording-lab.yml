@@ -63,6 +63,10 @@ jobs:
             lab=true
           fi
           echo "lab=${lab}" | tee -a "${GITHUB_OUTPUT}"
+      - name: Show failures as annotations
+        # This job has no checkout, so no annotate.sh: one line names the failed step.
+        if: failure()
+        run: echo "::error title=gate::Reading the head commit's subject failed; the lab jobs did not run."
 
   build:
     # The media, and ipcam-hub, the MediaMTX fork, recspike and reccontroller for linux/amd64

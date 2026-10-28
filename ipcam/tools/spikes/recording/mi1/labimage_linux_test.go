@@ -24,6 +24,8 @@ type fakeImageTools struct {
 	formatted, attached, mounted, unmounted []string
 	detached, flushed                       []string
 	formatOrder                             []string // "format <image>" and "attach <image>", in order
+	// onMount, when set, runs at each mount, before it is noted.
+	onMount func()
 }
 
 func (f *fakeImageTools) note(list *[]string, s string) {
@@ -45,6 +47,9 @@ func (f *fakeImageTools) attach(_ context.Context, image string) (string, error)
 }
 
 func (f *fakeImageTools) mount(_ context.Context, device, _ string) error {
+	if f.onMount != nil {
+		f.onMount()
+	}
 	f.note(&f.mounted, device)
 	return nil
 }
@@ -258,6 +263,59 @@ func TestLabImage_ReleasedWhenTheRunIsNotSaved(t *testing.T) {
 	}
 
 	if err := os.Remove(block); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RunSet(t.Context(), o); err != nil {
+		t.Fatalf("RunSet again: %v\nscreen:\n%s", err, r.out.String())
+	}
+	if reports := r.f.runReports(); len(reports) != smokeRuns || reports[0].RunID != filepath.Base(runDir) {
+		t.Errorf("reports %+v: want the smoke's %d runs, the first as %s", reports, smokeRuns, filepath.Base(runDir))
+	}
+}
+
+// TestLabImage_ReleasedWhenTheRunStateIsNotSaved (8a M5): when the run
+// state that would hold the run cannot be saved, after the run's files are
+// written, its image is released too, so that the run's next attempt, of
+// the same run id, gets a fresh one.
+func TestLabImage_ReleasedWhenTheRunStateIsNotSaved(t *testing.T) {
+	r := newRig(t, "lab-linux")
+	d := r.driver(t)
+	tools := &fakeImageTools{}
+	d.Volumes = &Images{Root: d.Work, tools: tools, size: testImageSize}
+	// Once the run's image is mounted, the state folder becomes a file:
+	// the save of the run state that holds the run fails.
+	state := filepath.Join(d.Results, "state")
+	broken := false
+	tools.onMount = func() {
+		if broken {
+			return
+		}
+		broken = true
+		if err := os.Rename(state, state+".saved"); err != nil {
+			t.Error(err)
+		}
+		if err := os.WriteFile(state, nil, 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	o := SetOptions{Set: SetLabLinuxKill9, Mode: ModeLab, Kind: "kill9", Shard: 1, Smoke: true}
+	if err := d.RunSet(t.Context(), o); err == nil {
+		t.Fatalf("RunSet with the run state unsaved = nil, want SaveRunState's error\nscreen:\n%s", r.out.String())
+	}
+	formatted, attached, mounted, unmounted, detached := tools.calls()
+	if len(formatted) != 1 || len(attached) != 1 || len(mounted) != 1 || len(unmounted) != 1 || len(detached) != 1 {
+		t.Errorf("the unsaved run's image: formatted %v, attached %v, mounted %v, unmounted %v, detached %v; want it released",
+			formatted, attached, mounted, unmounted, detached)
+	}
+	runDir := filepath.Join(d.Work, ResultsSet(SetLabLinuxKill9, true)+"-01-1")
+	if _, err := os.Stat(filepath.Join(runDir, imageFile)); !os.IsNotExist(err) {
+		t.Errorf("the unsaved run's image is still there: %v", err)
+	}
+
+	if err := os.Remove(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(state+".saved", state); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.RunSet(t.Context(), o); err != nil {

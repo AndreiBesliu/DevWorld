@@ -92,6 +92,33 @@ func TestQEMU_FetchImageChecksTheSHA256(t *testing.T) {
 	}
 }
 
+// TestQEMU_FetchImageWithAnotherDefaultTransport (8a M7): when something
+// replaced http.DefaultTransport with a RoundTripper that is no
+// *http.Transport, the download still works, through a transport of its
+// own, instead of panicking the shard.
+func TestQEMU_FetchImageWithAnotherDefaultTransport(t *testing.T) {
+	image := []byte("a cloud image, as far as this test is concerned")
+	sum := sha256.Sum256(image)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(image) }))
+	defer srv.Close()
+	previous := http.DefaultTransport
+	http.DefaultTransport = roundTripper(func(r *http.Request) (*http.Response, error) { return previous.RoundTrip(r) })
+	defer func() { http.DefaultTransport = previous }()
+
+	path := filepath.Join(t.TempDir(), "base.img")
+	if err := fetchImage(t.Context(), srv.URL+"/image.img", hex.EncodeToString(sum[:]), path); err != nil {
+		t.Fatalf("fetchImage: %v", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != string(image) { //nolint:gosec // the test's own file
+		t.Errorf("the image = %q, %v", data, err)
+	}
+}
+
+// roundTripper is a RoundTripper that is no *http.Transport.
+type roundTripper func(*http.Request) (*http.Response, error)
+
+func (f roundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // TestQEMU_FetchImageGivesUpOnAStalledServer: a server that never answers,
 // or that stops sending the image halfway, fails the download within its
 // limits (an answer within imageHeaderTimeout, the whole image within

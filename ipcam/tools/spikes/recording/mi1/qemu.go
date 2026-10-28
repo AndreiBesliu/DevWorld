@@ -408,7 +408,12 @@ func fetchImage(ctx context.Context, url, sum, path string) error {
 		return err
 	}
 	req.Header.Set("User-Agent", userAgent)
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Something may have replaced the default transport with a RoundTripper
+	// of its own: the download then uses a transport of its own (8a M7).
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = t.Clone()
+	}
 	transport.ResponseHeaderTimeout = imageHeaderTimeout
 	defer transport.CloseIdleConnections()
 	resp, err := (&http.Client{Transport: transport}).Do(req)

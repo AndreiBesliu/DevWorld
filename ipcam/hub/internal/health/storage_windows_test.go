@@ -39,8 +39,15 @@ func TestStorage_WriteCacheWithoutAccessRights(t *testing.T) {
 	}
 	got := writeCacheProperty(disk)
 	t.Logf("%s: write cache %s by its property, %s by IOCTL_DISK_GET_CACHE_INFORMATION", disk, got, cacheInformation(disk))
-	if got != "on" && got != "off" {
-		t.Errorf("writeCacheProperty(%s) = %q, want on or off", disk, got)
+	switch got {
+	case "on", "off":
+	case unknown:
+		// Some disks and drivers answer WriteCacheEnableUnknown (virtual
+		// disks, Storage Spaces); TestStorage_WriteCachePropertyStates covers
+		// that mapping (8a M4).
+		t.Logf("%s answers WriteCacheEnableUnknown: its write cache is unknown", disk)
+	default:
+		t.Errorf("writeCacheProperty(%s) = %q, want on, off or unknown", disk, got)
 	}
 }
 
