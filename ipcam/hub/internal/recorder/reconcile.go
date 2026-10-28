@@ -325,13 +325,14 @@ func quarantine(s segFile) error {
 // A file that cannot be repaired, through an I/O error or a failed Reseal,
 // is left as it is and counted as unreadable: one bad file never stops the
 // others' repair. Its restart gap, when it has one, then starts at its
-// start: none of it can be read until a later start repairs it. A file whose directory sync fails after its rename or
-// removal is repaired, and the sync's error is reported. A directory under
-// recDir that cannot be read is skipped and reported. When more than half
-// of the segments would be lost, it changes nothing and reports Aborted
-// (HUB-09). It returns an error only for ctx, the listing of recDir itself
-// and the catalog. It decrypts in RAM only and writes no temporary file
-// (G08).
+// start: none of it can be read until a later start repairs it. A file
+// whose directory sync fails after its rename or removal is repaired, and
+// the sync's error is reported. A directory under recDir that cannot be
+// read is skipped and reported, and the rows under it are left as they
+// are. When more than half of the segments would be lost, it changes
+// nothing and reports Aborted (HUB-09). It returns an error only for ctx,
+// the listing of recDir itself and the catalog. It decrypts in RAM only and
+// writes no temporary file (G08).
 func Reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *catalog.DB) (ReconcileReport, error) {
 	res, err := reconcile(ctx, recDir, tail, cat)
 	return res.report, err
@@ -887,10 +888,11 @@ var statSegment = os.Stat
 // rows for files that have none, with the start from the file's name and
 // the end from its contents, the facts of files that changed, and lost
 // rows for files that are gone. A file whose size cannot be read keeps its
-// row as it is, and its error is returned with the others; so does each
-// row under a directory that its listing could not read.
+// row as it is, and its error is returned with the others. A row under a
+// directory that this listing could not read stays as it is too; the first
+// listing reported the directory.
 func reconcileCatalog(ctx context.Context, recDir string, tail crypto.TailSealer, cat *catalog.DB, rows []catalog.Segment, durations map[string]int64) ([]error, error) {
-	l, err := scanRecDir(recDir) // the first listing reported the directories that cannot be read
+	l, err := scanRecDir(recDir)
 	if err != nil {
 		return nil, err
 	}
