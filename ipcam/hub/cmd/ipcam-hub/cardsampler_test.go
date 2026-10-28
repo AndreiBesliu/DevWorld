@@ -586,50 +586,143 @@ func TestCardSampler_HungProbe_FailedStillStopsTheJobs(t *testing.T) {
 
 // TestCardSampler_HungProbeCountsAsSlowThenAsErrors (T40, §13.1; Task 8
 // review M2): a probe that has not returned at the next interval counts
-// its time so far as an fsync's, so a hung card is DEGRADED at once; once
-// it has hung for 3 intervals, each interval also counts as an I/O error,
-// so that a card whose fsync hangs for good is FAILED, and its jobs stop,
-// about 50 s after the probe began, inside §13.1's 60 s.
+// its time so far as an fsync's, so a hung card is DEGRADED at once; from
+// the second interval that finds it still in flight, each interval also
+// counts as an I/O error. So a card whose fsync hangs for good is FAILED,
+// and its jobs stop, at the 4th interval after the probe began: about 40 s
+// after it, and at most about 50 s after the hang began, since a probe
+// starts up to one interval after; inside §13.1's 60 s. The intervals are
+// counted, not timed (Task 8b review): the tick that started the probe may
+// have been handled late, behind pollMount on the same loop or by a real
+// ticker's jitter, and the bound does not move.
 func TestCardSampler_HungProbeCountsAsSlowThenAsErrors(t *testing.T) {
-	var out bytes.Buffer
-	s := newCardSampler(t.TempDir(), "", &events{out: &out})
+	const every = 10 * time.Second
+	for _, tc := range []struct {
+		name string
+		late time.Duration // how late the tick that starts the probe is handled
+	}{
+		{"every tick on time", 0},
+		{"the probe's tick handled 1 ms late", time.Millisecond},
+		{"the probe's tick handled half an interval late", every / 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			s := newCardSampler(t.TempDir(), "", &events{out: &out})
+			s.probeEvery = every
+			var clock sync.Mutex
+			base := time.Now()
+			now := base.Add(tc.late)
+			s.now = func() time.Time {
+				clock.Lock()
+				defer clock.Unlock()
+				return now
+			}
+			hung := make(chan struct{})
+			t.Cleanup(func() { close(hung) })
+			s.probeFile = func(string) (time.Duration, error) {
+				<-hung
+				return 0, nil
+			}
+
+			s.probeTick() // the probe starts, and hangs
+			var states []string
+			var ioErrors []int
+			for k := 1; k <= 4; k++ {
+				clock.Lock()
+				now = base.Add(time.Duration(k) * every)
+				clock.Unlock()
+				s.probeTick()
+				s.mu.Lock()
+				states = append(states, s.state.String())
+				s.mu.Unlock()
+				ioErrors = append(ioErrors, s.stats().IOErrors24h)
+			}
+			if want := []string{"degraded", "degraded", "degraded", "failed"}; !slices.Equal(states, want) {
+				t.Errorf("after each interval of the hung probe, states %v, want %v", states, want)
+			}
+			if want := []int{0, 1, 2, 3}; !slices.Equal(ioErrors, want) {
+				t.Errorf("after each interval of the hung probe, I/O errors %v, want %v", ioErrors, want)
+			}
+			if st, hungFor := s.stats(), 4*every-tc.late; st.IOErrors60s != 3 || st.FsyncP99_10m != hungFor {
+				t.Errorf("stats %+v, want 3 I/O errors in 60 s and a p99 of %v", st, hungFor)
+			}
+			select {
+			case <-s.failed:
+			default:
+				t.Error("FAILED did not ask for the jobs' stop")
+			}
+			if n := strings.Count(out.String(), `"type":"alert"`); n != 1 {
+				t.Errorf("%d alerts, want 1:\n%s", n, out.String())
+			}
+		})
+	}
+}
+
+// TestCardSampler_ReturnedProbeRestartsTheCount (T40; Task 8b review): the
+// intervals that found a probe in flight are counted per probe. A probe
+// that was slow for one interval and then returned leaves no count behind,
+// so the next probe that hangs is slow only at its own first interval, and
+// an I/O error from its second.
+func TestCardSampler_ReturnedProbeRestartsTheCount(t *testing.T) {
+	const every = 10 * time.Second
+	s := newCardSampler(t.TempDir(), "", &events{out: io.Discard})
+	s.probeEvery = every
 	var clock sync.Mutex
-	now := time.Now()
+	base := time.Now()
+	now := base
 	s.now = func() time.Time {
 		clock.Lock()
 		defer clock.Unlock()
 		return now
 	}
-	hung := make(chan struct{})
+	tick := func(k int) int {
+		clock.Lock()
+		now = base.Add(time.Duration(k) * every)
+		clock.Unlock()
+		s.probeTick()
+		return s.stats().IOErrors24h
+	}
+	slow, hung := make(chan struct{}), make(chan struct{})
 	t.Cleanup(func() { close(hung) })
+	var calls sync.Mutex
+	probes := 0
 	s.probeFile = func(string) (time.Duration, error) {
-		<-hung
+		calls.Lock()
+		probes++
+		first := probes == 1
+		calls.Unlock()
+		if first {
+			<-slow
+		} else {
+			<-hung
+		}
 		return 0, nil
 	}
 
-	s.probeTick() // the probe starts, and hangs
-	var states []string
-	for range 5 {
-		clock.Lock()
-		now = now.Add(s.probeEvery)
-		clock.Unlock()
-		s.probeTick()
+	tick(0) // the first probe starts
+	if n := tick(1); n != 0 {
+		t.Fatalf("one interval of the first probe: %d I/O errors, want 0", n)
+	}
+	close(slow) // the first probe returns
+	deadline := time.Now().Add(10 * time.Second)
+	for {
 		s.mu.Lock()
-		states = append(states, s.state.String())
+		done := s.probing.IsZero()
 		s.mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the first probe did not return")
+		}
+		time.Sleep(time.Millisecond)
 	}
-	if want := []string{"degraded", "degraded", "degraded", "degraded", "failed"}; !slices.Equal(states, want) {
-		t.Errorf("after each interval of the hung probe, states %v, want %v", states, want)
+	tick(2) // the second probe starts, and hangs
+	var ioErrors []int
+	for k := 3; k <= 4; k++ {
+		ioErrors = append(ioErrors, tick(k))
 	}
-	if st := s.stats(); st.IOErrors60s != 3 || st.FsyncP99_10m != 5*s.probeEvery {
-		t.Errorf("stats %+v, want 3 I/O errors in 60 s and a p99 of %v", st, 5*s.probeEvery)
-	}
-	select {
-	case <-s.failed:
-	default:
-		t.Error("FAILED did not ask for the jobs' stop")
-	}
-	if n := strings.Count(out.String(), `"type":"alert"`); n != 1 {
-		t.Errorf("%d alerts, want 1:\n%s", n, out.String())
+	if want := []int{0, 1}; !slices.Equal(ioErrors, want) {
+		t.Errorf("after each interval of the second probe, I/O errors %v, want %v", ioErrors, want)
 	}
 }

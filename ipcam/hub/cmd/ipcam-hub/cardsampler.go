@@ -23,11 +23,16 @@ var probeEvery = 10 * time.Second
 
 const mountEvery = 5 * time.Second
 
-// probeHung is how many intervals a probe may hang before each further
-// interval also counts as an I/O error (Task 8 review M2): with 10 s
-// intervals, a card whose fsync hangs for good has 3 errors in 60 s, so is
-// FAILED, about 50 s after its probe began.
-const probeHung = 3
+// probeHung is how many intervals in a row must find a probe still in
+// flight before that interval, and each later one, also counts as an I/O
+// error (Task 8 review M2): the first one counts the probe as slow only.
+// The intervals are counted, not timed, so a tick handled late, behind
+// pollMount on the same loop or by the ticker's jitter, does not move the
+// bound (Task 8b review). With 10 s intervals, a card whose fsync hangs for
+// good has its third error, so is FAILED (3 I/O errors in 60 s), at the 4th
+// interval after its probe began: about 40 s after it, and at most about
+// 50 s after the hang began, since a probe starts up to one interval after.
+const probeHung = 2
 
 // probePath is the probe file, under rec/.
 var probePath = filepath.Join(".health", "probe")
@@ -77,9 +82,11 @@ type cardSampler struct {
 	rec      cardRecorder
 	failed   chan struct{} // closed once the card has failed
 	probeErr string        // the probe's last error that is not the card's
-	// probing is when the probe that has not returned yet began, by now;
-	// zero while none runs.
+	// probing is when the probe that has not returned yet began, by now,
+	// and stalled how many intervals since have found it still in flight;
+	// both zero while none runs.
 	probing time.Time
+	stalled int
 }
 
 func newCardSampler(recDir, mountInfo string, ev *events) *cardSampler {
@@ -190,21 +197,22 @@ func ioErrorText(text string) bool {
 }
 
 // probeTick starts a probe on a goroutine of its own. While the last one
-// has not returned, it starts none, and counts that probe's time so far as
-// an fsync's, and, once it has hung for probeHung intervals, as an I/O
-// error too: a probe that hangs on a dying card is never invisible.
+// has not returned, it starts none: it counts that probe's time so far as
+// an fsync's, and, from the probeHung-th interval that finds it still in
+// flight, as an I/O error too: a probe that hangs on a dying card is never
+// invisible.
 func (s *cardSampler) probeTick() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	if s.probing.IsZero() {
-		s.probing = now
+		s.probing, s.stalled = now, 0
 		go s.probe()
 		return
 	}
-	hung := now.Sub(s.probing)
-	s.observe(health.IoEvent{Kind: health.IoFsync, Latency: hung})
-	if hung >= probeHung*s.probeEvery {
+	s.stalled++
+	s.observe(health.IoEvent{Kind: health.IoFsync, Latency: now.Sub(s.probing)})
+	if s.stalled >= probeHung {
 		s.observe(health.IoEvent{Kind: health.IoEIO})
 	}
 }
@@ -214,7 +222,7 @@ func (s *cardSampler) probe() {
 	took, err := s.probeFile(filepath.Join(s.recDir, probePath))
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.probing = time.Time{}
+	s.probing, s.stalled = time.Time{}, 0
 	switch {
 	case errors.Is(err, syscall.EROFS):
 		s.observe(health.IoEvent{Kind: health.IoEROFS})
