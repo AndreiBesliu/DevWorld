@@ -230,6 +230,22 @@ func TestCatalog_GapsOpenAndClose(t *testing.T) {
 	if !slices.Equal(gaps, want) {
 		t.Errorf("after the moves, Gaps = %+v, want %+v", gaps, want)
 	}
+	// HasGap finds a gap by its stream, start and reason.
+	for _, tc := range []struct {
+		profile string
+		startMs int64
+		reason  GapReason
+		want    bool
+	}{
+		{"main", 950, GapRestart, true},
+		{"main", 120, GapRestart, false},
+		{"sub", 160, GapCard, true},
+		{"sub", 160, GapRestart, false},
+	} {
+		if got, err := db.HasGap(ctx, "c1", tc.profile, tc.startMs, tc.reason); err != nil || got != tc.want {
+			t.Errorf("HasGap(c1/%s at %d, %s) = %v, %v; want %v", tc.profile, tc.startMs, tc.reason, got, err, tc.want)
+		}
+	}
 	if err := db.PutGap(ctx, Gap{Cam: "c1", Profile: "main", StartMs: 1, Reason: "power"}); err == nil {
 		t.Error("PutGap accepted an unknown reason")
 	}

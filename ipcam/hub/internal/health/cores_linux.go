@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"os"
 	"strconv"
 	"strings"
 )
@@ -15,7 +14,7 @@ import (
 // hyperthreads nor a second socket's repeated core ids are miscounted. A
 // CPU that lists no core ids, as ARM does, has one core per logical CPU.
 func Cores(r Roots) (physical, logical int, err error) {
-	b, err := os.ReadFile(r.CPUInfo) //nolint:gosec // /proc/cpuinfo, or a test's fixture
+	b, err := readFile(r.CPUInfo)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -60,7 +59,7 @@ func Cores(r Roots) (physical, logical int, err error) {
 
 // RAMMb returns the RAM in MiB: MemTotal of r.MemInfo.
 func RAMMb(r Roots) (int, error) {
-	b, err := os.ReadFile(r.MemInfo) //nolint:gosec // /proc/meminfo, or a test's fixture
+	b, err := readFile(r.MemInfo)
 	if err != nil {
 		return 0, err
 	}

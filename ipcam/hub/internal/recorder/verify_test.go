@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -163,5 +164,32 @@ func TestVerify_AuthenticatesTheTrailingPadding(t *testing.T) {
 	}
 	if report != (ReconcileReport{Unreadable: 1}) {
 		t.Errorf("verification %+v, want the corrupt padding found: 1 unreadable", report)
+	}
+}
+
+// TestVerify_UnreadableDirectoryLeavesItsRows (7a M2): a verification pass
+// while a directory under rec/ cannot be read goes out, and counts the rows
+// under it neither as mismatches nor as lost: their files may well be
+// there.
+func TestVerify_UnreadableDirectoryLeavesItsRows(t *testing.T) {
+	recDir, cat := t.TempDir(), openCatalog(t)
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
+	seen, hidden := segPath(recDir, "cam1", "main", t0, ""), segPath(recDir, "cam2", "main", t0, "")
+	writeFile(t, seen, f.data)
+	writeFile(t, hidden, f.data)
+	putRows(t, cat, recDir, seen, hidden)
+	defer setWalkRecDir(unreadableDir(filepath.Dir(hidden)))()
+
+	obs := &testObserver{}
+	v := &verifier{recDir: recDir, cat: cat, obs: obs}
+	report, err := v.pass(t.Context())
+	if err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if report != (ReconcileReport{}) {
+		t.Errorf("report %+v, want no mismatch", report)
+	}
+	if got := obs.snapshot().verified; len(got) != 1 {
+		t.Errorf("%d verify reports, want 1", len(got))
 	}
 }

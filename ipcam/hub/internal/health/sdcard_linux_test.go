@@ -1,6 +1,7 @@
 package health
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -12,6 +13,7 @@ import (
 // direction; a mount point holds only the paths under it, not those that
 // merely share its first letters.
 func TestIsSdCard_DetectsMmcblk(t *testing.T) {
+	fixturePaths(t)
 	for _, tc := range []struct {
 		name, mountinfo, recDir string
 		want                    bool
@@ -25,6 +27,7 @@ func TestIsSdCard_DetectsMmcblk(t *testing.T) {
 		{"a sibling of a mount point", "mountinfo-pi-sd", "/mnt/ssdx/data/rec", true},
 		{"a mount point with a space", "mountinfo-pi-sd", "/mnt/my disk/data/rec", false},
 		{"a relative recDir on the card's root", "mountinfo-pi-sd", "data/rec", true},
+		{"a relative recDir that leads to the SSD", "mountinfo-pi-sd", "../../../mnt/ssd/rec", false},
 		{"the mount point itself", "mountinfo-pi-sd", "/mnt/ssd", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -32,6 +35,48 @@ func TestIsSdCard_DetectsMmcblk(t *testing.T) {
 				t.Errorf("IsSdCard(%s, %s) = %v, want %v", tc.mountinfo, tc.recDir, got, tc.want)
 			}
 		})
+	}
+}
+
+// fixtureWorkDir is where fixturePaths resolves a relative path: ipcam-hub's
+// folder on the fixtures' Raspberry Pi.
+const fixtureWorkDir = "/home/pi/ipcam"
+
+// fixturePaths makes the test resolve rec/ as the fixtures' host would,
+// without the test host's directories: an absolute path stays as it is,
+// and a relative one lies under fixtureWorkDir.
+func fixturePaths(t *testing.T) {
+	t.Helper()
+	previous := resolvePath
+	resolvePath = func(dir string) string {
+		if filepath.IsAbs(dir) {
+			return filepath.Clean(dir)
+		}
+		return filepath.Join(fixtureWorkDir, dir)
+	}
+	t.Cleanup(func() { resolvePath = previous })
+}
+
+// TestResolve_FollowsTheNearestExistingAncestorsSymlinks: rec/ need not
+// exist yet; the symlinks of its nearest existing ancestor are resolved,
+// and the rest is kept.
+func TestResolve_FollowsTheNearestExistingAncestorsSymlinks(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "ssd"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "ssd"), filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := resolve(filepath.Join(root, "link", "data", "rec")), filepath.Join(root, "ssd", "data", "rec"); got != want {
+		t.Errorf("resolve(link/data/rec) = %s, want %s", got, want)
+	}
+	t.Chdir(root)
+	if got, want := resolve(filepath.Join("link", "rec")), filepath.Join(root, "ssd", "rec"); got != want {
+		t.Errorf("resolve of a relative path = %s, want %s", got, want)
 	}
 }
 

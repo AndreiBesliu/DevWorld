@@ -62,7 +62,7 @@ func readSysfs(dir string, elem ...string) string {
 	if dir == "" {
 		return ""
 	}
-	b, err := os.ReadFile(filepath.Join(append([]string{dir}, elem...)...)) //nolint:gosec // a file of /sys, or of a test's fixture
+	b, err := readFile(filepath.Join(append([]string{dir}, elem...)...))
 	if err != nil {
 		return ""
 	}

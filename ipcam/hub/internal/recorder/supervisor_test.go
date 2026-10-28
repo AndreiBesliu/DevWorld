@@ -348,10 +348,11 @@ func TestRecorder_GracefulStopWritesHubStoppedGaps(t *testing.T) {
 	}
 	doneAt := time.Now().UnixMilli()
 
-	segs, _, _, err := scanRecDir(cfg.RecDir)
+	l, err := scanRecDir(cfg.RecDir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	segs := l.segs
 	if len(segs) == 0 {
 		t.Fatal("no segment")
 	}

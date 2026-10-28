@@ -43,7 +43,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return diagCommand(args[1:], stdout, stderr)
 		}
 	}
-	_, _ = fmt.Fprintln(stderr, "usage: ipcam-hub run --config <run.json> [--stop-on-stdin-eof]\n       ipcam-hub hook segment-complete\n"+
-		"       ipcam-hub diag host [--rec <dir>]\n       ipcam-hub diag pimodel --raw <model>")
+	_, _ = fmt.Fprintln(stderr, "usage: ipcam-hub run --config <run.json> [--stop-on-stdin-eof]\n       ipcam-hub hook segment-complete\n       "+diagLines)
 	return exitFatal
 }

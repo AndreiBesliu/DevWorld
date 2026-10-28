@@ -51,6 +51,7 @@ func fakeSys(t *testing.T) string {
 // "off" ("write through"). A mount without a block device, such as tmpfs,
 // is "unknown" for both.
 func TestStorage_ReadsTheDiskUnderRec(t *testing.T) {
+	fixturePaths(t)
 	sys := fakeSys(t)
 	for _, tc := range []struct {
 		name, mountinfo, recDir string

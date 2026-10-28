@@ -3,7 +3,6 @@ package health
 import (
 	"bufio"
 	"bytes"
-	"os"
 	"strings"
 )
 
@@ -81,7 +80,7 @@ func ParsePiModel(raw, revision string) PiModel {
 // the file cannot be read, it returns that model and the error.
 func ReadPiModel(cpuinfoPath string) (PiModel, error) {
 	var raw, revision string
-	b, err := os.ReadFile(cpuinfoPath) //nolint:gosec // /proc/cpuinfo, or a test's fixture
+	b, err := readFile(cpuinfoPath)
 	if err == nil {
 		s := bufio.NewScanner(bytes.NewReader(b))
 		for s.Scan() {

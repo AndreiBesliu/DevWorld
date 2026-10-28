@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -61,19 +62,19 @@ func (v *verifier) pass(ctx context.Context) (ReconcileReport, error) {
 	if segs, err = v.cat.Segments(ctx); err != nil {
 		return report, err
 	}
+	l, err := scanRecDir(v.recDir)
+	if err != nil {
+		return report, err
+	}
+	// The rows under a directory that could not be read are compared with
+	// nothing: whether their files are there is unknown (7a M2).
+	segs = slices.DeleteFunc(segs, func(s catalog.Segment) bool { return l.hidden(s.Path) })
 	rows := map[string]bool{}
 	for _, s := range segs {
 		rows[s.Path] = true
 	}
-	files, _, listErrs, err := scanRecDir(v.recDir)
-	if err == nil && len(listErrs) > 0 {
-		err = listErrs[0] // the rows under it would read as lost
-	}
-	if err != nil {
-		return report, err
-	}
 	var facts []catalog.FileFact
-	for _, f := range files {
+	for _, f := range l.segs {
 		if f.part || v.isBusy(f.rel) {
 			continue
 		}

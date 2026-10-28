@@ -14,8 +14,11 @@ const (
 	ioctlStorageQueryProperty        = 0x2D1400 // IOCTL_STORAGE_QUERY_PROPERTY
 	ioctlStorageGetDeviceNumber      = 0x2D1080 // IOCTL_STORAGE_GET_DEVICE_NUMBER
 	ioctlDiskGetCacheInformation     = 0x740D4  // IOCTL_DISK_GET_CACHE_INFORMATION
+	storageDeviceWriteCacheProperty  = 4        // STORAGE_PROPERTY_ID
 	storageDeviceSeekPenaltyProperty = 7        // STORAGE_PROPERTY_ID
 	propertyStandardQuery            = 0        // STORAGE_QUERY_TYPE
+	writeCacheDisabled               = 1        // WRITE_CACHE_ENABLE
+	writeCacheEnabled                = 2        // WRITE_CACHE_ENABLE
 )
 
 // storagePropertyQuery is STORAGE_PROPERTY_QUERY.
@@ -31,6 +34,21 @@ type deviceSeekPenaltyDescriptor struct {
 	Size              uint32
 	IncursSeekPenalty byte
 	_                 [3]byte
+}
+
+// storageWriteCacheProperty is STORAGE_WRITE_CACHE_PROPERTY; its enums
+// are 32-bit.
+type storageWriteCacheProperty struct {
+	Version                    uint32
+	Size                       uint32
+	WriteCacheType             uint32
+	WriteCacheEnabled          uint32
+	WriteCacheChangeable       uint32
+	WriteThroughSupported      uint32
+	FlushCacheSupported        byte
+	UserDefinedPowerProtection byte
+	NVCacheEnabled             byte
+	_                          byte
 }
 
 // storageDeviceNumber is STORAGE_DEVICE_NUMBER.
@@ -62,7 +80,8 @@ type diskCacheInformation struct {
 //   - kind is "hdd" when IOCTL_STORAGE_QUERY_PROPERTY says that the disk
 //     incurs a seek penalty (StorageDeviceSeekPenaltyProperty), else "ssd";
 //   - writeCache is "on" or "off" as IOCTL_DISK_GET_CACHE_INFORMATION says,
-//     which needs an elevated process.
+//     which needs an elevated process, or else as the disk's
+//     StorageDeviceWriteCacheProperty says, which needs no access right.
 //
 // Each is "unknown" on any error, such as a volume that spans disks. It
 // ignores r.
@@ -119,18 +138,27 @@ func openDevice(name string, access uint32) (windows.Handle, error) {
 	return windows.CreateFile(p, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, 0, 0)
 }
 
-// seekPenalty is "hdd" or "ssd" for disk, or "unknown".
-func seekPenalty(disk string) string {
+// queryProperty asks disk for its storage property id with
+// IOCTL_STORAGE_QUERY_PROPERTY, which needs no access right, into the size
+// bytes at out, and returns how many bytes came back.
+func queryProperty(disk string, id uint32, out unsafe.Pointer, size uintptr) (uint32, error) {
 	h, err := openDevice(disk, 0)
 	if err != nil {
-		return unknown
+		return 0, err
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
-	q := storagePropertyQuery{PropertyID: storageDeviceSeekPenaltyProperty, QueryType: propertyStandardQuery}
-	var d deviceSeekPenaltyDescriptor
+	q := storagePropertyQuery{PropertyID: id, QueryType: propertyStandardQuery}
 	var returned uint32
-	if err := windows.DeviceIoControl(h, ioctlStorageQueryProperty, (*byte)(unsafe.Pointer(&q)), uint32(unsafe.Sizeof(q)), //nolint:gosec // the IOCTL's input buffer
-		(*byte)(unsafe.Pointer(&d)), uint32(unsafe.Sizeof(d)), &returned, nil); err != nil || returned < uint32(unsafe.Offsetof(d.IncursSeekPenalty))+1 { //nolint:gosec // its output buffer
+	err = windows.DeviceIoControl(h, ioctlStorageQueryProperty, (*byte)(unsafe.Pointer(&q)), uint32(unsafe.Sizeof(q)), //nolint:gosec // the IOCTL's input buffer
+		(*byte)(out), uint32(size), &returned, nil) //nolint:gosec // its output buffer, a small struct
+	return returned, err
+}
+
+// seekPenalty is "hdd" or "ssd" for disk, or "unknown".
+func seekPenalty(disk string) string {
+	var d deviceSeekPenaltyDescriptor
+	returned, err := queryProperty(disk, storageDeviceSeekPenaltyProperty, unsafe.Pointer(&d), unsafe.Sizeof(d)) //nolint:gosec // the IOCTL's output buffer
+	if err != nil || returned < uint32(unsafe.Offsetof(d.IncursSeekPenalty))+1 {
 		return unknown
 	}
 	if d.IncursSeekPenalty != 0 {
@@ -139,8 +167,21 @@ func seekPenalty(disk string) string {
 	return "ssd"
 }
 
-// writeCacheState is "on" or "off" for disk's write cache, or "unknown".
+// writeCacheState is "on" or "off" for disk's write cache, or "unknown":
+// as IOCTL_DISK_GET_CACHE_INFORMATION says, which needs the disk opened for
+// reading, so an elevated process; else as the disk's
+// StorageDeviceWriteCacheProperty says, which the owner's unelevated diag
+// host can read.
 func writeCacheState(disk string) string {
+	if state := cacheInformation(disk); state != unknown {
+		return state
+	}
+	return writeCacheProperty(disk)
+}
+
+// cacheInformation is disk's write cache as IOCTL_DISK_GET_CACHE_INFORMATION
+// says, or "unknown".
+func cacheInformation(disk string) string {
 	h, err := openDevice(disk, windows.GENERIC_READ)
 	if err != nil {
 		return unknown
@@ -156,4 +197,31 @@ func writeCacheState(disk string) string {
 		return "on"
 	}
 	return "off"
+}
+
+// writeCacheProperty is disk's write cache as its
+// StorageDeviceWriteCacheProperty says, or "unknown".
+func writeCacheProperty(disk string) string {
+	var p storageWriteCacheProperty
+	returned, err := queryProperty(disk, storageDeviceWriteCacheProperty, unsafe.Pointer(&p), unsafe.Sizeof(p)) //nolint:gosec // the IOCTL's output buffer
+	if err != nil {
+		return unknown
+	}
+	return writeCacheOf(p, returned)
+}
+
+// writeCacheOf is the write cache that p's WriteCacheEnabled says, in an
+// answer of returned bytes: "unknown" when the answer does not hold it or
+// it is WriteCacheEnableUnknown.
+func writeCacheOf(p storageWriteCacheProperty, returned uint32) string {
+	if returned < uint32(unsafe.Offsetof(p.WriteCacheEnabled)+unsafe.Sizeof(p.WriteCacheEnabled)) {
+		return unknown
+	}
+	switch p.WriteCacheEnabled {
+	case writeCacheEnabled:
+		return "on"
+	case writeCacheDisabled:
+		return "off"
+	}
+	return unknown
 }

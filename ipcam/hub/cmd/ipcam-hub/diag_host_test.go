@@ -179,6 +179,25 @@ func TestDiagHost_UnknownPiHasNoNumber(t *testing.T) {
 	}
 }
 
+// TestUsage_ListsTheDiagSubcommandsAsDiagDoes: ipcam-hub's own usage error
+// lists the diag subcommands with diag's usage lines, so the two never
+// drift apart.
+func TestUsage_ListsTheDiagSubcommandsAsDiagDoes(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run(nil, nil, &stdout, &stderr); code != exitFatal || stdout.Len() != 0 {
+		t.Fatalf("ipcam-hub: exit %d, stdout %q; want exit 1 and nothing", code, stdout.String())
+	}
+	usage := stderr.String()
+	for _, line := range strings.Split(strings.TrimPrefix(diagUsage, "usage: "), "\n") {
+		if line = strings.TrimSpace(line); !strings.Contains(usage, "       "+line+"\n") {
+			t.Errorf("ipcam-hub's usage lacks diag's line %q:\n%s", line, usage)
+		}
+	}
+	if !strings.HasPrefix(usage, "usage: ipcam-hub run --config <run.json> [--stop-on-stdin-eof]\n") {
+		t.Errorf("ipcam-hub's usage does not start with run's line:\n%s", usage)
+	}
+}
+
 // TestDiag_Usage: an unknown diag subcommand or argument is a usage error.
 func TestDiag_Usage(t *testing.T) {
 	defer setHostProbe(func(string) hostFacts { t.Error("a usage error read the host"); return hostFacts{} })()

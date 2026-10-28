@@ -6,6 +6,20 @@
 // what it reports reaches published results (PH0-22).
 package health
 
+import "os"
+
+// readFile reads every file that health parses. SetReadFile replaces it.
+var readFile = os.ReadFile
+
+// SetReadFile makes health read its files with f until restore is called:
+// a test of a command that must read nothing from the host, such as diag
+// pimodel, makes every read fail.
+func SetReadFile(f func(name string) ([]byte, error)) (restore func()) {
+	previous := readFile
+	readFile = f
+	return func() { readFile = previous }
+}
+
 // Roots are the files that the Linux readers parse; tests point them at
 // fixtures. On Windows, Cores, RAMMb and Storage ask the system and ignore
 // them.

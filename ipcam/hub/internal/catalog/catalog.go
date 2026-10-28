@@ -244,6 +244,17 @@ func (db *DB) PutGap(ctx context.Context, g Gap) error {
 	return nil
 }
 
+// HasGap reports whether the stream has a gap of reason that starts at
+// startMs.
+func (db *DB) HasGap(ctx context.Context, cam, profile string, startMs int64, reason GapReason) (bool, error) {
+	var n int
+	if err := db.sql.QueryRowContext(ctx, "SELECT count(*) FROM gaps WHERE camera_id = ? AND profile = ? AND start_ms = ? AND reason = ?",
+		cam, profile, startMs, string(reason)).Scan(&n); err != nil {
+		return false, fmt.Errorf("catalog: look for a gap of %s/%s: %w", cam, profile, err)
+	}
+	return n > 0, nil
+}
+
 // CloseGap ends every open gap of the stream at endMs, or at its start if
 // that is later.
 func (db *DB) CloseGap(ctx context.Context, cam, profile string, endMs int64) error {

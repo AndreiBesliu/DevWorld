@@ -6,8 +6,11 @@ import (
 	"io"
 )
 
+// diagLines are the diag subcommands' lines of a usage error.
+const diagLines = "ipcam-hub diag host [--rec <dir>]\n       ipcam-hub diag pimodel --raw <model>"
+
 // diagUsage is the usage of the diag subcommands.
-const diagUsage = "usage: ipcam-hub diag host [--rec <dir>]\n       ipcam-hub diag pimodel --raw <model>"
+const diagUsage = "usage: " + diagLines
 
 // diagCommand is "ipcam-hub diag": it prints what the hub reads about its
 // host as one JSON object on stdout.

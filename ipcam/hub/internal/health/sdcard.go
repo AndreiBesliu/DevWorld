@@ -3,7 +3,6 @@ package health
 import (
 	"bufio"
 	"bytes"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -41,11 +40,11 @@ func IsSdCard(mountinfoPath, recDir string) bool {
 // the longest mount point that dir lies under, and of those, the last one
 // listed, which is mounted over the others.
 func mountOf(mountinfoPath, dir string) (mount, bool) {
-	b, err := os.ReadFile(mountinfoPath) //nolint:gosec // /proc/self/mountinfo, or a test's fixture
+	b, err := readFile(mountinfoPath)
 	if err != nil {
 		return mount{}, false
 	}
-	path := resolve(dir)
+	path := resolvePath(dir)
 	var best mount
 	found := false
 	s := bufio.NewScanner(bytes.NewReader(b))
@@ -119,6 +118,10 @@ func under(path, point string) bool {
 	}
 	return strings.HasPrefix(path, point)
 }
+
+// resolvePath is resolve; the fixture tests replace it, so that they never
+// depend on the test host's directories and symlinks.
+var resolvePath = resolve
 
 // resolve returns dir as an absolute path without symlinks: those of its
 // nearest existing ancestor are resolved, and the rest, which does not
