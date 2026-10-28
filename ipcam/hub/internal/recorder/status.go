@@ -37,9 +37,9 @@ type partState struct {
 	// created, and left those that poll reported as left behind.
 	seen map[string]uint64
 	left map[string]bool
-	// resumeAfter, when set, is a failed creation of a segment's file: the
-	// next new .part that starts after it is reported as recording resumed
-	// (expectResume).
+	// resumeAfter, when set, is a failed creation of a segment's file, to
+	// the microsecond of the names: the next new .part that starts at it or
+	// later is reported as recording resumed (expectResume).
 	resumeAfter time.Time
 }
 
@@ -108,17 +108,24 @@ func (w *partWatcher) claimFirst(k streamKey) bool {
 	return true
 }
 
-// expectResume makes poll report the stream's next .part that starts after
-// at and grows as a firstPart, resumed: MediaMTX could not create the file
-// of a segment at at, and the stream's open gap ends where recording
-// resumes, also when that is not its first part since the child started.
+// expectResume makes poll report the stream's next .part that starts at at
+// or later, to the microsecond of its name (nameTime), and grows as a
+// firstPart, resumed: MediaMTX could not create the file of a segment at
+// at, and the stream's open gap ends where recording resumes, also when
+// that is not its first part since the child started.
 func (w *partWatcher) expectResume(k streamKey, at time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if s, ok := w.streams[k]; ok {
-		s.resumeAfter = at
+		s.resumeAfter = nameTime(at)
 	}
 }
+
+// nameTime is t to the microsecond, the precision of a segment's name
+// (MTX-4): a segment whose name is t's microsecond or later started at t or
+// after it, whatever finer digits the hub's clock gave t; on Windows the
+// clock can give a failure and the next segment the same tick.
+func nameTime(t time.Time) time.Time { return t.Truncate(time.Microsecond) }
 
 // inBaseline reports whether path is one of the stream's .part files that
 // were there when the child started: one that no child writes.
@@ -166,7 +173,7 @@ func (w *partWatcher) poll(now time.Time) (firsts []firstPart, left []string) {
 			f.segmentStart = seg.start
 		}
 		if s.reported {
-			if !f.segmentStart.After(s.resumeAfter) {
+			if f.segmentStart.Before(s.resumeAfter) {
 				continue // a .part from before the failed creation
 			}
 			f.resumed = true

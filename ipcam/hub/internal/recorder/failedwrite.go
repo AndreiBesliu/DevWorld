@@ -47,7 +47,8 @@ func (r *rec) noteFailedWrites(ctx context.Context) {
 }
 
 // noteFailedWrite records the hole that fw left in its stream's recording,
-// by the stream's newest segment file that started before fw:
+// by the stream's newest segment file that started before fw, to the
+// microsecond of the names (nameTime):
 //   - a .part that this hub's MediaMTX was writing keeps the hole as its lost
 //     tail: fw's reason goes to the catalog with the file's path, so that
 //     the file's repair, live or at the next start, writes the tail gap with
@@ -65,7 +66,7 @@ func (r *rec) noteFailedWrites(ctx context.Context) {
 // from before this child started, or that is no longer recorded, whose Stop
 // wrote its gap, needs no new one: its open gap covers the hole.
 func (r *rec) noteFailedWrite(ctx context.Context, fw failedWrite) error {
-	last, ok := newestBefore(streamSegments(r.cfg.RecDir, fw.key), fw.at)
+	last, ok := newestBefore(streamSegments(r.cfg.RecDir, fw.key), nameTime(fw.at))
 	switch {
 	case ok && last.part && !r.watch.inBaseline(fw.key, last.abs):
 		return r.cfg.Catalog.PutTailReason(ctx, last.rel, fw.reason)

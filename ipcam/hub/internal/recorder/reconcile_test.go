@@ -1880,6 +1880,35 @@ func TestRecorder_WriteFailed_ReasonOutlivesAStop(t *testing.T) {
 	}
 }
 
+// TestRecorder_WriteFailed_FailedFileByTheNamesMicrosecond (T40; Task 8b):
+// the failed .part is the newest that started before the failure, compared
+// to the microsecond of the segment names (MTX-4): the stream's next
+// segment, whose name is the failure's microsecond, as when Windows' clock
+// gives both the same tick, is not taken for it.
+func TestRecorder_WriteFailed_FailedFileByTheNamesMicrosecond(t *testing.T) {
+	r, cfg := startFake(t, "sleep", Config{})
+	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil)}); err != nil {
+		t.Fatal(err)
+	}
+	failedAt := time.Now().Truncate(time.Microsecond).Add(500 * time.Nanosecond)
+	failedStart := failedAt.Add(-10 * time.Second)
+	writeFile(t, segPath(cfg.RecDir, "cam1", "main", failedStart, ".part"), []byte("the failed segment"))
+	writeFile(t, segPath(cfg.RecDir, "cam1", "main", failedAt, ".part"), []byte("the next segment"))
+	if err := r.noteFailedWrite(t.Context(), failedWrite{key: streamKey{"cam1", "main"}, reason: catalog.GapCard, at: failedAt}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		start time.Time
+		want  bool
+	}{{"the failed .part", failedStart, true}, {"the next segment's .part", failedAt, false}} {
+		reason, found, err := cfg.Catalog.TailReason(t.Context(), relSeg("cam1", "main", tc.start, ".part"))
+		if err != nil || found != tc.want || (found && reason != catalog.GapCard) {
+			t.Errorf("%s: tail reason %q, %v, %v; want a card reason %v", tc.name, reason, found, err, tc.want)
+		}
+	}
+}
+
 // TestRecorder_WriteFailed_CreationGapFromLastPartToNextPart (T40; Task 8
 // concern 2): a write that failed at the creation of a stream's next
 // segment leaves no .part, so no repair writes its hole: the recorder writes
