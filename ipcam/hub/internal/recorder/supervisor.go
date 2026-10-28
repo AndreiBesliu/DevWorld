@@ -731,7 +731,8 @@ func (r *rec) pollLoop(ctx context.Context) {
 }
 
 // verifyLoop runs a verification pass each time it is kicked: after the
-// start, after each SegmentClosed and after each rewrite.
+// start, after each SegmentClosed and after each rewrite. It reports each
+// directory that a pass could not read, as well as what stopped a pass.
 func (r *rec) verifyLoop(ctx context.Context) {
 	defer r.wg.Done()
 	for {
@@ -739,7 +740,11 @@ func (r *rec) verifyLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-r.verifyKick:
-			if _, err := r.verify.pass(ctx); err != nil && ctx.Err() == nil {
+			_, listErrs, err := r.verify.pass(ctx)
+			for _, listErr := range listErrs {
+				r.notifyError(fmt.Errorf("recorder: verification: %w", listErr))
+			}
+			if err != nil && ctx.Err() == nil {
 				r.notifyError(fmt.Errorf("recorder: verification: %w", err))
 			}
 		}

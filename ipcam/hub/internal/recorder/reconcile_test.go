@@ -269,10 +269,7 @@ func TestReconcile_NewestFinalFileTorn_RepairedLikePart(t *testing.T) {
 
 	obs := &testObserver{}
 	v := &verifier{recDir: recDir, cat: cat, recording: crypto.NewRecording(riG), obs: obs}
-	vr, err := v.pass(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
+	vr := mustPass(t, v)
 	if vr.Unreadable != 1 || vr.TornParts != 0 || vr.CatalogMismatches != 0 {
 		t.Errorf("verification %+v, want the older file unreadable and nothing else", vr)
 	}
@@ -357,10 +354,7 @@ func TestReconcile_CompleteNewestAgeIsNotReadAtStartup(t *testing.T) {
 	requireGaps(t, cat, nil)
 
 	v := &verifier{recDir: recDir, cat: cat, recording: crypto.NewRecording(riG), obs: &testObserver{}}
-	vr, err := v.pass(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
+	vr := mustPass(t, v)
 	if vr.Unreadable != 1 || vr.TornParts != 0 || vr.CatalogMismatches != 0 {
 		t.Errorf("verification %+v, want the corrupt chunk found: 1 unreadable", vr)
 	}
@@ -1203,8 +1197,8 @@ func TestReconcile_AfterTheHubIsKilled(t *testing.T) {
 		}
 	}
 	v := &verifier{recDir: recDir, cat: cat, recording: crypto.NewRecording(riG), obs: &testObserver{}}
-	if vr, err := v.pass(t.Context()); err != nil || vr != (ReconcileReport{}) {
-		t.Errorf("verification after reconcile: %+v, %v; want all zero", vr, err)
+	if vr := mustPass(t, v); vr != (ReconcileReport{}) {
+		t.Errorf("verification after reconcile: %+v; want all zero", vr)
 	}
 	gaps, err := cat.Gaps(t.Context())
 	if err != nil {
@@ -1390,7 +1384,8 @@ func TestRecorder_ReconcileUpdatesAreNumbered(t *testing.T) {
 // under rec/ that cannot be read, such as a date directory with an I/O
 // error after a cut on an SD card, does not fail New: it is skipped, an
 // error names it by its base name only, the other streams are repaired and
-// recording starts.
+// recording starts. The verification pass after the start goes out too, and
+// reports the directory through the same errors.
 func TestRecorder_UnreadableDirectoryDoesNotStopRecording(t *testing.T) {
 	recDir := filepath.Join(t.TempDir(), "rec")
 	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
@@ -1424,6 +1419,19 @@ func TestRecorder_UnreadableDirectoryDoesNotStopRecording(t *testing.T) {
 	}
 	if !named {
 		t.Errorf("errors %q, want one that names %s", obs.snapshot().errs, filepath.Base(bad))
+	}
+	// The verification after the start goes out, and reports the directory
+	// that it could not read as well (8a C2 follow-up).
+	waitFor(t, 10*time.Second, "the verification after the start did not report the directory it could not read", func() bool {
+		s := obs.snapshot()
+		return len(s.verified) > 0 && slices.ContainsFunc(s.errs, func(e string) bool {
+			return strings.HasPrefix(e, "recorder: verification: ") && strings.Contains(e, filepath.Base(bad))
+		})
+	})
+	for _, e := range obs.snapshot().errs {
+		if strings.HasPrefix(e, "recorder: verification: ") && strings.Contains(e, filepath.Dir(bad)) {
+			t.Errorf("the error %q names the directory's parents", e)
+		}
 	}
 }
 

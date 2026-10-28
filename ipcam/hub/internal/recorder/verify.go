@@ -41,18 +41,22 @@ type verifier struct {
 // pass checks every complete segment that is not verified yet, marks those
 // that pass, and reports through Observer.Verified how many could not be
 // read, how many end in a torn part, and how many rows and files disagree.
-func (v *verifier) pass(ctx context.Context) (ReconcileReport, error) {
-	var report ReconcileReport
+//
+// A directory under rec/ that cannot be read, such as a date directory on a
+// failing card, does not stop the pass: the rows under it are left out of
+// the comparison, and its error, which names it, comes back in listErrs for
+// the caller to report. err is what stopped the pass.
+func (v *verifier) pass(ctx context.Context) (report ReconcileReport, listErrs []error, err error) {
 	segs, err := v.cat.Segments(ctx)
 	if err != nil {
-		return report, err
+		return report, nil, err
 	}
 	for _, s := range segs {
 		if s.State != catalog.StateComplete || s.VerifiedAtMs != nil {
 			continue
 		}
 		if err := v.verifySegment(ctx, s, &report); err != nil {
-			return report, err
+			return report, nil, err
 		}
 	}
 
@@ -60,11 +64,11 @@ func (v *verifier) pass(ctx context.Context) (ReconcileReport, error) {
 	// is after the rename, so the scan finds its file under its final name;
 	// a file without a row may still wait for its hook.
 	if segs, err = v.cat.Segments(ctx); err != nil {
-		return report, err
+		return report, nil, err
 	}
 	l, err := scanRecDir(v.recDir)
 	if err != nil {
-		return report, err
+		return report, nil, err
 	}
 	// The rows under a directory that could not be read are compared with
 	// nothing: whether their files are there is unknown (7a M2).
@@ -96,7 +100,7 @@ func (v *verifier) pass(ctx context.Context) (ReconcileReport, error) {
 	}
 	report.CatalogMismatches += len(d.Added) + len(d.Updated)
 	v.obs.Verified(report)
-	return report, nil
+	return report, l.errs, nil
 }
 
 // verifySegment checks one segment and marks its row verified when it

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -56,10 +57,7 @@ func TestReconcile_ReportsUnreadableAndTornParts(t *testing.T) {
 	obs := &testObserver{}
 	v := &verifier{recDir: recDir, cat: cat, recording: crypto.NewRecording(riG), obs: obs}
 	for pass := range 2 {
-		report, err := v.pass(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
+		report := mustPass(t, v)
 		if report != (ReconcileReport{Unreadable: 2, TornParts: 1}) {
 			t.Errorf("pass %d: %+v, want 2 unreadable and 1 torn part", pass+1, report)
 		}
@@ -125,10 +123,7 @@ func TestVerify_DecryptsEachAgeSegmentOnce(t *testing.T) {
 	obs := &testObserver{}
 	rec := &countingRecording{Recording: crypto.NewRecording(riG)}
 	v := &verifier{recDir: recDir, cat: cat, recording: rec, obs: obs}
-	report, err := v.pass(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	report := mustPass(t, v)
 	if report != (ReconcileReport{}) || !slices.Equal(obs.snapshot().passedSeg, []string{path}) {
 		t.Fatalf("verification %+v, passed %q; want the segment passed", report, obs.snapshot().passedSeg)
 	}
@@ -158,10 +153,7 @@ func TestVerify_AuthenticatesTheTrailingPadding(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := &verifier{recDir: recDir, cat: cat, recording: crypto.NewRecording(riG), obs: &testObserver{}}
-	report, err := v.pass(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	report := mustPass(t, v)
 	if report != (ReconcileReport{Unreadable: 1}) {
 		t.Errorf("verification %+v, want the corrupt padding found: 1 unreadable", report)
 	}
@@ -170,7 +162,9 @@ func TestVerify_AuthenticatesTheTrailingPadding(t *testing.T) {
 // TestVerify_UnreadableDirectoryLeavesItsRows (7a M2): a verification pass
 // while a directory under rec/ cannot be read goes out, and counts the rows
 // under it neither as mismatches nor as lost: their files may well be
-// there.
+// there. It returns the directory's error, which names the directory by its
+// base name only, for the caller to report (T40/HUB-17: a card that starts
+// failing while ipcam-hub runs).
 func TestVerify_UnreadableDirectoryLeavesItsRows(t *testing.T) {
 	recDir, cat := t.TempDir(), openCatalog(t)
 	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
@@ -182,7 +176,7 @@ func TestVerify_UnreadableDirectoryLeavesItsRows(t *testing.T) {
 
 	obs := &testObserver{}
 	v := &verifier{recDir: recDir, cat: cat, obs: obs}
-	report, err := v.pass(t.Context())
+	report, listErrs, err := v.pass(t.Context())
 	if err != nil {
 		t.Fatalf("pass: %v", err)
 	}
@@ -192,4 +186,25 @@ func TestVerify_UnreadableDirectoryLeavesItsRows(t *testing.T) {
 	if got := obs.snapshot().verified; len(got) != 1 {
 		t.Errorf("%d verify reports, want 1", len(got))
 	}
+	bad := filepath.Dir(hidden)
+	if len(listErrs) != 1 || !strings.Contains(listErrs[0].Error(), filepath.Base(bad)) {
+		t.Fatalf("listing errors %v, want one that names %s", listErrs, filepath.Base(bad))
+	}
+	if e := listErrs[0].Error(); strings.Contains(e, filepath.Dir(bad)) {
+		t.Errorf("the error %q names the directory's parents", e)
+	}
+}
+
+// mustPass runs a verification pass in which every directory under rec/ can
+// be read, and returns its report.
+func mustPass(t *testing.T, v *verifier) ReconcileReport {
+	t.Helper()
+	report, listErrs, err := v.pass(t.Context())
+	if err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if len(listErrs) > 0 {
+		t.Fatalf("pass: listing errors %v, want none", listErrs)
+	}
+	return report
 }
