@@ -45,7 +45,9 @@ const (
 
 // Judge is G11 (C17, HUB-31). On each owner device, the 20 resumes are the
 // ResumeMs of its kill9 set's counted default runs, each once (G13,
-// mi1.DefaultRuns), and the 72 h run is its MI2 envelope. G11 passes when
+// mi1.DefaultRuns), and the 72 h run is its MI2 envelope. More than 20
+// counted resumes, as when a run is redone under another attempt and both
+// count, are all judged, and a note names the excess. G11 passes when
 // every resume is ≤ 10 s and the 72 h ran with 0 crashes of ipcam-hub;
 // otherwise it fails with the reverse-ingest plan B, also with other parts
 // missing (G27). A missing or short part leaves it without a verdict, and a
@@ -119,7 +121,11 @@ func judgeResumes(j *results.Judgement, host, kill9 string, envs []results.Envel
 				kill9, r.RunID, mi1.SecondsText(*r.ResumeMs), mi1.WholeSecondsText(MaxResumeMs)))
 		}
 	}
-	complete := measured == Kill9Runs
+	complete := measured >= Kill9Runs
+	if excess := measured - Kill9Runs; excess > 0 {
+		j.Notes = append(j.Notes, fmt.Sprintf("%s: %d de reluări numărate, cu %d peste cele %d ale setului; fiecare este judecată față de %s.",
+			kill9, measured, excess, Kill9Runs, mi1.WholeSecondsText(MaxResumeMs)))
+	}
 	row := results.Row{Code: "MI2 " + host + ": reluarea după kill -9", Value: "lipsește", Limit: "≤ " + mi1.WholeSecondsText(MaxResumeMs), Source: host}
 	if measured > 0 {
 		row.Value = fmt.Sprintf("%s (%d din %d)", mi1.SecondsText(slowest), measured, Kill9Runs)

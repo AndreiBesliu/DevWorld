@@ -71,6 +71,7 @@ type fakeHub struct {
 	once     sync.Once
 	stopped  atomic.Bool
 	stopWait atomic.Int64 // how long Stop's context gave it, in ns
+	stopErr  error        // what Stop returns
 }
 
 func (h *fakeHub) Exited() <-chan struct{} { return h.exited }
@@ -82,7 +83,7 @@ func (h *fakeHub) Stop(ctx context.Context) error {
 	}
 	h.stopped.Store(true)
 	h.exit()
-	return nil
+	return h.stopErr
 }
 
 func (h *fakeHub) exit() { h.once.Do(func() { close(h.exited) }) }
@@ -142,9 +143,17 @@ func (h *harness) start() {
 // ready.
 func (h *harness) nextHub() *fakeHub {
 	h.t.Helper()
+	hub := h.unreadyHub()
+	hub.emit(hubproc.Event{Type: "ready"})
+	return hub
+}
+
+// unreadyHub waits for the next ipcam-hub that the run starts, which is not
+// ready yet.
+func (h *harness) unreadyHub() *fakeHub {
+	h.t.Helper()
 	select {
 	case hub := <-h.hubs:
-		hub.emit(hubproc.Event{Type: "ready"})
 		return hub
 	case err := <-h.done:
 		h.t.Fatalf("the run ended (%v) before it started ipcam-hub; it printed:\n%s", err, h.out)
@@ -444,4 +453,248 @@ func requireCleared(t *testing.T, work, runID string, disk func() (uint64, error
 	if free, err := disk(); err != nil || free != 20e9 {
 		t.Errorf("after the run, %d bytes free (%v), want all 20 GB", free, err)
 	}
+}
+
+// TestStability_SetupFailuresAreNotCrashes (G11, C07; Task 8 review M5): only
+// an unexpected exit of an ipcam-hub that was ready is a crash. An exit
+// before ready is a setup failure (binary, configuration, MediaMTX), which
+// measures nothing about stability: recspike starts ipcam-hub again and
+// counts no crash. When no start of the run ever got ready, the run ends
+// after maxStartsUnready of them with a Romanian error and no envelope, so
+// that G11 never fails on it; the next run lists it as redone. After a
+// crash of a ready ipcam-hub, starts that do not get ready end the run with
+// its envelope: that crash was measured.
+func TestStability_SetupFailuresAreNotCrashes(t *testing.T) {
+	t.Run("no start gets ready", func(t *testing.T) {
+		dir := t.TempDir()
+		h := newHarness(t, dir, pcHost, "boot-1")
+		h.start()
+		for range maxStartsUnready {
+			h.unreadyHub().exit()
+		}
+		err := h.wait()
+		if err == nil || !strings.HasPrefix(err.Error(), "ipcam-hub nu a ajuns gata") {
+			t.Fatalf("Run = %v, want the Romanian error of a run that never got ready", err)
+		}
+		if strings.Contains(h.out.String(), "crash-ul") {
+			t.Errorf("the run counted a crash:\n%s", h.out)
+		}
+		if entries, err := os.ReadDir(filepath.Join(dir, "results", "MI2")); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the run wrote results %v (%v), want none", entries, err)
+		}
+
+		again := newHarness(t, dir, pcHost, "boot-1")
+		again.start()
+		again.nextHub()
+		again.finish()
+		d := again.envelope("pc-72h-2").MI2
+		if d.Crashes72h != 0 || len(d.Invalidated) != 1 || !strings.HasPrefix(d.Invalidated[0], "pc-72h-1: ipcam-hub nu a ajuns gata") {
+			t.Errorf("the next run: %d crashes, invalidated %q; want none, and pc-72h-1 as the run that never got ready", d.Crashes72h, d.Invalidated)
+		}
+	})
+
+	t.Run("an exit before ready", func(t *testing.T) {
+		h := newHarness(t, t.TempDir(), pcHost, "boot-1")
+		h.start()
+		h.unreadyHub().exit()
+		h.nextHub()
+		h.finish()
+		if d := h.envelope("pc-72h-1").MI2; d.Crashes72h != 0 {
+			t.Errorf("%d crashes, want 0: ipcam-hub was never ready when it exited", d.Crashes72h)
+		}
+	})
+
+	t.Run("starts that do not get ready after a crash", func(t *testing.T) {
+		h := newHarness(t, t.TempDir(), pcHost, "boot-1")
+		h.start()
+		h.nextHub().exit() // a crash of a ready ipcam-hub
+		for range maxStartsUnready {
+			h.unreadyHub().exit()
+		}
+		if err := h.wait(); err != nil {
+			t.Fatalf("Run: %v; it printed:\n%s", err, h.out)
+		}
+		if d := h.envelope("pc-72h-1").MI2; d.Crashes72h != 1 {
+			t.Errorf("%d crashes, want the 1 of the ready ipcam-hub", d.Crashes72h)
+		}
+	})
+}
+
+// TestStability_PrunesVerifiedSegmentsOlderThanTheWindow (G19; Task 8
+// review M6): inside Run, a segment_verified event of ipcam-hub reaches the
+// Pruner, and the prune of each minute deletes that segment once it is
+// older than the window: here 1 h, the shortest that Run takes, set through
+// the free space, with the fake clock. A segment without the event, and a
+// verified one younger than the window, stay.
+func TestStability_PrunesVerifiedSegmentsOlderThanTheWindow(t *testing.T) {
+	dir := t.TempDir()
+	h := newHarness(t, dir, pcHost, "boot-1")
+	h.opts.FreeBytes = func() (uint64, error) { return uint64(2 * MinWindow.Seconds() * WriteRate(pcHost.Cameras)), nil }
+	h.start()
+	hub := h.nextHub()
+	start := h.clock.Now()
+	segments := filepath.Join(dir, "segments")
+	if err := os.MkdirAll(segments, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	closedAt := map[string]time.Time{
+		"old-verified.mp4":       start.Add(-MinWindow),
+		"old-unverified.mp4":     start.Add(-2 * MinWindow),
+		"young-verified.mp4.age": start,
+	}
+	for name, at := range closedAt {
+		path := filepath.Join(segments, name)
+		if err := os.WriteFile(path, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hub.emit(hubproc.Event{Type: "segment_verified", Path: filepath.Join(segments, "old-verified.mp4")},
+		hubproc.Event{Type: "segment_verified", Path: filepath.Join(segments, "young-verified.mp4.age")})
+	h.clock.advance(t, pruneEvery) // the prune: old-verified.mp4 closed 1 h 1 min ago
+	h.clock.advance(t, pruneEvery) // taken once that prune is done
+	entries, err := os.ReadDir(segments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	if want := []string{"old-unverified.mp4", "young-verified.mp4.age"}; !slices.Equal(left, want) {
+		t.Errorf("after the prunes, segments %v, want %v", left, want)
+	}
+	h.finish()
+}
+
+// TestStability_KeepsTheLastLogUntilTheRunStarts (G19; Task 8 review): the
+// last run's ipcam-hub.log is the owner's one record of why it ended, so a
+// new recspike mi2 removes it only once the new run has passed its window
+// check and has its cameras from the controller. The recordings of the runs
+// left in work/mi2 go before the free space is measured, as before; a run
+// that is refused keeps the log, and says why in Romanian.
+func TestStability_KeepsTheLastLogUntilTheRunStarts(t *testing.T) {
+	const diagnostic = "ipcam-hub: the last run's diagnostic\n"
+	// prior leaves the ended run pc-72h-1 in dir, with its log and 1 GB of
+	// recordings, and returns its log.
+	prior := func(t *testing.T, dir string) string {
+		t.Helper()
+		state := filepath.Join(dir, "results", "state", "mi2-pc-72h.json")
+		st, err := beginRun(state, "pc-72h", mi1.Boot{ID: "boot-1"}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := finishRun(state, st); err != nil {
+			t.Fatal(err)
+		}
+		work := filepath.Join(dir, "work")
+		record(t, work, "pc-72h-1", 1)
+		log := filepath.Join(work, "mi2", "pc-72h-1", logName)
+		if err := os.WriteFile(log, []byte(diagnostic), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return log
+	}
+	kept := func(t *testing.T, log string) {
+		t.Helper()
+		if b, err := os.ReadFile(log); err != nil || string(b) != diagnostic { //nolint:gosec // the test's own file
+			t.Errorf("the last run's log: %q, %v; want it kept", b, err)
+		}
+		if _, err := os.Stat(filepath.Join(filepath.Dir(log), "data")); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the last run's recordings are still there (%v)", err)
+		}
+	}
+
+	t.Run("a window under 1 h", func(t *testing.T) {
+		dir := t.TempDir()
+		log := prior(t, dir)
+		h := newHarness(t, dir, pcHost, "boot-1")
+		h.opts.FreeBytes = func() (uint64, error) { return 20e9, nil }
+		h.start()
+		if err := h.wait(); !errors.Is(err, ErrWindowTooSmall) {
+			t.Fatalf("Run = %v, want ErrWindowTooSmall", err)
+		}
+		kept(t, log)
+	})
+
+	t.Run("no controller", func(t *testing.T) {
+		dir := t.TempDir()
+		log := prior(t, dir)
+		h := newHarness(t, dir, pcHost, "boot-1")
+		h.opts.CameraURLs = func(context.Context, []string) (map[string]string, error) {
+			return nil, errors.New("dial tcp 127.0.0.1:7081: connect: connection refused")
+		}
+		h.start()
+		if err := h.wait(); err == nil || !strings.HasPrefix(err.Error(), "nu pot lua camerele de la reccontroller -local") {
+			t.Fatalf("Run = %v, want the Romanian error of a controller that does not answer", err)
+		}
+		kept(t, log)
+	})
+
+	t.Run("the next run starts", func(t *testing.T) {
+		dir := t.TempDir()
+		log := prior(t, dir)
+		h := newHarness(t, dir, pcHost, "boot-1")
+		h.start()
+		h.nextHub()
+		if _, err := os.Stat(filepath.Dir(log)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the last run's folder is still there once pc-72h-2 records (%v)", err)
+		}
+		h.finish()
+	})
+}
+
+// TestStability_OwnerLinesAreRomanian (Task 8 review M7): every line that the
+// owner sees from MI2 is Romanian. The error that refuses a window under
+// 1 h, a prune that cannot delete a segment, a stop of ipcam-hub that
+// fails, and the error of an interrupted run start with a Romanian
+// sentence, whatever the error that they wrap says.
+func TestStability_OwnerLinesAreRomanian(t *testing.T) {
+	t.Run("a window under 1 h", func(t *testing.T) {
+		h := newHarness(t, t.TempDir(), pcHost, "boot-1")
+		h.opts.FreeBytes = func() (uint64, error) { return 20e9, nil }
+		h.start()
+		if err := h.wait(); err == nil || !strings.HasPrefix(err.Error(), "spațiul liber nu ajunge pentru o fereastră de cel puțin 1 h") {
+			t.Errorf("Run = %v, want the Romanian refusal", err)
+		}
+	})
+
+	t.Run("a prune, a stop and an interruption that fail", func(t *testing.T) {
+		dir := t.TempDir()
+		h := newHarness(t, dir, pcHost, "boot-1")
+		h.start()
+		hub := h.nextHub()
+		hub.stopErr = errors.New("hubproc: ipcam-hub did not stop within 5m0s; it was killed")
+		// A "segment" that cannot be deleted: a folder that is not empty.
+		stuck := filepath.Join(dir, "stuck.mp4")
+		if err := os.MkdirAll(filepath.Join(stuck, "x"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		old := h.clock.Now().Add(-7 * time.Hour)
+		if err := os.Chtimes(stuck, old, old); err != nil {
+			t.Fatal(err)
+		}
+		hub.emit(hubproc.Event{Type: "segment_verified", Path: stuck})
+		h.clock.advance(t, pruneEvery)
+		h.clock.advance(t, pruneEvery)
+		h.cancel()
+		err := h.wait()
+		if !errors.Is(err, context.Canceled) || !strings.HasPrefix(err.Error(), "proba MI2 s-a întrerupt") {
+			t.Errorf("Run = %v, want the Romanian error of an interrupted run, around context.Canceled", err)
+		}
+		lines := strings.Split(strings.TrimSpace(h.out.String()), "\n")
+		for _, want := range []string{
+			"Segmentele mai vechi decât fereastra nu s-au putut șterge toate; se reîncearcă peste un minut: ",
+			"ipcam-hub nu s-a oprit curat: ",
+		} {
+			if !slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, want) }) {
+				t.Errorf("no line starts with %q:\n%s", want, h.out)
+			}
+		}
+		if strings.Contains(h.out.String(), "mi2: ") {
+			t.Errorf("the run printed an English error of its own:\n%s", h.out)
+		}
+	})
 }

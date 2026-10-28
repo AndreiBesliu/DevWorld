@@ -45,14 +45,25 @@ type Recorder interface {
 	Closed(ctx context.Context) <-chan SegmentClosed
 	Status(ctx context.Context, cam CameraID, p Profile) RecStatus
 	// Stop takes the stream out of the configuration and writes an open gap
-	// with reason.
+	// with reason, which goes to GapObserver. The stream is out of the
+	// recorder's jobs, and its gap goes out, also when the configuration or
+	// the gap's row cannot be written, as on a card that a read-only remount
+	// left (T40): Stop then returns those errors, and MediaMTX keeps its
+	// configuration until the next one that can be written leaves the
+	// stream out.
 	Stop(ctx context.Context, cam CameraID, p Profile, reason catalog.GapReason) error
-	// WriteFailed tells the recorder that MediaMTX could not write the .part
-	// that the stream writes now, for reason: catalog.GapCard when rec/ is
-	// on an SD card (T40). MediaMTX keeps that file's name and starts the
-	// stream's next segment; the repair of the file then writes its tail
-	// gap, from the end of its last good part to the start of the next
-	// segment, with reason instead of restart. Recording goes on.
+	// WriteFailed tells the recorder that MediaMTX could not write the
+	// stream's recording, for reason: catalog.GapCard when rec/ is on an SD
+	// card (T40). It returns at once, without touching the disk, and the
+	// recorder records the hole on a goroutine of its own. When MediaMTX was
+	// writing a .part, it keeps that file's name and starts the stream's
+	// next segment; the reason goes to the catalog with the file's path, and
+	// the file's repair, live or at the next start, writes its tail gap,
+	// from the end of its last good part to the start of the next segment,
+	// with reason instead of restart. When it could not create the next
+	// segment's file, no .part holds the hole: the stream gets an open gap
+	// of reason from the end of its last segment, which its next part
+	// closes. Recording goes on.
 	WriteFailed(cam CameraID, p Profile, reason catalog.GapReason)
 }
 
@@ -95,7 +106,7 @@ type rec struct {
 	verifyKick chan struct{}
 	jobsKick   chan struct{}
 	partsKick  chan struct{}
-	wg         sync.WaitGroup // the background loops and the child's log readers
+	wg         sync.WaitGroup // the background loops, the child's log readers and its configuration's settle
 
 	mu      sync.Mutex
 	jobs    map[streamKey]Job
@@ -114,9 +125,9 @@ type rec struct {
 	// left: each is repaired at most once while the hub runs.
 	parts []string
 	tried map[string]bool
-	// tailReasons holds the reason of the tail gap of each .part that
-	// MediaMTX could not write (WriteFailed), until its repair takes it.
-	tailReasons map[string]catalog.GapReason
+	// failedWrites are the writes that MediaMTX could not make
+	// (WriteFailed), which repairLoop has not noted yet.
+	failedWrites []failedWrite
 
 	// gapMu is held while a stream's open gaps are closed, and while a repair
 	// finds where its gap ends and writes it.
@@ -192,7 +203,7 @@ func New(ctx context.Context, cfg Config) (Recorder, ReconcileReport, error) {
 		watch: newPartWatcher(cfg.RecDir), closed: make(chan SegmentClosed, 1024),
 		verifyKick: make(chan struct{}, 1), jobsKick: make(chan struct{}, 1), partsKick: make(chan struct{}, 1),
 		jobs: map[streamKey]Job{}, stopped: map[streamKey]bool{}, report: report, pending: res.pending, busy: map[string]bool{},
-		tried: map[string]bool{}, tailReasons: map[string]catalog.GapReason{}, seq: 1, lastFinal: len(res.pending) == 0,
+		tried: map[string]bool{}, seq: 1, lastFinal: len(res.pending) == 0,
 	}
 	for _, p := range leftParts(cfg.RecDir) {
 		r.tried[p] = true // reconcile could not repair it
@@ -323,7 +334,11 @@ func (r *rec) startChild() (*childProc, <-chan struct{}, error) {
 // by itself within stopGrace of being asked to stop, when it was asked.
 func (r *rec) runChild(ctx context.Context, child *childProc, logs <-chan struct{}, at time.Time) (uptime time.Duration, stoppedAt time.Time) {
 	r.setChild(child.cmd.Process.Pid)
-	go r.settleConfig(ctx, at)
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		r.settleConfig(ctx, at)
+	}()
 	exited := make(chan struct{})
 	go func() {
 		_ = child.cmd.Wait()
@@ -510,38 +525,13 @@ func (r *rec) Stop(ctx context.Context, cam CameraID, p Profile, reason catalog.
 	}
 	r.mu.Unlock()
 	r.watch.setStreams(keys)
-	if err := r.writeConfig(ctx); err != nil {
-		return err
-	}
+	// Neither write keeps the other from being tried, nor the gap from going
+	// out: on a read-only card both fail (T40; Task 8 review M1).
+	cerr := r.writeConfig(ctx)
 	g := catalog.Gap{Cam: string(cam), Profile: string(p), StartMs: time.Now().UnixMilli(), Reason: reason}
-	if err := r.cfg.Catalog.PutGap(ctx, g); err != nil {
-		return err
-	}
+	gerr := r.cfg.Catalog.PutGap(ctx, g)
 	r.notifyGap(g)
-	return nil
-}
-
-func (r *rec) WriteFailed(cam CameraID, p Profile, reason catalog.GapReason) {
-	path, _, ok := newestOf(partFiles(r.watch.streamDir(streamKey{cam, p})))
-	if !ok {
-		return // the failed write was the creation of the next segment: no .part holds its tail
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.tailReasons[path] = reason
-}
-
-// takeTailReason returns the reason of the tail gap of the .part at path:
-// the one that WriteFailed noted for it, else restart.
-func (r *rec) takeTailReason(path string) catalog.GapReason {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	reason, ok := r.tailReasons[path]
-	if !ok {
-		return catalog.GapRestart
-	}
-	delete(r.tailReasons, path)
-	return reason
+	return errors.Join(cerr, gerr)
 }
 
 func (r *rec) Status(_ context.Context, cam CameraID, p Profile) RecStatus {
@@ -572,7 +562,7 @@ func (r *rec) writeConfig(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-	if err := writeFileSynced(r.configPath, config, 0o600); err != nil {
+	if err := writeConfigFile(r.configPath, config, 0o600); err != nil {
 		return fmt.Errorf("recorder: write the MediaMTX configuration: %w", err)
 	}
 	r.lastWrite = time.Now()
@@ -597,6 +587,9 @@ func (r *rec) settleConfig(ctx context.Context, at time.Time) {
 		}
 	}
 }
+
+// writeConfigFile writes MediaMTX's configuration file; tests replace it.
+var writeConfigFile = writeFileSynced
 
 // writeFileSynced replaces path with data: a sibling written and synced,
 // renamed over it, and the directory synced.
@@ -703,18 +696,9 @@ func (r *rec) notifyError(err error) {
 func (r *rec) closeGaps(ctx context.Context, k streamKey, endMs int64) error {
 	r.gapMu.Lock()
 	defer r.gapMu.Unlock()
-	gaps, err := r.cfg.Catalog.Gaps(ctx)
-	if err != nil {
+	open, err := r.openGaps(ctx, k)
+	if err != nil || len(open) == 0 {
 		return err
-	}
-	var open []catalog.Gap
-	for _, g := range gaps {
-		if g.Cam == string(k.cam) && g.Profile == string(k.profile) && g.EndMs == 0 {
-			open = append(open, g)
-		}
-	}
-	if len(open) == 0 {
-		return nil
 	}
 	if err := r.cfg.Catalog.CloseGap(ctx, string(k.cam), string(k.profile), endMs); err != nil {
 		return err
@@ -724,6 +708,21 @@ func (r *rec) closeGaps(ctx context.Context, k streamKey, endMs int64) error {
 		r.notifyGap(g)
 	}
 	return nil
+}
+
+// openGaps returns the stream's open gaps.
+func (r *rec) openGaps(ctx context.Context, k streamKey) ([]catalog.Gap, error) {
+	gaps, err := r.cfg.Catalog.Gaps(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var open []catalog.Gap
+	for _, g := range gaps {
+		if g.Cam == string(k.cam) && g.Profile == string(k.profile) && g.EndMs == 0 {
+			open = append(open, g)
+		}
+	}
+	return open, nil
 }
 
 // pollLoop polls the open parts and makes the date directories ahead.
@@ -743,12 +742,15 @@ func (r *rec) pollLoop(ctx context.Context) {
 			r.firstMu.Lock()
 			firsts, left := r.watch.poll(now)
 			for _, f := range firsts {
-				r.obs.FirstPart(f.key.cam, f.key.profile, f.at)
+				if !f.resumed {
+					r.obs.FirstPart(f.key.cam, f.key.profile, f.at)
+				}
 			}
 			r.firstMu.Unlock()
 			r.queueParts(left)
 			for _, f := range firsts {
-				// Recording resumed: the stream's gap ends where its new segment starts.
+				// Recording resumed, after a start or a failed creation of a
+				// segment: the stream's gap ends where its new segment starts.
 				if err := r.closeGaps(ctx, f.key, f.segmentStart.UnixMilli()); err != nil && ctx.Err() == nil {
 					r.notifyError(err)
 				}
@@ -858,15 +860,22 @@ func (r *rec) forgetPart(path string) {
 	delete(r.tried, path)
 }
 
-// repairLoop repairs the queued .part files (repairParts).
+// repairLoop notes the failed writes that WriteFailed queued
+// (noteFailedWrite), then repairs the queued .part files (repairParts): a
+// failed .part's reason is in the catalog before its repair reads it, since
+// MediaMTX logs the failed write before it starts the stream's next
+// segment, which makes the file one that a newer .part left behind. The
+// failed writes queued when the hub stops are noted before it ends.
 func (r *rec) repairLoop(ctx context.Context) {
 	defer r.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
+			r.noteFailedWrites(ctx)
 			return
 		case <-r.partsKick:
 		}
+		r.noteFailedWrites(ctx)
 		r.mu.Lock()
 		paths := r.parts
 		r.parts = nil

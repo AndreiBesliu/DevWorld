@@ -334,3 +334,49 @@ func TestCatalog_GapReasonCheckedBySQLite(t *testing.T) {
 		t.Errorf("an unknown reason written past PutGap: %v, want SQLite's CHECK constraint failure", err)
 	}
 }
+
+// TestCatalog_TailReasons (T40; Task 8 review M3): the reason of the tail
+// gap of a .part that MediaMTX could not write is kept by the file's path,
+// so that a start of the hub before the file's repair still knows it; a
+// path has one reason, the last put, until it is deleted; an unknown reason
+// is refused, by the catalog and by SQLite.
+func TestCatalog_TailReasons(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "catalog.db")
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := "c1/main/2026-10-28/120000_000000.mp4.part"
+	if reason, found, err := db.TailReason(ctx, part); err != nil || found {
+		t.Errorf("TailReason before any = %q, %v, %v; want none", reason, found, err)
+	}
+	for _, reason := range []GapReason{GapRestart, GapCard} {
+		if err := db.PutTailReason(ctx, part, reason); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if reason, found, err := db.TailReason(ctx, part); err != nil || !found || reason != GapCard {
+		t.Errorf("TailReason after a new Open = %q, %v, %v; want card, the last put", reason, found, err)
+	}
+	if err := db.PutTailReason(ctx, part, "power"); err == nil {
+		t.Error("PutTailReason accepted an unknown reason")
+	}
+	if _, err := db.sql.ExecContext(ctx, "INSERT INTO tail_reasons (local_path, reason) VALUES ('x.mp4.part', 'power')"); err == nil ||
+		!strings.Contains(err.Error(), "CHECK constraint failed") {
+		t.Errorf("an unknown reason written past PutTailReason: %v, want SQLite's CHECK constraint failure", err)
+	}
+	if err := db.DeleteTailReason(ctx, part); err != nil {
+		t.Fatal(err)
+	}
+	if reason, found, err := db.TailReason(ctx, part); err != nil || found {
+		t.Errorf("TailReason after DeleteTailReason = %q, %v, %v; want none", reason, found, err)
+	}
+}

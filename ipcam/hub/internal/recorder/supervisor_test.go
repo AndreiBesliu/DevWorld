@@ -2,6 +2,8 @@ package recorder
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,6 +184,54 @@ func TestStop_WritesOpenGapClosedOnReapply(t *testing.T) {
 	}
 	if paths := configPaths(t, cfg); !slices.Equal(paths, []string{"cam1/main"}) {
 		t.Errorf("after Apply again the configuration has %v", paths)
+	}
+}
+
+// TestStop_ReadOnlyCard_GapEventStillGoesOut (T40, Review Focus 4; Task 8
+// review M1): on a card that a read-only remount left, Stop can write
+// neither MediaMTX's configuration nor the gap's row, both on the card. It
+// still stops the job, which no longer runs, still tries the gap's row, and
+// still gives the gap out as an event, with its error: recording stops with
+// a gap, never with a silent loss, for every job that the card failure
+// stops.
+func TestStop_ReadOnlyCard_GapEventStillGoesOut(t *testing.T) {
+	var readOnly atomic.Bool
+	t.Cleanup(setWriteConfigFile(func(path string, data []byte, perm os.FileMode) error {
+		if readOnly.Load() {
+			return &fs.PathError{Op: "open", Path: path + ".tmp", Err: errors.New("read-only file system")}
+		}
+		return writeFileSynced(path, data, perm)
+	}))
+	obs := &testObserver{}
+	r, cfg := startFake(t, "sleep", Config{Observer: obs})
+	ctx := t.Context()
+	jobs := []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil), NewJob("cam2", "main", "rtsp://127.0.0.1:1/cam2/main", nil)}
+	if err := r.Apply(ctx, jobs); err != nil {
+		t.Fatal(err)
+	}
+
+	readOnly.Store(true)
+	if err := cfg.Catalog.Close(); err != nil { // its rows are on the card too
+		t.Fatal(err)
+	}
+	for _, j := range jobs {
+		if err := r.Stop(ctx, j.Cam, j.Profile, catalog.GapCard); err == nil {
+			t.Errorf("Stop of %s/%s on a read-only card: no error", j.Cam, j.Profile)
+		}
+	}
+	var stopped []string
+	for _, g := range obs.snapshot().gaps {
+		if g.Reason == catalog.GapCard && g.EndMs == 0 {
+			stopped = append(stopped, g.Cam+"/"+g.Profile)
+		}
+	}
+	if want := []string{"cam1/main", "cam2/main"}; !slices.Equal(stopped, want) {
+		t.Errorf("open card gap events for %v, want one for each of %v", stopped, want)
+	}
+	for _, j := range jobs {
+		if r.Status(ctx, j.Cam, j.Profile).Running {
+			t.Errorf("%s/%s still runs after its Stop", j.Cam, j.Profile)
+		}
 	}
 }
 

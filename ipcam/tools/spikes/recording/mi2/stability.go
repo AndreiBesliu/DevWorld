@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -74,36 +75,45 @@ const (
 	maxStartsUnready = 3
 )
 
+// errNeverReady is record's error when no ipcam-hub of the run got ready:
+// a setup failure (the binary, the configuration, MediaMTX), not a crash.
+var errNeverReady = errors.New("ipcam-hub nu a ajuns gata de înregistrare")
+
 // Run is MI2's 72 h run on this host (G11, G19, C07): it records the host's
 // recommended number of cameras, main streams from the controller, half of
 // them encrypted, for Hours, with a rolling window of the free space; it
 // keeps the host awake (R49), restarts ipcam-hub at once whenever it exits
-// unexpectedly and counts that exit as a crash, counts MediaMTX's restarts
-// (HUB-13), notes the SD-card monitor's states (T40), and writes the
-// envelope MI2/<host>-72h/<run id>.json. recspike is the supervisor here:
-// its restart is a lower bound for Faza 1's SCM and systemd recovery
-// (C07). A run that an OS reboot, or the end of recspike, interrupted is
-// invalid: the next Run redoes it under the next run id, removes its
-// recordings, and lists it in Invalidated; it never counts as a crash.
+// unexpectedly and counts the exit of a ready ipcam-hub as a crash, counts
+// MediaMTX's restarts (HUB-13), notes the SD-card monitor's states (T40),
+// and writes the envelope MI2/<host>-72h/<run id>.json. recspike is the
+// supervisor here: its restart is a lower bound for Faza 1's SCM and
+// systemd recovery (C07). An exit before ready is a setup failure, no
+// crash: a run in which no ipcam-hub ever got ready ends with an error and
+// no envelope. A run that an OS reboot, or the end of recspike,
+// interrupted, or one that never got ready, is invalid: the next Run redoes
+// it under the next run id, removes its recordings, and lists it in
+// Invalidated; it never counts as a crash.
 //
-// One run at a time: the runs left in Work's mi2 folder go before the free
-// space is measured. Each is finished, its envelope written, or invalid, so
-// none is needed, and an OS reboot's leftovers would otherwise shrink the
-// redo's window, or refuse it on a small SD card. A run's recordings go
-// when it ends, finished or interrupted, so that they keep no space from
-// MI3 and MI4; its ipcam-hub log stays until the next run.
+// One run at a time: the recordings of the runs left in Work's mi2 folder
+// go before the free space is measured. Each run is finished, its envelope
+// written, or invalid, so none is needed, and an OS reboot's leftovers
+// would otherwise shrink the redo's window, or refuse it on a small SD
+// card. Their ipcam-hub logs go only once this run has its window and its
+// cameras: until then the last one still says why its run ended. A run's
+// recordings go when it ends, finished or not, so that they keep no space
+// from MI3 and MI4. Every error is Romanian, for the owner's screen.
 func Run(ctx context.Context, o Options) error {
 	if o.CameraURLs == nil {
-		return errors.New("mi2: no controller for the cameras")
+		return errors.New("nu am de unde lua camerele: lipsește reccontroller -local")
 	}
 	set := SetFor(o.Host.Pseudonym)
 	cameras := max(o.Host.Cameras, 1)
 	if err := os.MkdirAll(o.Work, 0o700); err != nil {
-		return err
+		return fmt.Errorf("nu pot crea dosarul de lucru: %w", err)
 	}
 	runs := filepath.Join(o.Work, "mi2")
-	if err := os.RemoveAll(runs); err != nil {
-		return err
+	if err := clearRuns(runs); err != nil {
+		return fmt.Errorf("nu pot șterge înregistrările probelor MI2 de dinainte: %w", err)
 	}
 	free, err := o.freeBytes()
 	if err != nil {
@@ -123,7 +133,11 @@ func Run(ctx context.Context, o Options) error {
 	}
 	urls, err := o.CameraURLs(ctx, streams)
 	if err != nil {
-		return err
+		return fmt.Errorf("nu pot lua camerele de la reccontroller -local: %w", err)
+	}
+	// This run starts: the last run's log is no longer needed.
+	if err := os.RemoveAll(runs); err != nil {
+		return fmt.Errorf("nu pot șterge probele MI2 de dinainte: %w", err)
 	}
 
 	statePath := filepath.Join(o.Results, "state", "mi2-"+set+".json")
@@ -138,20 +152,21 @@ func Run(ctx context.Context, o Options) error {
 	}
 	dir := filepath.Join(runs, runID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return fmt.Errorf("nu pot pregăti rularea %s: %w", runID, err)
 	}
 	config, err := o.writeRun(dir, streams, urls)
 	if err != nil {
-		return err
+		return fmt.Errorf("nu pot pregăti rularea %s: %w", runID, err)
 	}
 	release, err := mi1.KeepAwake()
 	if err != nil {
-		return err
+		return fmt.Errorf("nu pot ține dispozitivul treaz: %w", err)
 	}
 	defer release()
-	log, err := os.OpenFile(filepath.Join(dir, logName), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the run's own folder
+	logPath := filepath.Join(dir, logName)
+	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the run's own folder
 	if err != nil {
-		return err
+		return fmt.Errorf("nu pot deschide jurnalul ipcam-hub: %w", err)
 	}
 	// After the envelope and the run state, or after the interruption: the
 	// run's recordings are no longer needed.
@@ -164,17 +179,24 @@ func Run(ctx context.Context, o Options) error {
 
 	o.say("Proba MI2 %s începe: %s h, %d camere. Lăsați dispozitivul pornit, cu reccontroller -local pornit tot timpul.", runID, decimal(o.Hours, -1), cameras)
 	data, err := o.record(ctx, config, log, window)
-	if errors.Is(err, context.Canceled) {
+	switch {
+	case errors.Is(err, errNeverReady):
+		if serr := abandonRun(statePath, st, runID+": "+errNeverReady.Error()); serr != nil {
+			return serr
+		}
+		return fmt.Errorf("%w de %d ori la rând: proba %s nu a pornit și nu are rezultat. Jurnalul %s arată de ce; corectați cauza și porniți din nou proba",
+			err, maxStartsUnready, runID, logPath)
+	case errors.Is(err, context.Canceled):
 		o.say("Proba MI2 %s s-a întrerupt: nu contează, și se reface la următorul recspike mi2.", runID)
-	}
-	if err != nil {
+		return fmt.Errorf("proba MI2 s-a întrerupt: %w", err)
+	case err != nil:
 		return err
 	}
 	data.Cameras, data.OnSdCard, data.WindowHours, data.Invalidated = cameras, o.Host.Storage == "sd", window.Hours(), st.Invalidated
 	e := results.Envelope{Schema: results.Schema, Code: "MI2", RunID: runID, Set: set, Host: o.Host.Pseudonym, OS: o.Host.OS,
 		PiModel: o.Host.PiModel, Storage: o.Host.Storage, SdConfirmation: o.Host.SdConfirmation, MI2: &data}
 	if err := results.Create(o.Results, e); err != nil {
-		return err
+		return fmt.Errorf("nu pot scrie rezultatul probei: %w", err)
 	}
 	if err := finishRun(statePath, st); err != nil {
 		return err
@@ -184,11 +206,14 @@ func Run(ctx context.Context, o Options) error {
 }
 
 // record runs ipcam-hub on config for the run's hours and supervises it
-// (C07): an exit that recspike did not ask for is a crash, and ipcam-hub
-// starts again at once. Every pruneEvery it deletes the verified segments
-// older than window. At the end, or when ctx is done, it stops ipcam-hub
-// cleanly, waiting mi1.StopTimeout, long enough for an SD card (Task
-// 7.2d): that stop is no crash, even when it ends in a kill.
+// (C07): an exit that recspike did not ask for is a crash when that
+// ipcam-hub was ready, a setup failure before, and ipcam-hub starts again
+// at once. After maxStartsUnready setup failures in a row, the run ends:
+// with errNeverReady when no ipcam-hub of the run ever got ready, else
+// with the crashes measured. Every pruneEvery it deletes the verified
+// segments older than window. At the end, or when ctx is done, it stops
+// ipcam-hub cleanly, waiting mi1.StopTimeout, long enough for an SD card
+// (Task 7.2d): that stop is no crash, even when it ends in a kill.
 func (o Options) record(ctx context.Context, config string, stderr io.Writer, window time.Duration) (results.Mi2Data, error) {
 	clock := o.clock()
 	start := clock.Now()
@@ -206,41 +231,44 @@ func (o Options) record(ctx context.Context, config string, stderr io.Writer, wi
 	}
 	hub, err := o.startHub(config, stderr, onEvent)
 	if err != nil {
-		return results.Mi2Data{}, err
+		return results.Mi2Data{}, fmt.Errorf("nu pot porni ipcam-hub: %w", err)
 	}
 	stop := func() {
 		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mi1.StopTimeout)
 		defer cancel()
 		if err := hub.Stop(stopCtx); err != nil {
-			o.say("Oprirea ipcam-hub: %v", err)
+			o.say("ipcam-hub nu s-a oprit curat: %v", err)
 		}
 	}
-	unready := 0
+	unready := 0 // the setup failures in a row
 	for {
 		select {
 		case <-ctx.Done():
 			stop()
 			return results.Mi2Data{}, ctx.Err()
 		case <-hub.Exited():
-			crashes, ready := t.crash()
-			o.say("ipcam-hub s-a oprit neașteptat (codul %d): crash-ul %d. Îl pornesc din nou.", hub.ExitCode(), crashes)
-			if ready {
+			if crashes, crashed := t.exit(); crashed {
 				unready = 0
+				o.say("ipcam-hub s-a oprit neașteptat (codul %d): crash-ul %d. Îl pornesc din nou.", hub.ExitCode(), crashes)
 			} else {
 				unready++
-			}
-			if unready >= maxStartsUnready {
-				o.say("ipcam-hub s-a oprit de %d ori la rând înainte să înregistreze: proba se oprește.", unready)
-				return t.data(clock.Now().Sub(start)), nil
+				if unready >= maxStartsUnready {
+					if !t.everReady() {
+						return results.Mi2Data{}, errNeverReady
+					}
+					o.say("ipcam-hub s-a oprit de %d ori la rând înainte să fie gata: proba se oprește.", unready)
+					return t.data(clock.Now().Sub(start)), nil
+				}
+				o.say("ipcam-hub s-a oprit înainte să fie gata (codul %d): nu este un crash. Îl pornesc din nou.", hub.ExitCode())
 			}
 			if hub, err = o.startHub(config, stderr, onEvent); err != nil {
-				return results.Mi2Data{}, err
+				return results.Mi2Data{}, fmt.Errorf("nu pot porni ipcam-hub: %w", err)
 			}
 		case now := <-tick.C():
 			// ipcam-hub's verify counts the deleted files' rows as mismatches,
 			// which MI2 does not judge: the deletes are the spike's.
 			if _, err := pruner.Prune(now); err != nil {
-				o.say("Fereastra păstrată: %v", err)
+				o.say("Segmentele mai vechi decât fereastra nu s-au putut șterge toate; se reîncearcă peste un minut: %v", err)
 			}
 			if !now.Before(end) {
 				stop()
@@ -252,6 +280,27 @@ func (o Options) record(ctx context.Context, config string, stderr io.Writer, wi
 
 // logName is the run's ipcam-hub log, in its folder.
 const logName = "ipcam-hub.log"
+
+// clearRuns clears each run folder in runs (clearRun), if there are any.
+func clearRuns(runs string) error {
+	entries, err := os.ReadDir(runs)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, e := range entries {
+		path := filepath.Join(runs, e.Name())
+		if e.IsDir() {
+			errs = append(errs, clearRun(path))
+		} else {
+			errs = append(errs, os.Remove(path))
+		}
+	}
+	return errors.Join(errs...)
+}
 
 // clearRun removes what the run in dir left but its ipcam-hub log: its
 // recordings and ipcam-hub's catalog in data/, run.json, and the RI_g
@@ -274,6 +323,7 @@ func clearRun(dir string) error {
 type tally struct {
 	mu            sync.Mutex
 	ready         bool // the running ipcam-hub sent ready
+	anyReady      bool // an ipcam-hub of the run sent ready
 	crashes       int
 	childRestarts int
 	cardStates    []results.CardState
@@ -285,7 +335,7 @@ func (t *tally) event(e hubproc.Event) {
 	defer t.mu.Unlock()
 	switch e.Type {
 	case "ready":
-		t.ready = true
+		t.ready, t.anyReady = true, true
 	case "child_restart":
 		t.childRestarts++
 	case "card":
@@ -293,14 +343,24 @@ func (t *tally) event(e hubproc.Event) {
 	}
 }
 
-// crash counts an unexpected exit of ipcam-hub, and returns the crashes so
-// far and whether it had been ready; the next ipcam-hub starts unready.
-func (t *tally) crash() (crashes int, ready bool) {
+// exit takes an unexpected exit of ipcam-hub: a crash when that ipcam-hub
+// was ready (C07), a setup failure before. It returns the crashes so far
+// and whether this was one; the next ipcam-hub starts unready.
+func (t *tally) exit() (crashes int, crashed bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.crashes++
-	ready, t.ready = t.ready, false
-	return t.crashes, ready
+	crashed, t.ready = t.ready, false
+	if crashed {
+		t.crashes++
+	}
+	return t.crashes, crashed
+}
+
+// everReady reports whether an ipcam-hub of the run sent ready.
+func (t *tally) everReady() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.anyReady
 }
 
 // data is the run's measurements after it ran for d.
@@ -407,16 +467,17 @@ func runIDOf(set string, attempt int) string { return fmt.Sprintf("%s-%d", set, 
 // beginRun starts the next run of set in the state at path. A run that is
 // still open did not end: it is invalid, because the host rebooted since it
 // began (another boot, when both are known), or because recspike stopped.
+// So is one that abandonRun closed; a run that finishRun closed is not.
 func beginRun(path, set string, boot mi1.Boot, bootKnown bool) (runState, error) {
 	var st runState
 	data, err := os.ReadFile(path) //nolint:gosec // recspike's own state
 	switch {
 	case err == nil:
 		if err := json.Unmarshal(data, &st); err != nil {
-			return st, fmt.Errorf("mi2: %s: %w", filepath.Base(path), err)
+			return st, fmt.Errorf("nu pot citi starea probei din %s: %w", filepath.Base(path), err)
 		}
 	case !errors.Is(err, os.ErrNotExist):
-		return st, err
+		return st, fmt.Errorf("nu pot citi starea probei: %w", err)
 	}
 	if st.Open {
 		reason := "proba s-a întrerupt înainte de final (recspike s-a oprit)"
@@ -424,12 +485,17 @@ func beginRun(path, set string, boot mi1.Boot, bootKnown bool) (runState, error)
 			reason = "gazda a repornit în timpul probei"
 		}
 		st.Invalidated = append(st.Invalidated, runIDOf(set, st.Attempt)+": "+reason)
-	} else {
-		st.Invalidated = nil
 	}
 	st.Attempt++
 	st.Open, st.Boot = true, boot
 	return st, saveState(path, st)
+}
+
+// abandonRun records that the run of st ended without a result, invalid
+// for reason, "<run id>: <why>": the next run redoes it and lists it.
+func abandonRun(path string, st runState, reason string) error {
+	st.Open, st.Invalidated = false, append(st.Invalidated, reason)
+	return saveState(path, st)
 }
 
 // finishRun records that the run of st ended.
@@ -438,13 +504,17 @@ func finishRun(path string, st runState) error {
 	return saveState(path, st)
 }
 
+// saveState writes st to path, durably.
 func saveState(path string, st runState) error {
 	data, err := json.MarshalIndent(st, "", "  ")
+	if err == nil {
+		err = os.MkdirAll(filepath.Dir(path), 0o750)
+	}
+	if err == nil {
+		err = mi1.WriteDurably(path, append(data, '\n'), 0o600)
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("nu pot salva starea probei: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
-	}
-	return mi1.WriteDurably(path, append(data, '\n'), 0o600)
+	return nil
 }

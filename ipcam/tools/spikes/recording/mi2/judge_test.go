@@ -180,6 +180,34 @@ func TestMI2_ResumeFromKill9Runs(t *testing.T) {
 	}
 }
 
+// TestMI2_MoreThan20Resumes (G11; Task 8 review M4): a kill9 set whose
+// counted default runs give more than the 20 resumes of MI1's composition,
+// such as a run redone under another attempt when both count, still gets a
+// verdict: every resume is judged against 10 s, and a note names the
+// excess. One of them over 10 s fails G11.
+func TestMI2_MoreThan20Resumes(t *testing.T) {
+	extra := func(resumeMs int64) results.Envelope {
+		r := results.Run{RunID: "pc-kill9-05-2", Valid: true, Attempt: 2, ShutdownKind: "kill9", Encrypted: true, PadLowBitrate: true,
+			Reconciled: true, Hub04Clear: true, PacingP99Ms: 5, Cameras: 2, ResumeMs: &resumeMs}
+		return envelope("MI1", "pc-kill9", r.RunID, "pc", []results.Run{r}, nil)
+	}
+	j := Judge(append(passing(t), extra(4000)))
+	if j.Verdict != results.Pass {
+		t.Errorf("21 resumes within 10 s: Judge = %q, reasons %q; want trece", j.Verdict, j.Reasons)
+	}
+	if row := rowOf(t, j, "MI2 pc: reluarea după kill -9"); row.Value != "4,00 s (21 din 20)" || row.Pass == nil || !*row.Pass {
+		t.Errorf("resume row %+v, want 4,00 s (21 din 20), passed", row)
+	}
+	if !slices.ContainsFunc(j.Notes, func(n string) bool {
+		return strings.HasPrefix(n, "pc-kill9: 21 de reluări numărate, cu 1 peste cele 20")
+	}) {
+		t.Errorf("notes %q, want the excess of pc-kill9", j.Notes)
+	}
+	if j := Judge(append(passing(t), extra(12_000))); j.Verdict != results.Fail || j.PlanB != PlanB {
+		t.Errorf("21 resumes, one of 12 s: Judge = %q, plan B %q; want pică with the plan B", j.Verdict, j.PlanB)
+	}
+}
+
 func rowOf(t *testing.T, j results.Judgement, code string) results.Row {
 	t.Helper()
 	for _, r := range j.Rows {

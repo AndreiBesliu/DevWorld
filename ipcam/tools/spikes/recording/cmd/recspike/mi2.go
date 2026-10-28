@@ -9,7 +9,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"runtime"
+	"strings"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi2"
@@ -17,7 +19,8 @@ import (
 
 // mi2Command is `recspike mi2 --controller 127.0.0.1 [--hours 72]`: MI2's
 // 72 h run on this host (G11), with the cameras of a reccontroller -local on
-// the same device (G18, G19).
+// the same device (R07, G18, G19): a controller at another address is
+// refused, before anything runs.
 func mi2Command(ctx context.Context, args []string, in *bufio.Reader, out io.Writer) error {
 	flags := flag.NewFlagSet("mi2", flag.ContinueOnError)
 	controller := flags.String("controller", "", "")
@@ -29,6 +32,9 @@ func mi2Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	case *controller == "":
 		_, _ = fmt.Fprint(out, usage)
 		return errors.New("lipsește --controller: adresa reccontroller -local, 127.0.0.1")
+	case !loopback(*controller):
+		_, _ = fmt.Fprint(out, usage)
+		return fmt.Errorf("--controller %s nu este pe acest dispozitiv: proba de 72 h folosește reccontroller -local, pornit pe același dispozitiv, la 127.0.0.1", *controller)
 	case *hours <= 0:
 		_, _ = fmt.Fprint(out, usage)
 		return errors.New("--hours este un număr de ore mai mare decât 0")
@@ -48,4 +54,17 @@ func mi2Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 		CameraURLs: func(ctx context.Context, streams []string) (map[string]string, error) {
 			return mi1.CameraURLs(ctx, addr, host.Pseudonym, streams)
 		}})
+}
+
+// loopback reports whether addr, a host with or without a port, is this
+// device: a loopback address, or localhost.
+func loopback(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
 }

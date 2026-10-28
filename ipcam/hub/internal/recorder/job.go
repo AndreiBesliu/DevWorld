@@ -139,7 +139,8 @@ type Observer interface {
 
 // The Observer may also implement these.
 type (
-	// GapObserver is told of each gap written, open, or closed.
+	// GapObserver is told of each gap written, open, or closed, and of a
+	// stopped stream's gap that a failed card did not let Stop write.
 	GapObserver interface{ Gap(g catalog.Gap) }
 	// SegmentVerifiedObserver is told of each segment that the background
 	// verification passed, by its absolute path.

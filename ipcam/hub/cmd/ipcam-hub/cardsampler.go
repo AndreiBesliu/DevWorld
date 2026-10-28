@@ -23,6 +23,12 @@ var probeEvery = 10 * time.Second
 
 const mountEvery = 5 * time.Second
 
+// probeHung is how many intervals a probe may hang before each further
+// interval also counts as an I/O error (Task 8 review M2): with 10 s
+// intervals, a card whose fsync hangs for good has 3 errors in 60 s, so is
+// FAILED, about 50 s after its probe began.
+const probeHung = 3
+
 // probePath is the probe file, under rec/.
 var probePath = filepath.Join(".health", "probe")
 
@@ -37,9 +43,11 @@ type cardRecorder interface {
 
 // cardSampler watches the SD card under rec/ while ipcam-hub records on it
 // (T40, HUB-17, G17), with health.CardMonitor's §13.1 thresholds. Its
-// inputs: every probeEvery it writes and fsyncs rec/.health/probe and times
-// it, and an EIO or EROFS of the probe is an I/O error or a read-only card;
-// every mountEvery it reads the read-only flag of rec/'s mount; a line of
+// inputs: every probeEvery it writes and fsyncs rec/.health/probe, on a
+// goroutine of its own, and times it, and an EIO or EROFS of the probe is
+// an I/O error or a read-only card, and a probe that hangs counts as slow,
+// then as I/O errors (probeTick); every mountEvery it reads the read-only
+// flag of rec/'s mount; a line of
 // MediaMTX's log, or an error of ipcam-hub's own, that holds «input/output
 // error» or «read-only file system» is an I/O error (the recorder reports a
 // directory that stays unreadable once, at the start's reconcile or at the
@@ -47,10 +55,11 @@ type cardRecorder interface {
 // card's state is a card event, and the card alert an alert event.
 //
 // Below FAILED, recording goes on: a write that MediaMTX could not make
-// becomes a card gap, from the end of the file's last good part to the
-// start of the stream's next segment (recorder.WriteFailed). At FAILED,
-// every job stops with a card gap (recorder.Stop), at once: recording stops
-// with a gap, never with a silent loss (Review Focus 4).
+// becomes a card gap, from the end of the last good part to the start of
+// the stream's next segment (recorder.WriteFailed, which returns at once:
+// the goroutine that reads MediaMTX's log never touches the card). At
+// FAILED, every job stops with a card gap (recorder.Stop), at once:
+// recording stops with a gap, never with a silent loss (Review Focus 4).
 type cardSampler struct {
 	recDir, mountInfo string
 	ev                *events
@@ -58,6 +67,9 @@ type cardSampler struct {
 	// probeFile writes and fsyncs the probe at path and returns how long it
 	// took; tests replace it.
 	probeFile func(path string) (time.Duration, error)
+	// probeEvery and mountEvery are the sampler's pace: the package's, which
+	// tests change.
+	probeEvery, mountEvery time.Duration
 
 	mu       sync.Mutex
 	mon      *health.CardMonitor
@@ -65,10 +77,14 @@ type cardSampler struct {
 	rec      cardRecorder
 	failed   chan struct{} // closed once the card has failed
 	probeErr string        // the probe's last error that is not the card's
+	// probing is when the probe that has not returned yet began, by now;
+	// zero while none runs.
+	probing time.Time
 }
 
 func newCardSampler(recDir, mountInfo string, ev *events) *cardSampler {
 	return &cardSampler{recDir: recDir, mountInfo: mountInfo, ev: ev, now: time.Now, probeFile: writeProbe,
+		probeEvery: probeEvery, mountEvery: mountEvery,
 		mon: health.NewCardMonitor(), state: health.CardOK, failed: make(chan struct{})}
 }
 
@@ -93,24 +109,33 @@ func (s *cardSampler) attach(rec cardRecorder) {
 }
 
 // run probes the card and reads the mount table until ctx is done, and
-// stops every job of jobs once the card has failed.
+// stops every job of jobs once the card has failed. The stop waits on a
+// goroutine of its own, and each probe runs on one of its own: a probe that
+// hangs on a dying card holds neither the stop nor the next intervals
+// (Task 8 review M2). The stop's own writes, MediaMTX's configuration and
+// the gaps' rows, are on the card: on a read-only card they fail at once,
+// and the gaps still go out as events (recorder.Stop); a card that hangs
+// holds them.
 func (s *cardSampler) run(ctx context.Context, jobs []recorder.Job) {
-	probe := time.NewTicker(probeEvery)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-s.failed:
+			s.stopAll(ctx, jobs)
+		}
+	}()
+	probe := time.NewTicker(s.probeEvery)
 	defer probe.Stop()
-	mount := time.NewTicker(mountEvery)
+	mount := time.NewTicker(s.mountEvery)
 	defer mount.Stop()
-	failed := s.failed
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-probe.C:
-			s.probe()
+			s.probeTick()
 		case <-mount.C:
 			s.pollMount()
-		case <-failed:
-			failed = nil
-			s.stopAll(ctx, jobs)
 		}
 	}
 }
@@ -129,18 +154,22 @@ func (s *cardSampler) stopAll(ctx context.Context, jobs []recorder.Job) {
 
 // childLog takes a line of MediaMTX's log: one that holds an I/O error is
 // one of the card's, and when it is a stream's recorder that failed, the
-// tail of the file that it was writing gets a card gap.
+// hole that it leaves gets a card gap (recorder.WriteFailed). It runs on
+// the goroutine that reads MediaMTX's log, so it does no disk I/O. The
+// failed write goes to the recorder before the card's new state goes out.
 func (s *cardSampler) childLog(line string) {
 	if !ioErrorText(line) {
 		return
 	}
 	s.mu.Lock()
-	s.observe(health.IoEvent{Kind: health.IoEIO})
 	rec := s.rec
 	s.mu.Unlock()
 	if cam, p, ok := recorder.LogStream(line); ok && rec != nil && strings.Contains(line, "] [recorder] ") {
 		rec.WriteFailed(cam, p, catalog.GapCard)
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.observe(health.IoEvent{Kind: health.IoEIO})
 }
 
 // hubError takes an error of ipcam-hub's own: one that holds an I/O error
@@ -160,11 +189,32 @@ func ioErrorText(text string) bool {
 	return strings.Contains(text, "input/output error") || strings.Contains(text, "read-only file system")
 }
 
+// probeTick starts a probe on a goroutine of its own. While the last one
+// has not returned, it starts none, and counts that probe's time so far as
+// an fsync's, and, once it has hung for probeHung intervals, as an I/O
+// error too: a probe that hangs on a dying card is never invisible.
+func (s *cardSampler) probeTick() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	if s.probing.IsZero() {
+		s.probing = now
+		go s.probe()
+		return
+	}
+	hung := now.Sub(s.probing)
+	s.observe(health.IoEvent{Kind: health.IoFsync, Latency: hung})
+	if hung >= probeHung*s.probeEvery {
+		s.observe(health.IoEvent{Kind: health.IoEIO})
+	}
+}
+
 // probe writes and fsyncs the probe and observes its time, or its error.
 func (s *cardSampler) probe() {
 	took, err := s.probeFile(filepath.Join(s.recDir, probePath))
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.probing = time.Time{}
 	switch {
 	case errors.Is(err, syscall.EROFS):
 		s.observe(health.IoEvent{Kind: health.IoEROFS})

@@ -4,7 +4,6 @@ package mi2
 
 import (
 	"errors"
-	"fmt"
 	"io/fs"
 	"math"
 	"os"
@@ -25,8 +24,8 @@ const (
 )
 
 // ErrWindowTooSmall is Window's error when half the free space holds less
-// than an hour of recording.
-var ErrWindowTooSmall = errors.New("mi2: the free space holds a rolling window of less than 1 h")
+// than an hour of recording. recspike prints it to the owner, in Romanian.
+var ErrWindowTooSmall = errors.New("spațiul liber nu ajunge pentru o fereastră de cel puțin 1 h")
 
 // WriteRate is the write rate of cameras main streams, in bytes per second:
 // 4 MB/s for 8 cameras.
@@ -78,7 +77,7 @@ func (p *Pruner) Verified(path string) {
 // Prune deletes the verified segments whose last write, their close, is at
 // least the window before now, and returns them, sorted. A segment that is
 // gone is forgotten; one that cannot be deleted now is kept for the next
-// prune, with its error.
+// prune, with its error, the file system's own, which names the segment.
 func (p *Pruner) Prune(now time.Time) ([]string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -97,7 +96,7 @@ func (p *Pruner) Prune(now time.Time) ([]string, error) {
 			continue
 		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("mi2: delete a segment older than the window: %w", err))
+			errs = append(errs, err)
 			continue
 		}
 		delete(p.verified, path)

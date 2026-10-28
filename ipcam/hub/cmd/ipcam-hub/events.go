@@ -28,7 +28,9 @@ import (
 //   - recording: cam, profile; the first part of a stream after a (re)start.
 //   - segment_closed: cam, profile, path, startMs, endMs, encrypted.
 //   - gap: cam, profile, startMs, endMs (0 while open), reason; for each gap
-//     written, closed or moved.
+//     written, closed or moved, and for the gap of a job that the card's
+//     failure stopped also when the card did not let it be written (an
+//     error event says so).
 //   - child_restart: MediaMTX was started again.
 //   - verify: unreadable, tornParts, catalogMismatches of a background
 //     verification pass.

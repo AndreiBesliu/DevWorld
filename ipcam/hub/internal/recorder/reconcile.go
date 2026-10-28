@@ -331,11 +331,13 @@ func quarantine(s segFile) error {
 //     its last complete part, and New rewrites the salvage in the background
 //     (C1-R9; Reconcile alone leaves the cut file). A file with its final
 //     chunk is never resealed or rewritten;
-//   - each lost tail is a restart gap, which ends where the stream's next
-//     segment that holds a recording starts, or stays open when there is
-//     none: the first part after the start closes it. It is written before
-//     the file changes, so that no cut loses it; the next start finds it
-//     again after a cut before the change, and writes no second one;
+//   - each lost tail is a restart gap, or a gap of the reason that
+//     WriteFailed recorded for a .part that MediaMTX could not write (T40),
+//     which ends where the stream's next segment that holds a recording
+//     starts, or stays open when there is none: the first part after the
+//     start closes it. It is written before the file changes, so that no cut
+//     loses it; the next start finds it again after a cut before the change,
+//     and writes no second one;
 //   - an unreadable .part gets a restart gap from the start in its name, and
 //     is set aside as <name>.unreadable;
 //   - the catalog is made to match the files.
@@ -424,14 +426,29 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 			continue
 		}
 		var g catalog.Gap
-		gapChanged := false
+		gapChanged, recorded := false, false
+		// forget drops the file's recorded tail reason once its gap is written
+		// and the .part is gone.
+		forget := func() {
+			if recorded {
+				if err := cat.DeleteTailReason(ctx, rp.seg.rel); err != nil {
+					res.errs = append(res.errs, err)
+				}
+			}
+		}
 		if rp.lostTail() {
 			// The gap first, before the file changes: a cut before the change
 			// finds the gap again at the next start, one after it would lose
 			// the gap. A .part that an earlier MediaMTX left, older than other
 			// segments of its stream, has a gap that ended when the next one
-			// started.
-			g = tailGap(rp.seg, rp.keptMs(), nextStartMs(segs, rp.seg, noRecording), catalog.GapRestart)
+			// started. Its reason is restart, or the one that WriteFailed
+			// recorded for the .part (T40).
+			reason, found, err := tailReason(ctx, cat, rp.seg)
+			if err != nil {
+				return res, err
+			}
+			recorded = found
+			g = tailGap(rp.seg, rp.keptMs(), nextStartMs(segs, rp.seg, noRecording), reason)
 			isNew, moved, err := putTailGap(ctx, cat, rp.seg, rp.keptMs(), g)
 			if err != nil {
 				return res, err
@@ -450,6 +467,8 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 				rp.close() // Windows renames only a file that nobody has open
 				if err := quarantine(rp.seg); err != nil {
 					res.errs = append(res.errs, fileError("set aside", rp.seg.abs, err))
+				} else {
+					forget()
 				}
 			}
 			continue
@@ -471,7 +490,11 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 				continue
 			}
 		}
+		forget()
 		if p != nil {
+			if rp.lostTail() {
+				p.gapReason = g.Reason
+			}
 			res.pending = append(res.pending, p)
 		}
 		durations[rp.seg.final()] = durationMs
@@ -483,6 +506,19 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 	errs, err := reconcileCatalog(ctx, recDir, tail, cat, rows, durations)
 	res.errs = append(res.errs, errs...)
 	return res, err
+}
+
+// tailReason returns the reason of the tail gap of s: the one that
+// WriteFailed recorded in the catalog for a .part that MediaMTX could not
+// write (T40), else restart. found reports a recorded one, which the repair
+// deletes once the file has its final name or is set aside.
+func tailReason(ctx context.Context, cat *catalog.DB, s segFile) (reason catalog.GapReason, found bool, err error) {
+	if s.part {
+		if reason, found, err = cat.TailReason(ctx, s.rel); err != nil || found {
+			return reason, found, err
+		}
+	}
+	return catalog.GapRestart, false, nil
 }
 
 // tailGap is the gap of reason after the lost tail of s, whose file now
@@ -879,12 +915,26 @@ func (r *rec) repairPart(ctx context.Context, rp *repair, none map[string]bool, 
 		report.Unreadable++
 		return nil, rp.failed
 	}
-	// The gap first, before the file changes, as at startup. It ends where the
-	// stream's next segment that holds a recording starts when that segment
-	// is there; otherwise the stream's first part closes it. gapMu keeps that
-	// first part from closing the stream's gaps between the two steps.
+	// The gap first, before the file changes, as at startup, with its
+	// reason: restart, or the one that WriteFailed recorded (T40). It ends
+	// where the stream's next segment that holds a recording starts when that
+	// segment is there; otherwise the stream's first part closes it. gapMu
+	// keeps that first part from closing the stream's gaps between the two
+	// steps.
+	reason, recorded, err := tailReason(ctx, r.cfg.Catalog, s)
+	if err != nil {
+		return nil, err
+	}
+	// forget drops the recorded reason once the gap is written and the .part
+	// is gone.
+	forget := func() error {
+		if !recorded {
+			return nil
+		}
+		return r.cfg.Catalog.DeleteTailReason(ctx, s.rel)
+	}
 	r.gapMu.Lock()
-	g := tailGap(s, rp.keptMs(), nextStartMs(streamSegments(r.cfg.RecDir, s.key), s, none), r.takeTailReason(s.abs))
+	g := tailGap(s, rp.keptMs(), nextStartMs(streamSegments(r.cfg.RecDir, s.key), s, none), reason)
 	isNew, moved, err := putTailGap(ctx, r.cfg.Catalog, s, rp.keptMs(), g)
 	r.gapMu.Unlock()
 	if err != nil {
@@ -903,7 +953,10 @@ func (r *rec) repairPart(ctx context.Context, rp *repair, none map[string]bool, 
 	if rp.unreadable {
 		report.Unreadable++
 		rp.close() // Windows renames only a file that nobody has open
-		return nil, quarantine(s)
+		if err := quarantine(s); err != nil {
+			return nil, err
+		}
+		return nil, forget()
 	}
 	durationMs, pending, err := rp.apply(ctx, report)
 	if pending != nil {
@@ -914,6 +967,9 @@ func (r *rec) repairPart(ctx context.Context, rp *repair, none map[string]bool, 
 		moved, merr := failedRepairGap(ctx, r.cfg.Catalog, s, &g)
 		announce = announce || moved
 		return nil, errors.Join(err, merr)
+	}
+	if ferr := forget(); ferr != nil {
+		err = errors.Join(err, ferr)
 	}
 	if removed := !rp.complete && rp.salvage.empty; !removed {
 		info, serr := os.Stat(s.final())

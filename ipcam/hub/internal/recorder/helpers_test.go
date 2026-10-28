@@ -338,6 +338,15 @@ func waitFinalReport(t *testing.T, obs *testObserver) ReconcileReport {
 // recorder stops when the test ends.
 func startFake(t *testing.T, mode string, cfg Config) (*rec, Config) {
 	t.Helper()
+	r, cfg, _ := startFakeStoppable(t, mode, cfg)
+	return r, cfg
+}
+
+// startFakeStoppable is startFake, with stop, which stops the recorder, as
+// ipcam-hub's stop does, and returns once it has stopped; the test's end
+// calls it too.
+func startFakeStoppable(t *testing.T, mode string, cfg Config) (*rec, Config, func()) {
+	t.Helper()
 	t.Setenv(fakeChildEnv, mode)
 	self, err := os.Executable()
 	if err != nil {
@@ -358,17 +367,21 @@ func startFake(t *testing.T, mode string, cfg Config) (*rec, Config) {
 		cfg.HookCommand = []string{self, "hook", "segment-complete"}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	r, report, err := New(ctx, cfg)
+	started, report, err := New(ctx, cfg)
 	if err != nil {
 		cancel()
 		t.Fatalf("New: %v (report %+v)", err, report)
 	}
-	t.Cleanup(func() {
-		cancel()
-		for range r.Closed(context.Background()) {
-		}
-	})
-	return r.(*rec), cfg
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			for range started.Closed(context.Background()) {
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return started.(*rec), cfg, stop
 }
 
 // The fMP4 recordings of the tests are written with mediacommon, as MediaMTX
@@ -683,6 +696,24 @@ func setSyncDir(f func(dir string) error) (restore func()) {
 	previous := syncDir
 	syncDir = f
 	return func() { syncDir = previous }
+}
+
+// setReadDir replaces the listing of the directories under rec/ until
+// restore is called. A test that starts a recorder sets it before, and
+// restores it in a t.Cleanup registered before the recorder's, so that no
+// background loop reads it while it changes.
+func setReadDir(f func(dir string) ([]os.DirEntry, error)) (restore func()) {
+	previous := readDir
+	readDir = f
+	return func() { readDir = previous }
+}
+
+// setWriteConfigFile replaces the write of MediaMTX's configuration until
+// restore is called, under the same rule as setReadDir.
+func setWriteConfigFile(f func(path string, data []byte, perm os.FileMode) error) (restore func()) {
+	previous := writeConfigFile
+	writeConfigFile = f
+	return func() { writeConfigFile = previous }
 }
 
 // setVerifyOpenHook makes each verification call f with the path of each

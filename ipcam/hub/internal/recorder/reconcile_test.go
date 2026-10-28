@@ -1798,6 +1798,127 @@ func TestRecorder_WriteFailed_TailGapHasTheReason(t *testing.T) {
 	}
 }
 
+// TestRecorder_WriteFailed_ReadsNoDisk (T40; Task 8 review M3): WriteFailed
+// comes from the goroutine that reads MediaMTX's log, so it never waits for
+// the card: while the listing of the stream's directory hangs, as on a dying
+// SD card, it returns at once, and the recorder finds the failed .part on a
+// goroutine of its own once the listing answers, so that the file's tail gap
+// still has reason card.
+func TestRecorder_WriteFailed_ReadsNoDisk(t *testing.T) {
+	var hang atomic.Bool
+	release := make(chan struct{})
+	t.Cleanup(setReadDir(func(dir string) ([]os.DirEntry, error) {
+		if hang.Load() {
+			<-release
+		}
+		return os.ReadDir(dir)
+	}))
+	obs := &testObserver{}
+	r, cfg := startFake(t, "sleep", Config{Observer: obs})
+	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil)}); err != nil {
+		t.Fatal(err)
+	}
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
+	failedStart := time.Now().Add(-10 * time.Second)
+	writeFile(t, segPath(cfg.RecDir, "cam1", "main", failedStart, ".part"), f.data[:f.partStart[2]+10])
+	waitFor(t, 10*time.Second, "the .part was not seen", func() bool { return len(obs.snapshot().firsts) >= 1 })
+
+	hang.Store(true)
+	returned := make(chan struct{})
+	go func() {
+		r.WriteFailed("cam1", "main", catalog.GapCard)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Error("WriteFailed waited for the listing of the stream's directory")
+	}
+	hang.Store(false)
+	close(release)
+	<-returned
+
+	nextStart := time.Now()
+	writeFile(t, segPath(cfg.RecDir, "cam1", "main", nextStart, ".part"), []byte("the segment that MediaMTX writes now"))
+	if rep := waitFinalReport(t, obs); rep != (ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 1, GapsWritten: 1}) {
+		t.Errorf("report after the repair %+v, want the failed .part repaired with its gap", rep)
+	}
+	requireGaps(t, cfg.Catalog, []catalog.Gap{{Cam: "cam1", Profile: "main", StartMs: failedStart.UnixMilli() + 2000, EndMs: nextStart.UnixMilli(), Reason: catalog.GapCard}})
+}
+
+// TestRecorder_WriteFailed_ReasonOutlivesAStop (T40; Task 8 review M3): the
+// card reason of a .part that MediaMTX could not write is kept in the
+// catalog, not only in memory: when ipcam-hub stops before MediaMTX starts
+// the stream's next segment, so before the live repair, the next start's
+// reconcile repairs the file with a card gap, not a restart gap.
+func TestRecorder_WriteFailed_ReasonOutlivesAStop(t *testing.T) {
+	r, cfg, stop := startFakeStoppable(t, "sleep", Config{})
+	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil)}); err != nil {
+		t.Fatal(err)
+	}
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}})
+	failedStart := time.Now().Add(-10 * time.Second)
+	failed := segPath(cfg.RecDir, "cam1", "main", failedStart, ".part")
+	writeFile(t, failed, f.data[:f.partStart[2]+10])
+	r.WriteFailed("cam1", "main", catalog.GapCard)
+	stop()
+	if _, err := os.Stat(failed); err != nil {
+		t.Fatalf("the failed .part is gone before the next start: %v", err)
+	}
+
+	if _, err := Reconcile(t.Context(), cfg.RecDir, nil, cfg.Catalog); err != nil {
+		t.Fatal(err)
+	}
+	gaps, err := cfg.Catalog.Gaps(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := catalog.Gap{Cam: "cam1", Profile: "main", StartMs: failedStart.UnixMilli() + 2000, Reason: catalog.GapCard}
+	tails := slices.DeleteFunc(gaps, func(g catalog.Gap) bool { return g.Reason == catalog.GapHubStopped })
+	if !slices.Equal(tails, []catalog.Gap{want}) {
+		t.Errorf("after the next start's reconcile, the tail gaps are %+v, want %+v", tails, want)
+	}
+}
+
+// TestRecorder_WriteFailed_CreationGapFromLastPartToNextPart (T40; Task 8
+// concern 2): a write that failed at the creation of a stream's next
+// segment leaves no .part, so no repair writes its hole: the recorder writes
+// it as an open card gap from the end of the last good part, the end of the
+// stream's newest file, and goes out as a gap event at once, so that a stop
+// in between keeps it; the next part closes it at its start, although it is
+// not the stream's first since MediaMTX started.
+func TestRecorder_WriteFailed_CreationGapFromLastPartToNextPart(t *testing.T) {
+	obs := &testObserver{}
+	r, cfg := startFake(t, "sleep", Config{Observer: obs})
+	if err := r.Apply(t.Context(), []Job{NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil)}); err != nil {
+		t.Fatal(err)
+	}
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000}})
+	lastStart := time.Now().Add(-10 * time.Second)
+	last := segPath(cfg.RecDir, "cam1", "main", lastStart, "")
+	writeFile(t, last+".part", f.data)
+	waitFor(t, 10*time.Second, "the .part was not seen", func() bool { return len(obs.snapshot().firsts) == 1 })
+	// MediaMTX closes the segment, then cannot create the next one's file.
+	if err := os.Rename(last+".part", last); err != nil {
+		t.Fatal(err)
+	}
+	r.WriteFailed("cam1", "main", catalog.GapCard)
+
+	open := catalog.Gap{Cam: "cam1", Profile: "main", StartMs: lastStart.UnixMilli() + 2000, Reason: catalog.GapCard}
+	waitFor(t, 10*time.Second, "no open card gap from the end of the last part", func() bool { return slices.Contains(obs.snapshot().gaps, open) })
+	requireGaps(t, cfg.Catalog, []catalog.Gap{open})
+
+	nextStart := time.Now()
+	writeFile(t, segPath(cfg.RecDir, "cam1", "main", nextStart, ".part"), f.data[:f.partEnd[0]])
+	closed := open
+	closed.EndMs = nextStart.UnixMilli()
+	waitFor(t, 10*time.Second, "the card gap was not closed by the next part", func() bool { return slices.Contains(obs.snapshot().gaps, closed) })
+	requireGaps(t, cfg.Catalog, []catalog.Gap{closed})
+	if firsts := obs.snapshot().firsts; len(firsts) != 1 {
+		t.Errorf("recording events %v, want only the stream's first part since MediaMTX started", firsts)
+	}
+}
+
 // TestReconcile_TailGapKeepsOtherReasonsAndFiles (8a M1, M2): the gap of a
 // lost tail is this file's when a gap of its reason starts within the
 // file's recording, [its start, its start + what it keeps]: a failed

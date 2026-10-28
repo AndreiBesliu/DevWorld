@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/signal"
@@ -22,12 +24,14 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mp4/codecs"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/recorder"
 )
 
 // With fakeMediaMTXEnv set, the test binary started on a MediaMTX
 // configuration (<run dir>/mediamtx.yml) plays MediaMTX (fakeMediaMTX):
 // ipcam-hub, which the variable reaches too, starts it as its child. The
-// fake writes what it did to the file that fakeOutEnv names.
+// fake writes what it did to the file that fakeOutEnv names, and waits for
+// the test's signals beside it (fakeSignal).
 const (
 	fakeMediaMTXEnv = "IPCAM_HUB_TEST_FAKE_MEDIAMTX"
 	fakeOutEnv      = "IPCAM_HUB_TEST_FAKE_OUT"
@@ -53,7 +57,7 @@ type fakeOut struct {
 //   - "writeerror": for the first path, it writes a .part of two whole 1 s
 //     parts and a torn third, logs its failed write, then writes the next
 //     segment's .part, as MediaMTX does when a write fails and it starts the
-//     recorder again 2 s later.
+//     recorder again 2 s later; each step waits for the test's signal.
 //
 // Then it waits until it is stopped.
 func fakeMediaMTX(mode, config string) int {
@@ -122,7 +126,31 @@ func firstPath(config string) (path, recDir string, err error) {
 	return "", "", errors.New("no path in the configuration after 30 s")
 }
 
-// writeErrorSegments writes the segments of mode "writeerror" for path.
+// The signals of the test to the "writeerror" fake, each sent once
+// ipcam-hub's events show that it took the fake's step before.
+const (
+	signalSeen   = "seen"   // a poll saw the first segment's .part: its recording event
+	signalFailed = "failed" // the failed write reached the recorder: the card's degraded event
+)
+
+// fakeSignal is the file that sends signal to the fake MediaMTX whose out
+// file is out.
+func fakeSignal(out, signal string) string { return out + "." + signal }
+
+// awaitSignal waits until the test sends signal.
+func awaitSignal(signal string) error {
+	path := fakeSignal(os.Getenv(fakeOutEnv), signal)
+	for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(path); err == nil { //nolint:gosec // G703: beside the file that the test named
+			return nil
+		}
+	}
+	return fmt.Errorf("no %s signal after 60 s", signal)
+}
+
+// writeErrorSegments writes the segments of mode "writeerror" for path,
+// each step once the test has seen ipcam-hub take the one before, never
+// after a fixed time.
 func writeErrorSegments(path, recDir string, failedWrite func(file string)) error {
 	init, parts, err := fakeRecording(3)
 	if err != nil {
@@ -135,16 +163,25 @@ func writeErrorSegments(path, recDir string, failedWrite func(file string)) erro
 	if err != nil {
 		return err
 	}
-	time.Sleep(500 * time.Millisecond) // a poll sees the first part
+	// The next segment's .part leaves this one behind only for a hub that saw
+	// this one first.
+	if err := awaitSignal(signalSeen); err != nil {
+		return err
+	}
 	if err := appendFile(first, slices.Concat(parts[1], torn)); err != nil {
 		return err
 	}
-	time.Sleep(300 * time.Millisecond)
 	failedWrite(first)
-	time.Sleep(2 * time.Second) // MediaMTX's pause before it starts the recorder again
+	// The hub notes the failed write before the next segment makes it repair
+	// the file.
+	if err := awaitSignal(signalFailed); err != nil {
+		return err
+	}
+	// The next segment starts after MediaMTX's 2 s pause, as its name says:
+	// after the failed file's two parts, however soon the signals came.
+	nextStart := time.Now().Add(2 * time.Second).UTC().Truncate(time.Microsecond)
 	// What the test reads goes out first: the next segment's .part makes the
 	// hub repair the failed one.
-	nextStart := time.Now().UTC().Truncate(time.Microsecond)
 	b, err := json.Marshal(fakeOut{FirstStartMs: firstStart.UnixMilli(), NextStartMs: nextStart.UnixMilli()})
 	if err != nil {
 		return err
@@ -152,12 +189,8 @@ func writeErrorSegments(path, recDir string, failedWrite func(file string)) erro
 	if err := os.WriteFile(os.Getenv(fakeOutEnv), b, 0o600); err != nil { //nolint:gosec // the file that the test named
 		return err
 	}
-	next, err := fakeSegment(recDir, path, nextStart, init, parts[0])
-	if err != nil {
-		return err
-	}
-	time.Sleep(500 * time.Millisecond)
-	return appendFile(next, parts[1])
+	_, err = fakeSegment(recDir, path, nextStart, init, parts[0])
+	return err
 }
 
 // fakeSegment creates the .part of a segment of path that starts at start,
@@ -351,7 +384,17 @@ func TestSdCard_IoErrors_RaiseAlertThenStop(t *testing.T) {
 // of the next segment.
 func TestSdCard_DegradedKeepsRecording(t *testing.T) {
 	h, dataDir := sdCardHub(t, "writeerror", false, "cam1/main")
+	out := filepath.Join(filepath.Dir(dataDir), "fake.json")
+	signal := func(name string) {
+		if err := os.WriteFile(fakeSignal(out, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var c cardEvents
+	c.until(t, h, 60*time.Second, "recording event", func(all []map[string]any) bool { return len(ofTypeIn(all, "recording", "", nil)) > 0 })
+	signal(signalSeen)
+	c.until(t, h, 60*time.Second, "degraded card", func(all []map[string]any) bool { return len(ofTypeIn(all, "card", "state", "degraded")) > 0 })
+	signal(signalFailed)
 	c.until(t, h, 60*time.Second, "card gap", func(all []map[string]any) bool { return len(cardGaps(all)) > 0 })
 	c.until(t, h, 10*time.Second, "running status after the gap", func(all []map[string]any) bool {
 		return ofTypeIn(all[len(all)-1:], "status", "running", true) != nil
@@ -367,12 +410,12 @@ func TestSdCard_DegradedKeepsRecording(t *testing.T) {
 	if n := len(ofTypeIn(c.all, "alert", "kind", "card")); n != 1 {
 		t.Errorf("%d card alerts, want 1", n)
 	}
-	b, err := os.ReadFile(filepath.Join(filepath.Dir(dataDir), "fake.json")) //nolint:gosec // the fake's own output
+	b, err := os.ReadFile(out) //nolint:gosec // the fake's own output
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out fakeOut
-	if err := json.Unmarshal(b, &out); err != nil {
+	var segments fakeOut
+	if err := json.Unmarshal(b, &segments); err != nil {
 		t.Fatal(err)
 	}
 
@@ -390,7 +433,7 @@ func TestSdCard_DegradedKeepsRecording(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []catalog.Gap{{Cam: "cam1", Profile: "main", StartMs: out.FirstStartMs + 2000, EndMs: out.NextStartMs, Reason: catalog.GapCard}}
+	want := []catalog.Gap{{Cam: "cam1", Profile: "main", StartMs: segments.FirstStartMs + 2000, EndMs: segments.NextStartMs, Reason: catalog.GapCard}}
 	if !slices.Equal(gaps, want) {
 		t.Errorf("gaps %+v, want %+v", gaps, want)
 	}
@@ -472,5 +515,121 @@ func TestCardSampler_CountsIOErrorsOfMediaMTXAndTheHub(t *testing.T) {
 	s.hubError(fmt.Errorf("recorder: verification: list 2026-10-28: %w", &fs.PathError{Op: "readdirent", Path: "x", Err: syscall.EIO}))
 	if st := s.stats(); st.IOErrors24h != 3 {
 		t.Errorf("stats %+v, want 3 I/O errors: two lines of MediaMTX and one error of ipcam-hub", st)
+	}
+}
+
+// fakeCardRecorder records what the card sampler asks of the recorder.
+type fakeCardRecorder struct {
+	stops chan string // "<cam>/<profile>" of each Stop
+}
+
+func (f *fakeCardRecorder) Stop(_ context.Context, cam recorder.CameraID, p recorder.Profile, reason catalog.GapReason) error {
+	if reason != catalog.GapCard {
+		return fmt.Errorf("stop with reason %s, not card", reason)
+	}
+	f.stops <- string(cam) + "/" + string(p)
+	return nil
+}
+
+func (f *fakeCardRecorder) WriteFailed(recorder.CameraID, recorder.Profile, catalog.GapReason) {}
+
+// eioLine is a line of MediaMTX's log for a write that failed on the card.
+const eioLine = "2026/10/28 12:00:00 ERR [path cam1/main] [recorder] write /data/rec/cam1/main/x.mp4.part: input/output error"
+
+// TestCardSampler_HungProbe_FailedStillStopsTheJobs (T40, Review Focus 4;
+// Task 8 review M2): the probe's write and fsync run on a goroutine of
+// their own, and the stop at FAILED on another: a probe that hangs on a
+// dying card keeps neither MediaMTX's I/O errors from making the card
+// FAILED nor every job from stopping with a card gap at once.
+func TestCardSampler_HungProbe_FailedStillStopsTheJobs(t *testing.T) {
+	s := newCardSampler(t.TempDir(), "", &events{out: io.Discard})
+	s.probeEvery = 10 * time.Millisecond
+	hung, probing := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	s.probeFile = func(string) (time.Duration, error) {
+		once.Do(func() { close(probing) })
+		<-hung
+		return 0, nil
+	}
+	rec := &fakeCardRecorder{stops: make(chan string, 4)}
+	s.attach(rec)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(func() {
+		cancel()
+		close(hung)
+	})
+	jobs := []recorder.Job{recorder.NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil), recorder.NewJob("cam2", "main", "rtsp://127.0.0.1:1/cam2/main", nil)}
+	go s.run(ctx, jobs)
+	select {
+	case <-probing:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no probe started")
+	}
+
+	for range 3 {
+		s.childLog(eioLine)
+	}
+	var stopped []string
+	for len(stopped) < len(jobs) {
+		select {
+		case job := <-rec.stops:
+			stopped = append(stopped, job)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("10 s after FAILED, with the probe hung, Stop for %v; want every job", stopped)
+		}
+	}
+	slices.Sort(stopped)
+	if want := []string{"cam1/main", "cam2/main"}; !slices.Equal(stopped, want) {
+		t.Errorf("stopped %v, want %v", stopped, want)
+	}
+}
+
+// TestCardSampler_HungProbeCountsAsSlowThenAsErrors (T40, §13.1; Task 8
+// review M2): a probe that has not returned at the next interval counts
+// its time so far as an fsync's, so a hung card is DEGRADED at once; once
+// it has hung for 3 intervals, each interval also counts as an I/O error,
+// so that a card whose fsync hangs for good is FAILED, and its jobs stop,
+// about 50 s after the probe began, inside §13.1's 60 s.
+func TestCardSampler_HungProbeCountsAsSlowThenAsErrors(t *testing.T) {
+	var out bytes.Buffer
+	s := newCardSampler(t.TempDir(), "", &events{out: &out})
+	var clock sync.Mutex
+	now := time.Now()
+	s.now = func() time.Time {
+		clock.Lock()
+		defer clock.Unlock()
+		return now
+	}
+	hung := make(chan struct{})
+	t.Cleanup(func() { close(hung) })
+	s.probeFile = func(string) (time.Duration, error) {
+		<-hung
+		return 0, nil
+	}
+
+	s.probeTick() // the probe starts, and hangs
+	var states []string
+	for range 5 {
+		clock.Lock()
+		now = now.Add(s.probeEvery)
+		clock.Unlock()
+		s.probeTick()
+		s.mu.Lock()
+		states = append(states, s.state.String())
+		s.mu.Unlock()
+	}
+	if want := []string{"degraded", "degraded", "degraded", "degraded", "failed"}; !slices.Equal(states, want) {
+		t.Errorf("after each interval of the hung probe, states %v, want %v", states, want)
+	}
+	if st := s.stats(); st.IOErrors60s != 3 || st.FsyncP99_10m != 5*s.probeEvery {
+		t.Errorf("stats %+v, want 3 I/O errors in 60 s and a p99 of %v", st, 5*s.probeEvery)
+	}
+	select {
+	case <-s.failed:
+	default:
+		t.Error("FAILED did not ask for the jobs' stop")
+	}
+	if n := strings.Count(out.String(), `"type":"alert"`); n != 1 {
+		t.Errorf("%d alerts, want 1:\n%s", n, out.String())
 	}
 }
