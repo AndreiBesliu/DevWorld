@@ -11,6 +11,10 @@ Upstream: `github.com/bluenviron/mediamtx` (MIT), vendored by `tools/scripts/ven
 
 The other upstream tests are not run. Some of them fail in the fork because of MTX-0 (see below).
 
+**Upstream tests changed.** Besides the adaptations that each patch lists, one upstream test of the recorder is changed only to make it reliable:
+
+- `TestRecorderFMP4NegativeInitialDTS` (`internal/recorder/recorder_test.go`) waited a fixed 50 ms between writing its units and closing the recorder. `Close` drops the units still in the recorder's queue, so on a loaded runner the last audio unit could be lost and with it the part that the test reads: it failed once in CI (PR run 40219718421), and 2 of 200 runs with `-race` on a core shared with `stress-ng`. It now waits, for at most 10 s, for the disk writer's second fsync request (MTX-1's `syncAsked` seam), which only the last unit causes; 600 runs under the same load passed. **Rebase:** redo it while upstream's test still sleeps; it needs MTX-1's seam.
+
 **Rebasing.** `tools/scripts/vendor-mediamtx.sh <tag>` replaces the upstream tree (`main.go`, `internal/`, `LICENSE`, `go.mod`, `go.sum`) and applies MTX-0. It stops when one of MTX-0's anchors has moved. Then `GOWORK=off go mod tidy`, redo the dependency changes below that the new release still needs, update `SOURCE.md`, and redo MTX-1… from the diff of their commits, each with its test.
 
 ### Dependency versions that differ from upstream's go.mod
