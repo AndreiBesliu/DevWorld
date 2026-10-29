@@ -3,6 +3,7 @@ package mi1
 import (
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -759,6 +760,27 @@ func TestMI1_Judge_DedupKeepsTheCopyThatCounts(t *testing.T) {
 			t.Errorf("Reasons = %q, want %q", j.Reasons, want)
 		}
 	})
+}
+
+// TestMI1_CountedRunsNameTheirEnvelope (G15; Task 12b review): CountedRuns
+// is G10's selection of each run once, which recreport uses too: of the
+// copies of a run, the first that counts, whatever their order, with its
+// set and the index in envs of the envelope that it came from.
+func TestMI1_CountedRunsNameTheirEnvelope(t *testing.T) {
+	plan := func(i int) RunPlan { return RunPlan{Index: i, PadLowBitrate: true, Streams: []string{MainStream}} }
+	counted, other := runOf(SetPCKill9, plan(1), 500), runOf(SetPCKill9, plan(2), 600)
+	invalid := counted
+	invalid.Valid, invalid.InvalidReason = false, "oprire în afara ferestrei"
+	envs := []results.Envelope{
+		{Code: "MI2", Set: "pc-mi2", Runs: []results.Run{counted}},
+		{Code: "MI1", Set: SetPCKill9, Runs: []results.Run{invalid}},
+		{Code: "MI1", Set: SetPCKill9, Runs: []results.Run{counted, other}},
+		{Code: "MI1", Set: SetPCKill9, Runs: []results.Run{invalid}},
+	}
+	want := []CountedRun{{Set: SetPCKill9, Run: counted, Env: 2}, {Set: SetPCKill9, Run: other, Env: 2}}
+	if got := CountedRuns(envs); !reflect.DeepEqual(got, want) {
+		t.Errorf("CountedRuns = %+v, want %+v", got, want)
+	}
 }
 
 // TestMI1_InvalidRealCut_IsRedoneWithSameSlot (Review Focus 1, G12): an

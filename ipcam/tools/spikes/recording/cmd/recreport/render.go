@@ -57,6 +57,8 @@ func newReport(in *inputs, date string) *report {
 
 func (r *report) g10() results.Judgement { return r.gates[0].j }
 
+func (r *report) g12() results.Judgement { return r.gates[2].j }
+
 func (r *report) g13() results.Judgement { return r.gates[3].j }
 
 // fileName is the report's name in the output folder.
@@ -235,7 +237,7 @@ func (r *report) models(b *strings.Builder) {
 	fmt.Fprintf(b, "| H1 (Pi 5) | ≈ 8 | %s | %s |\n| H2 (N100) | 16 | — | estimare, nemăsurată |\n\n", h1Result, h1)
 	fmt.Fprintf(b, "Numerele rezultate: G12 — %s; G13 — %s. Un plan B al lor coboară numărul recomandat al gazdei (minimum 1, O16), "+
 		"iar PR-ul raportului scrie numerele măsurate în §4.8. H1 și H2 se măsoară doar în Faza 0-bis, dacă doriți (G31).\n\n",
-		verdictText(r.gates[2].j), verdictText(r.gates[3].j))
+		verdictText(r.g12()), verdictText(r.g13()))
 }
 
 // h3Cameras is H3's recommended number (§4.8), the PC's starting number.
@@ -244,14 +246,18 @@ const h3Cameras = 8
 // resultText is host's recommended number after G12 and G13 (§4.8), from
 // start: the lower of the numbers that their judgements leave
 // (Recommended), named by the gates that lowered it below start. Without
-// G12's number, as while its steps are open, it is not settled.
+// G12's number, as while its steps are open, it is not settled, and G13's
+// number below start, when there is one, caps it.
 func (r *report) resultText(host string, start int) string {
-	g12, ok := r.gates[2].j.Recommended[host]
+	g12, ok := r.g12().Recommended[host]
+	g13, ok13 := r.g13().Recommended[host]
 	if !ok {
+		if ok13 && g13 < start {
+			return "nestabilit (G12); cel mult " + count(g13, "cameră", "camere") + " (G13)"
+		}
 		return "nestabilit (G12)"
 	}
 	n := g12
-	g13, ok13 := r.g13().Recommended[host]
 	if ok13 {
 		n = min(n, g13)
 	}
@@ -545,15 +551,32 @@ func (r *report) input(b *strings.Builder) {
 	b.WriteString("\n")
 }
 
-// latestGate is the gate whose Judge takes, of a host's set, the run with
-// the highest number, by the code of its envelopes (mi3, mi4).
-var latestGate = map[string]string{"MI3": "G12", "MI4": "G13"}
+// latestGate is the gate whose Judge takes, of a set, the run with the
+// highest number, by the code and set of its envelopes: G12 each host's
+// MI3 run, G13 the Pi's MI4 run (the PC's is information only).
+var latestGate = map[string]string{
+	"MI3 " + mi3.SetFor("pc"): "G12", "MI3 " + mi3.SetFor("pi"): "G12", "MI4 " + mi4.SetFor("pi"): "G13",
+}
+
+// worstRunNote is what a renumbering of MI2 means for G11, which judges a
+// host's run with the most crashes, or of runs without any the longest.
+const worstRunNote = " G11 nu depinde de ordine: judecă rularea cu cele mai multe crash-uri ale ipcam-hub sau, fără crash-uri, pe cea mai lungă."
 
 // renumberedText says how a set's envelopes that shared a run id were
 // renumbered (Task 10b): by their time, or, when some have none (named by
 // their new run ids), in an uncertain order, which the owner checks by hand
-// where a gate judges the highest number (Task 12 review, M1).
+// where a gate judges the highest number (Task 12 review, M1); for MI2,
+// that G11 does not depend on the order.
 func renumberedText(n renumbering) string {
+	text := renumberedOrder(n)
+	if n.code == "MI2" {
+		text += worstRunNote
+	}
+	return text
+}
+
+// renumberedOrder is renumberedText without what MI2's order means.
+func renumberedOrder(n renumbering) string {
 	pairs := make([]string, len(n.from))
 	for i := range n.from {
 		pairs[i] = fmt.Sprintf("`%s` → `%s`", n.from[i], n.to[i])
@@ -561,7 +584,7 @@ func renumberedText(n renumbering) string {
 	text := fmt.Sprintf("Intrare renumerotată: în `%s %s`, plicuri diferite aveau același număr de rulare, din dosare sau rulări CI diferite; ",
 		n.code, n.set)
 	last := len(n.to) - 1
-	gate, judged := latestGate[n.code]
+	gate, judged := latestGate[n.code+" "+n.set]
 	if len(n.untimed) == 0 {
 		text += "au fost renumerotate după momentul lor, de la cea mai veche la cea mai nouă: " + strings.Join(pairs, ", ") + "."
 		if judged {

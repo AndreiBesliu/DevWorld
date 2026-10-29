@@ -3,9 +3,13 @@ package mi3
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"errors"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,6 +122,61 @@ func TestLoads_RunUntilTheirEnd(t *testing.T) {
 	}
 	if _, err := RunLoad(t.Context(), "stream", LoadSpec{}, nil); err == nil {
 		t.Error("an unknown load ran")
+	}
+}
+
+// roundTrip is an http.RoundTripper made of a function.
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestLoads_UploadCutByItsEndIsItsEnd (Task 12b review): when the load's
+// end cuts a PUT short, what then comes back, the sink's 400 for a body
+// that did not arrive or the connection's error, is the load's end, not a
+// failure; a 400 before the end still fails the load.
+func TestLoads_UploadCutByItsEndIsItsEnd(t *testing.T) {
+	fx, err := makeFixture(t.TempDir(), 256<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, der, err := controller.NewSinkCertificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	badRequest := func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusBadRequest, Status: "400 Bad Request", Header: http.Header{}, Request: req,
+			Body: io.NopCloser(strings.NewReader("the body did not arrive\n"))}, nil
+	}
+	reset := func(*http.Request) (*http.Response, error) { return nil, errors.New("connection reset by peer") }
+	for _, c := range []struct {
+		name   string
+		end    bool // the load's end comes during the PUT
+		answer func(*http.Request) (*http.Response, error)
+		fails  bool
+	}{
+		{"the sink's 400 after the end", true, badRequest, false},
+		{"the connection's error after the end", true, reset, false},
+		{"the sink's 400 before the end", false, badRequest, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			old := uploadTransport
+			t.Cleanup(func() { uploadTransport = old })
+			uploadTransport = func(*tls.Config) http.RoundTripper {
+				return roundTrip(func(req *http.Request) (*http.Response, error) {
+					_, _ = io.CopyN(io.Discard, req.Body, 1000) // part of the segment went out
+					if c.end {
+						cancel()
+					}
+					return c.answer(req)
+				})
+			}
+			spec := LoadSpec{Plain: fx.plain, URL: "https://" + controller.SinkServerName + "/sink/", SinkCert: der, Bps: 8_000_000}
+			if _, err := RunLoad(ctx, LoadUpload, spec, func(LoadReport) error { return nil }); (err != nil) != c.fails {
+				t.Errorf("RunLoad = %v, want an error: %v", err, c.fails)
+			}
+		})
 	}
 }
 

@@ -5,6 +5,7 @@ package mi3
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -296,7 +297,10 @@ func runExport(ctx context.Context, spec LoadSpec, started func(LoadReport) erro
 
 // runUpload encrypts the clear segment with age for a fresh recipient and
 // PUTs it to the sink at spec.Bps, over and over, until ctx is done; it
-// returns the bytes that went out.
+// returns the bytes that went out. Once ctx is done, the PUT that its end
+// cut short ends the load whatever comes back, the sink's 400 for a body
+// that did not arrive or the connection's error: that is the load's end,
+// not a failure.
 func runUpload(ctx context.Context, spec LoadSpec, started func(LoadReport) error) (int64, error) {
 	tlsConfig, err := controller.SinkClientTLS(spec.SinkCert)
 	if err != nil {
@@ -306,7 +310,7 @@ func runUpload(ctx context.Context, spec LoadSpec, started func(LoadReport) erro
 	if err != nil {
 		return 0, err
 	}
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}}
+	client := &http.Client{Transport: uploadTransport(tlsConfig)}
 	defer client.CloseIdleConnections()
 	if err := started(LoadReport{}); err != nil {
 		return 0, err
@@ -315,10 +319,19 @@ func runUpload(ctx context.Context, spec LoadSpec, started func(LoadReport) erro
 	for n := 1; ; n++ {
 		sent, err := putSegment(ctx, client, spec, to.Recipient(), fmt.Sprintf("%supload-%d", spec.URL, n))
 		total += sent
+		if err != nil && ctx.Err() != nil {
+			return total, ctx.Err()
+		}
 		if err != nil {
 			return total, err
 		}
 	}
+}
+
+// uploadTransport is the upload's HTTP transport, with tlsConfig; tests
+// replace it.
+var uploadTransport = func(tlsConfig *tls.Config) http.RoundTripper {
+	return &http.Transport{TLSClientConfig: tlsConfig}
 }
 
 // putSegment PUTs the clear segment, age-encrypted as it goes, at the

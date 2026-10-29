@@ -222,7 +222,7 @@ type setResult struct {
 }
 
 // Judge is G10 (C17). Each set counts its runs that count (C16, R07), each
-// run once (G15, dedup). A set is complete when they have its plan's
+// run once (G15, CountedRuns). A set is complete when they have its plan's
 // composition (Plan: 20 default runs and an O17-off run, or 5 real cuts);
 // it passes complete with its default runs' median ≤ 1 s, their max ≤ 2 s
 // and no failed run (G11). Every stream's limit is recomputed with
@@ -249,8 +249,8 @@ func Judge(envs []results.Envelope) results.Judgement {
 		}
 	}
 	runs := map[string][]results.Run{}
-	for _, sr := range dedup(envs) {
-		runs[sr.set] = append(runs[sr.set], sr.run)
+	for _, c := range CountedRuns(envs) {
+		runs[c.Set] = append(runs[c.Set], c.Run)
 	}
 
 	outcomes := map[string]setResult{}
@@ -282,9 +282,9 @@ func Judge(envs []results.Envelope) results.Judgement {
 // O17-off run. MI2 takes its 20 resumes from the owner kill9 sets' (G13).
 func DefaultRuns(envs []results.Envelope, set string) []results.Run {
 	var out []results.Run
-	for _, sr := range dedup(envs) {
-		if sr.set == set && Counts(sr.run) && isDefault(sr.run) {
-			out = append(out, sr.run)
+	for _, c := range CountedRuns(envs) {
+		if c.Set == set && Counts(c.Run) && isDefault(c.Run) {
+			out = append(out, c.Run)
 		}
 	}
 	return out
@@ -294,25 +294,29 @@ func DefaultRuns(envs []results.Envelope, set string) []results.Run {
 // not its O17-off run, encrypted with the setting off.
 func isDefault(r results.Run) bool { return !r.Encrypted || r.PadLowBitrate }
 
-// setRun is a run and the set of its envelope.
-type setRun struct {
-	set string
-	run results.Run
+// CountedRun is a run of an MI1 envelope as G10 judges it: the copy that
+// counts of its copies, with the set of its envelope and Env, the index in
+// the envelopes given of the envelope that it came from.
+type CountedRun struct {
+	Set string
+	Run results.Run
+	Env int
 }
 
-// dedup is the runs of the MI1 envelopes in envs, in order, each once
-// (G15): an envelope can arrive twice, from the PC's folder and from the
-// Pi's. Two runs are the same when their id and attempt are; of two
-// copies, the one that counts is kept, whatever their order. A run without
-// an id is always kept.
-func dedup(envs []results.Envelope) []setRun {
+// CountedRuns is G10's selection of the runs of the MI1 envelopes in envs,
+// in order, each once (G15): an envelope can arrive twice, from the PC's
+// folder and from the Pi's. Two runs are the same when their id and
+// attempt are; of the copies of a run, the first that counts is kept, else
+// the first, whatever their order. A run without an id is always kept.
+// recreport names, by it, where the runs that G10 counted came from.
+func CountedRuns(envs []results.Envelope) []CountedRun {
 	type key struct {
 		id      string
 		attempt int
 	}
-	var out []setRun
+	var out []CountedRun
 	at := map[key]int{}
-	for _, e := range envs {
+	for n, e := range envs {
 		if e.Code != "MI1" {
 			continue
 		}
@@ -321,9 +325,9 @@ func dedup(envs []results.Envelope) []setRun {
 			switch i, seen := at[k]; {
 			case r.RunID == "" || !seen:
 				at[k] = len(out)
-				out = append(out, setRun{e.Set, r})
-			case !Counts(out[i].run) && Counts(r):
-				out[i] = setRun{e.Set, r}
+				out = append(out, CountedRun{e.Set, r, n})
+			case !Counts(out[i].Run) && Counts(r):
+				out[i] = CountedRun{e.Set, r, n}
 			}
 		}
 	}

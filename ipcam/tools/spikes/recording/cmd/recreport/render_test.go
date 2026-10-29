@@ -515,6 +515,13 @@ func TestRender_ModelTableShowsTheResultingNumber(t *testing.T) {
 	if models := section(t, markdownOf(t, open), heading); !strings.Contains(models, "| H1b: Pi-ul dvs. | 4 camere | nestabilit (G12) |") {
 		t.Errorf("with G12's steps open, the Pi's number is not settled:\n%s", models)
 	}
+	// G12's steps open, and G13's rate already caps the Pi lower (Task 12b
+	// review): the cell says both.
+	open.each(ofCode("MI4", "pi"), func(e *results.Envelope) { e.MI4.CryptoMBs = 12 })
+	if models := section(t, markdownOf(t, open), heading); !strings.Contains(models,
+		"| H1b: Pi-ul dvs. | 4 camere | nestabilit (G12); cel mult 2 camere (G13) |") {
+		t.Errorf("with G12's steps open and G13 at 2 cameras, the cell does not show G13's cap:\n%s", models)
+	}
 }
 
 // TestRender_MixedStorageNamesSdSets (G16; Task 12 review, M11): a Pi with

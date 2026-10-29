@@ -224,8 +224,47 @@ func TestInputs_RenumbersMergedFolders(t *testing.T) {
 		t.Errorf("G13 = %q, reasons %q; want the newest run's pass, not the older folder's failing third", j.Verdict, j.Reasons)
 	}
 	input := section(t, r.markdown(), "## Intrarea raportului")
-	if !strings.Contains(input, "renumerotat") || !strings.Contains(input, "`MI4 pi-mi4`") {
-		t.Errorf("the report does not say that the input was renumbered:\n%s", input)
+	for _, want := range []string{"renumerotat", "`MI4 pi-mi4`", "după momentul lor",
+		"G13 judecă rularea cu numărul cel mai mare, `pi-mi4-4`, cea mai nouă."} {
+		if !strings.Contains(input, want) {
+			t.Errorf("the input section lacks «%s»:\n%s", want, input)
+		}
+	}
+}
+
+// TestInputs_RenumberedTextNamesTheGateThatJudges (Task 12b review): the
+// renumbering names the gate that judges the run with the highest number
+// by the set: G12 for each MI3 set, G13 for the Pi's MI4 set alone (the
+// PC's is information only); for MI2 it says that G11 does not depend on
+// the order, since it judges the worst run.
+func TestInputs_RenumberedTextNamesTheGateThatJudges(t *testing.T) {
+	for _, c := range []struct {
+		code, set  string
+		untimed    bool
+		has, lacks []string
+	}{
+		{"MI4", "pi-mi4", false, []string{"G13 judecă rularea cu numărul cel mai mare, `pi-mi4-2`, cea mai nouă."}, nil},
+		{"MI4", "pc-mi4", false, nil, []string{"judecă"}},
+		{"MI4", "pc-mi4", true, []string{"nesigur"}, []string{"judecă", "verificați"}},
+		{"MI3", "pc-mi3", true, []string{"G12 judecă rularea cu numărul cel mai mare, `pc-mi3-2`", "verificați"}, nil},
+		{"MI2", "pi-72h", true, []string{"nesigur", "G11 nu depinde de ordine"}, []string{"verificați"}},
+		{"MI2", "pi-72h", false, []string{"după momentul lor", "G11 nu depinde de ordine"}, nil},
+	} {
+		n := renumbering{code: c.code, set: c.set, from: []string{c.set + "-1", c.set + "-1"}, to: []string{c.set + "-1", c.set + "-2"}}
+		if c.untimed {
+			n.untimed = []string{c.set + "-2"}
+		}
+		text := renumberedText(n)
+		for _, want := range c.has {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s %s (untimed %v): %q lacks «%s»", c.code, c.set, c.untimed, text, want)
+			}
+		}
+		for _, bad := range c.lacks {
+			if strings.Contains(text, bad) {
+				t.Errorf("%s %s (untimed %v): %q holds «%s»", c.code, c.set, c.untimed, text, bad)
+			}
+		}
 	}
 }
 
@@ -252,6 +291,33 @@ func TestInputs_ConflictingMI1RunsNamed(t *testing.T) {
 	}
 	if md := newReport(in, goldenDate).markdown(); !strings.Contains(md, "`lab-linux-kill9`: 21 de rulări") {
 		t.Errorf("the report does not name the set:\n%s", section(t, md, "## Intrarea raportului"))
+	}
+}
+
+// TestInputs_ConflictNamesWhatG10Counts (Task 12b review): the report
+// names the copies of a conflicting set that G10 counts by G10's own
+// selection (mi1.CountedRuns), run by run: of two copies of an envelope
+// whose runs count in different copies, each run counts from the copy
+// where it counts.
+func TestInputs_ConflictNamesWhatG10Counts(t *testing.T) {
+	run := func(id string, counts bool) results.Run {
+		r := results.Run{RunID: id, Attempt: 1, Valid: counts, ShutdownKind: "power", PacingP99Ms: 6}
+		if !counts {
+			r.InvalidReason = "oprire în afara ferestrei"
+		}
+		return r
+	}
+	a := envelope("MI1", mi1.SetRealPC, "real-pc-99", "pc")
+	b := a
+	a.Runs = []results.Run{run("real-pc-98", true), run("real-pc-99", false)}
+	b.Runs = []results.Run{run("real-pc-98", false), run("real-pc-99", true)}
+	in, err := load([]string{(&fixture{envs: []results.Envelope{a}}).folder(t), (&fixture{envs: []results.Envelope{b}}).folder(t)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []conflict{{set: mi1.SetRealPC, runs: 2, counted: []originCount{{origin{folder: 1}, 1}, {origin{folder: 2}, 1}}}}
+	if fmt.Sprint(in.conflicts) != fmt.Sprint(want) {
+		t.Errorf("conflicts %+v, want %+v: a run from each folder, as G10 counts them", in.conflicts, want)
 	}
 }
 

@@ -340,53 +340,39 @@ func stableKey(e results.Envelope) string {
 // conflicts are G10's MI1 sets with different envelopes of one run id, as
 // from two lab runs; a set that G10 does not judge (unjudged) has none.
 // They are not renumbered, since an MI1 run id names its position and
-// attempt: of each run, G10 counts the first copy read that counts
-// (mi1.Judge), CI runs being read the newest first (readRuns), and the
-// report names the set and where the counted copies came from.
+// attempt: G10 counts each of their runs once, by its own selection
+// (mi1.CountedRuns), CI runs being read the newest first (readRuns), and
+// the report names the set, its runs and where the copies that G10
+// counted came from.
 func conflicts(reads []read) []conflict {
-	copies := map[identity][]read{}
-	var ids []identity
-	for _, r := range reads {
-		if r.env.Code != "MI1" || !slices.Contains(g10Sets, r.env.Set) {
-			continue
+	copies := map[identity]int{}
+	envs := make([]results.Envelope, len(reads))
+	for i, r := range reads {
+		envs[i] = r.env
+		if r.env.Code == "MI1" && slices.Contains(g10Sets, r.env.Set) {
+			copies[idOf(r.env)]++
 		}
-		id := idOf(r.env)
-		if copies[id] == nil {
-			ids = append(ids, id)
-		}
-		copies[id] = append(copies[id], r)
 	}
 	var out []conflict
-	for _, id := range ids {
-		if len(copies[id]) < 2 {
+	for _, c := range mi1.CountedRuns(envs) {
+		r := reads[c.Env]
+		if copies[idOf(r.env)] < 2 {
 			continue
 		}
-		i := slices.IndexFunc(out, func(c conflict) bool { return c.set == id.set })
+		i := slices.IndexFunc(out, func(c conflict) bool { return c.set == r.env.Set })
 		if i < 0 {
-			i, out = len(out), append(out, conflict{set: id.set})
+			i, out = len(out), append(out, conflict{set: r.env.Set})
 		}
-		c := &out[i]
-		c.runs++
-		from := countedCopy(copies[id]).from
-		if j := slices.IndexFunc(c.counted, func(o originCount) bool { return o.from == from }); j >= 0 {
-			c.counted[j].runs++
+		set := &out[i]
+		set.runs++
+		if j := slices.IndexFunc(set.counted, func(o originCount) bool { return o.from == r.from }); j >= 0 {
+			set.counted[j].runs++
 		} else {
-			c.counted = append(c.counted, originCount{from, 1})
+			set.counted = append(set.counted, originCount{r.from, 1})
 		}
 	}
 	slices.SortFunc(out, func(a, b conflict) int { return strings.Compare(a.set, b.set) })
 	return out
-}
-
-// countedCopy is the copy of an MI1 run that G10 counts, of copies in the
-// order read: the first whose runs all count (mi1.Counts), else the first.
-func countedCopy(copies []read) read {
-	for _, c := range copies {
-		if !slices.ContainsFunc(c.env.Runs, func(r results.Run) bool { return !mi1.Counts(r) }) {
-			return c
-		}
-	}
-	return copies[0]
 }
 
 // renumber gives the envelopes of a set new run ids when two different
