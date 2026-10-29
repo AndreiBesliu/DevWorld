@@ -849,20 +849,25 @@ jobs:
                 -v "${certs}:/certs:ro" "coturn/coturn:${COTURN_VERSION}@${COTURN_DIGEST}" \
                 -n --log-file=stdout --lt-cred-mech --realm=mi9.test --user="mi9:${pass}" \
                 --listening-ip="${TURN_IP}" --relay-ip="${TURN_IP}" --tls-listening-port=443 \
-                --cert=/certs/turn.pem --pkey=/certs/turn.key --no-dtls --no-cli --fingerprint \
+                --cert=/certs/turn.pem --pkey=/certs/turn.key --no-cli --fingerprint \
                 --allowed-peer-ip="${TURN_IP}"
           } 2>&1 | tee "${log}"
+          # coturn 4.18 starts no DTLS listener unless --dtls is given (its --no-dtls is gone).
           ready=false
           for _ in $(seq 30); do
             if openssl s_client -connect "${TURN_IP}:443" -CAfile "${certs}/turn.pem" -verify_ip "${TURN_IP}" \
-              -verify_return_error < /dev/null > /dev/null 2>> "${log}"; then
+              -verify_return_error < /dev/null > /dev/null 2> "${RUNNER_TEMP}/coturn-probe.log"; then
               ready=true
               break
             fi
             sleep 1
           done
           if [[ ${ready} != true ]]; then
-            echo "coturn: no verified TLS handshake on 443 in 30 s" | tee -a "${log}"
+            {
+              echo "coturn: no verified TLS handshake on 443 in 30 s; the last attempt:"
+              tail -n 5 "${RUNNER_TEMP}/coturn-probe.log"
+              docker ps -a --filter name=coturn --format '{{.Status}}'
+            } | tee -a "${log}"
             exit 1
           fi
           jq -nc --arg v "${COTURN_VERSION}" --arg d "${COTURN_DIGEST}" --arg t "${COTURN_DATE}" \
@@ -973,8 +978,9 @@ jobs:
           fi
           exit "${status}"
       - name: Show failures as annotations
-        # The failed step's log, a go test's failure lines first; then the end of coturn's,
-        # mi9page's and ipcam-hub's logs.
+        # The failed step's log, a go test's failure lines first; then the logs of what that
+        # step ran: ipcam-hub's for the recording, coturn's (its start, where a bad option is
+        # named, and its end) for coturn and the relay, mi9page's for Chrome.
         if: failure()
         env:
           STEPS: ${{ toJSON(steps) }}
@@ -989,9 +995,18 @@ jobs:
               tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
             fi
           done
-          if docker container inspect coturn > /dev/null 2>&1; then
-            docker logs coturn 2>&1 | tail -n 40 | tools/scripts/annotate.sh 'coturn log' 40
+          failed() { jq -e --arg id "$1" '.[$id].outcome == "failure"' <<< "${STEPS}" > /dev/null; }
+          if failed record && [[ -f "${RUNNER_TEMP}/mi9-rec/ipcam-hub.log" ]]; then
+            tail -n 40 "${RUNNER_TEMP}/mi9-rec/ipcam-hub.log" | tools/scripts/annotate.sh 'ipcam-hub log' 40
           fi
-          [[ -f "${RUNNER_TEMP}/mi9page.log" ]] && tail -n 40 "${RUNNER_TEMP}/mi9page.log" | tools/scripts/annotate.sh 'mi9page log' 40
-          [[ -f "${RUNNER_TEMP}/mi9-rec/ipcam-hub.log" ]] && tail -n 40 "${RUNNER_TEMP}/mi9-rec/ipcam-hub.log" | tools/scripts/annotate.sh 'ipcam-hub log' 40
+          if { failed coturn || failed go-live; } && docker container inspect coturn > /dev/null 2>&1; then
+            {
+              docker logs coturn 2>&1 | head -n 30
+              echo '…'
+              docker logs coturn 2>&1 | tail -n 30
+            } | tools/scripts/annotate.sh 'coturn log' 61
+          fi
+          if failed chrome && [[ -f "${RUNNER_TEMP}/mi9page.log" ]]; then
+            tail -n 40 "${RUNNER_TEMP}/mi9page.log" | tools/scripts/annotate.sh 'mi9page log' 40
+          fi
           true
