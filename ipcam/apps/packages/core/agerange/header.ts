@@ -1,10 +1,12 @@
 /**
  * Why an age file cannot be read:
  * - `header`: the file does not start with an age v1 header (its version line,
- *   then a `--- <mac>` line);
- * - `truncated`: the file is shorter than its layout needs or has a size that no
- *   age payload has, the source's size is not a byte count (a safe integer
- *   ≥ 0), or the source returned fewer bytes than asked;
+ *   then a `--- <mac>` line), or its header is larger than age's 2 MiB limit;
+ * - `truncated`: the bytes end before the layout does: a prefix that ends
+ *   before the header's `--- <mac>` line (headerLength: read more), a file
+ *   shorter than its layout needs or with a size that no age payload has, the
+ *   source's size is not a byte count (a safe integer ≥ 0), or the source
+ *   returned fewer bytes than asked;
  * - `auth`: a chunk does not authenticate under the file key (a wrong key or
  *   changed bytes);
  * - `range`: a read outside the plaintext.
@@ -28,10 +30,16 @@ const LF = 0x0a;
  * The length of the age header at the start of prefix: the bytes through the
  * newline that ends its `--- <mac>` line. It reads only the layout; the stanzas
  * and the MAC are typage's job (decryptHeader).
+ *
+ * prefix is the first bytes of the file: 4 KiB hold an X25519 header with two
+ * recipients (about 250 bytes) many times over. When prefix ends before the
+ * header does, it throws `truncated`: read twice as many bytes and call again,
+ * up to the file's size or age's 2 MiB header limit. It throws `header` as soon
+ * as the bytes cannot start an age v1 file, however many follow.
  */
 export function headerLength(prefix: Uint8Array): number {
   const end = findHeaderEnd(prefix);
-  if (end < 0) throw new AgeRangeError('header', `no complete "--- <mac>" line in the first ${prefix.length} bytes`);
+  if (end < 0) throw new AgeRangeError('truncated', `the header goes on past the first ${prefix.length} bytes`);
   return end;
 }
 

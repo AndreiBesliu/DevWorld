@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHUNK_SIZE, memorySource, readGoldens, sha256Hex, type Golden } from './fixtures';
+import { CHUNK_SIZE, memorySource, readGoldens, sameBytes, sha256Hex, type Golden } from './fixtures';
 import { AgeRangeError, headerLength, openAgeRange, type RangeSource } from './index';
 
 const goldens = readGoldens();
@@ -37,12 +37,27 @@ describe('headerLength', () => {
     expect(g.file.length).toBe(h + 16 + size + 16 * Math.max(1, Math.ceil(size / CHUNK_SIZE)));
 
     expect(headerLength(g.file.subarray(0, h))).toBe(h);
-    expect(await errorKind(() => headerLength(g.file.subarray(0, h - 1)))).toBe('header');
+    // A prefix that ends before the header does: the caller reads more.
+    expect(await errorKind(() => headerLength(g.file.subarray(0, h - 1)))).toBe('truncated');
   });
 
   it('agerange_headerLength_rejectsNonAgePrefix', async () => {
     const notAge = new TextEncoder().encode('this is no age file, though\n--- it has a line like a MAC line\n');
     expect(await errorKind(() => headerLength(notAge))).toBe('header');
+  });
+
+  it('agerange_headerLength_tellsAShortPrefixFromAFileThatIsNotAge', async () => {
+    // A caller reads a prefix of the file, then hands typage's decryptHeader the
+    // first headerLength bytes: `truncated` says to read more, `header` that no
+    // amount of reading helps.
+    const g = goldens[0]!;
+    const h = headerLength(g.file);
+    for (const n of [0, 5, 'age-encryption.org/v1\n'.length, h - 1]) {
+      expect(await errorKind(() => headerLength(g.file.subarray(0, n))), `the first ${n} bytes`).toBe('truncated');
+    }
+    const notAge = new TextEncoder().encode('age-encryption.org/v2\n--- AAAA\n');
+    expect(await errorKind(() => headerLength(notAge))).toBe('header');
+    expect(await errorKind(() => headerLength(notAge.subarray(0, 21)))).toBe('header');
   });
 });
 
@@ -53,6 +68,7 @@ describe('openAgeRange', () => {
   const h = payload - 16;
 
   it.each([
+    ['inside the header', h - 1],
     ['inside the nonce', h + 8],
     ['after the nonce', payload],
     ['inside the second chunk', payload + CHUNK_SIZE + 16 + 8],
@@ -96,6 +112,26 @@ describe('openAgeRange', () => {
     expect(reads).toBe(0);
   });
 
+  it.each([
+    ['empty', 0],
+    ['short', 15],
+    ['long', 32],
+  ])('agerange_rejectsAFileKeyThatIsNot16Bytes %s', async (_name, n) => {
+    // age's file keys are 16 bytes. Another length is the caller's mistake, not
+    // a file that fails to authenticate: a RangeError before any read.
+    let reads = 0;
+    const src: RangeSource = {
+      size: g.file.length,
+      read: async (offset, length) => {
+        reads++;
+        return g.file.slice(offset, offset + length);
+      },
+    };
+    await expect(openAgeRange(src, new Uint8Array(n))).rejects.toThrow(RangeError);
+    await expect(openAgeRange(src, new Uint8Array(n))).rejects.not.toBeInstanceOf(AgeRangeError);
+    expect(reads).toBe(0);
+  });
+
   it('agerange_rejectsWrongKey', async () => {
     const wrongKey = g.fileKey.slice();
     wrongKey[0]! ^= 1;
@@ -109,6 +145,34 @@ describe('openAgeRange', () => {
       expect(await errorKind(() => r.read(offset, length)), `read(${offset}, ${length})`).toBe('range');
     }
     expect(await r.read(size, 0)).toHaveLength(0);
+  });
+
+  it('agerange_largeHeader_readsEachByteOfTheHeaderOnce', async () => {
+    // The header search reads only what it has not read yet, each time it
+    // needs more (a remote source pays for every byte).
+    const intro = 'age-encryption.org/v1\n'.length;
+    const stanza = new TextEncoder().encode(`-> grease\n${`${'A'.repeat(64)}\n`.repeat(256)}\n`);
+    const file = new Uint8Array(g.file.length + stanza.length);
+    file.set(g.file.subarray(0, intro));
+    file.set(stanza, intro);
+    file.set(g.file.subarray(intro), intro + stanza.length);
+    const header = h + stanza.length;
+    const reads: [number, number][] = [];
+    const src: RangeSource = {
+      size: file.length,
+      read: async (offset, length) => {
+        reads.push([offset, length]);
+        return file.slice(offset, offset + length);
+      },
+    };
+    await openAgeRange(src, g.fileKey);
+    const headerReads = reads.filter(([offset]) => offset < header);
+    expect(headerReads.length).toBeGreaterThan(1);
+    let next = 0;
+    for (const [offset, length] of headerReads) {
+      expect(offset, `the reads ${JSON.stringify(headerReads)}`).toBe(next);
+      next = offset + length;
+    }
   });
 
   it('agerange_largeHeader_readsPastFirstPrefix', async () => {
@@ -125,5 +189,57 @@ describe('openAgeRange', () => {
     expect(headerLength(file)).toBe(h + stanza.length);
     const r = await openAgeRange(memorySource(file), g.fileKey);
     expect(sha256Hex(await r.read(0, r.plaintextSize))).toBe(g.vector.plaintextSha256);
+  });
+});
+
+describe('agerange reads', () => {
+  // 17 chunks: 16 of 64 KiB and one of 17 bytes.
+  const g = golden(16 * CHUNK_SIZE + 17);
+
+  it('agerange_wholeFileRead_readsTheSourceInBoundedBatches', async () => {
+    // A whole-segment read on a phone holds the output and one batch of sealed
+    // chunks, not every sealed byte at once: the source is read in batches of
+    // at most 16 sealed chunks (about 1 MiB), each byte once.
+    const reads: [number, number][] = [];
+    const src: RangeSource = {
+      size: g.file.length,
+      read: async (offset, length) => {
+        reads.push([offset, length]);
+        return g.file.slice(offset, offset + length);
+      },
+    };
+    const r = await openAgeRange(src, g.fileKey);
+    reads.length = 0;
+
+    const plain = await r.read(0, r.plaintextSize);
+
+    expect(sha256Hex(plain)).toBe(g.vector.plaintextSha256);
+    const sealedChunk = CHUNK_SIZE + 16;
+    const payloadStart = g.file.length - 16 * sealedChunk - (17 + 16);
+    expect(reads).toEqual([
+      [payloadStart, 16 * sealedChunk],
+      [payloadStart + 16 * sealedChunk, 17 + 16],
+    ]);
+  });
+
+  it('agerange_readInsideOneBatch_isOneSourceRead', async () => {
+    const reads: [number, number][] = [];
+    const src: RangeSource = {
+      size: g.file.length,
+      read: async (offset, length) => {
+        reads.push([offset, length]);
+        return g.file.slice(offset, offset + length);
+      },
+    };
+    const r = await openAgeRange(src, g.fileKey);
+    const full = await r.read(0, r.plaintextSize);
+    reads.length = 0;
+
+    // Chunks 1 to 3: a partial first chunk, a whole one, a partial last one.
+    const part = await r.read(CHUNK_SIZE + 100, 2 * CHUNK_SIZE);
+
+    expect(sameBytes(part, full.subarray(CHUNK_SIZE + 100, 3 * CHUNK_SIZE + 100))).toBe(true);
+    expect(reads).toHaveLength(1);
+    expect(reads[0]![1]).toBe(3 * (CHUNK_SIZE + 16));
   });
 });

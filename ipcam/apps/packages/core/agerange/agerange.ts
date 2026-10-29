@@ -19,11 +19,16 @@ export interface AgeRange {
 // The age v1 payload (spec 10.2): a 16-byte nonce, then STREAM ChaCha20-Poly1305
 // chunks of 64 KiB of plaintext, each sealed with a 16-byte tag. Only the final
 // chunk may be shorter, and it is empty only when the whole plaintext is.
+const FILE_KEY_SIZE = 16;
 const NONCE_SIZE = 16;
 const CHUNK_SIZE = 64 * 1024;
 const TAG_SIZE = 16;
 const SEALED_CHUNK_SIZE = CHUNK_SIZE + TAG_SIZE;
 const PAYLOAD_INFO = new TextEncoder().encode('payload');
+
+// A read takes the sealed chunks from the source in batches of at most this
+// many (about 1 MiB), so a whole-segment read holds its output and one batch.
+const BATCH_CHUNKS = 16;
 
 // The header is looked for in the first FIRST_HEADER_READ bytes (two X25519
 // stanzas take about 250), then in twice as many, up to the 2 MiB header limit of
@@ -32,12 +37,16 @@ const FIRST_HEADER_READ = 4096;
 const MAX_HEADER_SIZE = 2 << 20;
 
 /**
- * Opens an age file for reads by plaintext range. fileKey is the file key that
- * typage's decryptHeader unwraps from the header (the first headerLength bytes).
- * This derives the payload key and authenticates the final chunk, which fixes the
+ * Opens an age file for reads by plaintext range. fileKey is the 16-byte file
+ * key that typage's decryptHeader unwraps from the header (the first
+ * headerLength bytes); another length is a RangeError, before any read. This
+ * derives the payload key and authenticates the final chunk, which fixes the
  * plaintext size. Each read authenticates every chunk it touches.
  */
 export async function openAgeRange(src: RangeSource, fileKey: Uint8Array): Promise<AgeRange> {
+  if (fileKey.length !== FILE_KEY_SIZE) {
+    throw new RangeError(`an age file key has ${FILE_KEY_SIZE} bytes, not ${fileKey.length}`);
+  }
   const size = src.size;
   // A size from outside (say parseInt of a missing HTTP Content-Range total)
   // can be NaN, and with NaN the header search below would read forever.
@@ -58,16 +67,19 @@ export async function openAgeRange(src: RangeSource, fileKey: Uint8Array): Promi
     const start = payloadStart + first * SEALED_CHUNK_SIZE;
     return readExact(src, start, Math.min(payloadStart + (last + 1) * SEALED_CHUNK_SIZE, size) - start);
   };
-  const openChunk = (index: number, sealed: Uint8Array): Uint8Array => {
+  // Opens chunk index into output, which has exactly its plaintext's length;
+  // noble writes the plaintext only once the tag is authentic.
+  const openChunk = (index: number, sealed: Uint8Array, output: Uint8Array): void => {
     try {
-      return chacha20poly1305(key, chunkNonce(index, index === chunks - 1)).decrypt(sealed);
+      chacha20poly1305(key, chunkNonce(index, index === chunks - 1)).decrypt(sealed, output);
     } catch {
       throw new AgeRangeError('auth', `chunk ${index} of ${chunks} does not authenticate under the file key`);
     }
   };
 
   // As in age's DecryptReaderAt: only an authentic final chunk proves the size.
-  openChunk(chunks - 1, await readSealed(chunks - 1, chunks - 1));
+  const final = await readSealed(chunks - 1, chunks - 1);
+  openChunk(chunks - 1, final, new Uint8Array(final.length - TAG_SIZE));
 
   return {
     plaintextSize,
@@ -76,31 +88,49 @@ export async function openAgeRange(src: RangeSource, fileKey: Uint8Array): Promi
       if (!inside || offset + length > plaintextSize) {
         throw new AgeRangeError('range', `[${offset}, +${length}) is not inside the ${plaintextSize}-byte plaintext`);
       }
+      const end = offset + length;
       const out = new Uint8Array(length);
       if (length === 0) return out;
-      const first = Math.floor(offset / CHUNK_SIZE);
-      const last = Math.floor((offset + length - 1) / CHUNK_SIZE);
-      const sealed = await readSealed(first, last);
-      for (let i = first; i <= last; i++) {
-        const at = (i - first) * SEALED_CHUNK_SIZE;
-        const chunk = openChunk(i, sealed.subarray(at, at + SEALED_CHUNK_SIZE));
-        const chunkStart = i * CHUNK_SIZE;
-        const from = Math.max(offset - chunkStart, 0);
-        out.set(chunk.subarray(from, Math.min(offset + length - chunkStart, chunk.length)), chunkStart + from - offset);
+      // A chunk that the range covers whole is opened straight into out; one
+      // that it covers in part (at most the first and the last) into scratch.
+      let scratch: Uint8Array | undefined;
+      const last = Math.floor((end - 1) / CHUNK_SIZE);
+      for (let first = Math.floor(offset / CHUNK_SIZE); first <= last; first += BATCH_CHUNKS) {
+        const sealed = await readSealed(first, Math.min(first + BATCH_CHUNKS - 1, last));
+        for (let at = 0, i = first; at < sealed.length; at += SEALED_CHUNK_SIZE, i++) {
+          const chunk = sealed.subarray(at, at + SEALED_CHUNK_SIZE);
+          const chunkStart = i * CHUNK_SIZE;
+          const chunkEnd = chunkStart + chunk.length - TAG_SIZE;
+          if (chunkStart >= offset && chunkEnd <= end) {
+            openChunk(i, chunk, out.subarray(chunkStart - offset, chunkEnd - offset));
+            continue;
+          }
+          scratch ??= new Uint8Array(CHUNK_SIZE);
+          const plain = scratch.subarray(0, chunkEnd - chunkStart);
+          openChunk(i, chunk, plain);
+          const from = Math.max(offset, chunkStart);
+          out.set(plain.subarray(from - chunkStart, Math.min(end, chunkEnd) - chunkStart), from - offset);
+        }
       }
       return out;
     },
   };
 }
 
+// Reads the header, the first FIRST_HEADER_READ bytes and then as many more
+// each time, each byte once, and returns its size and the bytes read.
 async function readHeader(src: RangeSource, size: number): Promise<{ headerSize: number; prefix: Uint8Array }> {
+  let prefix = new Uint8Array(0);
   for (let n = Math.min(size, FIRST_HEADER_READ); ; n = Math.min(size, 2 * n)) {
-    const prefix = await readExact(src, 0, n);
+    const more = await readExact(src, prefix.length, n - prefix.length);
+    const grown = new Uint8Array(n);
+    grown.set(prefix);
+    grown.set(more, prefix.length);
+    prefix = grown;
     const headerSize = findHeaderEnd(prefix);
     if (headerSize >= 0) return { headerSize, prefix };
-    if (n === size || n >= MAX_HEADER_SIZE) {
-      throw new AgeRangeError('header', `no complete "--- <mac>" line in the first ${n} bytes`);
-    }
+    if (n >= MAX_HEADER_SIZE) throw new AgeRangeError('header', `no "--- <mac>" line in the first ${n} bytes`);
+    if (n === size) throw new AgeRangeError('truncated', `the file ends inside its header, at ${size} bytes`);
   }
 }
 
