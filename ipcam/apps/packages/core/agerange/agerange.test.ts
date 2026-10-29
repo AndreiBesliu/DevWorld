@@ -73,6 +73,29 @@ describe('openAgeRange', () => {
     expect(await errorKind(() => openAgeRange(src, g.fileKey))).toBe('truncated');
   });
 
+  it.each([
+    ['NaN', Number.NaN],
+    ['-1', -1],
+    ['fractional', g.file.length - 0.5],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['undefined', undefined],
+  ])('agerange_rejectsInvalidSourceSize %s', async (_name, size) => {
+    // A source's size can come from outside, e.g. parseInt of an HTTP
+    // Content-Range total that is missing or "*". openAgeRange checks it before
+    // any read; this source fails after 100 reads, so a size that sends the
+    // header search into an endless loop fails the test instead of hanging it.
+    let reads = 0;
+    const src = {
+      size,
+      read: async (offset: number, length: number) => {
+        if (++reads > 100) throw new Error(`still reading after ${reads - 1} reads of length ${length}`);
+        return g.file.slice(offset, offset + length);
+      },
+    } as unknown as RangeSource;
+    expect(await errorKind(() => openAgeRange(src, g.fileKey))).toBe('truncated');
+    expect(reads).toBe(0);
+  });
+
   it('agerange_rejectsWrongKey', async () => {
     const wrongKey = g.fileKey.slice();
     wrongKey[0]! ^= 1;

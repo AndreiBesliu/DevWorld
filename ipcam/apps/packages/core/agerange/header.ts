@@ -3,7 +3,8 @@
  * - `header`: the file does not start with an age v1 header (its version line,
  *   then a `--- <mac>` line);
  * - `truncated`: the file is shorter than its layout needs or has a size that no
- *   age payload has, or the source returned fewer bytes than asked;
+ *   age payload has, the source's size is not a byte count (a safe integer
+ *   ≥ 0), or the source returned fewer bytes than asked;
  * - `auth`: a chunk does not authenticate under the file key (a wrong key or
  *   changed bytes);
  * - `range`: a read outside the plaintext.

@@ -5,6 +5,7 @@ import { AgeRangeError, findHeaderEnd } from './header';
 
 /** Bytes read by range: a file, a Blob or an HTTP resource with range requests. */
 export interface RangeSource {
+  /** The byte count: a safe integer ≥ 0, else openAgeRange fails as `truncated` before any read. */
   readonly size: number;
   read(offset: number, length: number): Promise<Uint8Array>;
 }
@@ -38,6 +39,11 @@ const MAX_HEADER_SIZE = 2 << 20;
  */
 export async function openAgeRange(src: RangeSource, fileKey: Uint8Array): Promise<AgeRange> {
   const size = src.size;
+  // A size from outside (say parseInt of a missing HTTP Content-Range total)
+  // can be NaN, and with NaN the header search below would read forever.
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new AgeRangeError('truncated', `the source's size ${String(size)} is not a byte count`);
+  }
   const { headerSize, prefix } = await readHeader(src, size);
   const payloadStart = headerSize + NONCE_SIZE;
   if (size < payloadStart) throw new AgeRangeError('truncated', `the file ends inside the payload nonce, at ${size} bytes`);
