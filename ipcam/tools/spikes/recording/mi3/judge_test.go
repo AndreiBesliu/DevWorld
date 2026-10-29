@@ -2,6 +2,7 @@ package mi3
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -297,6 +298,53 @@ func TestMI3_InformationRows(t *testing.T) {
 				t.Error("the Pi has a 16-camera row: only H3 has one (R07)")
 			}
 		})
+	}
+}
+
+// TestMI3_RecommendedPerHost (§4.8; Task 12 review, M7): the judgement
+// gives, per host, the recommended number that G12 leaves, for the
+// report's «Rezultat» column: the count of a first hour that passed, or the
+// count that the steps settled on after one that failed; none while the
+// steps are open.
+func TestMI3_RecommendedPerHost(t *testing.T) {
+	if got := Judge(owners()).Recommended; !maps.Equal(got, map[string]int{"pc": 8, "pi": 4}) {
+		t.Errorf("Recommended = %v, want pc 8 and pi 4, the counts measured", got)
+	}
+	f := meeting()
+	f.CPUPctTotal = 65
+	envs := owners()
+	envs[0] = envelope("pc", "H3", 8, f, step(8, 60, 1, false), step(4, 15, 1, true), step(4, 60, 1, true))
+	if got := Judge(envs).Recommended; !maps.Equal(got, map[string]int{"pc": 4, "pi": 4}) {
+		t.Errorf("Recommended = %v, want pc 4, where the steps settled", got)
+	}
+	envs[0] = envelope("pc", "H3", 8, f, step(8, 60, 1, false))
+	if got := Judge(envs).Recommended; !maps.Equal(got, map[string]int{"pi": 4}) {
+		t.Errorf("Recommended = %v, want none for the PC while its steps are open", got)
+	}
+}
+
+// TestMI3_ClearDiskRatioShownWithoutABudget (Task 12 review, M6): on a
+// tier without a disk budget (H1b, H1c), the clear cameras' disk ÷ bitrate
+// is an information row next to the encrypted cameras', so that the report
+// shows both modes; on H3 and H1 it is the budget's own row, not repeated.
+func TestMI3_ClearDiskRatioShownWithoutABudget(t *testing.T) {
+	j := Judge(owners())
+	const info = "disc ÷ bitrate, camere în clar (informativ)"
+	at := slices.IndexFunc(j.Rows, func(r results.Row) bool { return r.Code == "MI3 pi: "+info })
+	if at < 0 {
+		t.Fatalf("no row «MI3 pi: %s» in %+v", info, j.Rows)
+	}
+	if r := j.Rows[at]; r.Value != "1,010" || r.Limit != "" || r.Pass != nil || r.Source != "pi" {
+		t.Errorf("the Pi's clear ratio row %+v, want 1,010, information", r)
+	}
+	if at+1 >= len(j.Rows) || !strings.HasPrefix(j.Rows[at+1].Code, "MI3 pi: disc ÷ bitrate, camere criptate") {
+		t.Errorf("the encrypted ratio does not follow the clear one: %+v", j.Rows)
+	}
+	if slices.ContainsFunc(j.Rows, func(r results.Row) bool { return r.Code == "MI3 pc: "+info }) {
+		t.Error("H3 repeats its clear ratio as information beside its budget row")
+	}
+	if r := row(t, j, "MI3 pc: disc ÷ bitrate, camere în clar"); passOf(r) != "true" {
+		t.Errorf("H3's clear ratio row %+v, want the judged budget", r)
 	}
 }
 

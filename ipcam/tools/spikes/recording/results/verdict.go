@@ -33,11 +33,27 @@ type Row struct {
 // Romanian, and the rows behind it (C17). Reasons explain the verdict;
 // Notes, in Romanian too, report measurements outside it (MI1's O17-off
 // loss, C1-R13), which neither change the verdict nor call for the plan B.
+// O17OffOverLimit is G10's: an O17-off run's 256 kbps loss went over §4.5's
+// bound, which calls for a proposal in the report's PR, not a decision.
+// Recommended is, per host, the recommended camera count that the gate's
+// measurements leave (§4.8): G12's count, measured or lowered, and G13's
+// after the Pi's encryption rate; a host whose count the gate did not
+// settle has none.
 type Judgement struct {
-	Gate    string
-	Verdict Verdict
-	PlanB   string
-	Reasons []string
-	Notes   []string
-	Rows    []Row
+	Gate            string
+	Verdict         Verdict
+	PlanB           string
+	Reasons         []string
+	Notes           []string
+	Rows            []Row
+	O17OffOverLimit bool
+	Recommended     map[string]int
+}
+
+// Recommend records n as host's recommended camera count in j.
+func (j *Judgement) Recommend(host string, n int) {
+	if j.Recommended == nil {
+		j.Recommended = map[string]int{}
+	}
+	j.Recommended[host] = n
 }

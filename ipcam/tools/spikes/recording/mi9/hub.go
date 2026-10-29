@@ -176,6 +176,7 @@ func (h *Hub) serveRange(call uint64, r reply) {
 		if h.ctx.Err() == nil && dc.ReadyState() == webrtc.DataChannelStateOpen {
 			slog.Warn("mi9: a bulk channel stopped", "call", call, "err", err)
 		}
+		stopDecided()
 		return
 	}
 	select {
@@ -188,6 +189,11 @@ func (h *Hub) serveRange(call uint64, r reply) {
 // sendBulk sends a range's bytes on its bulk channel (send); a test
 // replaces it with a slower peer's.
 var sendBulk = send
+
+// stopDecided is called once a range whose send failed has decided whether
+// to log it; a test waits for it before it closes the hub side, whose stop
+// would otherwise decide in its place.
+var stopDecided = func() {}
 
 // reply sends r on the rpc channel.
 func (h *Hub) reply(r reply) {

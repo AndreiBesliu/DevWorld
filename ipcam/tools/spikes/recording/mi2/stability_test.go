@@ -232,6 +232,20 @@ func TestMI2_CrashCountsUnexpectedExitsOnly(t *testing.T) {
 	}
 }
 
+// TestMI2_EnvelopeCarriesItsTime (Task 12 review, M1): the 72 h run's
+// envelope is stamped with the time it was stored, on the run's clock
+// (AtMs), as MI4's is, so that the runs of merged results folders order by
+// time in the report.
+func TestMI2_EnvelopeCarriesItsTime(t *testing.T) {
+	h := newHarness(t, t.TempDir(), pcHost, "boot-1")
+	h.start()
+	h.nextHub()
+	h.finish()
+	if e, want := h.envelope("pc-72h-1"), h.clock.Now().UnixMilli(); e.AtMs != want {
+		t.Errorf("the envelope's time %d ms, want %d, when the run stored it", e.AtMs, want)
+	}
+}
+
 // TestStability_RebootInvalidatesRun (G19): a run that an OS reboot ended,
 // told by the boot id, is invalid: the next `recspike mi2` redoes it under
 // the next run id, lists it as invalidated, removes its recordings, and

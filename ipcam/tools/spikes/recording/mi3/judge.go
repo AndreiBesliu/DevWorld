@@ -85,9 +85,12 @@ var rowNames = map[string]string{
 // (coldboot.go) fails G12 above 20 s with its Technical Decision, the number
 // unchanged; the Pi's is information. A measured failure decides even with
 // other parts missing (G27), as when a step after it could not be measured
-// (StepsStopped). The steps, with the one that stopped them, the disk
-// writers' queue peak next to the RAM (C1-R17), each load's CPU (C1-R19),
-// the encrypted disk ratio (R02), the pacing, the storage, the PC's 16
+// (StepsStopped). Each host's count that G12 leaves is in Recommended: the
+// first hour's when it passes, the steps' when they settled after it
+// failed. The steps, with the one that stopped them, the disk writers'
+// queue peak next to the RAM (C1-R17), each load's CPU (C1-R19), the disk
+// ratio of each mode that no budget judges (the encrypted one, R02, and on
+// H1b and H1c the clear one), the pacing, the storage, the PC's 16
 // cameras, measured or an estimate (R07), and §4.8's timeline row,
 // deferred to HUB-20, are information rows; the proxies (G20) and what
 // §4.8 asks that MI3 does not judge are Notes.
@@ -210,11 +213,13 @@ func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (host
 			j.Reasons = append(j.Reasons, reason)
 			return hostFail, host + ": numărul recomandat coboară; pașii nu s-au încheiat"
 		}
+		j.Recommend(host, n)
 		return hostFail, fmt.Sprintf("%s: numărul recomandat devine %d", host, n)
 	case missing:
 		j.Reasons = append(j.Reasons, host+": lipsesc bugete ale nivelului "+d.Tier)
 		return hostIncomplete, ""
 	}
+	j.Recommend(host, d.Cameras)
 	return hostPass, ""
 }
 
@@ -271,7 +276,9 @@ func invalidText(d *results.Mi3Data) string {
 
 // infoRows adds the rows and notes of host's run that are no gate: the
 // steps, with the one that stopped them, if any; each load's CPU (C1-R19);
-// the encrypted disk ratio, the pacing, the storage and the proxies.
+// the disk ratio of each mode that no budget of the tier judges (the
+// encrypted one, R02, and on H1b and H1c the clear one), the pacing, the
+// storage and the proxies.
 func infoRows(j *results.Judgement, prefix, host string, e *results.Envelope) {
 	d := e.MI3
 	steps := make([]string, len(d.Steps))
@@ -288,7 +295,10 @@ func infoRows(j *results.Judgement, prefix, host string, e *results.Envelope) {
 				Value: results.Decimal(pct, 1) + " %", Source: host})
 		}
 	}
-	if ratio, ok := d.DiskRatio["encrypted"]; ok {
+	if ratio, ok := d.DiskRatio[modeClear]; ok && !slices.Contains(BudgetKeys(d.Tier), keyDisk) {
+		j.Rows = append(j.Rows, results.Row{Code: prefix + rowNames[keyDisk] + " (informativ)", Value: valueText(keyDisk, ratio), Source: host})
+	}
+	if ratio, ok := d.DiskRatio[modeEncrypted]; ok {
 		j.Rows = append(j.Rows, results.Row{Code: prefix + "disc ÷ bitrate, camere criptate (R02, informativ)", Value: results.Decimal(ratio, 3), Source: host})
 	}
 	j.Rows = append(j.Rows,

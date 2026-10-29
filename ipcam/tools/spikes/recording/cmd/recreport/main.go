@@ -93,7 +93,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	for _, s := range in.skipped {
-		say(stderr, "recreport: skipped %s: %s", s.file, s.err)
+		if s.err != nil {
+			say(stderr, "recreport: skipped %s: %s (%v)", s.file, s.reason, s.err)
+		} else {
+			say(stderr, "recreport: skipped %s: %s", s.file, s.reason)
+		}
 	}
 	if *date == "" {
 		newest := in.newest()

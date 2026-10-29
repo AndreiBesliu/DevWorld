@@ -39,11 +39,13 @@ type Envelope struct {
 	// RunID names the file; for a one-run envelope it is the run's id.
 	RunID string `json:"runId"`
 	// AtMs is when the envelope's result was made, in Unix ms on its
-	// writer's clock, 0 when the writer gives none. MI4's envelopes carry
-	// it: mi4.Run's when it writes the run, mi4.AgerangeRun's when
-	// reccontroller stored the AGE result, and recreport's ENC-06 envelope
-	// when CI's check ran. mi4.Judge picks the later of two runs that end
-	// in the same number by it.
+	// writer's clock, 0 when the writer gives none. MI2, MI3 and MI4 runs
+	// carry it, from when they are stored; mi4.AgerangeRun's envelope, from
+	// when reccontroller stored the AGE result; and recreport stamps the
+	// envelopes that it reads from CI's annotations, and its ENC-06 one,
+	// with when their job completed. mi4.Judge picks the later of two runs
+	// that end in the same number by it, and recreport orders by it the
+	// runs of merged folders that share a run id.
 	AtMs int64 `json:"atMs,omitempty"`
 	// Set is "lab-linux-kill9", "lab-linux-qemu-reset", "lab-windows-kill9",
 	// "pc-kill9", "pc-bugcheck", "pi-kill9", "pi-sysrq", "real-pc",

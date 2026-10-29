@@ -295,16 +295,16 @@ func openingText(tier string, cameras int, sixteen bool) string {
 		"Lăsați dispozitivul pornit și nefolosit până la final.", maxAttempts)
 }
 
-// finish writes d, what the steps measured, as the run's envelope, also
-// when stepErr stopped the steps after the first hour, which decides G12
-// (G27), and then returns stepErr. sixteenErr, the hour at 16 cameras', is
-// information: it is said on the screen, and the run succeeds. The owner's
-// stop (Ctrl+C) of either is an interruption, errInterrupted, as on
-// recspike's other interruptions.
+// finish writes d, what the steps measured, as the run's envelope, stamped
+// with the time it is stored (AtMs), also when stepErr stopped the steps
+// after the first hour, which decides G12 (G27), and then returns stepErr.
+// sixteenErr, the hour at 16 cameras', is information: it is said on the
+// screen, and the run succeeds. The owner's stop (Ctrl+C) of either is an
+// interruption, errInterrupted, as on recspike's other interruptions.
 func (o Options) finish(d results.Mi3Data, sixteenErr, stepErr error) error {
 	d.Proxies = Proxies
 	set := SetFor(o.Host.Pseudonym)
-	e := results.Envelope{Schema: results.Schema, Code: "MI3", Set: set, Host: o.Host.Pseudonym, OS: o.Host.OS,
+	e := results.Envelope{Schema: results.Schema, Code: "MI3", AtMs: time.Now().UnixMilli(), Set: set, Host: o.Host.Pseudonym, OS: o.Host.OS,
 		PiModel: o.Host.PiModel, Storage: o.Host.Storage, SdConfirmation: o.Host.SdConfirmation, MI3: &d}
 	for n := 1; ; n++ {
 		e.RunID = fmt.Sprintf("%s-%d", set, n)

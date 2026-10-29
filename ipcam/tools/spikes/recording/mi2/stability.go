@@ -84,7 +84,8 @@ var errNeverReady = errors.New("ipcam-hub nu a ajuns gata de înregistrare")
 // keeps the host awake (R49), restarts ipcam-hub at once whenever it exits
 // unexpectedly and counts the exit of a ready ipcam-hub as a crash, counts
 // MediaMTX's restarts (HUB-13), notes the SD-card monitor's states (T40),
-// and writes the envelope MI2/<host>-72h/<run id>.json. recspike is the
+// and writes the envelope MI2/<host>-72h/<run id>.json, stamped with the
+// run clock's time (AtMs). recspike is the
 // supervisor here: its restart is a lower bound for Faza 1's SCM and
 // systemd recovery (C07). An exit before ready is a setup failure, no
 // crash: a run in which no ipcam-hub ever got ready ends with an error and
@@ -192,8 +193,8 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	data.Cameras, data.OnSdCard, data.WindowHours, data.Invalidated = cameras, o.Host.Storage == "sd", window.Hours(), st.Invalidated
-	e := results.Envelope{Schema: results.Schema, Code: "MI2", RunID: runID, Set: set, Host: o.Host.Pseudonym, OS: o.Host.OS,
-		PiModel: o.Host.PiModel, Storage: o.Host.Storage, SdConfirmation: o.Host.SdConfirmation, MI2: &data}
+	e := results.Envelope{Schema: results.Schema, Code: "MI2", RunID: runID, AtMs: o.clock().Now().UnixMilli(), Set: set, Host: o.Host.Pseudonym,
+		OS: o.Host.OS, PiModel: o.Host.PiModel, Storage: o.Host.Storage, SdConfirmation: o.Host.SdConfirmation, MI2: &data}
 	if err := results.Create(o.Results, e); err != nil {
 		return fmt.Errorf("nu pot scrie rezultatul probei: %w", err)
 	}

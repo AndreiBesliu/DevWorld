@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,6 +45,16 @@ type job struct {
 	CompletedAt time.Time `json:"completed_at"`
 }
 
+// doneAtMs is when j completed, in Unix ms: the time of the envelopes that
+// its annotations carry (C1-R22). A job still running, whose completed_at
+// is null, gives 0, no time.
+func (j job) doneAtMs() int64 {
+	if j.CompletedAt.IsZero() {
+		return 0
+	}
+	return j.CompletedAt.UnixMilli()
+}
+
 // mtx2Loss is the mtx2-loss line of the recorder job (R01, O17): the loss at
 // a cut and the disk overhead per bitrate, padding on and off.
 type mtx2Loss struct {
@@ -77,57 +88,95 @@ func (c *ciNotices) add(n ciNotices) {
 	}
 }
 
+// workflowRun is what a workflow run's annotations carried: its envelopes and
+// its other notices, with when its last job completed.
+type workflowRun struct {
+	id      string
+	doneAt  time.Time
+	envs    []results.Envelope
+	notices ciNotices
+}
+
+// readRuns reads the workflow runs ids (readRun), the newest first: by when
+// their last job completed, then by their id, whatever the order of ids, so
+// that of two lab runs G10 counts the newer's copy of a run (conflicts).
+func readRuns(ids []string) ([]workflowRun, error) {
+	runs := make([]workflowRun, 0, len(ids))
+	for _, id := range ids {
+		r, err := readRun(id)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, r)
+	}
+	slices.SortStableFunc(runs, func(a, b workflowRun) int {
+		if c := b.doneAt.Compare(a.doneAt); c != 0 {
+			return c
+		}
+		return cmp.Or(cmp.Compare(len(b.id), len(a.id)), strings.Compare(b.id, a.id))
+	})
+	return runs, nil
+}
+
 // readRun reads the workflow run id's results (C32): it lists the run's
 // jobs, then reads each job's check-run annotations, every call through
-// `gh api … --paginate`. The envelopes come back as they are; the ENC-06
-// line becomes its envelope (enc06Envelope), the Chrome line of MI9 its
-// own (chromeEnvelope), and the other notices are kept or counted.
-func readRun(id string) ([]results.Envelope, ciNotices, error) {
-	var notices ciNotices
+// `gh api … --paginate`. The envelopes come back as they are, stamped with
+// when their job completed when they carry no time (M1); the ENC-06 line
+// becomes its envelope (enc06Envelope), the Chrome line of MI9 its own
+// (mi9Line), and the other notices are kept or counted.
+func readRun(id string) (workflowRun, error) {
+	run := workflowRun{id: id}
 	out, err := gh(repo + "actions/runs/" + id + "/jobs")
 	if err != nil {
-		return nil, notices, err
+		return run, err
 	}
 	jobs, err := parseJobs(out)
 	if err != nil {
-		return nil, notices, fmt.Errorf("workflow run %s: %w", id, err)
+		return run, fmt.Errorf("workflow run %s: %w", id, err)
 	}
-	var envs []results.Envelope
 	for _, j := range jobs {
+		if j.CompletedAt.After(run.doneAt) {
+			run.doneAt = j.CompletedAt
+		}
 		if j.Conclusion == "skipped" {
 			continue
 		}
 		out, err := gh(repo + "check-runs/" + strconv.FormatInt(j.ID, 10) + "/annotations")
 		if err != nil {
-			return nil, notices, err
+			return run, err
 		}
 		e, n, err := results.ReadAnnotations(bytes.NewReader(out))
 		if err != nil {
-			return nil, notices, fmt.Errorf("workflow run %s, job %q: %w", id, j.Name, err)
+			return run, fmt.Errorf("workflow run %s, job %q: %w", id, j.Name, err)
 		}
-		envs = append(envs, e...)
+		for i := range e {
+			if e[i].AtMs == 0 {
+				e[i].AtMs = j.doneAtMs()
+			}
+		}
+		run.envs = append(run.envs, e...)
 		for _, notice := range n {
-			e, err := fromNotice(notice, j, &notices)
+			e, err := fromNotice(notice, j, &run.notices)
 			if err != nil {
-				return nil, notices, fmt.Errorf("workflow run %s, job %q: %w", id, j.Name, err)
+				return run, fmt.Errorf("workflow run %s, job %q: %w", id, j.Name, err)
 			}
 			if e != nil {
-				envs = append(envs, *e)
+				run.envs = append(run.envs, *e)
 			}
 		}
 	}
-	return envs, notices, nil
+	return run, nil
 }
 
 // fromNotice turns notice, of job j, into its envelope, or keeps it in
 // notices.
 func fromNotice(notice results.Notice, j job, notices *ciNotices) (*results.Envelope, error) {
-	switch {
-	case notice.Title == titleEnc06:
+	switch notice.Title {
+	case titleEnc06:
 		return enc06Envelope(notice.Message, j)
-	case notice.Title == titleMI9 && strings.HasPrefix(notice.Message, `{"transport":"chrome"`):
-		return chromeEnvelope(notice.Message, j)
-	case notice.Title == titleMtx2:
+	case titleMI9:
+		return mi9Line(notice.Message, j)
+	case titleMtx2:
 		var m mtx2Loss
 		if err := strict(notice.Message, &m); err != nil {
 			return nil, fmt.Errorf("the mtx2-loss line: %w", err)
@@ -143,8 +192,8 @@ func fromNotice(notice results.Notice, j job, notices *ciNotices) (*results.Enve
 }
 
 // enc06Envelope is the ENC-06 line of job j as the envelope that mi4.Judge
-// reads: set ci-enc06 on lab-linux, stamped with the time its check ran
-// (C1-R22), its run id the job's.
+// reads: set ci-enc06 on lab-linux, stamped with the time its check
+// completed (C1-R22), its run id the job's.
 func enc06Envelope(message string, j job) (*results.Envelope, error) {
 	var line struct {
 		Code  string   `json:"code"`
@@ -155,13 +204,32 @@ func enc06Envelope(message string, j job) (*results.Envelope, error) {
 	if err := strict(message, &line); err != nil || line.Code != "ENC-06" || line.Pass == nil {
 		return nil, fmt.Errorf("the ENC-06 line is not ENC-06's result: %v", err)
 	}
-	e := results.Envelope{Schema: results.Schema, Code: "ENC-06", RunID: "ci-enc06-" + strconv.FormatInt(j.ID, 10), AtMs: j.CompletedAt.UnixMilli(),
+	e := results.Envelope{Schema: results.Schema, Code: "ENC-06", RunID: "ci-enc06-" + strconv.FormatInt(j.ID, 10), AtMs: j.doneAtMs(),
 		Set: "ci-enc06", Host: ciHost, OS: "linux", MI4: &results.Mi4Data{Enc06: line.Pass}}
 	return &e, e.Validate()
 }
 
+// mi9Line is an mi9 notice of job j that is no envelope, told by its
+// transport: "chrome" is the Chrome line (chromeEnvelope), whatever the
+// order of its keys. Any other shape is an error, as for ENC-06 and
+// mtx2-loss: a changed line would otherwise leave G18 without its Chrome
+// part, silently.
+func mi9Line(message string, j job) (*results.Envelope, error) {
+	var probe struct {
+		Transport string `json:"transport"`
+	}
+	if err := json.Unmarshal([]byte(message), &probe); err != nil {
+		return nil, fmt.Errorf("an mi9 line that is neither an envelope nor the Chrome line: %w", err)
+	}
+	if probe.Transport != string(mi9.Chrome) {
+		return nil, fmt.Errorf("an mi9 line that is neither an envelope nor the Chrome line: transport %q", probe.Transport)
+	}
+	return chromeEnvelope(message, j)
+}
+
 // chromeEnvelope is MI9's Chrome line of job j as an envelope with one leg
-// of source ci-chrome (G26), its run id the job's.
+// of source ci-chrome (G26), its run id the job's, stamped with when the
+// job completed.
 func chromeEnvelope(message string, j job) (*results.Envelope, error) {
 	var line struct {
 		Transport string    `json:"transport"`
@@ -171,7 +239,7 @@ func chromeEnvelope(message string, j job) (*results.Envelope, error) {
 	if err := strict(message, &line); err != nil {
 		return nil, fmt.Errorf("the mi9 Chrome line: %w", err)
 	}
-	e := results.Envelope{Schema: results.Schema, Code: "MI9", RunID: "ci-chrome-" + strconv.FormatInt(j.ID, 10), Set: mi9.SourceChrome,
+	e := results.Envelope{Schema: results.Schema, Code: "MI9", RunID: "ci-chrome-" + strconv.FormatInt(j.ID, 10), AtMs: j.doneAtMs(), Set: mi9.SourceChrome,
 		Host: ciHost, OS: "linux", MI9: &results.Mi9Data{Legs: []results.Mi9Leg{{Transport: line.Transport, SeekMs: line.SeekMs,
 			DisplayMs: line.DisplayMs, Source: mi9.SourceChrome}}}}
 	return &e, e.Validate()

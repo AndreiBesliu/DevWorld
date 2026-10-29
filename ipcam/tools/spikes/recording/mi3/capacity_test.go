@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
@@ -417,6 +418,28 @@ func TestMI3_RunWritesWhatWasMeasured(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "16 camere") || !strings.Contains(out.String(), "codul 2") {
 		t.Errorf("the screen does not say why the 16-camera hour has no result:\n%s", out)
+	}
+}
+
+// TestMI3_EnvelopeCarriesItsTime (Task 12 review, M1): the run's envelope
+// is stamped with the time it was stored (AtMs), as MI4's is, so that the
+// runs of merged results folders order by time in the report.
+func TestMI3_EnvelopeCarriesItsTime(t *testing.T) {
+	dir := t.TempDir()
+	o := Options{Host: mi1.HostState{Pseudonym: "pc", OS: "windows", Storage: "ssd"}, Results: dir, Out: &strings.Builder{}}
+	d := dataOf("H3", 8, passIf(true))
+	d.Steps = []results.Mi3Step{step(8, 60, 1, true)}
+	before := time.Now().UnixMilli()
+	if err := o.finish(d, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now().UnixMilli()
+	e, err := results.Read(filepath.Join(dir, "MI3", "pc-mi3", "pc-mi3-1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.AtMs < before || e.AtMs > after {
+		t.Errorf("the envelope's time %d ms is not when finish stored it, within [%d, %d]", e.AtMs, before, after)
 	}
 }
 

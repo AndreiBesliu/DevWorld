@@ -191,6 +191,11 @@ func TestMI4_ThroughputPerModel(t *testing.T) {
 			if j.Verdict != want || j.PlanB != planB {
 				t.Errorf("Judge = %q → %q, reasons %q; want %q → %q", j.Verdict, j.PlanB, j.Reasons, want, planB)
 			}
+			// Task 12 review, M7: the number the rate leaves, for the
+			// report's «Rezultat» column.
+			if got := j.Recommended; len(got) != 1 || got["pi"] != c.after {
+				t.Errorf("Recommended = %v, want pi %d", got, c.after)
+			}
 		})
 	}
 	t.Run("PC", func(t *testing.T) {
@@ -206,6 +211,9 @@ func TestMI4_ThroughputPerModel(t *testing.T) {
 		}
 		if r := row(t, j, "MI4 pc: criptare"); r.Pass != nil {
 			t.Errorf("the PC's rate row %+v, want information", r)
+		}
+		if _, ok := j.Recommended["pc"]; ok {
+			t.Errorf("Recommended = %v: the PC's rate leaves no number", j.Recommended)
 		}
 	})
 }

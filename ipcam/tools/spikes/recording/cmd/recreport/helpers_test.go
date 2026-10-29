@@ -86,6 +86,76 @@ func installFakeGH(t *testing.T, dir string) string {
 	return log
 }
 
+// ghJob is a job of a workflow run that the fake gh answers: its id, when
+// it completed (zero: null, as for a job still running) and its notices.
+type ghJob struct {
+	id        int64
+	completed time.Time
+	notices   []results.Notice
+}
+
+// ghRuns writes workflow runs, by their ids, into a new folder that the
+// fake gh answers from (installFakeGH): each run's jobs, and each job's
+// notices as its check run's annotations.
+func ghRuns(t *testing.T, runs map[string][]ghJob) string {
+	t.Helper()
+	dir := t.TempDir()
+	for id, jobs := range runs {
+		list := []map[string]any{}
+		for _, j := range jobs {
+			var completed any
+			if !j.completed.IsZero() {
+				completed = j.completed.Format(time.RFC3339)
+			}
+			list = append(list, map[string]any{"id": j.id, "name": fmt.Sprintf("job %d", j.id), "status": "completed", "conclusion": "success",
+				"completed_at": completed})
+			annotations := []map[string]any{}
+			for _, n := range j.notices {
+				annotations = append(annotations, map[string]any{"path": ".github", "start_line": 1, "end_line": 1, "annotation_level": "notice",
+					"title": n.Title, "message": n.Message, "raw_details": nil})
+			}
+			writeJSON(t, filepath.Join(dir, "check-runs", fmt.Sprint(j.id), "annotations.json"), annotations)
+		}
+		writeJSON(t, filepath.Join(dir, "actions", "runs", id, "jobs.json"), map[string]any{"total_count": len(list), "jobs": list})
+	}
+	return dir
+}
+
+// writeJSON writes v as JSON to path, making its folder.
+func writeJSON(t *testing.T, path string, v any) {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// notice is e as the notice that carries it in CI, titled with its set.
+func notice(t *testing.T, e results.Envelope) results.Notice {
+	t.Helper()
+	data, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return results.Notice{Title: e.Set, Message: string(data)}
+}
+
+// notices are envs as their notices.
+func notices(t *testing.T, envs []results.Envelope) []results.Notice {
+	t.Helper()
+	out := make([]results.Notice, len(envs))
+	for i, e := range envs {
+		out[i] = notice(t, e)
+	}
+	return out
+}
+
 // annotationsDir is the fixture of the CI runs: 101, the lab's, with the
 // set lab-linux-kill9 whole and lab-windows-kill9 without its part 7, and
 // 102, the recorder workflow's, with ENC-06, mtx2-loss and the MI9 lines.

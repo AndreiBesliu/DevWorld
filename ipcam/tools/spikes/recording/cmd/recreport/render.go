@@ -129,14 +129,14 @@ func (r *report) summary(b *strings.Builder) {
 	for _, s := range r.in.incomplete {
 		fmt.Fprintf(b, "- **Set de laborator incomplet:** %s; G10 nu are verdict pentru el până la o nouă rulare din laborator.\n", missingParts(s))
 	}
-	if len(r.gates[0].j.Notes) > 0 {
+	if r.g10().O17OffOverLimit {
 		fmt.Fprintf(b, "- **De propus în PR:** %s\n", o17Proposal)
 	}
 	b.WriteString("\nMotivele fiecărui verdict sunt la „Verdicte și decizii declanșate”; cifrele, pe gazdă, la „Rezultate pe gazdă”.\n\n")
 }
 
-// o17Proposal is what an O17-off loss over §4.5's bound calls for: a
-// proposal, not a decision (Task 14).
+// o17Proposal is what an O17-off loss over §4.5's bound calls for, which
+// G10 signals (O17OffOverLimit): a proposal, not a decision (Task 14).
 const o17Proposal = "rularea „Pierdere minimă la pană de curent” oprită a pierdut mai mult decât limita din §4.5; nu e o decizie declanșată " +
 	"(planul B al lui G10 nu se aplică), iar PR-ul raportului propune o Decizie tehnică pentru limita sau pentru nota din §4.5, cu cifrele din notele lui G10."
 
@@ -150,8 +150,8 @@ func (r *report) decisions(b *strings.Builder) {
 		fmt.Fprintf(b, "### %s\n\n", g.title())
 		decision, changes := g.decision()
 		fmt.Fprintf(b, "- **Verdict:** %s\n- **Decizie declanșată:** %s\n- **Ce se schimbă în §2 sau în cerințe:** %s\n", verdictText(g.j), decision, changes)
-		if g.id == "G10" && len(g.j.Notes) > 0 {
-			fmt.Fprintf(b, "- **De propus în PR (nu e o decizie declanșată):** %s\n", o17Proposal)
+		if g.j.O17OffOverLimit {
+			fmt.Fprintf(b, "- **De propus în PR:** %s\n", o17Proposal)
 		}
 		bullets(b, "Motive", g.j.Reasons)
 		bullets(b, "Note (în afara verdictului)", g.j.Notes)
@@ -219,22 +219,54 @@ func (r *report) models(b *strings.Builder) {
 	} else {
 		fmt.Fprintf(b, "Pi-ul dvs.: %s (citit din %s). %s\n\n", m.Raw, cmp.Or(m.Source, "cpuinfo"), modelText(m))
 	}
-	b.WriteString("| Nivel | Camere recomandate (§4.8) | Măsurat |\n| --- | --- | --- |\n")
-	fmt.Fprintf(b, "| H3: PC-ul dvs. | 8 (16 cu ≥ 6 nuclee) | %s |\n", r.measuredOn("pc", "PC-ul dvs."))
-	h1 := "estimare, nemăsurată"
+	b.WriteString("| Nivel | Camere recomandate (§4.8) | Rezultat | Măsurat |\n| --- | --- | --- | --- |\n")
+	fmt.Fprintf(b, "| H3: PC-ul dvs. | 8 (16 cu ≥ 6 nuclee) | %s | %s |\n", r.resultText("pc", h3Cameras), r.measuredOn("pc", "PC-ul dvs."))
+	h1, h1Result := "estimare, nemăsurată", "—"
 	switch {
 	case m == nil:
 	case m.Known && !m.Supported:
-		fmt.Fprintf(b, "| nesuportat: Pi-ul dvs. | — | %s |\n", results.Deferred("Pi armv6"))
+		fmt.Fprintf(b, "| nesuportat: Pi-ul dvs. | — | — | %s |\n", results.Deferred("Pi armv6"))
 	case m.Tier == mi3.TierH1:
-		h1 = r.measuredOn("pi", "Pi-ul dvs.")
+		h1, h1Result = r.measuredOn("pi", "Pi-ul dvs."), r.resultText("pi", m.RecommendedMax)
 	default:
-		fmt.Fprintf(b, "| %s: Pi-ul dvs. | %s | %s |\n", cmp.Or(m.Tier, "necunoscut"), recommendedText(m), r.measuredOn("pi", "Pi-ul dvs."))
+		fmt.Fprintf(b, "| %s: Pi-ul dvs. | %s | %s | %s |\n", cmp.Or(m.Tier, "necunoscut"), recommendedText(m), r.resultText("pi", m.RecommendedMax),
+			r.measuredOn("pi", "Pi-ul dvs."))
 	}
-	fmt.Fprintf(b, "| H1 (Pi 5) | ≈ 8 | %s |\n| H2 (N100) | 16 | estimare, nemăsurată |\n\n", h1)
+	fmt.Fprintf(b, "| H1 (Pi 5) | ≈ 8 | %s | %s |\n| H2 (N100) | 16 | — | estimare, nemăsurată |\n\n", h1Result, h1)
 	fmt.Fprintf(b, "Numerele rezultate: G12 — %s; G13 — %s. Un plan B al lor coboară numărul recomandat al gazdei (minimum 1, O16), "+
 		"iar PR-ul raportului scrie numerele măsurate în §4.8. H1 și H2 se măsoară doar în Faza 0-bis, dacă doriți (G31).\n\n",
 		verdictText(r.gates[2].j), verdictText(r.gates[3].j))
+}
+
+// h3Cameras is H3's recommended number (§4.8), the PC's starting number.
+const h3Cameras = 8
+
+// resultText is host's recommended number after G12 and G13 (§4.8), from
+// start: the lower of the numbers that their judgements leave
+// (Recommended), named by the gates that lowered it below start. Without
+// G12's number, as while its steps are open, it is not settled.
+func (r *report) resultText(host string, start int) string {
+	g12, ok := r.gates[2].j.Recommended[host]
+	if !ok {
+		return "nestabilit (G12)"
+	}
+	n := g12
+	g13, ok13 := r.g13().Recommended[host]
+	if ok13 {
+		n = min(n, g13)
+	}
+	var by []string
+	if n < start && g12 == n {
+		by = append(by, "G12")
+	}
+	if n < start && ok13 && g13 == n {
+		by = append(by, "G13")
+	}
+	text := count(n, "cameră", "camere")
+	if len(by) > 0 {
+		text += " (" + strings.Join(by, ", ") + ")"
+	}
+	return text
 }
 
 // modelText says what §4.8 makes of the Pi's model.
@@ -331,7 +363,7 @@ func (r *report) hosts(b *strings.Builder) {
 		fmt.Fprintf(b, "%s\n\n", heading)
 		switch {
 		case t == tablePi && heading != tablePi:
-			r.sdIntro(b)
+			r.sdIntro(b, heading == tablePiMixed)
 			rows = nextToResumes(rows, "pi")
 		case t == tableLab:
 			b.WriteString("Rulările din laborator (`lab-linux`, `lab-windows`, `lab-qemu`) și din CI, citite din adnotările rulărilor (C32).\n\n")
@@ -352,31 +384,56 @@ const sdResumeNote = "Reluările de după kill -9 (MI2) stau lângă stările ca
 	"încărcare, laboratorul spike-ului a măsurat reluări de 13–37 s, din fsync-urile reconcilierii și ale stării rulării. Limita de 10 s a " +
 	"lui G11 poate pica din latența fsync a cardului, pe care planul B al lui G11 (ingestul inversat) nu o schimbă."
 
+// storageNames are the storages other than an SD card in the report's
+// Romanian (G16).
+var storageNames = map[string]string{"ssd": "SSD", "hdd": "HDD", "unknown": "o stocare necunoscută"}
+
 // sdIntro says which of the Pi's sets were on an SD card, and the owner's
-// confirmation of the card's warning (G16, T40).
-func (r *report) sdIntro(b *strings.Builder) {
-	var sets []string
+// confirmation of the card's warning (G16, T40). On mixed storage, the
+// judges' rows being per host, one table holds every storage: the intro
+// says so and names the sets on each.
+func (r *report) sdIntro(b *strings.Builder, mixed bool) {
+	sets := map[string][]string{}
 	var confirmations []string
 	for _, e := range r.in.envs {
-		if e.Host != "pi" || e.Storage != "sd" {
+		if e.Host != "pi" {
 			continue
 		}
-		if label := "`" + e.Code + " " + e.Set + "`"; !slices.Contains(sets, label) {
-			sets = append(sets, label)
+		storage := cmp.Or(e.Storage, "unknown")
+		if label := "`" + e.Code + " " + e.Set + "`"; !slices.Contains(sets[storage], label) {
+			sets[storage] = append(sets[storage], label)
 		}
-		if c := e.SdConfirmation; c != nil {
+		if c := e.SdConfirmation; c != nil && storage == "sd" {
 			text := fmt.Sprintf("«%s», la %s", c.Text, time.UnixMilli(c.AtMs).UTC().Format("2006-01-02 15:04 UTC"))
 			if !slices.Contains(confirmations, text) {
 				confirmations = append(confirmations, text)
 			}
 		}
 	}
-	slices.Sort(sets)
-	confirmed := "fără confirmarea proprietarului în rezultate"
-	if len(confirmations) > 0 {
-		confirmed = "avertismentul cardului SD confirmat de proprietar: " + strings.Join(confirmations, "; ")
+	for _, s := range sets {
+		slices.Sort(s)
 	}
-	fmt.Fprintf(b, "Rezultatele Pi-ului de pe card SD, separat de celelalte (G16): %s. Seturile de pe card SD: %s.\n\n", confirmed, strings.Join(sets, ", "))
+	if !mixed {
+		confirmed := "fără confirmarea proprietarului în rezultate"
+		if len(confirmations) > 0 {
+			confirmed = "avertismentul cardului SD confirmat de proprietar: " + strings.Join(confirmations, "; ")
+		}
+		fmt.Fprintf(b, "Rezultatele Pi-ului de pe card SD, separat de celelalte (G16): %s. Seturile de pe card SD: %s.\n\n", confirmed, strings.Join(sets["sd"], ", "))
+		return
+	}
+	confirmed := "Avertismentul cardului SD nu are confirmarea proprietarului în rezultate."
+	if len(confirmations) > 0 {
+		confirmed = "Avertismentul cardului SD e confirmat de proprietar: " + strings.Join(confirmations, "; ") + "."
+	}
+	var others []string
+	for _, storage := range slices.Sorted(maps.Keys(sets)) {
+		if storage != "sd" {
+			others = append(others, fmt.Sprintf("Pe %s: %s.", cmp.Or(storageNames[storage], storage), strings.Join(sets[storage], ", ")))
+		}
+	}
+	fmt.Fprintf(b, "Pi-ul are rezultate pe mai multe stocări (G16). Judecata dă rândurile pe gazdă, nu pe stocare, deci tabelul de mai jos le "+
+		"cuprinde pe toate: citiți fiecare rând după setul lui. Seturile de pe card SD: %s. %s %s\n\n",
+		strings.Join(sets["sd"], ", "), strings.Join(others, " "), confirmed)
 }
 
 // nextToResumes moves host's card row to right after its resume row.
@@ -461,16 +518,16 @@ func (r *report) input(b *strings.Builder) {
 		fmt.Fprintf(b, "- Set de laborator incomplet (C32): %s; partea lui din G10 rămâne fără verdict.\n", missingParts(s))
 	}
 	for _, n := range in.renumbered {
-		pairs := make([]string, len(n.from))
-		for i := range n.from {
-			pairs[i] = fmt.Sprintf("`%s` → `%s`", n.from[i], n.to[i])
-		}
-		fmt.Fprintf(b, "- Intrare renumerotată: în `%s %s`, plicuri diferite aveau același număr de rulare, din dosare diferite; ca rularea "+
-			"cea mai nouă să fie cea judecată, au fost renumerotate după momentul lor: %s.\n", n.code, n.set, strings.Join(pairs, ", "))
+		fmt.Fprintf(b, "- %s\n", renumberedText(n))
 	}
 	for _, c := range in.conflicts {
-		fmt.Fprintf(b, "- Rulări MI1 cu rezultate diferite în intrare (de exemplu, din două rulări de laborator): `%s`: %s; G10 numără una "+
-			"din fiecare, pe cea care contează, altfel pe prima citită.\n", c.set, count(c.runs, "rulare", "rulări"))
+		from := make([]string, len(c.counted))
+		for i, o := range c.counted {
+			from[i] = count(o.runs, "rulare", "rulări") + " din " + originText(o.from)
+		}
+		fmt.Fprintf(b, "- Rulări MI1 cu rezultate diferite în intrare (de exemplu, din două rulări de laborator): `%s`: %s; G10 numără, din "+
+			"fiecare, prima copie citită care contează, rulările CI fiind citite de la cea mai nouă: %s.\n", c.set, count(c.runs, "rulare", "rulări"),
+			strings.Join(from, ", "))
 	}
 	if len(in.unjudged) > 0 {
 		fmt.Fprintf(b, "- Plicuri MI1 din seturi pe care G10 nu le judecă (rulările smoke din CI): %s.\n", counted(in.unjudged))
@@ -478,14 +535,63 @@ func (r *report) input(b *strings.Builder) {
 	if len(in.skipped) > 0 {
 		names := make([]string, len(in.skipped))
 		for i, s := range in.skipped {
-			names[i] = "`" + s.file + "`"
+			names[i] = fmt.Sprintf("`%s` (%s)", s.file, s.reason)
 		}
-		fmt.Fprintf(b, "- Fișiere necitite, care nu sunt plicuri de rezultate valide: %s.\n", strings.Join(names, ", "))
+		fmt.Fprintf(b, "- Fișiere necitite: %s.\n", strings.Join(names, ", "))
 	}
 	if len(in.ci.other) > 0 {
 		fmt.Fprintf(b, "- Alte notificări din CI, informative: %s.\n", counted(in.ci.other))
 	}
 	b.WriteString("\n")
+}
+
+// latestGate is the gate whose Judge takes, of a host's set, the run with
+// the highest number, by the code of its envelopes (mi3, mi4).
+var latestGate = map[string]string{"MI3": "G12", "MI4": "G13"}
+
+// renumberedText says how a set's envelopes that shared a run id were
+// renumbered (Task 10b): by their time, or, when some have none (named by
+// their new run ids), in an uncertain order, which the owner checks by hand
+// where a gate judges the highest number (Task 12 review, M1).
+func renumberedText(n renumbering) string {
+	pairs := make([]string, len(n.from))
+	for i := range n.from {
+		pairs[i] = fmt.Sprintf("`%s` → `%s`", n.from[i], n.to[i])
+	}
+	text := fmt.Sprintf("Intrare renumerotată: în `%s %s`, plicuri diferite aveau același număr de rulare, din dosare sau rulări CI diferite; ",
+		n.code, n.set)
+	last := len(n.to) - 1
+	gate, judged := latestGate[n.code]
+	if len(n.untimed) == 0 {
+		text += "au fost renumerotate după momentul lor, de la cea mai veche la cea mai nouă: " + strings.Join(pairs, ", ") + "."
+		if judged {
+			text += fmt.Sprintf(" %s judecă rularea cu numărul cel mai mare, `%s`, cea mai nouă.", gate, n.to[last])
+		}
+		return text
+	}
+	untimed := make([]string, len(n.untimed))
+	for i, id := range n.untimed {
+		untimed[i] = "`" + id + "`"
+	}
+	without := strings.Join(untimed, ", ") + " nu spun când s-au făcut"
+	if len(untimed) == 1 {
+		without = untimed[0] + " nu spune când s-a făcut"
+	}
+	text += fmt.Sprintf("au fost renumerotate, dar ordinea lor e nesigură, fiindcă %s: %s.", without, strings.Join(pairs, ", "))
+	if judged {
+		text += fmt.Sprintf(" %s judecă rularea cu numărul cel mai mare, `%s` (fost `%s`), care poate să nu fie cea mai nouă: verificați de mână "+
+			"care e cea mai nouă.", gate, n.to[last], n.from[last])
+	}
+	return text
+}
+
+// originText names where an envelope was read: "rularea CI `123`", or
+// "dosarul de rezultate nr. 1", by its place among -in.
+func originText(o origin) string {
+	if o.ciRun != "" {
+		return "rularea CI `" + o.ciRun + "`"
+	}
+	return fmt.Sprintf("dosarul de rezultate nr. %d", o.folder)
 }
 
 // counted lists names with their counts, sorted: "`a` (2), `b` (1)".

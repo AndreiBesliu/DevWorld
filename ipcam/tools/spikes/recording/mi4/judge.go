@@ -152,10 +152,11 @@ func (v *verdict) row(code, value, limit, source string, pass *bool) {
 // (G21): a slow read or an age mismatch the RAM buffer; a slow seek the
 // RAM buffer, or 2-min segments, or an escalation, after what their own
 // seeks measured, and PlanBUnmeasured when a stage that the choice needs
-// was not measured; the rate a lower recommended number; agerange F6's
-// whole-segment download. A measured failure decides even with other parts
-// missing (G27); a missing Pi part on an unsupported Pi moves G13 to Faza
-// 0-bis (G31).
+// was not measured; the rate a lower recommended number, which Recommended
+// gives for the Pi, the model's own when the rate reaches its threshold;
+// agerange F6's whole-segment download. A measured failure decides even
+// with other parts missing (G27); a missing Pi part on an unsupported Pi
+// moves G13 to Faza 0-bis (G31).
 func Judge(envs []results.Envelope) results.Judgement {
 	v := &verdict{j: results.Judgement{Gate: "G13"}}
 	if e := latest(envs, "pi"); e != nil {
@@ -258,7 +259,8 @@ func (v *verdict) judgeSeek(d *results.Mi4Data) {
 	}
 }
 
-// judgeRate judges the Pi's encryption rate against its model's threshold.
+// judgeRate judges the Pi's encryption rate against its model's threshold,
+// and records the Pi's recommended number that the rate leaves.
 func (v *verdict) judgeRate(e *results.Envelope) {
 	d := e.MI4
 	threshold, judged, after := Throughput(e.PiModel, d.CryptoMBs)
@@ -273,6 +275,7 @@ func (v *verdict) judgeRate(e *results.Envelope) {
 		return
 	}
 	ok := d.CryptoMBs >= threshold
+	v.j.Recommend("pi", after)
 	v.row("MI4 pi: criptare pe un nucleu", mbs(d.CryptoMBs), "≥ "+mbs(threshold), "pi", results.RowPass(ok, true))
 	v.row("MI4 pi: criptare pe toate nucleele (informativ)", mbs(d.CryptoMBsAllCores), "", "pi", nil)
 	if !ok {

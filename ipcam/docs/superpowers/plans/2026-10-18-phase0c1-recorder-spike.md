@@ -789,7 +789,7 @@ type Verdict string
 const (Pass Verdict = "trece"; Fail Verdict = "pică"; Incomplete Verdict = "fără verdict: lipsesc măsurători")
 func Deferred(reason string) Verdict // "amânat în Faza 0-bis: <reason>"
 type Row struct{ Code, Value, Limit, Source string; Host string /* the host whose table shows the row when Source does not name it: MI9's legs (Task 12) */; Pass *bool }
-type Judgement struct{ Gate string; Verdict Verdict; PlanB string; Reasons []string; Rows []Row }
+type Judgement struct{ Gate string; Verdict Verdict; PlanB string; Reasons, Notes []string; Rows []Row; O17OffOverLimit bool /* G10: an O17-off loss over §4.5's bound, a proposal for the report's PR (Task 12b) */; Recommended map[string]int /* G12, G13: per host, the recommended count that the measurements leave (Task 12b) */ }
 func Write(dir string, e Envelope) error // results/<code>/<set>/<runId>.json
 
 package mi1 // SPIKE-ONLY

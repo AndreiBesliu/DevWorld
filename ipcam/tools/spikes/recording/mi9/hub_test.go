@@ -50,13 +50,21 @@ const bulkStopped = "mi9: a bulk channel stopped"
 // measurement's wait ends during the transfer, the client stops it and
 // closes its bulk channel. That is a normal stop, and the hub side logs
 // nothing in English on the owner's screen. A send that fails while the
-// channel is still open is logged.
+// channel is still open is logged. The test closes the hub side only once
+// it has decided whether to log (stopDecided), and, when the channel is to
+// be open, ends the client's wait only then, so that each case takes the
+// branch it names whatever the scheduling: the channel's state, never the
+// hub's own stop (Task 12 review, M10).
 func TestHub_StoppedTransferLogsNothing(t *testing.T) {
 	path, id, _ := testSegment(t, 10)
 	for _, c := range []struct {
 		name string
 		// send is the hub side's send of the transfer.
 		send func(ctx context.Context, ch channel, src io.ReaderAt, off, size int64, message int) error
+		// logs is whether the hub side logs the stop. When it does, the
+		// channel is open as the hub side decides: the client's wait ends
+		// only after the decision. Otherwise it ends after a second, during
+		// the transfer, and the client closes the channel.
 		logs bool
 	}{
 		{"the client stopped it", sendHalfThenAfterClose, false},
@@ -71,14 +79,12 @@ func TestHub_StoppedTransferLogsNothing(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = seg.Close() }()
-			realSend := sendBulk
-			t.Cleanup(func() { sendBulk = realSend })
-			returned := make(chan struct{})
+			realSend, realDecided := sendBulk, stopDecided
+			t.Cleanup(func() { sendBulk, stopDecided = realSend, realDecided })
+			decided := make(chan struct{})
 			var once sync.Once
-			sendBulk = func(ctx context.Context, ch channel, src io.ReaderAt, off, size int64, message int) error {
-				defer once.Do(func() { close(returned) })
-				return c.send(ctx, ch, src, off, size, message)
-			}
+			sendBulk = c.send
+			stopDecided = func() { once.Do(func() { close(decided) }) }
 			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 			defer cancel()
 			wait := newFiredCtx(ctx)
@@ -87,12 +93,22 @@ func TestHub_StoppedTransferLogsNothing(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = cl.Close() }()
-			time.AfterFunc(time.Second, wait.fire)
+			if c.logs {
+				go func() {
+					select {
+					case <-decided:
+					case <-ctx.Done():
+					}
+					wait.fire()
+				}()
+			} else {
+				time.AfterFunc(time.Second, wait.fire)
+			}
 			_, _ = cl.Measure(wait)
 			select {
-			case <-returned:
+			case <-decided:
 			case <-ctx.Done():
-				t.Fatal("the hub side's send did not return")
+				t.Fatal("the hub side did not decide whether to log its stopped send")
 			}
 			if err := h.Close(); err != nil {
 				t.Fatal(err)

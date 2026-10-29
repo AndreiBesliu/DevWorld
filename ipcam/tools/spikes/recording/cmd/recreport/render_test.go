@@ -240,7 +240,7 @@ func TestRender_Faza0bisStaticTable(t *testing.T) {
 // in Phase 0, read «estimare, nemăsurată»; a Pi 5 of the owner measures H1.
 func TestRender_EstimatesMarked(t *testing.T) {
 	models := section(t, markdownOf(t, passing(t)), "## Modelul Pi-ului și numerele recomandate (§4.8)")
-	for _, want := range []string{"| H1 (Pi 5) | ≈ 8 | estimare, nemăsurată |", "| H2 (N100) | 16 | estimare, nemăsurată |"} {
+	for _, want := range []string{"| H1 (Pi 5) | ≈ 8 | — | estimare, nemăsurată |", "| H2 (N100) | 16 | — | estimare, nemăsurată |"} {
 		if !strings.Contains(models, want) {
 			t.Errorf("the §4.8 section lacks «%s»:\n%s", want, models)
 		}
@@ -249,8 +249,8 @@ func TestRender_EstimatesMarked(t *testing.T) {
 		e.PiModel = &results.PiModelInfo{Raw: "Raspberry Pi 5 Model B Rev 1.0", Tier: "H1", Supported: true, Known: true, RecommendedMin: 8, RecommendedMax: 8, Source: "cpuinfo"}
 	})
 	models = section(t, markdownOf(t, pi5), "## Modelul Pi-ului și numerele recomandate (§4.8)")
-	if !strings.Contains(models, "| H1 (Pi 5) | ≈ 8 | măsurat pe Pi-ul dvs. (G12, G13) |") {
-		t.Errorf("with a Pi 5, H1 is measured:\n%s", models)
+	if row := tableRow(t, models, "H1 (Pi 5)"); row[1] != "≈ 8" || row[3] != "măsurat pe Pi-ul dvs. (G12, G13)" {
+		t.Errorf("with a Pi 5, H1 is measured: %q", row)
 	}
 }
 
@@ -477,5 +477,93 @@ func TestRender_DecisionsInPH0Format(t *testing.T) {
 	}
 	if g13 := section(t, md, "### G13: `age` cu acces aleator (MI4)"); !strings.Contains(g13, "- **Ce se schimbă în §2 sau în cerințe:** Nimic în §2 sau în cerințe.") {
 		t.Errorf("a passing gate changes nothing:\n%s", g13)
+	}
+}
+
+// TestRender_ModelTableShowsTheResultingNumber (Task 12 review, M7): the
+// §4.8 table gives, next to each host's starting number, the number that
+// the measurements leave: G12's, or MI4's when the Pi's encryption rate
+// lowers it more (G13), named by the gate that lowered it; a host whose
+// steps have not settled its number says so. The summary sends the owner
+// there for the resulting number.
+func TestRender_ModelTableShowsTheResultingNumber(t *testing.T) {
+	const heading = "## Modelul Pi-ului și numerele recomandate (§4.8)"
+	golden := goldenReport(t).markdown()
+	models := section(t, golden, heading)
+	for _, want := range []string{
+		"| Nivel | Camere recomandate (§4.8) | Rezultat | Măsurat |",
+		"| H3: PC-ul dvs. | 8 (16 cu ≥ 6 nuclee) | 8 camere | măsurat pe PC-ul dvs. (G12, G13) |",
+		"| H1b: Pi-ul dvs. | 4 camere | 3 camere (G12) | măsurat pe Pi-ul dvs. (G12, G13) |",
+		"| H1 (Pi 5) | ≈ 8 | — | estimare, nemăsurată |",
+	} {
+		if !strings.Contains(models, want) {
+			t.Errorf("the §4.8 section lacks «%s»:\n%s", want, models)
+		}
+	}
+	if !strings.Contains(section(t, golden, "## Rezumat pentru proprietar"), "Numărul rezultat e la „Modelul Pi-ului și numerele recomandate”") {
+		t.Error("the summary does not send the owner to the resulting number")
+	}
+
+	slow := passing(t).each(ofCode("MI4", "pi"), func(e *results.Envelope) { e.MI4.CryptoMBs = 12 })
+	if models := section(t, markdownOf(t, slow), heading); !strings.Contains(models, "| H1b: Pi-ul dvs. | 4 camere | 2 camere (G13) |") {
+		t.Errorf("with 12 MB/s on one core, MI4 lowers the Pi to 2 cameras:\n%s", models)
+	}
+	open := passing(t).each(ofCode("MI3", "pi"), func(e *results.Envelope) {
+		e.MI3.Budgets["cpuTotal"] = results.Budget{Value: 75.2, Limit: 60}
+		e.MI3.Steps = []results.Mi3Step{{Cameras: 4, Minutes: 60, Attempt: 1, Valid: true, PacingP99Ms: 6}}
+	})
+	if models := section(t, markdownOf(t, open), heading); !strings.Contains(models, "| H1b: Pi-ul dvs. | 4 camere | nestabilit (G12) |") {
+		t.Errorf("with G12's steps open, the Pi's number is not settled:\n%s", models)
+	}
+}
+
+// TestRender_MixedStorageNamesSdSets (G16; Task 12 review, M11): a Pi with
+// sets on an SD card and on another storage has one table, since the
+// judges give their rows per host, not per storage; the line above it says
+// that the table holds both and names the sets on each storage.
+func TestRender_MixedStorageNamesSdSets(t *testing.T) {
+	confirmed := &results.SdConfirmation{Text: "DA", AtMs: time.Date(2026, 10, 27, 18, 4, 0, 0, time.UTC).UnixMilli()}
+	f := passing(t).each(func(e results.Envelope) bool { return e.Host == "pi" && e.Set == mi1.SetPiKill9 }, func(e *results.Envelope) {
+		e.Storage, e.SdConfirmation = "sd", confirmed
+	})
+	pi := section(t, markdownOf(t, f), "### Raspberry Pi (`pi`), pe mai multe stocări (G16)")
+	for _, want := range []string{
+		"Seturile de pe card SD: `MI1 pi-kill9`.",
+		"Pe SSD: `MI1 pi-sysrq`, `MI1 real-pi`, `MI2 pi-72h`, `MI3 pi-mi3`, `MI4 pi-mi4`, `MI9 lan`.",
+		"confirmat de proprietar: «DA»",
+		"| MI1 pi-kill9: mediana |",
+		"| MI1 pi-sysrq: mediana |",
+	} {
+		if !strings.Contains(pi, want) {
+			t.Errorf("the Pi's table lacks «%s»:\n%s", want, pi)
+		}
+	}
+	if strings.Contains(pi, "separat de celelalte") {
+		t.Errorf("the Pi's table claims its SD results apart, though it holds both storages:\n%s", pi)
+	}
+}
+
+// TestRender_O17ProposalOnlyOnItsSignal (Task 12 review, M8): the O17
+// proposal for the report's PR follows G10's own signal that an O17-off
+// loss went over §4.5's bound (O17OffOverLimit), not any note of G10; G10's
+// section says once that it is no decision triggered.
+func TestRender_O17ProposalOnlyOnItsSignal(t *testing.T) {
+	r := reportOf(t, passing(t))
+	r.gates[0].j.Notes = append(r.gates[0].j.Notes, "o altă notă a lui G10, fără legătură cu O17")
+	if md := r.markdown(); strings.Contains(md, "De propus în PR") {
+		t.Errorf("a G10 note that is no O17 loss triggers the O17 proposal:\n%s", section(t, md, "### G10: Pană de curent (MI1)"))
+	}
+
+	over := passing(t).each(func(e results.Envelope) bool { return e.RunID == "pc-kill9-21-1" }, func(e *results.Envelope) {
+		i := slices.IndexFunc(e.Runs[0].Streams, func(s results.StreamLoss) bool { return s.Stream == mi1.LowBitrateStream })
+		e.Runs[0].Streams[i].LossMs = 4500
+	})
+	md := markdownOf(t, over)
+	if !strings.Contains(section(t, md, "## Rezumat pentru proprietar"), "**De propus în PR:**") {
+		t.Errorf("an O17-off loss over its limit does not bring the proposal into the summary:\n%s", md)
+	}
+	g10 := section(t, md, "### G10: Pană de curent (MI1)")
+	if !strings.Contains(g10, "**De propus în PR:**") || strings.Count(g10, "nu e o decizie declanșată") != 1 {
+		t.Errorf("G10's section, want the proposal saying once that it is no decision triggered:\n%s", g10)
 	}
 }

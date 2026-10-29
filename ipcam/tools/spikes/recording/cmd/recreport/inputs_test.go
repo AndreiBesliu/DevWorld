@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi4"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
@@ -288,5 +289,280 @@ func TestInputs_SmokeSetsNotJudged(t *testing.T) {
 	}
 	if md := newReport(in, goldenDate).markdown(); !strings.Contains(section(t, md, "## Intrarea raportului"), "`lab-linux-kill9-smoke` (2)") {
 		t.Errorf("the input section does not count the smoke runs:\n%s", section(t, md, "## Intrarea raportului"))
+	}
+}
+
+// jobDone are when the fixture's jobs completed (testdata/annotations).
+var jobDone = map[int64]time.Time{
+	1001: time.Date(2026, 10, 26, 7, 44, 19, 0, time.UTC),
+	1002: time.Date(2026, 10, 26, 8, 6, 38, 0, time.UTC),
+	1003: time.Date(2026, 10, 26, 7, 51, 18, 0, time.UTC),
+	2002: time.Date(2026, 10, 29, 20, 25, 40, 0, time.UTC),
+}
+
+// TestInputs_AnnotationEnvelopesCarryTheirJobsTime (Task 12 review, M1):
+// an envelope that a CI run's annotations carry is stamped with the time
+// its job completed, as the ENC-06 envelope is, so that one set read from
+// two runs orders by time: the lab's runs, CI's MI9 legs and the Chrome
+// line's envelope.
+func TestInputs_AnnotationEnvelopesCarryTheirJobsTime(t *testing.T) {
+	installFakeGH(t, annotationsDir)
+	in, err := load(nil, []string{labRun, ciRun})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range in.envs {
+		var want []time.Time
+		switch e.Set {
+		case "lab-linux-kill9":
+			want = []time.Time{jobDone[1001], jobDone[1002]}
+		case "lab-windows-kill9":
+			want = []time.Time{jobDone[1003]}
+		case "ci-relay", "ci-loopback", "ci-chrome":
+			want = []time.Time{jobDone[2002]}
+		default:
+			continue
+		}
+		if !slices.ContainsFunc(want, func(at time.Time) bool { return e.AtMs == at.UnixMilli() }) {
+			t.Errorf("%s %s: AtMs %d, want its job's completion, one of %v", e.Code, e.RunID, e.AtMs, want)
+		}
+	}
+}
+
+// relayNotice is CI's ci-relay-1 leg at mbps, as the mi9 job's notice.
+func relayNotice(t *testing.T, mbps float64) results.Notice {
+	t.Helper()
+	e := mi9Envelope("lab-linux", "ci-relay", "ci-relay-1", results.Mi9Leg{Transport: "turns443", ThroughputMbps: mbps, SeekMs: seeks(20, 300),
+		RTTMs: 50.5, Source: "ci-relay"})
+	n := notice(t, e)
+	n.Title = "mi9"
+	return n
+}
+
+// TestInputs_CIRunsRenumberedByTheirTime (Task 12 review, M1): CI's MI9
+// legs have the same run id in every CI run (ci-relay-1); read from two
+// runs, in either order, they are renumbered by the time their jobs
+// completed, the newer last, and the report does not call the order
+// uncertain.
+func TestInputs_CIRunsRenumberedByTheirTime(t *testing.T) {
+	installFakeGH(t, ghRuns(t, map[string][]ghJob{
+		"501": {{id: 5001, completed: time.Date(2026, 10, 27, 20, 0, 0, 0, time.UTC), notices: []results.Notice{relayNotice(t, 17.5)}}},
+		"502": {{id: 5002, completed: time.Date(2026, 10, 28, 20, 0, 0, 0, time.UTC), notices: []results.Notice{relayNotice(t, 15.2)}}},
+	}))
+	for _, order := range [][]string{{"501", "502"}, {"502", "501"}} {
+		t.Run(strings.Join(order, " then "), func(t *testing.T) {
+			in, err := load(nil, order)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]float64{}
+			for _, e := range in.envs {
+				if e.Set == "ci-relay" {
+					got[e.RunID] = e.MI9.Legs[0].ThroughputMbps
+				}
+			}
+			if got["ci-relay-1"] != 17.5 || got["ci-relay-2"] != 15.2 || len(got) != 2 {
+				t.Errorf("ci-relay legs %v, want the older run's 17.5 as ci-relay-1 and the newer's 15.2 as ci-relay-2", got)
+			}
+			if input := section(t, newReport(in, goldenDate).markdown(), "## Intrarea raportului"); strings.Contains(input, "nesigur") ||
+				!strings.Contains(input, "`MI9 ci-relay`") {
+				t.Errorf("the input section, want the renumbering by time without an uncertain order:\n%s", input)
+			}
+		})
+	}
+}
+
+// TestInputs_RenumberWithoutTimesSaysTheOrderIsUncertain (Task 12 review,
+// M1): envelopes without a time (AtMs 0, as from an older recspike) that
+// share a run id are renumbered all the same, but the report says that
+// their order is uncertain, names the run that G12 judges, the highest
+// number, and asks for a check by hand.
+func TestInputs_RenumberWithoutTimesSaysTheOrderIsUncertain(t *testing.T) {
+	other := mi3Envelope("pi", "H1b", 4)
+	other.MI3.CPUPctTotal = 50.1
+	in, err := load([]string{passing(t).folder(t), (&fixture{envs: []results.Envelope{other}}).folder(t)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runIDs(in.envs, "MI3"); !slices.Equal(got, []string{"pc-mi3-1", "pi-mi3-1", "pi-mi3-2"}) {
+		t.Errorf("MI3 run ids %q, want the Pi's two renumbered", got)
+	}
+	input := section(t, newReport(in, goldenDate).markdown(), "## Intrarea raportului")
+	for _, want := range []string{"`MI3 pi-mi3`", "nesigur", "G12 judecă rularea cu numărul cel mai mare, `pi-mi3-2`", "verificați"} {
+		if !strings.Contains(input, want) {
+			t.Errorf("the input section lacks «%s»:\n%s", want, input)
+		}
+	}
+	if strings.Contains(input, "după momentul lor") {
+		t.Errorf("the input section claims an order by time that the envelopes do not have:\n%s", input)
+	}
+}
+
+// labNotices are lab-linux-kill9's 21 runs as a lab run's notices; with
+// fail, its third run loses 2.5 s, a measured failure.
+func labNotices(t *testing.T, fail bool) []results.Notice {
+	t.Helper()
+	envs := labEnvelopes(t, mi1.SetLabLinuxKill9, "lab-linux")
+	if fail {
+		r := &envs[2].Runs[0]
+		r.Streams[0].LossMs = 2500
+		r.LossMs = mi1.RunLossMs(*r)
+	}
+	return notices(t, envs)
+}
+
+// TestInputs_NewestLabRunCounts (Task 12 review, M2): with two lab runs,
+// recreport reads the newer first, whatever the order of -annotations, so
+// that G10 counts the newer run's result, here a measured failure; the
+// report names the CI run that G10 counted.
+func TestInputs_NewestLabRunCounts(t *testing.T) {
+	installFakeGH(t, ghRuns(t, map[string][]ghJob{
+		"601": {{id: 6001, completed: time.Date(2026, 10, 26, 8, 0, 0, 0, time.UTC), notices: labNotices(t, false)}},
+		"602": {{id: 6002, completed: time.Date(2026, 10, 28, 8, 0, 0, 0, time.UTC), notices: labNotices(t, true)}},
+	}))
+	for _, order := range [][]string{{"601", "602"}, {"602", "601"}} {
+		t.Run(strings.Join(order, " then "), func(t *testing.T) {
+			in, err := load(nil, order)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := newReport(in, goldenDate)
+			if j := r.g10(); j.Verdict != results.Fail {
+				t.Errorf("G10 = %q, reasons %q; want the newer run's measured failure", j.Verdict, j.Reasons)
+			}
+			if len(in.conflicts) != 1 || in.conflicts[0].set != mi1.SetLabLinuxKill9 {
+				t.Errorf("conflicts %+v, want lab-linux-kill9", in.conflicts)
+			}
+			if input := section(t, r.markdown(), "## Intrarea raportului"); !strings.Contains(input, "rularea CI `602`") ||
+				strings.Contains(input, "`601`") {
+				t.Errorf("the input section does not name the CI run that G10 counted, 602, alone:\n%s", input)
+			}
+		})
+	}
+}
+
+// TestInputs_SmokeConflictsNotNamed (Task 12 review, M2): two recorder
+// workflow runs carry different smoke runs under the same run ids; G10
+// does not judge them, so they are counted apart, not named as runs that
+// G10 counts one of.
+func TestInputs_SmokeConflictsNotNamed(t *testing.T) {
+	smoke := func(lossMs int64) []results.Notice {
+		envs := labEnvelopes(t, mi1.SetLabLinuxKill9, "lab-linux")[:2]
+		for i := range envs {
+			e := &envs[i]
+			e.Set, e.RunID = "lab-linux-kill9-smoke", strings.Replace(e.RunID, "kill9", "kill9-smoke", 1)
+			e.Runs[0].RunID, e.Runs[0].Streams[0].LossMs = e.RunID, lossMs
+			e.Runs[0].LossMs = mi1.RunLossMs(e.Runs[0])
+		}
+		return notices(t, envs)
+	}
+	installFakeGH(t, ghRuns(t, map[string][]ghJob{
+		"701": {{id: 7001, completed: time.Date(2026, 10, 27, 8, 0, 0, 0, time.UTC), notices: smoke(400)}},
+		"702": {{id: 7002, completed: time.Date(2026, 10, 28, 8, 0, 0, 0, time.UTC), notices: smoke(700)}},
+	}))
+	in, err := load(nil, []string{"701", "702"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in.conflicts) != 0 {
+		t.Errorf("conflicts %+v, want none: G10 does not judge a smoke set", in.conflicts)
+	}
+	if in.unjudged["lab-linux-kill9-smoke"] != 4 {
+		t.Errorf("unjudged %v, want the 4 smoke envelopes", in.unjudged)
+	}
+}
+
+// chromeLine is a Chrome line of the mi9 job with its keys reordered and
+// spaced, as a change of mi9.spec.ts could print it.
+var chromeLine = `{ "seekMs": [21.7, 31.3, 78.3, 25, 25.1, 7.9, 18.2, 30.8, 24.8, 31.7, 14.1, 44.2, 41.6, 13.1, 4.8, 15.3, 35.8, 22.8, 17.3, 36.6],
+  "displayMs": [115.6, 39.1, 115.6, 65.6, 49.1, 32.3, 65.7, 65.7, 101.5, 66.7, 49.3, 82.6, 82.4, 49, 15.7, 49.1, 82.6, 65.4, 65.6, 82.3],
+  "transport" : "chrome" }`
+
+// TestInputs_ChromeLineByItsTransport (Task 12 review, M3): an mi9 notice
+// that is no envelope is told by its transport: "chrome" decodes, strictly,
+// into the Chrome line's envelope whatever the order of its keys and its
+// spaces; any other shape is an error, as for ENC-06 and mtx2-loss, never
+// an information notice that leaves G18 without its Chrome part.
+func TestInputs_ChromeLineByItsTransport(t *testing.T) {
+	at := time.Date(2026, 10, 29, 20, 0, 0, 0, time.UTC)
+	line := func(id int64, message string) []ghJob {
+		return []ghJob{{id: id, completed: at, notices: []results.Notice{{Title: "mi9", Message: message}}}}
+	}
+	installFakeGH(t, ghRuns(t, map[string][]ghJob{
+		"801": line(8001, chromeLine),
+		"802": line(8002, `{"transport":"firefox","displayMs":[1],"seekMs":[1]}`),
+		"803": line(8003, `{"transport":"chrome","displayMs":[1],"seekMs":[1],"fps":30}`),
+		"804": line(8004, "mi9: gata"),
+	}))
+	in, err := load(nil, []string{"801"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(in.envs, func(e results.Envelope) bool { return e.Set == "ci-chrome" })
+	if i < 0 || len(in.envs[i].MI9.Legs[0].DisplayMs) != 20 || len(in.envs[i].MI9.Legs[0].SeekMs) != 20 {
+		t.Errorf("envelopes %+v, want the Chrome line's with 20 frames shown and 20 seeks", in.envs)
+	}
+	if len(in.ci.other) != 0 {
+		t.Errorf("other notices %v, want none: the Chrome line is no information notice", in.ci.other)
+	}
+	for _, id := range []string{"802", "803", "804"} {
+		if _, err := load(nil, []string{id}); err == nil {
+			t.Errorf("run %s: an mi9 line of an unknown shape was read without an error", id)
+		}
+	}
+}
+
+// TestInputs_JobWithoutCompletionHasNoTime (Task 12 review, M4): a job
+// whose completed_at is null, as one still running, gives its envelopes no
+// time (AtMs 0), never the zero time's -62135596800000.
+func TestInputs_JobWithoutCompletionHasNoTime(t *testing.T) {
+	enc06 := results.Notice{Title: "ENC-06", Message: `{"code":"ENC-06","tools":["age v1.3.2","rage 0.12.1"],"files":7,"pass":true}`}
+	lab := notice(t, labEnvelopes(t, mi1.SetLabLinuxKill9, "lab-linux")[0])
+	installFakeGH(t, ghRuns(t, map[string][]ghJob{"901": {{id: 9001, notices: []results.Notice{enc06, lab}}}}))
+	in, err := load(nil, []string{"901"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range in.envs {
+		if e.AtMs != 0 {
+			t.Errorf("%s %s: AtMs %d, want 0 without the job's completion", e.Code, e.RunID, e.AtMs)
+		}
+	}
+	if len(in.envs) != 2 {
+		t.Errorf("envelopes %+v, want the ENC-06 check and the lab run", in.envs)
+	}
+}
+
+// TestInputs_UnreadAppFilesListed (Task 12 review, M5): an app result that
+// is no JSON, and an AGE result whose name lacks the time that reccontroller
+// stored it at, are not read: the report lists them under «Fișiere
+// necitite», each with why in Romanian, so that a truncated AGE result does
+// not read as no AGE run.
+func TestInputs_UnreadAppFilesListed(t *testing.T) {
+	f := passing(t)
+	const truncated, misnamed = "android-samsung-sm-a245f-20261030-123000-age.json", "android-age.json"
+	f.app = append(f.app, appResult{name: truncated, data: []byte(`{"scenario":"AGE","mbps":3`)},
+		appResult{name: misnamed, data: ageFile(t, "android", time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC), 5).data})
+	in, err := load([]string{f.folder(t)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	for _, s := range in.skipped {
+		files = append(files, s.file)
+	}
+	slices.Sort(files)
+	if want := []string{"app/" + misnamed, "app/" + truncated}; !slices.Equal(files, want) {
+		t.Errorf("files not read %q, want %q", files, want)
+	}
+	if in.ageRuns != 1 {
+		t.Errorf("AGE runs %d, want the fixture's one: a file not read is no run", in.ageRuns)
+	}
+	input := section(t, newReport(in, goldenDate).markdown(), "## Intrarea raportului")
+	for _, want := range []string{"Fișiere necitite", "`app/" + truncated + "` (rezultat al aplicației care nu e JSON valid)",
+		"`app/" + misnamed + "` (rezultat AGE fără ora salvării în nume)"} {
+		if !strings.Contains(input, want) {
+			t.Errorf("the input section lacks «%s»:\n%s", want, input)
+		}
 	}
 }

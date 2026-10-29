@@ -489,8 +489,8 @@ func TestMI1_O17OffRunFailuresReported(t *testing.T) {
 		t.Errorf("O17OffLabel = %q, want %q", O17OffLabel, want)
 	}
 	j := Judge(envelopes(allSets(t)))
-	if len(j.Reasons) != 0 || len(j.Notes) != 0 {
-		t.Errorf("Reasons = %q, Notes = %q, want none when every run passes", j.Reasons, j.Notes)
+	if len(j.Reasons) != 0 || len(j.Notes) != 0 || j.O17OffOverLimit {
+		t.Errorf("Reasons = %q, Notes = %q, O17OffOverLimit %v, want none when every run passes", j.Reasons, j.Notes, j.O17OffOverLimit)
 	}
 	if r := o17RowOf(t, j, set); !passes(r) || r.Value != "3,00 s" || r.Limit != "≤ 4 s" {
 		t.Errorf("passing O17-off row = %+v, want 3,00 s ≤ 4 s, passed", r)
@@ -541,6 +541,11 @@ func TestMI1_O17OffRunFailuresReported(t *testing.T) {
 			}
 			if !slices.Equal(j.Notes, notes) {
 				t.Errorf("Notes = %q, want %q", j.Notes, notes)
+			}
+			// Task 12 review, M8: the report's O17 proposal follows this
+			// signal, not any note.
+			if j.O17OffOverLimit != (c.note != "") {
+				t.Errorf("O17OffOverLimit = %v, want %v: only a 256 kbps loss over its limit sets it", j.O17OffOverLimit, c.note != "")
 			}
 			if mx := row(t, j, "MI1 "+set+":", "maximul"); mx.Value != "1,90 s" {
 				t.Errorf("the set's max is %s, want 1,90 s: the O17-off run stays outside it", mx.Value)

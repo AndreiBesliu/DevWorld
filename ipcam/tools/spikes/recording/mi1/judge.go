@@ -228,9 +228,10 @@ type setResult struct {
 // and no failed run (G11). Every stream's limit is recomputed with
 // StreamLimitMs, never read from LimitMs. In the O17-off run of an
 // automated set, only the 256 kbps stream's loss is judged apart (C1-R13):
-// in a row of its own, and, over its limit, in Notes, outside the verdict
-// and its plan B; any other failure of that run fails the set like a
-// default run's. The run stays outside the set's median and max. A counted
+// in a row of its own, and, over its limit, in Notes and O17OffOverLimit,
+// outside the verdict and its plan B; any other failure of that run fails
+// the set like a default run's. The run stays outside the set's median
+// and max. A counted
 // run marked O17-off (encrypted, the setting off) that does not record
 // cam99_main at the setting off leaves the set incomplete, and what it
 // measured to fail fails the set the same way (G27). G10
@@ -483,7 +484,7 @@ func o17Row(j *results.Judgement, prefix, set, source string, runs, marked []res
 				shown, shownRun, found = s, r.RunID, true
 			}
 			if s.LossMs > limit {
-				pass = false
+				pass, j.O17OffOverLimit = false, true
 				j.Notes = append(j.Notes, o17Text(set, r.RunID, lossFailure(s, limit)))
 			}
 		}

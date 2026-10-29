@@ -85,12 +85,12 @@ Motivele fiecărui verdict sunt la „Verdicte și decizii declanșate”; cifre
 
 Pi-ul dvs.: Raspberry Pi 4 Model B Rev 1.5 (citit din cpuinfo). Nivelul H1b din §4.8, cu 4 camere.
 
-| Nivel | Camere recomandate (§4.8) | Măsurat |
-| --- | --- | --- |
-| H3: PC-ul dvs. | 8 (16 cu ≥ 6 nuclee) | măsurat pe PC-ul dvs. (G12, G13) |
-| H1b: Pi-ul dvs. | 4 camere | măsurat pe Pi-ul dvs. (G12, G13) |
-| H1 (Pi 5) | ≈ 8 | estimare, nemăsurată |
-| H2 (N100) | 16 | estimare, nemăsurată |
+| Nivel | Camere recomandate (§4.8) | Rezultat | Măsurat |
+| --- | --- | --- | --- |
+| H3: PC-ul dvs. | 8 (16 cu ≥ 6 nuclee) | 8 camere | măsurat pe PC-ul dvs. (G12, G13) |
+| H1b: Pi-ul dvs. | 4 camere | 3 camere (G12) | măsurat pe Pi-ul dvs. (G12, G13) |
+| H1 (Pi 5) | ≈ 8 | — | estimare, nemăsurată |
+| H2 (N100) | 16 | — | estimare, nemăsurată |
 
 Numerele rezultate: G12 — pică → pi: numărul recomandat devine 3; G13 — trece. Un plan B al lor coboară numărul recomandat al gazdei (minimum 1, O16), iar PR-ul raportului scrie numerele măsurate în §4.8. H1 și H2 se măsoară doar în Faza 0-bis, dacă doriți (G31).
 
@@ -174,6 +174,7 @@ Rezultatele Pi-ului de pe card SD, separat de celelalte (G16): avertismentul car
 | MI3 pi: CPU-ul încărcării de redare (proxy, informativ, C1-R19) | 1,2 % |  | – | pi |
 | MI3 pi: CPU-ul încărcării de export (proxy, informativ, C1-R19) | 12,4 % |  | – | pi |
 | MI3 pi: CPU-ul încărcării de upload (proxy, informativ, C1-R19) | 2,3 % |  | – | pi |
+| MI3 pi: disc ÷ bitrate, camere în clar (informativ) | 1,008 |  | – | pi |
 | MI3 pi: disc ÷ bitrate, camere criptate (R02, informativ) | 1,041 |  | – | pi |
 | MI3 pi: ritmul controlorului (R07) | ritmul controlorului p99 6 ms, cadre sărite 0 | ≤ 100 ms, cadre sărite 0 | – | pi |
 | MI3 pi: stocare | card SD, cu avertismentul confirmat de proprietar (G16) |  | – | pi |
