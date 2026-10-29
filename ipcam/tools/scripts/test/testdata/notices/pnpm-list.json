@@ -7,6 +7,14 @@
     "dependencies": {
       "@ipcam/capacitor-pip": { "from": "@ipcam/capacitor-pip", "version": "link:../pip", "path": "@DATA@/npm/pip" },
       "@tauri-apps/api": { "from": "@tauri-apps/api", "version": "2.12.1", "path": "@DATA@/npm/tauri-api" },
+      "@ipcam/core": {
+        "from": "@ipcam/core",
+        "version": "link:../core",
+        "path": "@DATA@/npm/core",
+        "dependencies": {
+          "@noble/ciphers": { "from": "@noble/ciphers", "version": "2.4.0", "path": "@DATA@/npm/noble-ciphers" }
+        }
+      },
       "@ipcam/player": {
         "from": "@ipcam/player",
         "version": "link:../player",

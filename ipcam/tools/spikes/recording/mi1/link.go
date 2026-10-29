@@ -92,43 +92,34 @@ func needsRoot(dir string) (bool, error) {
 
 // Push is `recspike push --controller <PC>` on the Pi, the final collection
 // (G15): it connects to the PC's reccontroller, which pulls the results
-// folder dir, and returns when the PC has it. Started without sudo on
-// results that root owns, it says so in Romanian before it connects.
+// folder dir (link.Push), and returns when the PC has it. Started without
+// sudo on results that root owns, it says so in Romanian before it
+// connects.
 func Push(ctx context.Context, addr, dir, host string, out io.Writer) error {
 	if root, err := needsRoot(dir); err != nil {
 		return err
 	} else if root {
 		return errors.New(pushNeedsSudo)
 	}
-	s, err := dialSession(ctx, addr, host, 0, nil)
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	c, err := dialLink(dialCtx, addr)
+	cancel()
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("nu mă pot conecta la controlor (portul %d): %w", link.Port, err)
+	}
+	defer func() { _ = c.Close() }()
+	var noPull *link.NoPullError
+	switch err := link.Push(ctx, c, host, dir); {
+	case errors.As(err, &noPull):
+		return fmt.Errorf("controlorul a închis legătura înainte să ceară rezultatele: %w", noPull.Err)
+	case err != nil:
 		return err
 	}
-	defer s.close()
-	// `reccontroller pull` asks at once; a running reccontroller sends its
-	// session first and pulls a Pi's folder after the bye.
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case r, ok := <-s.in:
-			if !ok || r.err != nil {
-				return fmt.Errorf("controlorul a închis legătura înainte să ceară rezultatele: %v", r.err)
-			}
-			switch r.m.(type) {
-			case link.Session:
-				if err := s.send(link.Bye{}); err != nil {
-					return err
-				}
-			case link.PullResults:
-				if err := s.c.SendResultsTar(dir); err != nil {
-					return err
-				}
-				_, _ = fmt.Fprintln(out, "Am trimis rezultatele.")
-				return nil
-			}
-		}
-	}
+	_, _ = fmt.Fprintln(out, "Am trimis rezultatele.")
+	return nil
 }
 
 // CameraURLs connects to the controller at addr as host, dialing again for
@@ -316,7 +307,7 @@ func dialSession(ctx context.Context, addr, host string, retry time.Duration, do
 		if err == nil {
 			s := &session{c: c, in: make(chan received, 16), closed: make(chan struct{}), broken: make(chan struct{})}
 			go read(c, s.in, s.closed, s.broken, down)
-			if err := s.send(link.Hello{Role: "host", Host: host, Version: "c1"}); err != nil {
+			if err := s.send(link.Hello{Role: "host", Host: host, Version: link.Version}); err != nil {
 				s.close()
 				return nil, err
 			}

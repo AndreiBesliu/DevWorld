@@ -631,17 +631,23 @@ func TestSession_PiResultsPulledAtBye(t *testing.T) {
 // `reccontroller pull` on the PC and `recspike push` on the Pi, in process
 // on loopback: the Pi's folder lands under results/pi, and the PC prints
 // what both hold and, in Romanian, what is missing; with an unsupported
-// Pi, nothing is expected with the Pi as host.
+// Pi, whose folder holds recspike-probe's marker (results.PiProbeMarker),
+// nothing is expected with the Pi as host.
 func TestPull_PushStoresPiFolderAndPrintsInventory(t *testing.T) {
 	for _, supported := range []bool{true, false} {
 		pcResults := filepath.Join(t.TempDir(), "results")
 		writeEnvelope(t, filepath.Join(pcResults, "pi"), "MI1", "pc-kill9", "pc", nil) // pulled from the Pi's controller earlier
 		piResults := t.TempDir()
-		model := &results.PiModelInfo{Raw: "Raspberry Pi 4 Model B Rev 1.5", Tier: "H1b", Supported: true, Known: true, RecommendedMin: 4, RecommendedMax: 4, Source: "cpuinfo"}
+		writeEnvelope(t, piResults, "MI4", "mi4", "pi",
+			&results.PiModelInfo{Raw: "Raspberry Pi 4 Model B Rev 1.5", Tier: "H1b", Supported: true, Known: true, RecommendedMin: 4, RecommendedMax: 4, Source: "cpuinfo"})
 		if !supported {
-			model = &results.PiModelInfo{Raw: "Raspberry Pi Zero W Rev 1.1", Tier: "unsupported", Known: true, Source: "cpuinfo"}
+			if err := os.RemoveAll(filepath.Join(piResults, "MI4")); err != nil {
+				t.Fatal(err)
+			}
+			if err := results.Write(piResults, results.PiProbeMarker("Raspberry Pi Zero W Rev 1.1", "9000c1", "device-tree", 1)); err != nil {
+				t.Fatal(err)
+			}
 		}
-		writeEnvelope(t, piResults, "MI4", "mi4", "pi", model)
 
 		ln, err := net.Listen("tcp4", "127.0.0.1:0")
 		if err != nil {
@@ -656,12 +662,19 @@ func TestPull_PushStoresPiFolderAndPrintsInventory(t *testing.T) {
 		if err := <-done; err != nil {
 			t.Fatalf("pull: %v", err)
 		}
-		if _, err := os.Stat(filepath.Join(pcResults, "pi", "MI4", "mi4", "mi4-1.json")); err != nil {
+		piFile, piLabel := filepath.Join("MI4", "mi4", "mi4-1.json"), "MI4 mi4 (pi)"
+		if !supported {
+			piFile, piLabel = filepath.Join("MI1", results.PiProbeSet, results.PiProbeSet+"-1.json"), "MI1 pi-probe (pi)"
+		}
+		if _, err := os.Stat(filepath.Join(pcResults, "pi", piFile)); err != nil {
 			t.Errorf("the Pi's folder is not under results/pi: %v", err)
 		}
 		out := pcOut.String()
-		if !strings.Contains(out, "Prezente: ") || !strings.Contains(out, "MI4 mi4 (pi)") || !strings.Contains(out, "MI1 pc-kill9 (pc)") {
+		if !strings.Contains(out, "Prezente: ") || !strings.Contains(out, piLabel) || !strings.Contains(out, "MI1 pc-kill9 (pc)") {
 			t.Errorf("supported %v: the inventory:\n%s\nwant both devices' results", supported, out)
+		}
+		if strings.Contains(out, "Modelul Pi-ului nu este suportat") == supported {
+			t.Errorf("supported %v: the inventory:\n%s\nwant the unsupported Pi named only when it is", supported, out)
 		}
 		if !strings.Contains(out, "Lipsesc: ") || !strings.Contains(out, "MI1 pc-bugcheck (pc)") {
 			t.Errorf("supported %v: the inventory:\n%s\nwant the missing PC sets", supported, out)

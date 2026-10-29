@@ -10,6 +10,7 @@ import (
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi3"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi4"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
 func (r *report) input(b *strings.Builder) {
@@ -37,6 +38,10 @@ func (r *report) input(b *strings.Builder) {
 		fmt.Fprintf(b, "- Rulări MI1 cu rezultate diferite în intrare (de exemplu, din două rulări de laborator): `%s`: %s; G10 numără, din "+
 			"fiecare, prima copie citită care contează, rulările CI fiind citite de la cea mai nouă: %s.\n", c.set, count(c.runs, "rulare", "rulări"),
 			strings.Join(from, ", "))
+	}
+	if in.piProbe {
+		fmt.Fprintf(b, "- Marcajul lui recspike-probe: Pi-ul dvs. este armv6 (`MI1 %s`), deci nu are măsurători; nu e o rulare, ci ce "+
+			"mută părțile Pi-ului în Faza 0-bis (G31, G32).\n", results.PiProbeSet)
 	}
 	if len(in.unjudged) > 0 {
 		fmt.Fprintf(b, "- Plicuri MI1 din seturi pe care G10 nu le judecă (rulările smoke din CI): %s.\n", counted(in.unjudged))

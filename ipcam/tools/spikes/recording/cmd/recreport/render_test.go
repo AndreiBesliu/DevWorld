@@ -194,13 +194,37 @@ func TestRender_VerdictIncompleteAndDeferred(t *testing.T) {
 }
 
 // armv6 is the passing fixture with an armv6 Pi: no measurement on it, and
-// the probe's envelope that names its model.
+// the marker that recspike-probe writes on it, which names its model
+// (results.PiProbeMarker).
 func armv6(t *testing.T) *fixture {
 	t.Helper()
 	f := passing(t).without(func(e results.Envelope) bool { return e.Host == "pi" })
-	e := envelope("MI1", "pi-probe", "pi-probe-1", "pi")
-	e.PiModel = &results.PiModelInfo{Raw: "Raspberry Pi Zero W Rev 1.1", Known: true, Supported: false, Source: "device-tree"}
-	return &fixture{envs: append(f.envs, e), app: f.app}
+	marker := results.PiProbeMarker("Raspberry Pi Zero W Rev 1.1", "9000c1", "device-tree", time.Date(2026, 10, 27, 18, 0, 0, 0, time.UTC).UnixMilli())
+	return &fixture{envs: append(f.envs, marker), app: f.app}
+}
+
+// TestRender_Armv6MarkerFromTheProbe (G31, G32; Task 12 review M9): the
+// marker that recspike-probe writes on an armv6 Pi renders the Pi's rows as
+// unsupported, and the input names it as the probe's marker, not as an MI1
+// set that G10 does not judge, nor as a smoke run of CI.
+func TestRender_Armv6MarkerFromTheProbe(t *testing.T) {
+	md := markdownOf(t, armv6(t))
+	for _, want := range []string{
+		"- **Pi-ul dvs.** este armv6, deci nesuportat: măsurătorile lui trec în Faza 0-bis (vezi mai jos).",
+		"| nesuportat: Pi-ul dvs. | — | — | amânat în Faza 0-bis: Pi armv6 |",
+		"Pi-ul dvs.: Raspberry Pi Zero W Rev 1.1 (citit din device-tree).",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("the report lacks «%s»", want)
+		}
+	}
+	input := section(t, md, "## Intrarea raportului")
+	if !strings.Contains(input, "Marcajul lui recspike-probe: Pi-ul dvs. este armv6 (`MI1 pi-probe`)") {
+		t.Errorf("the input section does not name the probe's marker:\n%s", input)
+	}
+	if strings.Contains(input, "pi-probe` (") || strings.Contains(input, "smoke") {
+		t.Errorf("the input section lists the probe's marker among the sets that G10 does not judge:\n%s", input)
+	}
 }
 
 // TestRender_Faza0bisStaticTable (G33, §16.9): the table of what moves to

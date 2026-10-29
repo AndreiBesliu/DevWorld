@@ -57,6 +57,10 @@ type inputs struct {
 	// unjudged counts the MI1 envelopes of sets that G10 does not judge,
 	// by set: CI's smoke runs.
 	unjudged map[string]int
+	// piProbe is set when recspike-probe's marker of an armv6 Pi is among
+	// the envelopes (results.PiProbeMarker): no measurement, but what
+	// moves the Pi's parts to Faza 0-bis.
+	piProbe bool
 	// ageRuns counts the app's AGE results, and ageUnmeasured those that
 	// measured nothing (interrupted, or without mbps).
 	ageRuns, ageUnmeasured int
@@ -171,6 +175,7 @@ func load(dirs, runs []string) (*inputs, error) {
 	envs, in.renumbered = renumber(envs)
 	in.incomplete = labParts(envs)
 	in.unjudged = unjudged(envs)
+	in.piProbe = slices.ContainsFunc(envs, func(e results.Envelope) bool { return e.Code == "MI1" && e.Set == results.PiProbeSet })
 	in.envs = envs
 	return in, nil
 }
@@ -457,11 +462,12 @@ var labSets = []string{mi1.SetLabLinuxKill9, mi1.SetLabLinuxQEMUReset, mi1.SetLa
 var g10Sets = append(slices.Clone(labSets), mi1.SetPCKill9, mi1.SetPCBugcheck, mi1.SetPiKill9, mi1.SetPiSysrq, mi1.SetRealPC, mi1.SetRealPi)
 
 // unjudged counts the MI1 envelopes of sets that G10 does not judge, such
-// as CI's smoke runs (<set>-smoke), by set.
+// as CI's smoke runs (<set>-smoke), by set; recspike-probe's marker is no
+// run (piProbe).
 func unjudged(envs []results.Envelope) map[string]int {
 	out := map[string]int{}
 	for _, e := range envs {
-		if e.Code == "MI1" && !slices.Contains(g10Sets, e.Set) {
+		if e.Code == "MI1" && !slices.Contains(g10Sets, e.Set) && e.Set != results.PiProbeSet {
 			out[e.Set]++
 		}
 	}
