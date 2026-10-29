@@ -23,6 +23,11 @@ var probeEvery = 10 * time.Second
 
 const mountEvery = 5 * time.Second
 
+// shutdownWait bounds how long ipcam-hub's stop waits for work that the card
+// can hold: the card sampler's goroutines, and the lines of MediaMTX's log
+// that wait for stderr.
+const shutdownWait = 5 * time.Second
+
 // probeHung is how many intervals in a row must find a probe still in
 // flight before that interval, and each later one, also counts as an I/O
 // error (Task 8 review M2): the first one counts the probe as slow only.
@@ -75,6 +80,11 @@ type cardSampler struct {
 	// probeEvery and mountEvery are the sampler's pace: the package's, which
 	// tests change.
 	probeEvery, mountEvery time.Duration
+	// joinWait bounds run's wait for its goroutines once ctx is done.
+	joinWait time.Duration
+	// running counts the goroutines that run waits for: the stop at FAILED
+	// and the probe in flight.
+	running sync.WaitGroup
 
 	mu       sync.Mutex
 	mon      *health.CardMonitor
@@ -87,11 +97,13 @@ type cardSampler struct {
 	// both zero while none runs.
 	probing time.Time
 	stalled int
+	// ended is set once run has returned: nothing goes out after.
+	ended bool
 }
 
 func newCardSampler(recDir, mountInfo string, ev *events) *cardSampler {
 	return &cardSampler{recDir: recDir, mountInfo: mountInfo, ev: ev, now: time.Now, probeFile: writeProbe,
-		probeEvery: probeEvery, mountEvery: mountEvery,
+		probeEvery: probeEvery, mountEvery: mountEvery, joinWait: shutdownWait,
 		mon: health.NewCardMonitor(), state: health.CardOK, failed: make(chan struct{})}
 }
 
@@ -122,9 +134,13 @@ func (s *cardSampler) attach(rec cardRecorder) {
 // (Task 8 review M2). The stop's own writes, MediaMTX's configuration and
 // the gaps' rows, are on the card: on a read-only card they fail at once,
 // and the gaps still go out as events (recorder.Stop); a card that hangs
-// holds them.
+// holds them. Once ctx is done, run returns when those goroutines have
+// ended (join).
 func (s *cardSampler) run(ctx context.Context, jobs []recorder.Job) {
+	defer s.join()
+	s.running.Add(1)
 	go func() {
+		defer s.running.Done()
 		select {
 		case <-ctx.Done():
 		case <-s.failed:
@@ -147,6 +163,27 @@ func (s *cardSampler) run(ctx context.Context, jobs []recorder.Job) {
 	}
 }
 
+// join waits until the goroutines that run started have ended, so that
+// nothing that they find goes out after ipcam-hub's stop (Task 8b review
+// M4): the stop at FAILED, whose writes are on the card, and the probe in
+// flight, whose result is still observed. It waits at most joinWait, since
+// a card that hangs holds either for good and must not hold ipcam-hub's
+// stop; what they find after that goes nowhere.
+func (s *cardSampler) join() {
+	joined := make(chan struct{})
+	go func() {
+		s.running.Wait()
+		close(joined)
+	}()
+	select {
+	case <-joined:
+	case <-time.After(s.joinWait):
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ended = true
+}
+
 // stopAll stops every job with a card gap.
 func (s *cardSampler) stopAll(ctx context.Context, jobs []recorder.Job) {
 	s.mu.Lock()
@@ -154,7 +191,11 @@ func (s *cardSampler) stopAll(ctx context.Context, jobs []recorder.Job) {
 	s.mu.Unlock()
 	for _, j := range jobs {
 		if err := rec.Stop(ctx, j.Cam, j.Profile, catalog.GapCard); err != nil {
-			s.ev.emit("error", map[string]any{"message": err.Error()})
+			s.mu.Lock()
+			if !s.ended {
+				s.ev.emit("error", map[string]any{"message": err.Error()})
+			}
+			s.mu.Unlock()
 		}
 	}
 }
@@ -207,7 +248,11 @@ func (s *cardSampler) probeTick() {
 	now := s.now()
 	if s.probing.IsZero() {
 		s.probing, s.stalled = now, 0
-		go s.probe()
+		s.running.Add(1)
+		go func() {
+			defer s.running.Done()
+			s.probe()
+		}()
 		return
 	}
 	s.stalled++
@@ -223,6 +268,9 @@ func (s *cardSampler) probe() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.probing, s.stalled = time.Time{}, 0
+	if s.ended {
+		return
+	}
 	switch {
 	case errors.Is(err, syscall.EROFS):
 		s.observe(health.IoEvent{Kind: health.IoEROFS})
@@ -262,8 +310,12 @@ func (s *cardSampler) stats() health.IoStats {
 }
 
 // observe gives ev to the monitor and reports what changed: a new state, the
-// alert, and the failure, once. s.mu is held.
+// alert, and the failure, once; nothing once run has returned. s.mu is
+// held.
 func (s *cardSampler) observe(ev health.IoEvent) {
+	if s.ended {
+		return
+	}
 	state, raised := s.mon.Observe(ev, s.now())
 	if state != s.state {
 		s.state = state

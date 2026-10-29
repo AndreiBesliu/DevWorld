@@ -521,6 +521,11 @@ func TestCardSampler_CountsIOErrorsOfMediaMTXAndTheHub(t *testing.T) {
 // fakeCardRecorder records what the card sampler asks of the recorder.
 type fakeCardRecorder struct {
 	stops chan string // "<cam>/<profile>" of each Stop
+	// hold, when set, holds each Stop until it is closed, as a card that
+	// holds the stop's writes would.
+	hold chan struct{}
+	// failed, when set, gets "<cam>/<profile>" of each WriteFailed.
+	failed chan string
 }
 
 func (f *fakeCardRecorder) Stop(_ context.Context, cam recorder.CameraID, p recorder.Profile, reason catalog.GapReason) error {
@@ -528,22 +533,31 @@ func (f *fakeCardRecorder) Stop(_ context.Context, cam recorder.CameraID, p reco
 		return fmt.Errorf("stop with reason %s, not card", reason)
 	}
 	f.stops <- string(cam) + "/" + string(p)
+	if f.hold != nil {
+		<-f.hold
+	}
 	return nil
 }
 
-func (f *fakeCardRecorder) WriteFailed(recorder.CameraID, recorder.Profile, catalog.GapReason) {}
+func (f *fakeCardRecorder) WriteFailed(cam recorder.CameraID, p recorder.Profile, _ catalog.GapReason) {
+	if f.failed != nil {
+		f.failed <- string(cam) + "/" + string(p)
+	}
+}
 
 // eioLine is a line of MediaMTX's log for a write that failed on the card.
 const eioLine = "2026/10/28 12:00:00 ERR [path cam1/main] [recorder] write /data/rec/cam1/main/x.mp4.part: input/output error"
 
 // TestCardSampler_HungProbe_FailedStillStopsTheJobs (T40, Review Focus 4;
-// Task 8 review M2): the probe's write and fsync run on a goroutine of
-// their own, and the stop at FAILED on another: a probe that hangs on a
-// dying card keeps neither MediaMTX's I/O errors from making the card
-// FAILED nor every job from stopping with a card gap at once.
+// Task 8 review M2; Task 8b review): the probe's write and fsync run on a
+// goroutine of their own, and the stop at FAILED on another: a probe that
+// hangs on a dying card keeps neither MediaMTX's I/O errors from making the
+// card FAILED nor every job from stopping with a card gap at once. The
+// probe hangs between two intervals, so it never counts: the three lines
+// of MediaMTX alone make the card FAILED.
 func TestCardSampler_HungProbe_FailedStillStopsTheJobs(t *testing.T) {
 	s := newCardSampler(t.TempDir(), "", &events{out: io.Discard})
-	s.probeEvery = 10 * time.Millisecond
+	s.probeEvery = time.Hour // no interval comes that would count the hung probe
 	hung, probing := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	s.probeFile = func(string) (time.Duration, error) {
@@ -558,16 +572,30 @@ func TestCardSampler_HungProbe_FailedStillStopsTheJobs(t *testing.T) {
 		cancel()
 		close(hung)
 	})
-	jobs := []recorder.Job{recorder.NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil), recorder.NewJob("cam2", "main", "rtsp://127.0.0.1:1/cam2/main", nil)}
-	go s.run(ctx, jobs)
+	s.probeTick() // the probe starts, and hangs
 	select {
 	case <-probing:
 	case <-time.After(10 * time.Second):
 		t.Fatal("no probe started")
 	}
+	jobs := []recorder.Job{recorder.NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil), recorder.NewJob("cam2", "main", "rtsp://127.0.0.1:1/cam2/main", nil)}
+	go s.run(ctx, jobs)
 
+	var states []string
 	for range 3 {
 		s.childLog(eioLine)
+		s.mu.Lock()
+		states = append(states, s.state.String())
+		s.mu.Unlock()
+	}
+	if want := []string{"degraded", "degraded", "failed"}; !slices.Equal(states, want) {
+		t.Errorf("after each line of MediaMTX, states %v, want %v", states, want)
+	}
+	s.mu.Lock()
+	stalled := s.stalled
+	s.mu.Unlock()
+	if st := s.stats(); st.IOErrors60s != 3 || stalled != 0 {
+		t.Errorf("stats %+v and %d intervals of the hung probe counted, want the 3 I/O errors of MediaMTX's lines and none of the probe", st, stalled)
 	}
 	var stopped []string
 	for len(stopped) < len(jobs) {
@@ -582,6 +610,142 @@ func TestCardSampler_HungProbe_FailedStillStopsTheJobs(t *testing.T) {
 	if want := []string{"cam1/main", "cam2/main"}; !slices.Equal(stopped, want) {
 		t.Errorf("stopped %v, want %v", stopped, want)
 	}
+}
+
+// TestCardSampler_RunJoinsItsGoroutines (T40; Task 8b review M4): run
+// returns only once the goroutines that it started have ended, so that
+// nothing the card sampler finds goes out after ipcam-hub's stop: the stop
+// of the jobs at FAILED, whose writes are on the card, and the probe in
+// flight, whose result is still observed. A probe that the card holds for
+// longer than joinWait is not waited for, so that a card that hangs does
+// not hold ipcam-hub's stop; what it finds later goes nowhere.
+func TestCardSampler_RunJoinsItsGoroutines(t *testing.T) {
+	jobs := []recorder.Job{recorder.NewJob("cam1", "main", "rtsp://127.0.0.1:1/cam1/main", nil)}
+	// start runs s until the returned cancel, and closes ran once run returns.
+	start := func(t *testing.T, s *cardSampler) (cancel func(), ran chan struct{}) {
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
+		ran = make(chan struct{})
+		go func() {
+			defer close(ran)
+			s.run(ctx, jobs)
+		}()
+		return cancel, ran
+	}
+	stillRuns := func(t *testing.T, ran chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ran:
+			t.Fatalf("run returned while %s", what)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	returns := func(t *testing.T, ran chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ran:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("run did not return %s", what)
+		}
+	}
+	// hungProbe makes s's probe hang until the returned release, which makes
+	// it return err.
+	hungProbe := func(t *testing.T, s *cardSampler, err error) (release func()) {
+		hung := make(chan struct{})
+		var once sync.Once
+		release = func() { once.Do(func() { close(hung) }) }
+		t.Cleanup(release)
+		s.probeFile = func(string) (time.Duration, error) {
+			<-hung
+			return 0, err
+		}
+		return release
+	}
+	probeReturned := func(t *testing.T, s *cardSampler) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			s.mu.Lock()
+			done := s.probing.IsZero()
+			s.mu.Unlock()
+			if done {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the probe did not return")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	t.Run("the stop at FAILED", func(t *testing.T) {
+		s := newCardSampler(t.TempDir(), "", &events{out: io.Discard})
+		s.probeEvery = time.Hour
+		rec := &fakeCardRecorder{stops: make(chan string, 1), hold: make(chan struct{})}
+		s.attach(rec)
+		cancel, ran := start(t, s)
+		for range 3 {
+			s.childLog(eioLine)
+		}
+		select {
+		case <-rec.stops:
+		case <-time.After(10 * time.Second):
+			t.Fatal("no Stop after FAILED")
+		}
+		cancel()
+		stillRuns(t, ran, "the stop of the jobs, which the card holds, still ran")
+		close(rec.hold)
+		returns(t, ran, "once the stop of the jobs ended")
+	})
+	t.Run("a probe in flight", func(t *testing.T) {
+		var out syncBuffer
+		s := newCardSampler(t.TempDir(), "", &events{out: &out})
+		s.probeEvery = time.Hour
+		release := hungProbe(t, s, &fs.PathError{Op: "sync", Path: "probe", Err: syscall.EIO})
+		s.probeTick()
+		cancel, ran := start(t, s)
+		cancel()
+		stillRuns(t, ran, "its probe was in flight")
+		release()
+		returns(t, ran, "once its probe returned")
+		if !strings.Contains(out.String(), `"state":"degraded"`) {
+			t.Errorf("events %q, want the probe's I/O error observed before run returned", out.String())
+		}
+	})
+	t.Run("a probe that the card holds", func(t *testing.T) {
+		var out syncBuffer
+		s := newCardSampler(t.TempDir(), "", &events{out: &out})
+		s.probeEvery = time.Hour
+		s.joinWait = 50 * time.Millisecond
+		release := hungProbe(t, s, &fs.PathError{Op: "sync", Path: "probe", Err: syscall.EIO})
+		s.probeTick()
+		cancel, ran := start(t, s)
+		cancel()
+		returns(t, ran, "while its probe hung")
+		release()
+		probeReturned(t, s)
+		if got := out.String(); got != "" {
+			t.Errorf("events after run returned: %q, want none", got)
+		}
+	})
+}
+
+// syncBuffer is a bytes.Buffer that goroutines share.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // TestCardSampler_HungProbeCountsAsSlowThenAsErrors (T40, §13.1; Task 8

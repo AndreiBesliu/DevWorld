@@ -736,6 +736,14 @@ func setRewriteHook(f func()) (restore func()) {
 // Windows' stop grace, less than Linux's.
 const slowStop = 7 * time.Second
 
+// setShutdownNoteTimeout bounds the notes of the failed writes queued at the
+// hub's stop by d, until restore is called.
+func setShutdownNoteTimeout(d time.Duration) (restore func()) {
+	previous := shutdownNoteTimeout
+	shutdownNoteTimeout = d
+	return func() { shutdownNoteTimeout = previous }
+}
+
 // setWalkRecDir makes every listing of the recordings directory walk with
 // f, until restore is called.
 func setWalkRecDir(f func(root string, fn fs.WalkDirFunc) error) (restore func()) {

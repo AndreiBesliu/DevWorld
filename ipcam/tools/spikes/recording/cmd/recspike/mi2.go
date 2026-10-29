@@ -32,7 +32,10 @@ func mi2Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	case *controller == "":
 		_, _ = fmt.Fprint(out, usage)
 		return errors.New("lipsește --controller: adresa reccontroller -local, 127.0.0.1")
-	case !loopback(*controller):
+	case isIPv6(*controller):
+		_, _ = fmt.Fprint(out, usage)
+		return fmt.Errorf("--controller %s este o adresă IPv6: reccontroller ascultă doar pe IPv4; folosiți 127.0.0.1", *controller)
+	case !ipv4Loopback(*controller):
 		_, _ = fmt.Fprint(out, usage)
 		return fmt.Errorf("--controller %s nu este pe acest dispozitiv: proba de 72 h folosește reccontroller -local, pornit pe același dispozitiv, la 127.0.0.1", *controller)
 	case *hours <= 0:
@@ -56,15 +59,30 @@ func mi2Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 		}})
 }
 
-// loopback reports whether addr, a host with or without a port, is this
-// device: a loopback address, or localhost.
-func loopback(addr string) bool {
+// controllerHost is the host of addr, an address with or without a port,
+// and its IP when it is one.
+func controllerHost(addr string) (string, net.IP) {
 	host := addr
 	if h, _, err := net.SplitHostPort(addr); err == nil {
 		host = h
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
+	return host, net.ParseIP(host)
+}
+
+// isIPv6 reports whether addr's host is an IPv6 address: reccontroller
+// listens on IPv4 only (R08).
+func isIPv6(addr string) bool {
+	_, ip := controllerHost(addr)
+	return ip != nil && ip.To4() == nil
+}
+
+// ipv4Loopback reports whether addr, a host with or without a port, is this
+// device's IPv4 loopback, where reccontroller -local listens (R08): an
+// address in 127.0.0.0/8, or localhost.
+func ipv4Loopback(addr string) bool {
+	host, ip := controllerHost(addr)
+	if ip != nil {
+		return ip.To4() != nil && ip.IsLoopback()
 	}
 	return strings.EqualFold(host, "localhost")
 }

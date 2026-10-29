@@ -195,8 +195,10 @@ func TestMI2_MoreThan20Resumes(t *testing.T) {
 	if j.Verdict != results.Pass {
 		t.Errorf("21 resumes within 10 s: Judge = %q, reasons %q; want trece", j.Verdict, j.Reasons)
 	}
-	if row := rowOf(t, j, "MI2 pc: reluarea după kill -9"); row.Value != "4,00 s (21 din 20)" || row.Pass == nil || !*row.Pass {
-		t.Errorf("resume row %+v, want 4,00 s (21 din 20), passed", row)
+	// The count without «din 20», which would read as a contradiction (Task
+	// 8b review M6): the note says why there are more.
+	if row := rowOf(t, j, "MI2 pc: reluarea după kill -9"); row.Value != "4,00 s (21 de reluări)" || row.Pass == nil || !*row.Pass {
+		t.Errorf("resume row %+v, want 4,00 s (21 de reluări), passed", row)
 	}
 	if !slices.ContainsFunc(j.Notes, func(n string) bool {
 		return strings.HasPrefix(n, "pc-kill9: 21 de reluări numărate, cu 1 peste cele 20")

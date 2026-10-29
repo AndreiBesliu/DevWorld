@@ -32,7 +32,7 @@ func mi3Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	case *controller == "":
 		_, _ = fmt.Fprint(out, usage)
 		return errors.New("lipsește --controller: adresa dispozitivului unde rulează reccontroller")
-	case loopback(*controller):
+	case onThisDevice(*controller):
 		_, _ = fmt.Fprint(out, usage)
 		return fmt.Errorf("--controller %s este chiar acest dispozitiv: proba MI3 ia camerele de la reccontroller de pe celălalt dispozitiv, ca procesorul măsurat să nu le simuleze", *controller)
 	}
@@ -55,6 +55,16 @@ func mi3Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	}
 	return mi3.Run(ctx, mi3.Options{Host: host, Controller: controllerAddr(*controller), Hub: f.hub, Self: self,
 		Results: f.results, Work: f.work, Out: out})
+}
+
+// onThisDevice reports whether addr, a host with or without a port, is this
+// device: a loopback address, or localhost.
+func onThisDevice(addr string) bool {
+	host, ip := controllerHost(addr)
+	if ip != nil {
+		return ip.IsLoopback()
+	}
+	return strings.EqualFold(host, "localhost")
 }
 
 // mi3LoadCommand is `recspike mi3-load live|playback|export|upload`, which

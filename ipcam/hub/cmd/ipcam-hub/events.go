@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -81,21 +80,31 @@ func statusFields(cam recorder.CameraID, p recorder.Profile, s recorder.RecStatu
 // goes to stderr, never to the events. The child's log and the errors go
 // to the card monitor too, while rec/ is on an SD card.
 type observer struct {
-	ev     *events
-	stderr io.Writer
-	card   *cardSampler // nil when rec/ is not on an SD card
-	logMu  sync.Mutex
+	ev   *events
+	log  *logQueue    // the child's log, on its way to stderr
+	card *cardSampler // nil when rec/ is not on an SD card
 }
+
+func newObserver(ev *events, stderr io.Writer, card *cardSampler) *observer {
+	return &observer{ev: ev, log: newLogQueue(stderr, logQueueLen), card: card}
+}
+
+// close writes the child's log lines that still wait for stderr, for at
+// most shutdownWait: a stderr that the card holds does not hold ipcam-hub's
+// stop.
+func (o *observer) close() { o.log.close(shutdownWait) }
 
 func (o *observer) ChildRestarted(time.Time) { o.ev.emit("child_restart", nil) }
 
+// ChildLog gives line to the card monitor first, then queues it for stderr:
+// the goroutine that reads MediaMTX's log never waits for stderr, which in
+// MI2 is a file on the same SD card (T40), so a write that the card holds
+// delays neither the card's I/O errors nor the failed write's time.
 func (o *observer) ChildLog(line string) {
-	o.logMu.Lock()
-	_, _ = fmt.Fprintln(o.stderr, "mediamtx:", line)
-	o.logMu.Unlock()
 	if o.card != nil {
 		o.card.childLog(line)
 	}
+	o.log.add("mediamtx: " + line)
 }
 
 func (o *observer) FirstPart(cam recorder.CameraID, p recorder.Profile, _ time.Time) {

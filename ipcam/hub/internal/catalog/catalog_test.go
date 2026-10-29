@@ -366,6 +366,13 @@ func TestCatalog_TailReasons(t *testing.T) {
 	if reason, found, err := db.TailReason(ctx, part); err != nil || !found || reason != GapCard {
 		t.Errorf("TailReason after a new Open = %q, %v, %v; want card, the last put", reason, found, err)
 	}
+	other := "c1/main/2026-10-28/115500_000000.mp4.part"
+	if err := db.PutTailReason(ctx, other, GapCard); err != nil {
+		t.Fatal(err)
+	}
+	if paths, err := db.TailReasonPaths(ctx); err != nil || !slices.Equal(paths, []string{other, part}) {
+		t.Errorf("TailReasonPaths = %q, %v; want both paths, sorted", paths, err)
+	}
 	if err := db.PutTailReason(ctx, part, "power"); err == nil {
 		t.Error("PutTailReason accepted an unknown reason")
 	}

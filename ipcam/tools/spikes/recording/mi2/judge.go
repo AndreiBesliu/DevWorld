@@ -127,7 +127,11 @@ func judgeResumes(j *results.Judgement, host, kill9 string, envs []results.Envel
 			kill9, measured, excess, Kill9Runs, mi1.WholeSecondsText(MaxResumeMs)))
 	}
 	row := results.Row{Code: "MI2 " + host + ": reluarea după kill -9", Value: "lipsește", Limit: "≤ " + mi1.WholeSecondsText(MaxResumeMs), Source: host}
-	if measured > 0 {
+	switch {
+	case measured > Kill9Runs:
+		// «21 din 20» would read as a contradiction; the note says why.
+		row.Value = fmt.Sprintf("%s (%d de reluări)", mi1.SecondsText(slowest), measured)
+	case measured > 0:
 		row.Value = fmt.Sprintf("%s (%d din %d)", mi1.SecondsText(slowest), measured, Kill9Runs)
 	}
 	row.Pass = verdict(!failed, complete)

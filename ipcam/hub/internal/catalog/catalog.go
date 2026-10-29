@@ -324,6 +324,28 @@ func (db *DB) DeleteTailReason(ctx context.Context, path string) error {
 	return nil
 }
 
+// TailReasonPaths returns the paths of the .part files that have a tail
+// reason, sorted.
+func (db *DB) TailReasonPaths(ctx context.Context) ([]string, error) {
+	rows, err := db.sql.QueryContext(ctx, "SELECT local_path FROM tail_reasons ORDER BY local_path")
+	if err != nil {
+		return nil, fmt.Errorf("catalog: list the tail reasons: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, fmt.Errorf("catalog: list the tail reasons: %w", err)
+		}
+		paths = append(paths, path)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("catalog: list the tail reasons: %w", err)
+	}
+	return paths, nil
+}
+
 // Gaps returns every gap, by stream and start.
 func (db *DB) Gaps(ctx context.Context) ([]Gap, error) {
 	rows, err := db.sql.QueryContext(ctx, "SELECT camera_id, profile, start_ms, end_ms, reason FROM gaps ORDER BY camera_id, profile, start_ms, id")

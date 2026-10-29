@@ -108,9 +108,11 @@ type rec struct {
 	partsKick  chan struct{}
 	wg         sync.WaitGroup // the background loops, the child's log readers and its configuration's settle
 
-	mu      sync.Mutex
-	jobs    map[streamKey]Job
-	stopped map[streamKey]bool
+	mu   sync.Mutex
+	jobs map[streamKey]Job
+	// stopped holds when Stop stopped each stream that Apply has not
+	// recorded again since.
+	stopped map[streamKey]time.Time
 	report  ReconcileReport
 	// seq is the Seq of the last reconcile update given out, and lastFinal
 	// its Final; working counts the rewrites and batches of repairs that run.
@@ -126,8 +128,11 @@ type rec struct {
 	parts []string
 	tried map[string]bool
 	// failedWrites are the writes that MediaMTX could not make
-	// (WriteFailed), which repairLoop has not noted yet.
+	// (WriteFailed), which repairLoop has not noted yet, and noted the .part
+	// files, relative to rec/, whose reason noteFailedWrite put in the
+	// catalog.
 	failedWrites []failedWrite
+	noted        map[string]bool
 
 	// gapMu is held while a stream's open gaps are closed, and while a repair
 	// finds where its gap ends and writes it.
@@ -202,8 +207,8 @@ func New(ctx context.Context, cfg Config) (Recorder, ReconcileReport, error) {
 		cfg: cfg, obs: cfg.Observer, configPath: filepath.Join(cfg.RunDir, configName),
 		watch: newPartWatcher(cfg.RecDir), closed: make(chan SegmentClosed, 1024),
 		verifyKick: make(chan struct{}, 1), jobsKick: make(chan struct{}, 1), partsKick: make(chan struct{}, 1),
-		jobs: map[streamKey]Job{}, stopped: map[streamKey]bool{}, report: report, pending: res.pending, busy: map[string]bool{},
-		tried: map[string]bool{}, seq: 1, lastFinal: len(res.pending) == 0,
+		jobs: map[streamKey]Job{}, stopped: map[streamKey]time.Time{}, report: report, pending: res.pending, busy: map[string]bool{},
+		tried: map[string]bool{}, noted: map[string]bool{}, seq: 1, lastFinal: len(res.pending) == 0,
 	}
 	for _, p := range leftParts(cfg.RecDir) {
 		r.tried[p] = true // reconcile could not repair it
@@ -488,7 +493,7 @@ func (r *rec) Apply(ctx context.Context, jobs []Job) error {
 	for _, j := range jobs {
 		r.jobs[j.key()] = j
 		keys = append(keys, j.key())
-		if r.stopped[j.key()] {
+		if _, ok := r.stopped[j.key()]; ok {
 			delete(r.stopped, j.key())
 			readded = append(readded, j.key())
 		}
@@ -518,7 +523,7 @@ func (r *rec) Stop(ctx context.Context, cam CameraID, p Profile, reason catalog.
 		return fmt.Errorf("recorder: %s is not recorded", k)
 	}
 	delete(r.jobs, k)
-	r.stopped[k] = true
+	r.stopped[k] = time.Now()
 	keys := make([]streamKey, 0, len(r.jobs))
 	for key := range r.jobs {
 		keys = append(keys, key)
@@ -865,17 +870,22 @@ func (r *rec) forgetPart(path string) {
 // failed .part's reason is in the catalog before its repair reads it, since
 // MediaMTX logs the failed write before it starts the stream's next
 // segment, which makes the file one that a newer .part left behind. The
-// failed writes queued when the hub stops are noted before it ends.
+// notes are made whole also when the hub stops meanwhile, and the failed
+// writes queued when it stops are noted before it ends, for at most
+// shutdownNoteTimeout: a hole that the next start could not find again is
+// not lost to the stop.
 func (r *rec) repairLoop(ctx context.Context) {
 	defer r.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
-			r.noteFailedWrites(ctx)
+			note, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownNoteTimeout)
+			r.noteFailedWrites(note)
+			cancel()
 			return
 		case <-r.partsKick:
 		}
-		r.noteFailedWrites(ctx)
+		r.noteFailedWrites(context.WithoutCancel(ctx))
 		r.mu.Lock()
 		paths := r.parts
 		r.parts = nil

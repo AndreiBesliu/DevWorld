@@ -401,6 +401,9 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 		res.report.Aborted = true
 		return res, nil
 	}
+	if err := dropGoneTailReasons(ctx, cat, l); err != nil {
+		res.errs = append(res.errs, err)
+	}
 	for _, path := range l.rewrites {
 		if err := os.Remove(path); err != nil {
 			res.errs = append(res.errs, fileError("remove the partial rewrite", path, err))
@@ -426,9 +429,14 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 			continue
 		}
 		var g catalog.Gap
-		gapChanged, recorded := false, false
-		// forget drops the file's recorded tail reason once its gap is written
-		// and the .part is gone.
+		gapChanged := false
+		// The reason of the file's tail gap: restart, or the one that
+		// WriteFailed recorded for a .part (T40). Each .part's recorded reason
+		// is forgotten once its gap is written and the .part is gone.
+		reason, recorded, err := tailReason(ctx, cat, rp.seg)
+		if err != nil {
+			return res, err
+		}
 		forget := func() {
 			if recorded {
 				if err := cat.DeleteTailReason(ctx, rp.seg.rel); err != nil {
@@ -441,13 +449,7 @@ func reconcile(ctx context.Context, recDir string, tail crypto.TailSealer, cat *
 			// finds the gap again at the next start, one after it would lose
 			// the gap. A .part that an earlier MediaMTX left, older than other
 			// segments of its stream, has a gap that ended when the next one
-			// started. Its reason is restart, or the one that WriteFailed
-			// recorded for the .part (T40).
-			reason, found, err := tailReason(ctx, cat, rp.seg)
-			if err != nil {
-				return res, err
-			}
-			recorded = found
+			// started.
 			g = tailGap(rp.seg, rp.keptMs(), nextStartMs(segs, rp.seg, noRecording), reason)
 			isNew, moved, err := putTailGap(ctx, cat, rp.seg, rp.keptMs(), g)
 			if err != nil {
@@ -519,6 +521,33 @@ func tailReason(ctx context.Context, cat *catalog.DB, s segFile) (reason catalog
 		}
 	}
 	return catalog.GapRestart, false, nil
+}
+
+// dropGoneTailReasons forgets the tail reasons whose .part the listing l
+// did not find: a .part that MediaMTX closed and renamed itself has no tail
+// to lose, such as the stream's next segment when a failed write's line
+// came late and its reason went there (Task 8b review M3). A reason under a
+// directory that l could not read stays: whether its .part is there is
+// unknown.
+func dropGoneTailReasons(ctx context.Context, cat *catalog.DB, l listing) error {
+	paths, err := cat.TailReasonPaths(ctx)
+	if err != nil {
+		return err
+	}
+	parts := map[string]bool{}
+	for _, s := range l.segs {
+		if s.part {
+			parts[s.rel] = true
+		}
+	}
+	for _, path := range paths {
+		if !parts[path] && !l.hidden(path) {
+			if err := cat.DeleteTailReason(ctx, path); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // tailGap is the gap of reason after the lost tail of s, whose file now

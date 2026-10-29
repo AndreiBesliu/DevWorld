@@ -2003,6 +2003,40 @@ func TestReconcile_TailGapKeepsOtherReasonsAndFiles(t *testing.T) {
 	}
 }
 
+// TestReconcile_ForgetsTheTailReasonsOfFilesThatAreGone (T40; Task 8b
+// review M3): a .part's tail reason lives as long as the .part. Reconcile
+// forgets the reason of every .part that it repairs, one whose parts are
+// all whole too, and drops, as ipcam-hub starts, the reasons whose .part is
+// gone: one that MediaMTX closed and renamed itself, such as the next
+// segment that took a failed write's reason when the log came late. A
+// reason under a directory that cannot be read stays: whether its .part is
+// there is unknown.
+func TestReconcile_ForgetsTheTailReasonsOfFilesThatAreGone(t *testing.T) {
+	recDir, cat := t.TempDir(), openCatalog(t)
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000}})
+	whole := segPath(recDir, "cam1", "main", t0, ".part")
+	writeFile(t, whole, f.data)
+	renamed := segPath(recDir, "cam1", "main", t0.Add(5*time.Minute), "")
+	writeFile(t, renamed, f.data)
+	putRows(t, cat, recDir, renamed)
+	hidden := segPath(recDir, "cam2", "main", t0, ".part")
+	writeFile(t, hidden, f.data)
+	rels := []string{relSeg("cam1", "main", t0, ".part"), relSeg("cam1", "main", t0.Add(5*time.Minute), ".part"), relSeg("cam2", "main", t0, ".part")}
+	for _, rel := range rels {
+		if err := cat.PutTailReason(t.Context(), rel, catalog.GapCard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer setWalkRecDir(unreadableDir(filepath.Dir(hidden)))()
+
+	if _, err := reconcile(t.Context(), recDir, nil, cat); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []bool{false, false, true} {
+		requireTailReason(t, cat, rels[i], want)
+	}
+}
+
 // TestRecorder_UnreadableDirectoryReportedOnce (Task 8, 8a I1 follow-up;
 // Task 8 review I1): a directory under rec/ that stays unreadable is
 // reported once, with one «recorder:» prefix: by reconcile's listing when

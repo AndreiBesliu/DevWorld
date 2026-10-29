@@ -228,7 +228,9 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		card = newCardSampler(rc.RecDir, mountInfoPath, ev)
 		card.begin()
 	}
-	rc.Observer = &observer{ev: ev, stderr: stderr, card: card}
+	obs := newObserver(ev, stderr, card)
+	defer obs.close()
+	rc.Observer = obs
 
 	// New gives the reconcile event out (observer.Reconciled), as later updates.
 	rec, _, err := recorder.New(ctx, rc)
@@ -253,8 +255,14 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		ready = append(ready, map[string]any{"cam": j.Cam, "profile": j.Profile, "encrypted": j.Scope != nil, "padLowBitrate": j.PadLowBitrate})
 	}
 	ev.emit("ready", map[string]any{"jobs": ready})
+	sampled := make(chan struct{}) // closed once the card sampler has returned
 	if card != nil {
-		go card.run(ctx, jobs)
+		go func() {
+			defer close(sampled)
+			card.run(ctx, jobs)
+		}()
+	} else {
+		close(sampled)
 	}
 
 	tick := time.NewTicker(statusInterval)
@@ -264,7 +272,12 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		select {
 		case s, ok := <-closed:
 			if !ok {
-				return exitOK // the recorder stopped after SIGTERM or Ctrl-C
+				// The recorder stopped after SIGTERM or Ctrl-C. The card sampler
+				// returns once its goroutines have ended (cardSampler.join), so
+				// that its stop of the jobs, which writes the catalog, ends before
+				// the catalog closes.
+				<-sampled
+				return exitOK
 			}
 			ev.emit("segment_closed", map[string]any{"cam": s.Cam, "profile": s.Profile, "path": s.Path,
 				"startMs": s.StartMs, "endMs": s.EndMs, "encrypted": s.Encrypted})
