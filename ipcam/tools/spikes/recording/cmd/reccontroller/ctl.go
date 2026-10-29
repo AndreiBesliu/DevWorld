@@ -68,6 +68,9 @@ type ctlConfig struct {
 	sinkPort int
 	sinkCert []byte
 	liveAPI  *webrtc.API
+	// mi9API makes MI9's playback peers, nil on a -local controller,
+	// which MI9 does not use.
+	mi9API *webrtc.API
 }
 
 // ctl is the controller's state across the host's connections: a run's
@@ -80,18 +83,19 @@ type ctl struct {
 	ctx     context.Context
 	beacons *controller.BeaconLog
 
-	mu     sync.Mutex
-	rnd    *rand.Rand
-	runs   map[string]*runState
-	judged map[string]link.Verdict // the verdicts sent, for a report sent again
-	steps  map[string]*mi3Step     // MI3's steps in progress (mi3.go)
+	mu      sync.Mutex
+	rnd     *rand.Rand
+	runs    map[string]*runState
+	judged  map[string]link.Verdict // the verdicts sent, for a report sent again
+	steps   map[string]*mi3Step     // MI3's steps in progress (mi3.go)
+	mi9Runs map[string]*mi9Run      // MI9's runs awaiting their answer (mi9.go)
 }
 
 func newCtl(ctx context.Context, cfg ctlConfig) *ctl {
 	return &ctl{
 		ctlConfig: cfg, ctx: ctx, beacons: controller.NewBeaconLog(),
 		rnd:  rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())), //nolint:gosec // schedules cuts, not secrets
-		runs: map[string]*runState{}, judged: map[string]link.Verdict{}, steps: map[string]*mi3Step{},
+		runs: map[string]*runState{}, judged: map[string]link.Verdict{}, steps: map[string]*mi3Step{}, mi9Runs: map[string]*mi9Run{},
 	}
 }
 
@@ -131,6 +135,7 @@ func (c *ctl) serve(ctx context.Context, conn *link.Conn, local net.Addr) {
 	defer stop()
 	defer func() { _ = conn.Close() }()
 	defer c.dropSteps(conn)
+	defer c.dropMI9(conn)
 	host := ""
 	for {
 		m, err := conn.Receive()
@@ -169,6 +174,10 @@ func (c *ctl) serve(ctx context.Context, conn *link.Conn, local net.Addr) {
 			go c.mi3Answers(ctx, conn, m)
 		case link.Mi3End:
 			c.mi3End(conn, m)
+		case link.Mi9Start:
+			c.mi9Start(conn, m)
+		case link.Mi9Answer:
+			go c.mi9Answer(ctx, conn, m)
 		case link.Bye:
 			c.bye(conn, host)
 			return

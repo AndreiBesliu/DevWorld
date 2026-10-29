@@ -19,6 +19,7 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi9"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
 )
 
@@ -73,9 +74,13 @@ func serveOn(ctx context.Context, cfg serveConfig, lns *controller.Listeners, ou
 	if err != nil {
 		return err
 	}
-	var liveAPI *webrtc.API
+	var liveAPI, mi9API *webrtc.API
 	if !cfg.local {
 		if liveAPI, err = controller.NewLiveAPI(); err != nil {
+			return err
+		}
+		// MI9's playback peers (G26 leg 3), for the same reason.
+		if mi9API, err = mi9.NewAPI(mi9.LAN); err != nil {
 			return err
 		}
 	}
@@ -83,13 +88,12 @@ func serveOn(ctx context.Context, cfg serveConfig, lns *controller.Listeners, ou
 		pacer: srv, sendLog: sendLog, clock: clock, out: out, results: filepath.Join(cfg.dir, "results"), local: cfg.local,
 		rtspPort: port(lns.RTSP), beaconPort: lns.Beacon.LocalAddr().(*net.UDPAddr).Port,
 		creds: creds, streams: streams, needles: needles,
-		sinkPort: port(lns.Upload), sinkCert: sinkDER, liveAPI: liveAPI,
+		sinkPort: port(lns.Upload), sinkCert: sinkDER, liveAPI: liveAPI, mi9API: mi9API,
 	})
 	go superviseBeacons(ctx, func(ctx context.Context) error {
 		return controller.ReceiveBeacons(ctx, lns.Beacon, c.beacons, clock)
 	}, c.say)
-	// The spike app's endpoints, for MI4's phone step (G24); Task 11 adds
-	// MI9's.
+	// The spike app's endpoints, for MI4's phone step (G24).
 	app := &http.Server{Handler: controller.NewAppAPI(filepath.Join(c.results, "app")), ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = app.Serve(lns.App) }()
 	defer func() { _ = app.Close() }()

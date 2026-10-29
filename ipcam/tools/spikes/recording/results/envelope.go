@@ -75,6 +75,33 @@ type Envelope struct {
 	// (mi4.AgerangeRun: set app-age, OS the app's platform, "android" on
 	// the phone, AtMs the time that reccontroller stored the result).
 	MI4 *Mi4Data `json:"mi4,omitempty"`
+	// MI9 is an MI9 envelope's legs (G18), and only an MI9 envelope's.
+	MI9 *Mi9Data `json:"mi9,omitempty"`
+}
+
+// Mi9Data is MI9's data-channel playback (G18, CTR-12): its legs, each
+// measured where its Source says (G26).
+type Mi9Data struct {
+	Legs []Mi9Leg `json:"legs"`
+}
+
+// Mi9Leg is one leg of MI9 (G26):
+//   - Transport is "lan", "turns443" or "chrome";
+//   - ThroughputMbps is the whole segment's plaintext over one bulk
+//     channel, in bits ÷ time;
+//   - SeekMs are the 20 seeks, each from its request until the first
+//     IDR's bytes arrived, and DisplayMs, on Chrome, each until the first
+//     requestVideoFrameCallback after it;
+//   - RTTMs is the selected candidate pair's round trip;
+//   - Source is "lan" (the owner's devices), "ci-relay", "ci-chrome" or
+//     "ci-loopback", which decides what the leg may judge (mi9.Judge).
+type Mi9Leg struct {
+	Transport      string    `json:"transport"`
+	ThroughputMbps float64   `json:"throughputMbps,omitempty"`
+	SeekMs         []float64 `json:"seekMs,omitempty"`
+	DisplayMs      []float64 `json:"displayMs,omitempty"`
+	RTTMs          float64   `json:"rttMs,omitempty"`
+	Source         string    `json:"source"`
 }
 
 // Mi4Data is MI4's age random-access rig on a host (G13, ENC-08, HUB-33):
@@ -307,6 +334,8 @@ func (e Envelope) Validate() error {
 		return fmt.Errorf("results: an %s envelope with mi3 %v: only MI3's has it, always", e.Code, e.MI3 != nil)
 	case e.Code == "MI4" && e.MI4 == nil, e.MI4 != nil && e.Code != "MI4" && e.Code != "ENC-06":
 		return fmt.Errorf("results: an %s envelope with mi4 %v: MI4's has it always, and ENC-06's may", e.Code, e.MI4 != nil)
+	case (e.Code == "MI9") != (e.MI9 != nil):
+		return fmt.Errorf("results: an %s envelope with mi9 %v: only MI9's has it, always", e.Code, e.MI9 != nil)
 	}
 	if !fileName(e.Set) {
 		return fmt.Errorf("results: set %q is not a file name", e.Set)

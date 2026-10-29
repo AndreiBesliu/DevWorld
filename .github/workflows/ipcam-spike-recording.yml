@@ -3,8 +3,8 @@ name: ipcam-spike-recording
 # The Phase 0 (c1) recorder spike (ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md):
 # the hub module, the MediaMTX fork in hub/third_party/mediamtx (a nested module outside
 # go.work, built, tested and checked with GOWORK=off from its directory) and the spike
-# module tools/spikes/recording, and mi1-smoke, MI1's lab shards in small (Task 7). Task 11
-# adds the mi9 job.
+# module tools/spikes/recording, mi1-smoke, MI1's lab shards in small (Task 7), and mi9,
+# MI9's playback over the data channel in CI (Task 11).
 
 on:
   push:
@@ -25,6 +25,9 @@ on:
       - 'ipcam/go.work.sum'
       # The line endings of the checkout on the windows job (the fork's files are -text).
       - 'ipcam/.gitattributes'
+      # The mi9 job's Playwright, from the workspace's lockfile.
+      - 'ipcam/package.json'
+      - 'ipcam/pnpm-*.yaml'
       - '.github/workflows/ipcam-spike-recording.yml'
   pull_request:
     paths:
@@ -42,6 +45,9 @@ on:
       - 'ipcam/go.work.sum'
       # The line endings of the checkout on the windows job (the fork's files are -text).
       - 'ipcam/.gitattributes'
+      # The mi9 job's Playwright, from the workspace's lockfile.
+      - 'ipcam/package.json'
+      - 'ipcam/pnpm-*.yaml'
       - '.github/workflows/ipcam-spike-recording.yml'
 
 permissions:
@@ -732,4 +738,260 @@ jobs:
               [[ -f "${console}" ]] && tail -n 60 "${console}" | tools/scripts/annotate.sh "guest console" 60
             fi
           done
+          true
+
+  mi9:
+    # MI9, playback over the data channel (G18, CTR-12, Task 11), its CI legs (G26): ipcam-hub
+    # records a 5-min encrypted segment of main.h264 (mi9page record); the live Go tests play it
+    # over loopback (information only) and relayed through coturn's TLS listener on 443 at 50 ms
+    # round trip (the relay verdict); Google Chrome plays it through MSE (CTR-12's «afișează»).
+    # Each leg prints one "mi9: <json>" line, which goes out as a notice (C32).
+    needs: media
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ipcam
+    env:
+      # The relay's address on the job's own Docker network: coturn's container, and the
+      # bridge's name on the runner, whose veth to the container netem delays.
+      TURN_IP: 172.30.0.2
+      BRIDGE: br-mi9
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
+      # The pnpm version comes from "packageManager" in ipcam/package.json alone.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ipcam/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ipcam/pnpm-lock.yaml
+      - name: Install
+        id: install
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee "${RUNNER_TEMP}/install.log"
+      - name: Download media
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-recording-media
+          path: ${{ runner.temp }}/media
+      - name: Build
+        id: build
+        run: |
+          set -o pipefail
+          {
+            go build -o "${RUNNER_TEMP}/bin/" ./hub/cmd/ipcam-hub ./tools/spikes/recording/cmd/mi9page &&
+              (cd hub/third_party/mediamtx && GOWORK=off go build -o "${RUNNER_TEMP}/bin/mediamtx" .)
+          } 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: Record the segment
+        # The 4 Mbps main.h264 served as cam01_main on 127.0.0.1 and recorded through ipcam-hub
+        # (C01), encrypted for an ephemeral RI_g, into one closed 5-min segment. Its path and
+        # RI_g's identity file go to the steps after it as MI9_SEGMENT and MI9_IDENTITY.
+        id: record
+        run: |
+          set -o pipefail
+          out="${RUNNER_TEMP}/mi9-rec.json"
+          "${RUNNER_TEMP}/bin/mi9page" record -media "${RUNNER_TEMP}/media" -hub "${RUNNER_TEMP}/bin/ipcam-hub" \
+            -mediamtx "${RUNNER_TEMP}/bin/mediamtx" -out "${RUNNER_TEMP}/mi9-rec" 2>&1 > "${out}" |
+            tee "${RUNNER_TEMP}/record.log"
+          segment=$(jq -r .segment "${out}")
+          identity=$(jq -r .identity "${out}")
+          if [[ ! -s "${segment}" || ! -s "${identity}" ]]; then
+            echo "mi9page record printed no segment and identity: $(cat "${out}")" | tee -a "${RUNNER_TEMP}/record.log"
+            exit 1
+          fi
+          echo "segment: $(stat -c %s "${segment}") bytes" | tee -a "${RUNNER_TEMP}/record.log"
+          {
+            echo "MI9_SEGMENT=${segment}"
+            echo "MI9_IDENTITY=${identity}"
+          } >> "${GITHUB_ENV}"
+      - name: Start coturn
+        # G36: coturn 4.18.0, the newest coturn/coturn release at least 14 days old, pinned by
+        # the digest of its image index, as hub.docker.com/v2/repositories/coturn/coturn/tags
+        # gives them (digest, last_updated 2026-09-08); never apt's 4.6.1. It listens for TURN
+        # over TLS on 443 on a Docker network of the job's own, with a self-signed certificate
+        # for its address (and 127.0.0.1, for the TCP proxy of the fallback) and long-term
+        # credentials (--lt-cred-mech) made for this run, and relays between its own
+        # allocations only. MI9_TURN_* go to the steps after it.
+        id: coturn
+        env:
+          COTURN_VERSION: 4.18.0
+          COTURN_DIGEST: sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
+          COTURN_DATE: '2026-09-08'
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/coturn.log"
+          certs="${RUNNER_TEMP}/turn-certs"
+          pass=$(openssl rand -hex 16)
+          echo "::add-mask::${pass}"
+          {
+            mkdir -p "${certs}" &&
+              openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj /CN=mi9-turn \
+                -addext "subjectAltName=IP:${TURN_IP},IP:127.0.0.1" -keyout "${certs}/turn.key" -out "${certs}/turn.pem" &&
+              # coturn runs as nobody in its container; the key is this run's alone.
+              chmod 755 "${certs}" && chmod 644 "${certs}/turn.key" &&
+              docker network create --subnet 172.30.0.0/24 -o com.docker.network.bridge.name="${BRIDGE}" mi9 &&
+              docker run -d --name coturn --network mi9 --ip "${TURN_IP}" --sysctl net.ipv4.ip_unprivileged_port_start=0 \
+                -v "${certs}:/certs:ro" "coturn/coturn:${COTURN_VERSION}@${COTURN_DIGEST}" \
+                -n --log-file=stdout --lt-cred-mech --realm=mi9.test --user="mi9:${pass}" \
+                --listening-ip="${TURN_IP}" --relay-ip="${TURN_IP}" --tls-listening-port=443 \
+                --cert=/certs/turn.pem --pkey=/certs/turn.key --no-dtls --no-cli --fingerprint \
+                --allowed-peer-ip="${TURN_IP}"
+          } 2>&1 | tee "${log}"
+          ready=false
+          for _ in $(seq 30); do
+            if openssl s_client -connect "${TURN_IP}:443" -CAfile "${certs}/turn.pem" -verify_ip "${TURN_IP}" \
+              -verify_return_error < /dev/null > /dev/null 2>> "${log}"; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ ${ready} != true ]]; then
+            echo "coturn: no verified TLS handshake on 443 in 30 s" | tee -a "${log}"
+            exit 1
+          fi
+          jq -nc --arg v "${COTURN_VERSION}" --arg d "${COTURN_DIGEST}" --arg t "${COTURN_DATE}" \
+            '{coturn: $v, digest: $d, lastUpdated: $t, listener: "TLS/443", auth: "lt-cred-mech"}' |
+            tools/scripts/annotate.sh coturn 1 notice
+          {
+            echo "MI9_TURN_URL=turns:${TURN_IP}:443?transport=tcp"
+            echo "MI9_TURN_USER=mi9"
+            echo "MI9_TURN_PASS=${pass}"
+            echo "MI9_TURN_CA=${certs}/turn.pem"
+          } >> "${GITHUB_ENV}"
+      - name: Delay the relay by 25 ms
+        # R06: netem delays the traffic from the runner into coturn's container by 25 ms, on the
+        # egress of the veth's runner end only. Each direction of the relayed path between two
+        # peers crosses it once, so the round trip is 50 ms (on both ends it would be 100). It
+        # installs linux-modules-extra for sch_netem if needed. Without netem,
+        # TestMeasureBulk_Coturn443 puts a TCP proxy that delays by 25 ms in front of coturn
+        # instead (MI9_TURN_DELAY=proxy). Which one goes out as a notice.
+        id: netem
+        run: |
+          log="${RUNNER_TEMP}/netem.log"
+          veth=$(ip -o link show master "${BRIDGE}" | awk -F': ' '{print $2}' | cut -d@ -f1 | head -n 1)
+          status=0
+          {
+            echo "veth: ${veth}"
+            [[ -n "${veth}" ]] &&
+              {
+                sudo modprobe sch_netem ||
+                  {
+                    sudo apt-get update &&
+                      sudo apt-get install --yes --no-install-recommends "linux-modules-extra-$(uname -r)" &&
+                      sudo modprobe sch_netem
+                  }
+              } &&
+              sudo tc qdisc add dev "${veth}" root netem delay 25ms &&
+              tc qdisc show dev "${veth}" | tee "${RUNNER_TEMP}/netem.qdisc"
+          } >> "${log}" 2>&1 || status=$?
+          delay=proxy
+          if [[ ${status} -eq 0 ]] && grep -q 'netem.*delay 25ms' "${RUNNER_TEMP}/netem.qdisc"; then
+            delay=netem
+          fi
+          cat "${log}"
+          echo "MI9_TURN_DELAY=${delay}" >> "${GITHUB_ENV}"
+          jq -nc --arg d "${delay}" --argjson s "${status}" '{delay: $d, oneWayMs: 25, netemProbe: (if $s == 0 then "ok" else "failed" end)}' |
+            tools/scripts/annotate.sh netem 1 notice
+      - name: Live Go tests
+        # G26 leg 1: TestMeasureBulk_LiveLoopback over host candidates on the runner (information
+        # only) and TestMeasureBulk_Coturn443, the relay verdict's leg, which fails when the
+        # measured round trip is outside 45–60 ms. Each prints one "mi9: <envelope json>" line,
+        # which goes out as a notice even when a test fails, at most 10 (C32); the relay's round
+        # trip goes out as a notice of its own, and the step checks its range too.
+        id: go-live
+        if: ${{ !cancelled() && steps.record.outcome == 'success' && steps.coturn.outcome == 'success' }}
+        env:
+          MI9_REQUIRE_TURN: '1'
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/go-live.log"
+          status=0
+          go test -count=1 -timeout 30m -v -run '^(TestMeasureBulk_LiveLoopback|TestMeasureBulk_Coturn443)$' \
+            ./tools/spikes/recording/mi9/ 2>&1 | tee "${log}" || status=$?
+          sed -n 's/^mi9: //p' "${log}" | head -n 10 | while IFS= read -r line; do
+            printf '%s\n' "${line}" | tools/scripts/annotate.sh mi9 1 notice
+          done || true
+          relay=$(sed -n 's/^mi9: //p' "${log}" | jq -c 'select(.set == "ci-relay") | .mi9.legs[0]' 2> /dev/null | head -n 1) || true
+          if [[ -z "${relay}" ]]; then
+            echo "mi9: the relay test printed no ci-relay line" | tee -a "${log}"
+            exit 1
+          fi
+          rtt=$(jq -r .rttMs <<< "${relay}")
+          jq -nc --argjson r "${rtt}" --arg d "${MI9_TURN_DELAY}" '{relayRttMs: $r, delay: $d, wantMs: [45, 60]}' |
+            tools/scripts/annotate.sh 'mi9 relay RTT' 1 notice
+          if ! jq -e '.rttMs >= 45 and .rttMs <= 60' <<< "${relay}" > /dev/null; then
+            echo "mi9: the relay's round trip is ${rtt} ms, want 45–60 ms" | tee -a "${log}"
+            status=1
+          fi
+          exit "${status}"
+      - name: Chrome
+        # G26 leg 2: mi9page serves the page and its hub side on 127.0.0.1; the spec plays the
+        # segment in Google Chrome (installed on the runner, with H.264) over bulk/<id> channels
+        # into MSE, and times the first requestVideoFrameCallback after each of 20 seeks
+        # (CTR-12's «afișează»). Its "mi9: {"transport":"chrome",…}" line goes out as a notice;
+        # the step fails without it.
+        id: chrome
+        if: ${{ !cancelled() && steps.record.outcome == 'success' && steps.install.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/chrome.log"
+          page=http://127.0.0.1:7090/
+          "${RUNNER_TEMP}/bin/mi9page" serve -segment "${MI9_SEGMENT}" -identity "${MI9_IDENTITY}" -listen 127.0.0.1:7090 \
+            > "${RUNNER_TEMP}/mi9page.log" 2>&1 &
+          server=$!
+          for _ in $(seq 30); do
+            curl -fsS -o /dev/null "${page}" 2> /dev/null && break
+            sleep 1
+          done
+          google-chrome --version | tee "${log}"
+          status=0
+          MI9_PAGE="${page}" pnpm --filter spike-video-e2e exec playwright test mi9.spec.ts --project chrome 2>&1 |
+            tee -a "${log}" || status=$?
+          kill "${server}" 2> /dev/null || true
+          sed -n 's/^mi9: //p' "${log}" | head -n 10 | while IFS= read -r line; do
+            printf '%s\n' "${line}" | tools/scripts/annotate.sh mi9 1 notice
+          done || true
+          if ! grep -q '^mi9: {"transport":"chrome"' "${log}"; then
+            echo 'mi9: the spec printed no mi9: {"transport":"chrome",…} line' | tee -a "${log}"
+            exit 1
+          fi
+          exit "${status}"
+      - name: Show failures as annotations
+        # The failed step's log, a go test's failure lines first; then the end of coturn's,
+        # mi9page's and ipcam-hub's logs.
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            fi
+          done
+          if docker container inspect coturn > /dev/null 2>&1; then
+            docker logs coturn 2>&1 | tail -n 40 | tools/scripts/annotate.sh 'coturn log' 40
+          fi
+          [[ -f "${RUNNER_TEMP}/mi9page.log" ]] && tail -n 40 "${RUNNER_TEMP}/mi9page.log" | tools/scripts/annotate.sh 'mi9page log' 40
+          [[ -f "${RUNNER_TEMP}/mi9-rec/ipcam-hub.log" ]] && tail -n 40 "${RUNNER_TEMP}/mi9-rec/ipcam-hub.log" | tools/scripts/annotate.sh 'ipcam-hub log' 40
           true

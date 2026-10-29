@@ -24,6 +24,8 @@ func envelope(code, set, host string) Envelope {
 		e.Runs, e.MI3 = nil, &Mi3Data{Tier: "H3", Cameras: 8, Steps: []Mi3Step{{Cameras: 8, Minutes: 60, Attempt: 1, Valid: true, Pass: true}}}
 	case "MI4": // its age rig run, not runs
 		e.Runs, e.MI4 = nil, &Mi4Data{ReadMs: []float64{10}, SeekMs: []float64{900}, CryptoMBs: 22}
+	case "MI9": // its legs, not runs
+		e.Runs, e.MI9 = nil, &Mi9Data{Legs: []Mi9Leg{{Transport: "lan", ThroughputMbps: 90, SeekMs: []float64{300}, Source: "lan"}}}
 	}
 	return e
 }

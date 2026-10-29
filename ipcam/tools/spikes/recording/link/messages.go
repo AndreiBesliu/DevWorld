@@ -201,6 +201,35 @@ type Mi3Result struct {
 	LatencySamples int     `json:"latencySamples"`
 }
 
+// Mi9Start starts MI9's LAN run on the host (G26 leg 3), whose recspike
+// serves a recording: the controller makes its playback peer, the offering
+// side, and answers with Mi9Offer, or Refused.
+type Mi9Start struct {
+	RunID string `json:"runId"`
+}
+
+// Mi9Offer is the controller's playback peer's offer.
+type Mi9Offer struct {
+	RunID string `json:"runId"`
+	Offer string `json:"offer"`
+}
+
+// Mi9Answer is the host's hub-side answer. The controller then measures
+// and answers with Mi9Result, or Refused.
+type Mi9Answer struct {
+	RunID  string `json:"runId"`
+	Answer string `json:"answer"`
+}
+
+// Mi9Result is the controller's measurement of the host's bulk channel:
+// the whole segment's throughput, the 20 seeks and the pair's round trip.
+type Mi9Result struct {
+	RunID          string    `json:"runId"`
+	ThroughputMbps float64   `json:"throughputMbps"`
+	SeekMs         []float64 `json:"seekMs"`
+	RTTMs          float64   `json:"rttMs"`
+}
+
 // Bye ends a session.
 type Bye struct{}
 
@@ -261,6 +290,18 @@ func (Mi3End) Type() string { return "mi3_end" }
 // Type is "mi3_result".
 func (Mi3Result) Type() string { return "mi3_result" }
 
+// Type is "mi9_start".
+func (Mi9Start) Type() string { return "mi9_start" }
+
+// Type is "mi9_offer".
+func (Mi9Offer) Type() string { return "mi9_offer" }
+
+// Type is "mi9_answer".
+func (Mi9Answer) Type() string { return "mi9_answer" }
+
+// Type is "mi9_result".
+func (Mi9Result) Type() string { return "mi9_result" }
+
 // Type is "bye".
 func (Bye) Type() string { return "bye" }
 
@@ -285,6 +326,10 @@ var decoders = map[string]func([]byte) (Message, error){
 	"mi3_live":     decodeAs[Mi3Live],
 	"mi3_end":      decodeAs[Mi3End],
 	"mi3_result":   decodeAs[Mi3Result],
+	"mi9_start":    decodeAs[Mi9Start],
+	"mi9_offer":    decodeAs[Mi9Offer],
+	"mi9_answer":   decodeAs[Mi9Answer],
+	"mi9_result":   decodeAs[Mi9Result],
 	"bye":          decodeAs[Bye],
 }
 

@@ -11,7 +11,9 @@
 // index, measures its own pacing per step (R07), and takes the host's
 // encrypted upload into an HTTPS sink that discards it. For MI4's phone step
 // (G24) it answers the spike app on :7080 and keeps its AGE result in
-// results/app/. `reccontroller pull` is the final
+// results/app/. For MI9's LAN run (G26) its Pion playback peer plays the
+// host's recording over the data channel and measures it. `reccontroller
+// pull` is the final
 // collection on the PC: it waits for the Pi's `recspike push` and stores
 // its results under results/pi/ (G15). Every line it prints is Romanian;
 // its log goes to reccontroller.log next to the binary.

@@ -18,8 +18,8 @@ const markerText = "SPIKE" + "-ONLY" + ": ipcam/docs/superpowers/plans/2026-10-1
 
 // markedNonGoFiles are the spike files outside the Go code of this module that
 // must carry the marker, relative to this directory: the video app's AGE
-// scenario (Task 10); Task 11 adds the MI9 end-to-end test and the MI9 page.
-var markedNonGoFiles = []string{"../video/app/src/scenarios/age.ts"}
+// scenario (Task 10), the MI9 end-to-end test and the MI9 page (Task 11).
+var markedNonGoFiles = []string{"../video/app/src/scenarios/age.ts", "../video/e2e/mi9.spec.ts", "cmd/mi9page/web/index.html"}
 
 // markerLine is the first line that a file of the given type must have.
 func markerLine(path string) (string, error) {

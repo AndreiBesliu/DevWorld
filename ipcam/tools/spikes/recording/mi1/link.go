@@ -178,6 +178,33 @@ func (h *HostLink) CameraURL(stream string) (string, error) {
 	return h.s.cameraURL(stream)
 }
 
+// Send sends m to the controller.
+func (h *HostLink) Send(m link.Message) error { return h.s.send(m) }
+
+// Await returns the controller's next message that want accepts, dropping
+// the others, within d.
+func (h *HostLink) Await(ctx context.Context, d time.Duration, want func(link.Message) bool) (link.Message, error) {
+	timeout := time.NewTimer(d)
+	defer timeout.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timeout.C:
+			return nil, fmt.Errorf("controlorul nu a răspuns în %v", d)
+		case r, ok := <-h.s.in:
+			switch {
+			case !ok:
+				return nil, fmt.Errorf("%w: %w", errLinkDown, io.EOF)
+			case r.err != nil:
+				return nil, r.err
+			case want(r.m):
+				return r.m, nil
+			}
+		}
+	}
+}
+
 // End says goodbye and answers the controller's pull of the results folder
 // dir, if it asks (a Pi's link to the PC's controller), until the
 // controller closes the link, then closes it.

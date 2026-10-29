@@ -286,3 +286,39 @@ func TestEnvelope_MI4(t *testing.T) {
 		t.Error("an MI1 envelope with mi4 is valid")
 	}
 }
+
+// TestEnvelope_MI9 (G18): an MI9 envelope carries its legs in mi9, each
+// with its transport and source, and reads back the same; an MI9 envelope
+// without it, or another code's with it, is refused.
+func TestEnvelope_MI9(t *testing.T) {
+	dir := t.TempDir()
+	want := Envelope{
+		Schema: Schema, Code: "MI9", RunID: "pc-mi9-1", Set: "lan", Host: "pc", OS: "windows", Storage: "ssd",
+		MI9: &Mi9Data{Legs: []Mi9Leg{{Transport: "lan", ThroughputMbps: 212.5, SeekMs: []float64{31.5, 40}, RTTMs: 1.25, Source: "lan"}}},
+	}
+	if err := Write(dir, want); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got, err := Read(filepath.Join(dir, "MI9", "lan", "pc-mi9-1.json"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Read = %+v\nwant %+v", got, want)
+	}
+	chrome := Envelope{Schema: Schema, Code: "MI9", RunID: "ci-chrome-1", Set: "ci-chrome", Host: "lab-linux", OS: "linux",
+		MI9: &Mi9Data{Legs: []Mi9Leg{{Transport: "chrome", SeekMs: []float64{12}, DisplayMs: []float64{80}, Source: "ci-chrome"}}}}
+	if err := chrome.Validate(); err != nil {
+		t.Errorf("the Chrome leg's envelope is refused: %v", err)
+	}
+	without := want
+	without.MI9 = nil
+	if err := without.Validate(); err == nil {
+		t.Error("an MI9 envelope without mi9 is valid")
+	}
+	misplaced := sample()
+	misplaced.MI9 = want.MI9
+	if err := misplaced.Validate(); err == nil {
+		t.Error("an MI1 envelope with mi9 is valid")
+	}
+}
