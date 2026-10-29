@@ -109,7 +109,7 @@ type rig interface {
 // MI4/<host>-mi4/<run id>.json, and a Pi sends it to the PC. On Linux it
 // must run as root, which drops the cache; without root it refuses before
 // it reads the host or records anything. Every line it prints is Romanian.
-func Run(ctx context.Context, o Options) error {
+func Run(ctx context.Context, o Options) (err error) {
 	if err := requireRoot(o.euid()); err != nil {
 		return err
 	}
@@ -132,8 +132,17 @@ func Run(ctx context.Context, o Options) error {
 		return fmt.Errorf("nu pot crea dosarul de lucru: %w", err)
 	}
 	// Each segment's recording and identity stay until the last bench, the
-	// 2-min one's included, and go however the run ends (PH0-22).
-	defer func() { _ = removeRecordings(root) }()
+	// 2-min one's included, and go however the run ends (PH0-22). When they
+	// cannot, the owner deletes them by hand: a run that would otherwise
+	// succeed fails with that error, and a failed run keeps its own.
+	defer func() {
+		if rmErr := removeRecordings(root); rmErr != nil {
+			o.say("Nu am putut șterge înregistrarea probei și cheia ei: ștergeți de mână dosarul %s.", root)
+			if err == nil {
+				err = fmt.Errorf("nu am putut șterge înregistrarea și cheia ei din %s: %w", root, rmErr)
+			}
+		}
+	}()
 	r := o.rig
 	if r == nil {
 		r = &hubRig{o: o, host: host, dir: dir}
@@ -290,11 +299,14 @@ func removeRecordings(root string) error {
 			return err
 		}
 		for _, path := range paths {
-			errs = append(errs, os.RemoveAll(path))
+			errs = append(errs, removeAll(path))
 		}
 	}
 	return errors.Join(errs...)
 }
+
+// removeAll removes a recording or an identity file; tests replace it.
+var removeAll = os.RemoveAll
 
 func (o Options) euid() int {
 	if o.Euid != nil {

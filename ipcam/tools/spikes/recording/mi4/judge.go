@@ -147,8 +147,8 @@ func (v *verdict) row(code, value, limit, source string, pass *bool) {
 // least 12 Mbps, G24), only a run of the device (AgerangeRun on
 // DeviceOS), and CI's latest ENC-06 check the identical bytes, each from
 // the envelope that recreport builds for it; latest is by the run id's
-// number, then the envelope's time, then a stable key (later), whatever
-// the order of envs. Each failure names its plan B
+// number, then the envelope's time, then the failing measurement, then a
+// stable key (later), whatever the order of envs. Each failure names its plan B
 // (G21): a slow read or an age mismatch the RAM buffer; a slow seek the
 // RAM buffer, or 2-min segments, or an escalation, after what their own
 // seeks measured, and PlanBUnmeasured when a stage that the choice needs
@@ -378,9 +378,10 @@ func latest(envs []results.Envelope, host string) *results.Envelope {
 
 // later reports whether run a is later than run b: by the number that ends
 // its run id; on the same number, by the envelope's time (AtMs, 0 when its
-// writer gave none); on the same time too, by a stable key, the greater of
-// their JSON encodings. The run picked thus never depends on the order of
-// the envelopes.
+// writer gave none); at an exact tie, the failing measurement (fails), so
+// that a pass never hides a measured failure (G27); then by a stable key,
+// the greater of their JSON encodings. The run picked thus never depends
+// on the order of the envelopes.
 func later(a, b *results.Envelope) bool {
 	if na, nb := runNumber(a.RunID), runNumber(b.RunID); na != nb {
 		return na > nb
@@ -388,7 +389,30 @@ func later(a, b *results.Envelope) bool {
 	if a.AtMs != b.AtMs {
 		return a.AtMs > b.AtMs
 	}
+	if fa, fb := fails(a), fails(b); fa != fb {
+		return fa
+	}
 	return stableKey(a) > stableKey(b)
+}
+
+// fails reports whether e's own measurement fails its threshold, as Judge
+// reads it: an ENC-06 check whose bytes differ, an AGE run below 12 Mbps,
+// or a host's run with a read over 50 ms, a seek over 1.5 s, or an
+// encryption rate below its model's threshold.
+func fails(e *results.Envelope) bool {
+	d := e.MI4
+	switch {
+	case d == nil:
+		return false
+	case d.Enc06 != nil:
+		return !*d.Enc06
+	case d.AgerangeMbps != nil:
+		return *d.AgerangeMbps < MinAgerangeMbps
+	case len(d.ReadMs) > 0 && slices.Max(d.ReadMs) > MaxReadMs, len(d.SeekMs) > 0 && slices.Max(d.SeekMs) > MaxSeekMs:
+		return true
+	}
+	threshold, judged, _ := Throughput(e.PiModel, d.CryptoMBs)
+	return judged && d.CryptoMBs > 0 && d.CryptoMBs < threshold
 }
 
 // stableKey is e's JSON encoding, "" in the one case that has none, a

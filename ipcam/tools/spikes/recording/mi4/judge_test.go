@@ -344,6 +344,59 @@ func TestMI4_LatestRun_LaterTimeOnTheSameNumber(t *testing.T) {
 	}
 }
 
+// TestMI4_LatestRun_ExactTiePrefersTheFailure (G27; Task 10b review): of
+// two runs with the same number and the same time, the failing one
+// decides, for the Pi's run, the phone's AGE run and CI's ENC-06 check
+// alike, in either order: a measured failure is never hidden by a pass
+// that its JSON sorts after ("enc06":true after false, "13" after "11").
+// Between two failures, or two passes, the stable key still decides, the
+// same in either order.
+func TestMI4_LatestRun_ExactTiePrefersTheFailure(t *testing.T) {
+	const at = 10_000
+	slow := passing()
+	slow.ReadMs, slow.ReadMaxMs = append(repeat(10, 999), 51), 51
+	slowSeek := passing()
+	slowSeek.SeekMs, slowSeek.SeekRAMMs = append(repeat(1200, 19), 1600), repeat(1000, 20)
+	pi := func(d results.Mi4Data) results.Envelope {
+		e := onPi(d, pi4)
+		e.RunID, e.AtMs = "pi-mi4-2", at
+		return e
+	}
+	age := func(mbps float64) results.Envelope { return AgerangeRun(3, time.UnixMilli(at), DeviceOS, mbps) }
+	enc06 := func(same bool) results.Envelope {
+		e := enc06Run(same)
+		e.AtMs = at
+		return e
+	}
+	onePi, oneAge, oneEnc06 := onPi(passing(), pi4), agerangeRun(13), enc06Run(true)
+	for _, c := range []struct {
+		name         string
+		a, b         results.Envelope
+		others       []results.Envelope
+		verdict      results.Verdict
+		decidingPart string
+	}{
+		{"a slow read and a pass on the Pi", pi(passing()), pi(slow), []results.Envelope{oneAge, oneEnc06}, results.Fail, "pi"},
+		{"a slow seek and a pass on the Pi", pi(passing()), pi(slowSeek), []results.Envelope{oneAge, oneEnc06}, results.Fail, "pi"},
+		{"a slow and a fast AGE run", age(13), age(11), []results.Envelope{onePi, oneEnc06}, results.Fail, "agerange"},
+		{"a failed and a passed ENC-06 check", enc06(true), enc06(false), []results.Envelope{onePi, oneAge}, results.Fail, "ENC-06"},
+		{"two slow AGE runs", age(10), age(11), []results.Envelope{onePi, oneEnc06}, results.Fail, "agerange"},
+		{"two fast AGE runs", age(13), age(14), []results.Envelope{onePi, oneEnc06}, results.Pass, "agerange"},
+	} {
+		var values []string
+		for _, envs := range [][]results.Envelope{append([]results.Envelope{c.a, c.b}, c.others...), append([]results.Envelope{c.b, c.a}, c.others...)} {
+			j := Judge(envs)
+			values = append(values, row(t, j, c.decidingPart).Value)
+			if j.Verdict != c.verdict {
+				t.Errorf("%s, in the order %s: Judge = %q, %s %q; want %q", c.name, runIDs(envs), j.Verdict, c.decidingPart, values[len(values)-1], c.verdict)
+			}
+		}
+		if values[0] != values[1] {
+			t.Errorf("%s: the deciding run depends on the order: %q", c.name, values)
+		}
+	}
+}
+
 // TestMI4_LatestRun_WhateverTheOrder (G15): the Pi's latest run, the
 // phone's latest AGE run and CI's latest ENC-06 check are picked by one
 // rule, the run id's number, then the envelope's time, then, on the same

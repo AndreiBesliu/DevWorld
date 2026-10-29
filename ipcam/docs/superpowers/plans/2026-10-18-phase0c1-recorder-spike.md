@@ -762,6 +762,7 @@ package results // SPIKE-ONLY
 const Schema = "ipcam.phase0c1.result/1"
 type Envelope struct {
     Schema, Code, RunID, Set string // Code: "MI1".."MI4", "MI9", "ENC-06"; Set: "lab-linux-kill9", "lab-linux-qemu-reset", "lab-windows-kill9", "pc-kill9", "pc-bugcheck", "pi-kill9", "pi-sysrq", "real-pc", "real-pi", …
+    AtMs int64 `json:"atMs,omitempty"` // C1-R22: when the run was stored (Unix ms, writer's clock, 0 = none); the judges' second tie-break key after the run number, then a stable key
     Host string // "pc" | "pi" | "lab-linux" | "lab-windows" | "lab-qemu"
     OS string; PiModel *PiModelInfo; Storage string /* "ssd"|"sd"|"hdd"|"unknown" */
     SdConfirmation *SdConfirmation // G16: the typed text and time, the audit stand-in

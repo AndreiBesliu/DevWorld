@@ -233,7 +233,8 @@ const (
 
 // maxTrunSamples bounds a trun's sample count: a 1-s part holds tens of
 // samples, so more than this is a corrupt box, which would otherwise make
-// the walker allocate one sample per counted entry.
+// the walker allocate one sample per counted entry. A traf has one trun of
+// the video track (readTraf), so this bounds a moof's samples too.
 const maxTrunSamples = 1 << 20
 
 // eachPart calls visit with each part of the recording, in order: its span,
@@ -286,13 +287,16 @@ func (m *fmp4Recording) eachPart(visit func(part span, samples []fmp4Sample) (bo
 }
 
 // readTraf returns the samples of a traf when it is the video track's, else
-// nil; moof is where its moof starts.
+// nil; moof is where its moof starts. MediaMTX writes one trun per traf: a
+// second one of the video track is refused, so that a moof's samples are
+// at most one trun's, maxTrunSamples (a corrupt moof could otherwise hold
+// thousands of truns at that cap).
 func (m *fmp4Recording) readTraf(traf []byte, moof int64) ([]fmp4Sample, error) {
 	d := m.defaults
 	base := moof
 	var start uint64
 	var samples []fmp4Sample
-	video := false
+	video, trun := false, false
 	err := eachChild(traf, func(typ string, b []byte) error {
 		switch typ {
 		case "tfhd":
@@ -334,6 +338,10 @@ func (m *fmp4Recording) readTraf(traf []byte, moof int64) ([]fmp4Sample, error) 
 			if !video {
 				return nil
 			}
+			if trun {
+				return fmt.Errorf("%w: a second trun of the video track in a traf, at the moof at %d", errNotFMP4, moof)
+			}
+			trun = true
 			var err error
 			samples, err = readTrun(b, base, start, d)
 			return err

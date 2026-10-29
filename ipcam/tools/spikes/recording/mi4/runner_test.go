@@ -262,6 +262,44 @@ func TestMI4_RemovesTheIdentityWithTheRecording(t *testing.T) {
 	}
 }
 
+// TestMI4_SaysWhenTheIdentityStays (PH0-22; Task 10b review): when the
+// recording and RI_g's identity cannot be removed at the end of the run,
+// the owner reads a Romanian line that names the folder to delete by
+// hand, and a run that would otherwise succeed returns that error; a run
+// that fails keeps its own error.
+func TestMI4_SaysWhenTheIdentityStays(t *testing.T) {
+	realRemoveAll := removeAll
+	t.Cleanup(func() { removeAll = realRemoveAll })
+	removeAll = func(path string) error {
+		if filepath.Base(path) == identityFile {
+			return &fs.PathError{Op: "unlinkat", Path: path, Err: fs.ErrPermission}
+		}
+		return realRemoveAll(path)
+	}
+	for _, fail := range []string{"", "cryptobench 60 s"} {
+		t.Run(cmp.Or(fail, "a whole run"), func(t *testing.T) {
+			dir := t.TempDir()
+			work := filepath.Join(dir, "work")
+			rig := &fakeRig{work: work, fail: fail, seekMs: map[string][]float64{"5min.mp4.age ram=false": repeat(900, 20)}}
+			var out strings.Builder
+			o := Options{Controller: "192.0.2.1:7081", Results: filepath.Join(dir, "results"), Work: work, Out: &out,
+				Host: piHost, Euid: func() int { return 0 }, DropCaches: func() error { return nil }, rig: rig}
+			err := Run(t.Context(), o)
+			folder := filepath.Join(work, "mi4")
+			line := "Nu am putut șterge înregistrarea probei și cheia ei: ștergeți de mână dosarul " + folder + "."
+			if !strings.Contains(out.String(), line) {
+				t.Errorf("the screen does not say «%s»:\n%s", line, out.String())
+			}
+			switch {
+			case fail == "" && (err == nil || !errors.Is(err, fs.ErrPermission) || !strings.Contains(err.Error(), folder)):
+				t.Errorf("Run = %v, want the removal's error, which names %s", err, folder)
+			case fail != "" && (err == nil || errors.Is(err, fs.ErrPermission)):
+				t.Errorf("Run = %v, want the run's own error alone", err)
+			}
+		})
+	}
+}
+
 // TestMI4_UnsupportedPiIsDeferred (G31): an armv6 Pi runs no MI4.
 func TestMI4_UnsupportedPiIsDeferred(t *testing.T) {
 	rig := &fakeRig{}

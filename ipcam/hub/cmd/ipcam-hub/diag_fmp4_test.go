@@ -84,6 +84,24 @@ func corruptRecordings() map[string][]byte {
 	}
 }
 
+// TestFMP4_ManyTrunsPerMoofAreBounded (Task 10b review): maxTrunSamples
+// caps each trun, so a moof of many truns of the video track, each counting
+// 1 Mi samples without per-sample fields (20 bytes a trun), would allocate
+// and walk 1 Mi samples per trun. MediaMTX writes one trun per traf, so
+// the walker refuses a second one, after the first trun's cap at most.
+func TestFMP4_ManyTrunsPerMoofAreBounded(t *testing.T) {
+	const truns = 8
+	trun := box("trun", trunBody(trunDataOffset, maxTrunSamples))
+	traf := box("traf", fullBox("tfhd", 0, u32(1)), fullBox("tfdt", 0, u32(0)), bytes.Repeat(trun, truns))
+	plain := slices.Concat(testInit(), box("moof", traf), box("mdat", make([]byte, 16)))
+	var err error
+	n := allocated(func() { err = walkFMP4(plain) })
+	// One trun's samples: 1 Mi of 32 bytes, plus the walk's own few KB.
+	if err == nil || n > 33<<20 {
+		t.Errorf("walk of a moof of %d truns of %d samples = %v after %d MiB allocated, want an error and at most one trun's 32 MiB", truns, maxTrunSamples, err, n>>20)
+	}
+}
+
 // TestFMP4_CorruptIndexFailsWithBoundedMemory (Task 10 review): the
 // benches' fMP4 walker refuses a corrupt recording with an error and a
 // bounded allocation: a trun whose sample count its box cannot hold, with

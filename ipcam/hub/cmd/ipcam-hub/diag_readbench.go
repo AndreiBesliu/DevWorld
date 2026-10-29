@@ -93,9 +93,9 @@ func readbench(file, identity string, reads int, size string) (readbenchReport, 
 	buf := make([]byte, n)
 	for _, s := range readRanges(seg, reads, n) {
 		start := time.Now()
-		n, err := readPlaintext(seg.r, buf[:s.n], s.off)
+		got, err := readPlaintext(seg.r, buf[:s.n], s.off)
 		ms := float64(time.Since(start).Microseconds()) / 1000
-		if int64(n) != s.n {
+		if int64(got) != s.n {
 			if err == nil || errors.Is(err, io.EOF) {
 				err = io.ErrUnexpectedEOF
 			}

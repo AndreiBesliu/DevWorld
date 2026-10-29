@@ -96,9 +96,13 @@ func TestMI4_SmokeEndToEnd(t *testing.T) {
 	want := fullPartLength(parts)
 	t.Logf("the segment's parts, bytes [first-last SEI index]: %s; the median full part: %d bytes", partsText(parts), want)
 	// Windows' monotonic clock moves at the system timer's tick (about 0.5 ms
-	// on the runner), so a read of a short part can time at 0 ms there.
+	// on the runner), so a read of a short part can time at 0 ms there: the
+	// benches' timing shows in the sum of every figure they timed instead.
 	if len(d.ReadMs) != 20 || d.ReadSize != int(want) || d.ReadMaxMs != slices.Max(d.ReadMs) || (runtime.GOOS != "windows" && d.ReadMaxMs <= 0) {
 		t.Errorf("reads %v (max %v) of %d bytes, want 20 reads of the median full part's %d bytes", d.ReadMs, d.ReadMaxMs, d.ReadSize, want)
+	}
+	if sum := timedSum(d); sum <= 0 {
+		t.Errorf("the part reads %v, the information reads %+v and the seeks %v add up to %v ms: nothing was timed", d.ReadMs, d.InfoReads, d.SeekMs, sum)
 	}
 	if keys := keysIn(t, runs); len(keys) != 0 {
 		t.Errorf("identities left after the run: %q", keys)
@@ -120,6 +124,22 @@ func TestMI4_SmokeEndToEnd(t *testing.T) {
 	if n := strings.Count(screen.String(), "Gazda „pi” s-a conectat"); n != 1 || strings.Contains(screen.String(), "Nu am putut aduce") {
 		t.Errorf("the Pi connected %d times, or a pull failed:\n%s", n, screen.String())
 	}
+}
+
+// timedSum is the sum of every figure that MI4's benches timed: the part
+// reads, the information reads' maxima, and the seeks.
+func timedSum(d *results.Mi4Data) float64 {
+	var sum float64
+	for _, ms := range d.ReadMs {
+		sum += ms
+	}
+	for _, r := range d.InfoReads {
+		sum += r.MaxMs
+	}
+	for _, ms := range d.SeekMs {
+		sum += ms
+	}
+	return sum
 }
 
 // segmentParts reads back the parts of the segment that MI4 measures, the
