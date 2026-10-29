@@ -52,12 +52,12 @@ func dialController(ctx context.Context, addr, host string) (*controllerLink, er
 	l := &controllerLink{c: c, in: make(chan received, 16), done: make(chan struct{}), host: hostPart}
 	go l.read()
 	if err := c.Send(link.Hello{Role: "host", Host: host, Version: "c1"}); err != nil {
-		l.close()
+		_ = l.close("", false)
 		return nil, err
 	}
 	m, err := l.await(ctx, time.Minute, "session", "")
 	if err != nil {
-		l.close()
+		_ = l.close("", false)
 		return nil, fmt.Errorf("controlorul nu a trimis sesiunea: %w", err)
 	}
 	l.session = m.(link.Session)
@@ -80,11 +80,25 @@ func (l *controllerLink) read() {
 	}
 }
 
-// close says goodbye and closes the link.
-func (l *controllerLink) close() {
-	_ = l.c.Send(link.Bye{})
-	close(l.done)
-	_ = l.c.Close()
+// pullWait bounds the wait for the PC's pull after a Pi's goodbye.
+const pullWait = time.Minute
+
+// close says goodbye and closes the link. On the Pi (pi), the PC's
+// reccontroller then pulls the Pi's results folder, as at the end of every
+// MI1 session (G15): close answers it with results, so that the Pi's MI3
+// envelope reaches the PC at once.
+func (l *controllerLink) close(results string, pi bool) error {
+	defer func() {
+		close(l.done)
+		_ = l.c.Close()
+	}()
+	if err := l.c.Send(link.Bye{}); err != nil || !pi {
+		return err
+	}
+	if _, err := l.await(context.Background(), pullWait, "pull_results", ""); err != nil {
+		return err
+	}
+	return l.c.SendResultsTar(results)
 }
 
 // request sends m, of the step runID, and returns the controller's answer

@@ -201,9 +201,14 @@ func Run(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	defer l.close()
+	defer func() {
+		if err := l.close(o.Results, o.Host.Pseudonym == "pi"); err != nil {
+			o.say("Rezultatele nu au ajuns la PC (%v): trimiteți-le la final cu recspike push.", err)
+		}
+	}()
 	o.say("Pregătesc segmentul de 5 min al redării, exportului și upload-ului…")
 	fx, err := makeFixture(filepath.Join(dir, "fixture"), o.fixtureBytes())
+	defer func() { _ = os.RemoveAll(fx.dir) }()
 	if err != nil {
 		return fmt.Errorf("nu pot pregăti segmentul de test: %w", err)
 	}
@@ -213,9 +218,10 @@ func Run(ctx context.Context, o Options) error {
 	}
 	defer release()
 
-	o.say("Proba MI3 începe: nivelul %s, %s, %d sesiuni live, redare, export și upload de %s Mbps, în paralel, câte %d min pe pas. "+
+	o.say("Proba MI3 începe: nivelul %s, %s, %d sesiuni live, redare, export și upload de %s Mbps, în paralel, timp de 1 h. "+
+		"Dacă ora pică, proba continuă cu pași de 15 min la jumătate din camere, iar numărul care trece se confirmă cu încă o oră. "+
 		"Lăsați dispozitivul pornit și nefolosit până la final.", tier, camerasText(cameras), Sessions(tier),
-		decimal(float64(UploadBps(tier, cameras))/1e6, -1), FullMinutes)
+		decimal(float64(UploadBps(tier, cameras))/1e6, -1))
 	r := &stepRunner{o: o, l: l, fx: fx, tier: tier, dir: dir}
 	d, err := runSteps(ctx, tier, cameras, o.Host.Cores6Plus && tier == TierH3, r.measure)
 	if err != nil {
@@ -236,8 +242,10 @@ func Run(ctx context.Context, o Options) error {
 		}
 		break
 	}
-	_ = os.RemoveAll(fx.dir)
 	o.say("Proba MI3 s-a încheiat: rezultatul este %s. Pașii: %s.", e.RunID, stepsSummary(d.Steps))
+	if last := d.Steps[len(d.Steps)-1]; !last.Valid {
+		o.say("Controlorul a trimis neuniform de %d ori la rând, deci pasul nu are rezultat: verificați controlorul și rețeaua, apoi porniți din nou proba.", maxAttempts)
+	}
 	return nil
 }
 
@@ -364,12 +372,13 @@ func (r *stepRunner) measure(ctx context.Context, cameras, minutes, attempt int)
 	s := &stepRun{r: r, runID: SetFor(r.o.Host.Pseudonym) + "-" + name, dir: dir, cameras: cameras, minutes: minutes}
 	f, err := s.run(ctx)
 	s.cleanup()
-	if err != nil {
-		return Figures{}, fmt.Errorf("pasul %d (%s): %w; jurnalele sunt în %s", r.n, camerasText(cameras), err, dir)
-	}
-	// The recordings are measured: they would only take space.
+	// The recordings are measured, or of a step that failed: they would only
+	// take space. The logs stay.
 	if err := os.RemoveAll(filepath.Join(dir, "data")); err != nil {
 		r.o.say("Înregistrările pasului %d nu s-au putut șterge (%v); se șterg la următorul recspike mi3.", r.n, err)
+	}
+	if err != nil {
+		return Figures{}, fmt.Errorf("pasul %d (%s): %w; jurnalele sunt în %s", r.n, camerasText(cameras), err, dir)
 	}
 	verdict := "nevalid (ritmul controlorului), se reface"
 	if Valid(f) {
@@ -394,7 +403,8 @@ type stepRun struct {
 // later adds f to what cleanup undoes.
 func (s *stepRun) later(f func()) { s.undo = append(s.undo, f) }
 
-// cleanup undoes what the step started, after an error.
+// cleanup undoes what the step started and has not undone itself, as
+// after an error.
 func (s *stepRun) cleanup() {
 	for i := len(s.undo) - 1; i >= 0; i-- {
 		s.undo[i]()

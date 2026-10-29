@@ -63,6 +63,12 @@ var Proxies = []string{
 	"Upload-ul (proxy): criptare age și HTTPS PUT, cu ritm fix (10 Mbps; pe H1b și H1c, debitul camerelor), spre un receptor din reccontroller " +
 		"care aruncă datele (fără cost, fără cont); CPU-ul se raportează la debitul atins.",
 	"Segmentul de 5 min al redării, exportului și upload-ului are date aleatoare de mărimea unui main de 4 Mbps: costul criptării nu depinde de conținut.",
+	"Procentele de CPU sunt din întreaga mașină (toate nucleele logice), ca CPU-ul total; ingest-ul per cameră (H1) este dintr-un nucleu, " +
+		"din CPU-ul ipcam-hub și al MediaMTX.",
+	"RAM (proxy): vârful sumei memoriei rezidente a ipcam-hub, MediaMTX și celor patru încărcări (pe Windows, setul de lucru): fiecare " +
+		"încărcare are propriul runtime Go, deci cifra e acoperitoare.",
+	"fsync pe secundă per fișier: închiderile de părți pe secundă de înregistrare (MTX-1 face fsync la fiecare parte de 1 s); fsync-ul de la " +
+		"închiderea segmentului, unul la 5 min, nu intră în ritm.",
 }
 
 // pacingClock is the clock of a paced reader.

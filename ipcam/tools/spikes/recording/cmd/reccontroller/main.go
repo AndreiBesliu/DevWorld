@@ -6,7 +6,10 @@
 // access unit, receives the host's beacon, schedules each run's cut, shows
 // the prompt of a real cut, computes the loss on its own clock and writes
 // each MI1 run's envelope (C16), and keeps the results that the host sends
-// in results/ next to the binary. `reccontroller pull` is the final
+// in results/ next to the binary. For MI3 (G20) it receives the host's live
+// sessions with receive-only Pion peers, times their tiles from the SEI
+// index, measures its own pacing per step (R07), and takes the host's
+// encrypted upload into an HTTPS sink that discards it. `reccontroller pull` is the final
 // collection on the PC: it waits for the Pi's `recspike push` and stores
 // its results under results/pi/ (G15). Every line it prints is Romanian;
 // its log goes to reccontroller.log next to the binary.

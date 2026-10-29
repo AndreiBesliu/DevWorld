@@ -131,6 +131,8 @@ func TestDiskQueuePeak_HubPinsTheSameLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A Windows checkout may end its lines with CRLF.
+	src = bytes.ReplaceAll(src, []byte("\r\n"), []byte("\n"))
 	m := regexp.MustCompile("(?m)^const diskQueuePeakPattern = `([^`]*)`$").FindSubmatch(src)
 	if m == nil {
 		t.Fatal("hub/cmd/ipcam-hub/run_test.go has no diskQueuePeakPattern")

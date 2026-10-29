@@ -152,7 +152,7 @@ func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (host
 				r.Pass = new(b.Value <= lim)
 				if b.Value > lim {
 					failed = true
-					j.Reasons = append(j.Reasons, fmt.Sprintf("%s: %s %s la %s, peste %s", host, rowNames[key], r.Value, camerasText(d.Cameras), r.Limit))
+					j.Reasons = append(j.Reasons, fmt.Sprintf("%s: %s %s la %s (limita %s)", host, rowNames[key], r.Value, camerasText(d.Cameras), r.Limit))
 				}
 			}
 		case valid:
