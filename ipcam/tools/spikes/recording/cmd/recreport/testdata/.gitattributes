@@ -1,0 +1,4 @@
+# The golden report and the fixtures stay byte-identical in every checkout:
+# recreport writes its report with LF line ends, and a CRLF checkout (Git for
+# Windows sets core.autocrlf on the windows job) would no longer match it.
+* -text

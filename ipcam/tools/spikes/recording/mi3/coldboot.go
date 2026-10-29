@@ -17,6 +17,9 @@ const (
 	coldBootRuns  = 20
 )
 
+// coldBootRow names §4.8's cold-boot row in the report.
+const coldBootRow = "pornire la rece până la înregistrare"
+
 // ColdBootPlanB is the cold-boot row's plan B: the camera number does not
 // change a boot's time, so a failure leaves the PC's recommended number
 // and the Task 14 PR proposes the fix as a Technical Decision, as R02 does
@@ -58,7 +61,7 @@ func judgeColdBoot(j *results.Judgement, envs []results.Envelope) hostState {
 	failed := measured > 0 && slowest > MaxColdBootMs
 	complete := measured >= coldBootRuns
 	j.Rows = append(j.Rows, results.Row{
-		Code:  "MI3 pc: pornire la rece (" + coldBootWhat + "Windows)",
+		Code:  "MI3 pc: " + coldBootRow + " (" + coldBootWhat + "Windows)",
 		Value: coldBootValue(measured, slowest), Limit: "≤ " + mi1.WholeSecondsText(MaxColdBootMs), Source: "pc",
 		Pass: results.RowPass(!failed, complete),
 	})
@@ -79,7 +82,7 @@ func judgeColdBoot(j *results.Judgement, envs []results.Envelope) hostState {
 func coldBootInfo(j *results.Judgement, envs []results.Envelope) {
 	measured, slowest, _ := coldBoots(envs, mi1.SetPiSysrq)
 	j.Rows = append(j.Rows, results.Row{
-		Code:  "MI3 pi: pornire la rece (" + coldBootWhat + "Linux; informativ)",
+		Code:  "MI3 pi: " + coldBootRow + " (" + coldBootWhat + "Linux; informativ)",
 		Value: coldBootValue(measured, slowest), Source: "pi",
 	})
 }

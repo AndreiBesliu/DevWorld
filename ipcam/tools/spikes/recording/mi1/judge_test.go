@@ -320,7 +320,11 @@ func TestMI1_O17OffRunIsEncryptedWith256kbpsSettingOff(t *testing.T) {
 			}
 			j := Judge(envelopes(runs))
 			wantVerdict(t, j, results.Incomplete)
-			reasonsMention(t, j, SetPCKill9+": "+O17OffLabel+": rularea "+r.RunID+": nu înregistrează cam99_main cu setarea oprită")
+			// One reason names the run; «<O17OffLabel>: lipsește» would say
+			// it twice (Task 7.1b review, M4).
+			if want := []string{SetPCKill9 + ": " + O17OffLabel + ": rularea " + r.RunID + ": nu înregistrează cam99_main cu setarea oprită"}; !slices.Equal(j.Reasons, want) {
+				t.Errorf("Reasons = %q, want %q", j.Reasons, want)
+			}
 			if o := o17RowOf(t, j, SetPCKill9); o.Pass != nil || o.Value != "lipsește" || o.Limit != "≤ 4 s" {
 				t.Errorf("O17-off row = %+v, want lipsește ≤ 4 s and no pass value", o)
 			}
@@ -370,9 +374,12 @@ func TestMI1_O17OffRunIsEncryptedWith256kbpsSettingOff(t *testing.T) {
 			if len(j.Notes) != 0 {
 				t.Errorf("Notes = %q, want none: no 256 kbps loss was measured with the setting off", j.Notes)
 			}
-			// Still no O17-off measurement, and still not a default run.
-			if o := o17RowOf(t, j, SetPCKill9); o.Pass != nil || o.Value != "lipsește" || o.Limit != "≤ 4 s" {
-				t.Errorf("O17-off row = %+v, want lipsește ≤ 4 s and no pass value", o)
+			// Still no O17-off measurement, and still not a default run: the
+			// O17-off row fails with the run's cause, so that the set's
+			// failure shows in a row (Task 7.1b review, M1).
+			wantRow := "lipsește; rularea " + r.RunID + ": nu înregistrează cam99_main cu setarea oprită; " + c.reason
+			if o := o17RowOf(t, j, SetPCKill9); o.Pass == nil || *o.Pass || o.Value != wantRow || o.Limit != "≤ 4 s" {
+				t.Errorf("O17-off row = %+v, want «%s» ≤ 4 s, failed", o, wantRow)
 			}
 			if f := row(t, j, "MI1 "+SetPCKill9+":", "eșuate"); f.Value != "0 din 20" {
 				t.Errorf("failed-runs row = %+v, want 0 din 20", f)
@@ -880,7 +887,7 @@ func TestMI1_O17Row_RunWithoutTheO17Stream(t *testing.T) {
 	r.Streams = r.Streams[:1] // cam01_main only
 	r.TornParts = 1
 	var j results.Judgement
-	got := o17Row(&j, "MI1 "+SetLabLinuxKill9+": ", SetLabLinuxKill9, "lab", []results.Run{r})
+	got := o17Row(&j, "MI1 "+SetLabLinuxKill9+": ", SetLabLinuxKill9, "lab", []results.Run{r}, nil)
 	if !strings.HasPrefix(got.Value, "lipsește") || !strings.Contains(got.Value, "1 parte fMP4 ruptă") || passes(got) {
 		t.Errorf("row = %+v, want «lipsește», the torn part, and no pass", got)
 	}

@@ -788,7 +788,7 @@ func Inventory(dir string, piSupported bool) (present, missing []string) // G15:
 type Verdict string
 const (Pass Verdict = "trece"; Fail Verdict = "pică"; Incomplete Verdict = "fără verdict: lipsesc măsurători")
 func Deferred(reason string) Verdict // "amânat în Faza 0-bis: <reason>"
-type Row struct{ Code, Value, Limit, Source string; Pass *bool }
+type Row struct{ Code, Value, Limit, Source string; Host string /* the host whose table shows the row when Source does not name it: MI9's legs (Task 12) */; Pass *bool }
 type Judgement struct{ Gate string; Verdict Verdict; PlanB string; Reasons []string; Rows []Row }
 func Write(dir string, e Envelope) error // results/<code>/<set>/<runId>.json
 

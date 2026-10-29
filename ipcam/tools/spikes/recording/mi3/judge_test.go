@@ -2,6 +2,7 @@ package mi3
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -234,10 +235,68 @@ func TestMI3_ReportsWhatIsNotAGate(t *testing.T) {
 		t.Errorf("storage row %+v", r)
 	}
 	notes := strings.Join(j.Notes, "\n")
-	for _, want := range []string{"6,3 MB", "live: test", "timeline", "O17"} {
+	for _, want := range []string{"live: test", "timeline", "O17"} {
 		if !strings.Contains(notes, want) {
 			t.Errorf("notes %q lack %q", notes, want)
 		}
+	}
+}
+
+// TestMI3_InformationRows (C1-R17, C1-R19, R07, §4.8; Task 12): beside
+// the budgets, the report shows the disk writers' queue peak in a row
+// right after the RAM row, each load's CPU, the 16-camera hour of the PC as
+// measured or as an estimate, with why it was not measured, the cold-boot
+// row by §4.8's name, and §4.8's timeline row as deferred to HUB-20.
+func TestMI3_InformationRows(t *testing.T) {
+	envs := owners()
+	envs[0].MI3.DiskQueuePeakBytes = 6 << 20
+	envs[0].MI3.LoadCPUPct = map[string]float64{LoadLive: 6, LoadPlayback: 1.5, LoadExport: 12, LoadUpload: 2}
+	j := Judge(envs)
+	at := slices.IndexFunc(j.Rows, func(r results.Row) bool { return r.Code == "MI3 pc: RAM" })
+	if at < 0 || at+1 >= len(j.Rows) {
+		t.Fatalf("no RAM row in %+v", j.Rows)
+	}
+	if q := j.Rows[at+1]; !strings.Contains(q.Code, "coada de scriere pe disc") || !strings.HasPrefix(q.Value, "6,3 MB") || q.Pass != nil || q.Source != "pc" {
+		t.Errorf("the row after RAM = %+v, want the queue peak of 6,3 MB, information", q)
+	}
+	for load, want := range map[string]string{LoadLive: "6,0 %", LoadPlayback: "1,5 %", LoadExport: "12,0 %", LoadUpload: "2,0 %"} {
+		if r := row(t, j, "MI3 pc: CPU-ul încărcării "+loadNames[load]+" ("); r.Value != want || r.Pass != nil {
+			t.Errorf("load %s row %+v, want %s, information", load, r, want)
+		}
+	}
+	if r := row(t, j, "MI3 pc: pornire la rece până la înregistrare"); !strings.Contains(r.Code, "1 cameră") || !strings.Contains(r.Code, "include pornirea Windows") {
+		t.Errorf("cold-boot row %+v, want the camera count and the OS boot", r)
+	}
+	if r := row(t, j, "timeline"); r.Value != "amânat: HUB-20, Faza 1" || r.Limit != "≤ 50 ms" || r.Pass != nil {
+		t.Errorf("timeline row %+v, want amânat: HUB-20, Faza 1", r)
+	}
+
+	const sixteen = "MI3 pc: 16 camere (≥ 6 nuclee)"
+	for _, c := range []struct {
+		name   string
+		mutate func(envs []results.Envelope) []results.Envelope
+		want   string
+	}{
+		{"measured", func(envs []results.Envelope) []results.Envelope {
+			envs[0].MI3.Sixteen = new(step(16, 60, 1, true))
+			return envs
+		}, "măsurat: 16 camere 1 h: trece"},
+		{"not run", func(envs []results.Envelope) []results.Envelope { return envs }, "estimare, nemăsurată"},
+		{"stopped", func(envs []results.Envelope) []results.Envelope {
+			envs[0].MI3.SixteenStopped = "16 camere 1 h: nu s-a putut măsura; proprietarul a oprit proba"
+			return envs
+		}, "estimare, nemăsurată (16 camere 1 h: nu s-a putut măsura; proprietarul a oprit proba)"},
+		{"no MI3 on the PC", func(envs []results.Envelope) []results.Envelope { return envs[1:] }, "estimare, nemăsurată"},
+	} {
+		t.Run("16 cameras "+c.name, func(t *testing.T) {
+			j := Judge(c.mutate(owners()))
+			if r := row(t, j, sixteen); r.Value != c.want || r.Pass != nil || r.Source != "pc" {
+				t.Errorf("16-camera row %+v, want «%s», information", r, c.want)
+			}
+			if slices.ContainsFunc(j.Rows, func(r results.Row) bool { return strings.HasPrefix(r.Code, "MI3 pi: 16 camere") }) {
+				t.Error("the Pi has a 16-camera row: only H3 has one (R07)")
+			}
+		})
 	}
 }
 

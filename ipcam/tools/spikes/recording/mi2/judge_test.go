@@ -220,3 +220,41 @@ func rowOf(t *testing.T, j results.Judgement, code string) results.Row {
 	t.Fatalf("no row %q in %+v", code, j.Rows)
 	return results.Row{}
 }
+
+// TestMI2_CardFailedNotesIdleHub (Task 8 review, M9; T40): when the SD
+// card reached EȘUAT in a 72 h run without a crash, recording stopped on
+// every camera, so the run's later hours measured an ipcam-hub without
+// recording. G11 keeps its verdict, and a note says so; a card that only
+// degraded adds none. The report shows the card's states next to the
+// resumes, by the row codes ResumeRowCode and CardRowCode.
+func TestMI2_CardFailedNotesIdleHub(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		states []results.CardState
+		note   bool
+	}{
+		{"the card failed", []results.CardState{{State: "ok", AtMs: 1}, {State: "degraded", AtMs: 2}, {State: "failed", AtMs: 3}}, true},
+		{"the card degraded", []results.CardState{{State: "ok", AtMs: 1}, {State: "degraded", AtMs: 2}}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			envs := passing(t)
+			pi := &envs[len(envs)-1]
+			pi.Storage = "sd"
+			pi.MI2.OnSdCard, pi.MI2.CardStates = true, c.states
+			j := Judge(envs)
+			if j.Verdict != results.Pass {
+				t.Errorf("Judge = %q, reasons %q; want trece: the card's state does not change G11", j.Verdict, j.Reasons)
+			}
+			noted := slices.ContainsFunc(j.Notes, func(n string) bool {
+				return strings.HasPrefix(n, "pi: ") && strings.Contains(n, "EȘUAT") && strings.Contains(n, "fără înregistrare")
+			})
+			if noted != c.note {
+				t.Errorf("notes %q: the idle-hub note %v, want %v", j.Notes, noted, c.note)
+			}
+			rowOf(t, j, ResumeRowCode("pi"))
+			if r := rowOf(t, j, CardRowCode("pi")); !strings.Contains(r.Value, "OK → DEGRADAT") {
+				t.Errorf("card row %+v, want the states in order", r)
+			}
+		})
+	}
+}

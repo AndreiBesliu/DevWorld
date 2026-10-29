@@ -4,6 +4,7 @@ package mi9
 
 import (
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
@@ -119,6 +120,11 @@ func (v *verdict) row(code, value, limit, source string, pass *bool) {
 	v.j.Rows = append(v.j.Rows, results.Row{Code: code, Value: value, Limit: limit, Source: source, Pass: pass})
 }
 
+// legRow is a row of l: its source is the leg's, its table its host's.
+func (v *verdict) legRow(l leg, code, value, limit string, pass *bool) {
+	v.j.Rows = append(v.j.Rows, results.Row{Code: code, Value: value, Limit: limit, Source: l.Source, Host: l.host, Pass: pass})
+}
+
 // Judge is G18 (CTR-12, G26), each part decided only by the source that
 // measures it: the LAN throughput (≥ 8 Mbps) by every lan leg of the
 // owner's devices, at least one needed; the relay throughput (≥ 5 Mbps) by
@@ -128,6 +134,8 @@ func (v *verdict) row(code, value, limit, source string, pass *bool) {
 // information only. A part with no deciding leg, or a deciding leg without
 // its 20 seeks and none over 1.5 s (one that its wait ended may have fewer),
 // is incomplete; a measured failure decides all the same (G27), with PlanB.
+// A leg's rows name its Source and, as Row.Host, its envelope's host; a leg
+// that its wait ended has a row that says how far it got (PartialText).
 func Judge(envs []results.Envelope) results.Judgement {
 	v := &verdict{j: results.Judgement{Gate: "G18"}}
 	var lan, relay, chrome, loop []leg
@@ -148,12 +156,12 @@ func Judge(envs []results.Envelope) results.Judgement {
 			}
 		}
 	}
-	v.throughput(lan, "MI9 LAN", MinLANMbps, "lipsește proba MI9 pe LAN (recspike mi9 --lan pe PC și pe Pi)")
-	v.throughput(relay, "MI9 TURN-TLS/443 la 50 ms RTT", MinRelayMbps, "lipsește proba MI9 prin TURN-TLS/443 din CI")
+	v.throughput(lan, "MI9 LAN", SourceLAN, MinLANMbps, "lipsește proba MI9 pe LAN (recspike mi9 --lan pe PC și pe Pi)")
+	v.throughput(relay, "MI9 TURN-TLS/443 la 50 ms RTT", SourceRelay, MinRelayMbps, "lipsește proba MI9 prin TURN-TLS/443 din CI")
 	v.seeks(append(slices.Clone(lan), relay...))
 	v.display(chrome)
 	for _, l := range loop {
-		v.row("MI9 loopback CI (informativ)", fmt.Sprintf("%s Mbps; salt max %s ms", mbps(l.ThroughputMbps), maxOf(l.SeekMs)), "", "ci", nil)
+		v.legRow(l, "MI9 loopback CI (informativ)", fmt.Sprintf("%s Mbps; salt max %s ms", mbps(l.ThroughputMbps), maxOf(l.SeekMs)), "", nil)
 	}
 	switch {
 	case v.failed:
@@ -166,19 +174,24 @@ func Judge(envs []results.Envelope) results.Judgement {
 	return v.j
 }
 
-// throughput judges the throughput of each of legs against limit.
-func (v *verdict) throughput(legs []leg, part string, limit int, missing string) {
+// throughput judges the throughput of each of legs, measured at source,
+// against limit; a leg that its wait ended (Partial) says how far it got.
+func (v *verdict) throughput(legs []leg, part, source string, limit int, missing string) {
 	limitText := fmt.Sprintf("≥ %d Mbps", limit)
 	if len(legs) == 0 {
-		v.row(part+": debit canal bulk", "lipsește", limitText, "", nil)
+		v.row(part+": debit canal bulk", "lipsește", limitText, source, nil)
 		v.j.Reasons = append(v.j.Reasons, missing)
 		v.missing = true
 		return
 	}
 	for _, l := range legs {
 		ok := l.ThroughputMbps >= float64(limit)
-		v.row(fmt.Sprintf("%s (%s): debit canal bulk", part, l.host), fmt.Sprintf("%s Mbps (RTT %s ms)", mbps(l.ThroughputMbps), ms(l.RTTMs)),
-			limitText, l.host, results.RowPass(ok, true))
+		v.legRow(l, fmt.Sprintf("%s (%s): debit canal bulk", part, l.host), fmt.Sprintf("%s Mbps (RTT %s ms)", mbps(l.ThroughputMbps), ms(l.RTTMs)),
+			limitText, results.RowPass(ok, true))
+		if l.Partial != nil {
+			r := BulkResult{SeekMs: l.SeekMs, Partial: l.Partial}
+			v.legRow(l, fmt.Sprintf("%s (%s): proba încheiată de așteptare (G27)", part, l.host), PartialText(r), "", nil)
+		}
 		if !ok {
 			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s: %s: canalul bulk a dus %s Mbps (pragul %s)", l.host, part, mbps(l.ThroughputMbps), limitText))
 			v.failed = true
@@ -201,7 +214,7 @@ func (v *verdict) seeks(legs []leg) {
 	for _, l := range legs {
 		rowCode := fmt.Sprintf("%s (%s, %s)", code, l.Source, l.host)
 		if len(l.SeekMs) == 0 {
-			v.row(rowCode, "lipsește", limit, l.host, nil)
+			v.legRow(l, rowCode, "lipsește", limit, nil)
 			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s (%s): lipsesc salturile", l.host, l.Source))
 			v.missing = true
 			continue
@@ -209,20 +222,20 @@ func (v *verdict) seeks(legs []leg) {
 		worst, cut := slowest(l.SeekMs, l.Partial)
 		switch {
 		case worst > MaxSeekMs && cut:
-			v.row(rowCode, fmt.Sprintf("max ≥ %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, l.host, results.RowPass(false, true))
+			v.legRow(l, rowCode, fmt.Sprintf("max ≥ %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, results.RowPass(false, true))
 			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s (%s): un salt nu adusese primul IDR nici după %s ms, când proba s-a încheiat (limita ≤ 1500 ms)",
 				l.host, l.Source, ms(worst)))
 			v.failed = true
 		case worst > MaxSeekMs:
-			v.row(rowCode, fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, l.host, results.RowPass(false, true))
+			v.legRow(l, rowCode, fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, results.RowPass(false, true))
 			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s (%s): un salt a adus primul IDR în %s ms (limita ≤ 1500 ms)", l.host, l.Source, ms(worst)))
 			v.failed = true
 		case len(l.SeekMs) < Seeks:
-			v.row(rowCode, fmt.Sprintf("max %s ms (%d din %d de salturi)", ms(worst), len(l.SeekMs), Seeks), limit, l.host, nil)
+			v.legRow(l, rowCode, fmt.Sprintf("max %s ms (%d din %d de salturi)", ms(worst), len(l.SeekMs), Seeks), limit, nil)
 			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s (%s): s-au măsurat doar %d din %d de salturi", l.host, l.Source, len(l.SeekMs), Seeks))
 			v.missing = true
 		default:
-			v.row(rowCode, fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, l.host, results.RowPass(true, true))
+			v.legRow(l, rowCode, fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, results.RowPass(true, true))
 		}
 	}
 }
@@ -238,14 +251,14 @@ func (v *verdict) display(legs []leg) {
 		measured = true
 		worst := slices.Max(l.DisplayMs)
 		ok := worst <= MaxSeekMs
-		v.row(code, fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.DisplayMs)), limit, "ci", results.RowPass(ok, true))
+		v.legRow(l, code, fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.DisplayMs)), limit, results.RowPass(ok, true))
 		if !ok {
 			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("Chrome: primul cadru după un salt s-a afișat în %s ms (limita ≤ 1500 ms)", ms(worst)))
 			v.failed = true
 		}
 	}
 	if !measured {
-		v.row(code, "lipsește", limit, "ci", nil)
+		v.row(code, "lipsește", limit, SourceChrome, nil)
 		v.j.Reasons = append(v.j.Reasons, "lipsește proba MI9 în Chrome din CI")
 		v.missing = true
 	}
@@ -259,6 +272,7 @@ func maxOf(figures []float64) string {
 	return ms(slices.Max(figures))
 }
 
-func ms(v float64) string { return results.Decimal(v, -1) }
+// ms is a time in ms to a tenth, as few decimals as it needs: "318", "50,5".
+func ms(v float64) string { return results.Decimal(math.Round(v*10)/10, -1) }
 
 func mbps(v float64) string { return results.Decimal(v, 1) }

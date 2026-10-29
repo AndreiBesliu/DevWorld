@@ -4,6 +4,7 @@ package mi2
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -27,6 +28,13 @@ const restartNote = "Repornirea ipcam-hub făcută de recspike este o limită in
 
 // piDeferral is why the Pi's part moves to Faza 0-bis (G31).
 const piDeferral = "Pi armv6"
+
+// ResumeRowCode is the code of host's resume row, and CardRowCode that of
+// its SD card's states, which the report shows next to it (G16).
+func ResumeRowCode(host string) string { return "MI2 " + host + ": reluarea după kill -9" }
+
+// CardRowCode is the code of host's SD card row (ResumeRowCode).
+func CardRowCode(host string) string { return "MI2 " + host + ": starea cardului SD" }
 
 // owners are the devices of MI2 and their kill9 sets of MI1 (G13).
 var owners = []struct{ host, kill9 string }{
@@ -126,7 +134,7 @@ func judgeResumes(j *results.Judgement, host, kill9 string, envs []results.Envel
 		j.Notes = append(j.Notes, fmt.Sprintf("%s: %d de reluări numărate, cu %d peste cele %d ale setului; fiecare este judecată față de %s.",
 			kill9, measured, excess, Kill9Runs, mi1.WholeSecondsText(MaxResumeMs)))
 	}
-	row := results.Row{Code: "MI2 " + host + ": reluarea după kill -9", Value: "lipsește", Limit: "≤ " + mi1.WholeSecondsText(MaxResumeMs), Source: host}
+	row := results.Row{Code: ResumeRowCode(host), Value: "lipsește", Limit: "≤ " + mi1.WholeSecondsText(MaxResumeMs), Source: host}
 	switch {
 	case measured > Kill9Runs:
 		// «21 din 20» would read as a contradiction; the note says why.
@@ -174,7 +182,11 @@ func judgeRun(j *results.Judgement, host string, envs []results.Envelope) hostSt
 		results.Row{Code: prefix + "reporniri MediaMTX (HUB-13)", Value: strconv.Itoa(d.ChildRestarts), Source: host},
 		results.Row{Code: prefix + "fereastra păstrată", Value: results.Decimal(d.WindowHours, 2) + " h", Source: host})
 	if d.OnSdCard {
-		j.Rows = append(j.Rows, results.Row{Code: prefix + "starea cardului SD", Value: cardText(d.CardStates), Source: host})
+		j.Rows = append(j.Rows, results.Row{Code: CardRowCode(host), Value: cardText(d.CardStates), Source: host})
+		if d.Crashes72h == 0 && slices.ContainsFunc(d.CardStates, func(s results.CardState) bool { return s.State == "failed" }) {
+			j.Notes = append(j.Notes, host+": cardul SD a ajuns EȘUAT în proba de 72 h, iar de atunci ipcam-hub a oprit înregistrarea pe toate "+
+				"camerele (T40): „0 crash-uri” acoperă și orele de după, măsurate fără înregistrare.")
+		}
 	}
 	if len(d.Invalidated) > 0 {
 		j.Rows = append(j.Rows, results.Row{Code: prefix + "rulări refăcute", Value: strings.Join(d.Invalidated, "; "), Source: host})

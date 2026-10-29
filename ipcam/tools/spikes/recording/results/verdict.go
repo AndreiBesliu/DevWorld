@@ -18,10 +18,14 @@ const (
 func Deferred(reason string) Verdict { return Verdict("amânat în Faza 0-bis: " + reason) }
 
 // Row is one line of the report's table: Cod | Valoare | Prag | Trece, with
-// the source of the value (lab, pc, pi, …). Pass is nil for a row that is
-// information only or has no value.
+// the source of the value (lab, pc, pi, ci-relay, ci-chrome, lan, …). Pass
+// is nil for a row that is information only or has no value. Host is the
+// host whose table shows the row when Source does not name it, as for
+// MI9's legs, whose Source is where the leg was measured (G26); empty
+// otherwise, the row then going to the table that Source names.
 type Row struct {
 	Code, Value, Limit, Source string
+	Host                       string
 	Pass                       *bool
 }
 

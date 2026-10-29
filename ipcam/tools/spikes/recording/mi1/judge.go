@@ -349,7 +349,7 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 	if s.real {
 		missing = append(missing, realComposition(s.name, runs, defaults)...)
 	} else {
-		missing = append(missing, automatedComposition(s.name, defaults, o17)...)
+		missing = append(missing, automatedComposition(s.name, defaults, o17, marked)...)
 	}
 	complete := len(missing) == 0
 
@@ -428,7 +428,7 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 				Pass: results.RowPass(res.failed == 0, complete)})
 	}
 	if !s.real {
-		j.Rows = append(j.Rows, o17Row(j, prefix, s.name, s.source, o17))
+		j.Rows = append(j.Rows, o17Row(j, prefix, s.name, s.source, o17, marked))
 	}
 	return res
 }
@@ -450,11 +450,25 @@ func o17Text(set, id, what string) string {
 // j's Notes, outside G10's verdict; the other failures are the set's
 // reasons (judgeSet). Each run records an isO17Stream, as judgeSet sorts
 // them; a run without one adds only its other failures, and when no run has
-// one, the loss reads «lipsește».
-func o17Row(j *results.Judgement, prefix, set, source string, runs []results.Run) results.Row {
+// one, the loss reads «lipsește». A marked run, counted and marked O17-off
+// without recording cam99_main at the setting off (judgeSet), that measured
+// a failure fails the row too, named with why it is not the O17-off run, so
+// that a set failed only through it shows that failure in a row (Task 7.1b
+// review, M1); without a failure it leaves the row as it is.
+func o17Row(j *results.Judgement, prefix, set, source string, runs, marked []results.Run) results.Row {
 	row := results.Row{Code: prefix + O17OffLabel, Source: source}
+	var markedFailures []string
+	for _, r := range marked {
+		if f := measuredFailures(r, nil); len(f) > 0 {
+			markedFailures = append(markedFailures, "rularea "+r.RunID+": "+strings.Join(append([]string{notO17Run}, f...), "; "))
+		}
+	}
 	if len(runs) == 0 {
 		row.Value, row.Limit = "lipsește", "≤ "+WholeSecondsText(StreamLimitMs(lowBitrateKbps*1000, true, false))
+		if len(markedFailures) > 0 {
+			row.Value = strings.Join(append([]string{row.Value}, markedFailures...), "; ")
+			row.Pass = new(false)
+		}
 		return row
 	}
 	var shown results.StreamLoss
@@ -489,6 +503,10 @@ func o17Row(j *results.Judgement, prefix, set, source string, runs []results.Run
 		}
 	} else {
 		pass = false
+	}
+	if len(markedFailures) > 0 {
+		pass = false
+		others = append(others, markedFailures...)
 	}
 	row.Value = strings.Join(append([]string{value}, others...), "; ")
 	row.Limit, row.Pass = "≤ "+WholeSecondsText(limit), &pass

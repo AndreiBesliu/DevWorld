@@ -223,3 +223,34 @@ func TestJudgeBulk_MissingIsNoVerdict(t *testing.T) {
 		}
 	}
 }
+
+// TestMI9_Judge_RowsNameTheirSource (G26, Task 12): each leg's rows say
+// where the figure was measured (lan, ci-relay, ci-chrome, ci-loopback) and
+// on which host, so that the report shows them in that host's table with
+// their source; a leg that its wait ended has a row that says how far it
+// got (PartialText).
+func TestMI9_Judge_RowsNameTheirSource(t *testing.T) {
+	partialPi := mi9Env("pi", "lan", results.Mi9Leg{Transport: "lan", ThroughputMbps: 1.1, RTTMs: 3, Source: SourceLAN,
+		Partial: &results.Mi9Partial{ReceivedBytes: 124e6, SizeBytes: 150e6, ElapsedMs: 900e3}})
+	j := Judge([]results.Envelope{pcLAN, partialPi, relay, chrome, loop})
+	for _, c := range []struct{ code, source, host string }{
+		{"MI9 LAN (pc): debit canal bulk", SourceLAN, "pc"},
+		{"MI9 LAN (pi): debit canal bulk", SourceLAN, "pi"},
+		{"MI9 TURN-TLS/443 la 50 ms RTT (lab-linux): debit canal bulk", SourceRelay, "lab-linux"},
+		{"(lan, pc)", SourceLAN, "pc"},
+		{"(ci-relay, lab-linux)", SourceRelay, "lab-linux"},
+		{"MI9 Chrome: primul cadru afișat după salt", SourceChrome, "lab-linux"},
+		{"MI9 loopback CI (informativ)", SourceLoopback, "lab-linux"},
+	} {
+		if r := rowOf(t, j, c.code); r.Source != c.source || r.Host != c.host {
+			t.Errorf("row %q: source %q, host %q; want %q on %q", r.Code, r.Source, r.Host, c.source, c.host)
+		}
+	}
+	r := rowOf(t, j, "MI9 LAN (pi): proba încheiată de așteptare")
+	if want := PartialText(BulkResult{Partial: partialPi.MI9.Legs[0].Partial}); r.Value != want || r.Pass != nil || r.Source != SourceLAN || r.Host != "pi" {
+		t.Errorf("the partial leg's row %+v, want «%s», information", r, want)
+	}
+	if slices.ContainsFunc(j.Rows, func(r results.Row) bool { return strings.Contains(r.Code, "(pc): proba încheiată") }) {
+		t.Error("a leg that was not partial has a partial row")
+	}
+}

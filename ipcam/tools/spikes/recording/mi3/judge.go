@@ -28,6 +28,26 @@ const (
 		"de 1 an (HUB-20, Faza 1), iar catalogul minim din c1 are doar segmente și goluri pe câteva zile."
 )
 
+// timelineRow is §4.8's timeline row, which c1 does not measure
+// (timelineNote).
+const timelineRow = "timeline 24 h (catalog de 1 an × 16 camere)"
+
+// sixteenRow adds the PC's row of 16 cameras (R07, information): measured,
+// with its hour, when MI3 ran it on a PC with 6 cores or more (pc, the PC's
+// latest MI3 envelope); else an estimate, with why the hour has no result
+// when it stopped.
+func sixteenRow(j *results.Judgement, pc *results.Envelope) {
+	r := results.Row{Code: "MI3 pc: 16 camere (≥ 6 nuclee)", Value: "estimare, nemăsurată", Source: "pc"}
+	switch {
+	case pc == nil:
+	case pc.MI3.Sixteen != nil:
+		r.Value = "măsurat: " + stepText(*pc.MI3.Sixteen)
+	case pc.MI3.SixteenStopped != "":
+		r.Value += " (" + pc.MI3.SixteenStopped + ")"
+	}
+	j.Rows = append(j.Rows, r)
+}
+
 // The states of a part of G12.
 type hostState int
 
@@ -36,6 +56,9 @@ const (
 	hostFail
 	hostIncomplete
 )
+
+// loadNames are the loads in the report's Romanian (G20).
+var loadNames = map[string]string{LoadLive: "live", LoadPlayback: "de redare", LoadExport: "de export", LoadUpload: "de upload"}
 
 // rowNames are the budgets' rows in the report's Romanian (§4.8).
 var rowNames = map[string]string{
@@ -62,11 +85,12 @@ var rowNames = map[string]string{
 // (coldboot.go) fails G12 above 20 s with its Technical Decision, the number
 // unchanged; the Pi's is information. A measured failure decides even with
 // other parts missing (G27), as when a step after it could not be measured
-// (StepsStopped). The steps, with the one that stopped them, the 16-camera
-// hour or why it has no result, the encrypted disk ratio (R02), the pacing
-// and the storage are information rows; the disk writer's queue peak
-// (C1-R17), the proxies (G20) and what §4.8 asks that MI3 does not judge
-// are Notes.
+// (StepsStopped). The steps, with the one that stopped them, the disk
+// writers' queue peak next to the RAM (C1-R17), each load's CPU (C1-R19),
+// the encrypted disk ratio (R02), the pacing, the storage, the PC's 16
+// cameras, measured or an estimate (R07), and §4.8's timeline row,
+// deferred to HUB-20, are information rows; the proxies (G20) and what
+// §4.8 asks that MI3 does not judge are Notes.
 func Judge(envs []results.Envelope) results.Judgement {
 	j := results.Judgement{Gate: "G12"}
 	piUnsupported := false
@@ -90,6 +114,7 @@ func Judge(envs []results.Envelope) results.Judgement {
 			incomplete = true
 		}
 	}
+	sixteenRow(&j, latest(envs, "pc"))
 	switch judgeColdBoot(&j, envs) {
 	case hostFail:
 		failed = true
@@ -98,6 +123,7 @@ func Judge(envs []results.Envelope) results.Judgement {
 		incomplete = true
 	}
 	coldBootInfo(&j, envs)
+	j.Rows = append(j.Rows, results.Row{Code: "MI3: " + timelineRow, Value: "amânat: HUB-20, Faza 1", Limit: "≤ 50 ms"})
 	j.Notes = append(j.Notes, encryptedDiskNote, timelineNote)
 	switch {
 	case failed:
@@ -161,6 +187,10 @@ func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (host
 			missing = true
 		}
 		j.Rows = append(j.Rows, r)
+		if key == keyRAM && d.DiskQueuePeakBytes > 0 {
+			j.Rows = append(j.Rows, results.Row{Code: prefix + "coada de scriere pe disc a MediaMTX, vârf (C1-R17, informativ)", Source: host,
+				Value: results.Decimal(float64(d.DiskQueuePeakBytes)/1e6, 1) + " MB, suma vârfurilor fiecărei înregistrări (o limită superioară)"})
+		}
 	}
 	infoRows(j, prefix, host, e)
 	if note, ok := exportNote(host, d); ok && valid {
@@ -240,9 +270,8 @@ func invalidText(d *results.Mi3Data) string {
 }
 
 // infoRows adds the rows and notes of host's run that are no gate: the
-// steps, with the one that stopped them, if any; the 16-camera hour, or why
-// it has no result; the encrypted disk ratio, the pacing, the storage, the
-// disk writer's queue peak and the proxies.
+// steps, with the one that stopped them, if any; each load's CPU (C1-R19);
+// the encrypted disk ratio, the pacing, the storage and the proxies.
 func infoRows(j *results.Judgement, prefix, host string, e *results.Envelope) {
 	d := e.MI3
 	steps := make([]string, len(d.Steps))
@@ -253,12 +282,11 @@ func infoRows(j *results.Judgement, prefix, host string, e *results.Envelope) {
 		steps = append(steps, d.StepsStopped)
 	}
 	j.Rows = append(j.Rows, results.Row{Code: prefix + "pașii", Value: strings.Join(steps, "; "), Source: host})
-	const sixteenRow = "16 camere (≥ 6 nuclee, informativ, R07)"
-	switch {
-	case d.Sixteen != nil:
-		j.Rows = append(j.Rows, results.Row{Code: prefix + sixteenRow, Value: stepText(*d.Sixteen), Source: host})
-	case d.SixteenStopped != "":
-		j.Rows = append(j.Rows, results.Row{Code: prefix + sixteenRow, Value: d.SixteenStopped, Source: host})
+	for _, kind := range Loads {
+		if pct, ok := d.LoadCPUPct[kind]; ok {
+			j.Rows = append(j.Rows, results.Row{Code: prefix + "CPU-ul încărcării " + loadNames[kind] + " (proxy, informativ, C1-R19)",
+				Value: results.Decimal(pct, 1) + " %", Source: host})
+		}
 	}
 	if ratio, ok := d.DiskRatio["encrypted"]; ok {
 		j.Rows = append(j.Rows, results.Row{Code: prefix + "disc ÷ bitrate, camere criptate (R02, informativ)", Value: results.Decimal(ratio, 3), Source: host})
@@ -267,10 +295,6 @@ func infoRows(j *results.Judgement, prefix, host string, e *results.Envelope) {
 		results.Row{Code: prefix + "ritmul controlorului (R07)", Value: pacingText(d.PacingP99Ms, d.SkippedAUs),
 			Limit: fmt.Sprintf("≤ %d ms, cadre sărite 0", mi1.MaxPacingP99Ms), Source: host},
 		results.Row{Code: prefix + "stocare", Value: storageText(e.Storage), Source: host})
-	if d.DiskQueuePeakBytes > 0 {
-		j.Notes = append(j.Notes, fmt.Sprintf("%s: coada de scriere pe disc a MediaMTX a ajuns la cel mult %s MB (suma vârfurilor fiecărei înregistrări, "+
-			"o limită superioară), lângă bugetul de RAM (C1-R17); informativ.", host, results.Decimal(float64(d.DiskQueuePeakBytes)/1e6, 1)))
-	}
 	for _, p := range d.Proxies {
 		if !slices.Contains(j.Notes, p) {
 			j.Notes = append(j.Notes, p)

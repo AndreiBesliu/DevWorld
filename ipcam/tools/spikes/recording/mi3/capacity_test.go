@@ -300,8 +300,8 @@ func TestMI3_SixteenErrorIsInformation(t *testing.T) {
 			if j.Verdict != results.Pass {
 				t.Errorf("Judge = %q, reasons %q; want trece on the first hour", j.Verdict, j.Reasons)
 			}
-			if r := row(t, j, "MI3 pc: 16 camere"); r.Value != c.want || r.Pass != nil {
-				t.Errorf("16-camera row %+v, want %q as information", r, c.want)
+			if r, want := row(t, j, "MI3 pc: 16 camere"), "estimare, nemăsurată ("+c.want+")"; r.Value != want || r.Pass != nil {
+				t.Errorf("16-camera row %+v, want %q as information", r, want)
 			}
 		})
 	}

@@ -162,8 +162,11 @@ func realPlan() []RunPlan {
 // automatedComposition lists, in Romanian, what keeps the counted runs of
 // an automated set from its Plan: 20 default runs, 10 of them encrypted and
 // exactly one with cam99_main encrypted and the setting on, and at least
-// one O17-off run. None when they match.
-func automatedComposition(set string, defaults, o17 []results.Run) []string {
+// one O17-off run. None when they match. A marked run, marked O17-off
+// without what the O17-off run measures, already names the missing O17-off
+// run in its own reason (judgeSet), so with one the set's «lipsește» is
+// not said again.
+func automatedComposition(set string, defaults, o17, marked []results.Run) []string {
 	var encrypted, lowBitrate int
 	for _, r := range defaults {
 		if r.Encrypted {
@@ -186,7 +189,7 @@ func automatedComposition(set string, defaults, o17 []results.Run) []string {
 	case lowBitrate > 1:
 		out = append(out, fmt.Sprintf("%s: %s: %d rulări, nu una", set, o17OnLabel, lowBitrate))
 	}
-	if len(o17) == 0 {
+	if len(o17) == 0 && len(marked) == 0 {
 		out = append(out, set+": "+O17OffLabel+": lipsește")
 	}
 	return out
