@@ -61,10 +61,12 @@ var rowNames = map[string]string{
 // defers G12 to Faza 0-bis when the Pi is unsupported. The PC's cold boot
 // (coldboot.go) fails G12 above 20 s with its Technical Decision, the number
 // unchanged; the Pi's is information. A measured failure decides even with
-// other parts missing (G27). The steps, the 16-camera hour, the encrypted
-// disk ratio (R02), the pacing and the storage are information rows; the
-// disk writer's queue peak (C1-R17), the proxies (G20) and what §4.8 asks
-// that MI3 does not judge are Notes.
+// other parts missing (G27), as when a step after it could not be measured
+// (StepsStopped). The steps, with the one that stopped them, the 16-camera
+// hour or why it has no result, the encrypted disk ratio (R02), the pacing
+// and the storage are information rows; the disk writer's queue peak
+// (C1-R17), the proxies (G20) and what §4.8 asks that MI3 does not judge
+// are Notes.
 func Judge(envs []results.Envelope) results.Judgement {
 	j := results.Judgement{Gate: "G12"}
 	piUnsupported := false
@@ -168,7 +170,11 @@ func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (host
 	case failed:
 		n, settled := recommended(d.Steps)
 		if !settled {
-			j.Reasons = append(j.Reasons, host+": pașii de coborâre nu s-au încheiat")
+			reason := host + ": pașii de coborâre nu s-au încheiat"
+			if d.StepsStopped != "" {
+				reason += " (" + d.StepsStopped + ")"
+			}
+			j.Reasons = append(j.Reasons, reason)
 			return hostFail, host + ": numărul recomandat coboară; pașii nu s-au încheiat"
 		}
 		return hostFail, fmt.Sprintf("%s: numărul recomandat devine %d", host, n)
@@ -213,17 +219,25 @@ func invalidText(d *results.Mi3Data) string {
 }
 
 // infoRows adds the rows and notes of host's run that are no gate: the
-// steps, the 16-camera hour, the encrypted disk ratio, the pacing, the
-// storage, the disk writer's queue peak and the proxies.
+// steps, with the one that stopped them, if any; the 16-camera hour, or why
+// it has no result; the encrypted disk ratio, the pacing, the storage, the
+// disk writer's queue peak and the proxies.
 func infoRows(j *results.Judgement, prefix, host string, e *results.Envelope) {
 	d := e.MI3
 	steps := make([]string, len(d.Steps))
 	for i, s := range d.Steps {
 		steps[i] = stepText(s)
 	}
+	if d.StepsStopped != "" {
+		steps = append(steps, d.StepsStopped)
+	}
 	j.Rows = append(j.Rows, results.Row{Code: prefix + "pașii", Value: strings.Join(steps, "; "), Source: host})
-	if d.Sixteen != nil {
-		j.Rows = append(j.Rows, results.Row{Code: prefix + "16 camere (≥ 6 nuclee, informativ, R07)", Value: stepText(*d.Sixteen), Source: host})
+	const sixteenRow = "16 camere (≥ 6 nuclee, informativ, R07)"
+	switch {
+	case d.Sixteen != nil:
+		j.Rows = append(j.Rows, results.Row{Code: prefix + sixteenRow, Value: stepText(*d.Sixteen), Source: host})
+	case d.SixteenStopped != "":
+		j.Rows = append(j.Rows, results.Row{Code: prefix + sixteenRow, Value: d.SixteenStopped, Source: host})
 	}
 	if ratio, ok := d.DiskRatio["encrypted"]; ok {
 		j.Rows = append(j.Rows, results.Row{Code: prefix + "disc ÷ bitrate, camere criptate (R02, informativ)", Value: decimal(ratio, 3), Source: host})
@@ -243,8 +257,9 @@ func infoRows(j *results.Judgement, prefix, host string, e *results.Envelope) {
 	}
 }
 
-// stepText is a step as the report shows it: "8 camere 1 h: pică".
-func stepText(s results.Mi3Step) string {
+// stepHead names step s as the report shows it: "8 camere 1 h",
+// "4 camere 15 min, încercarea 2".
+func stepHead(s results.Mi3Step) string {
 	length := "1 h"
 	if s.Minutes != FullMinutes {
 		length = fmt.Sprintf("%d min", s.Minutes)
@@ -253,6 +268,12 @@ func stepText(s results.Mi3Step) string {
 	if s.Attempt > 1 {
 		head += fmt.Sprintf(", încercarea %d", s.Attempt)
 	}
+	return head
+}
+
+// stepText is a step as the report shows it: "8 camere 1 h: pică".
+func stepText(s results.Mi3Step) string {
+	head := stepHead(s)
 	switch {
 	case !s.Valid:
 		return head + ": nevalidă (" + pacingText(s.PacingP99Ms, s.SkippedAUs) + ")"

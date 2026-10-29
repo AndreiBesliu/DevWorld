@@ -75,6 +75,11 @@ type Envelope struct {
 // Proxies say, in Romanian, which load stands for what (G20).
 // DiskQueuePeakBytes is the sum of the MediaMTX disk writers' peaks, per
 // recorder, in that hour (C1-R17): an upper bound, reported beside the RAM.
+// StepsStopped says, in Romanian, which step after a failed first hour
+// could not be measured, and why, when that error stopped the steps before
+// they settled; SixteenStopped says the same of the hour at 16 cameras,
+// which then has no Sixteen. Neither carries an error's own text, which may
+// name a path or an address (PH0-22).
 type Mi3Data struct {
 	Tier               string             `json:"tier"`
 	Cameras            int                `json:"cameras"`
@@ -90,6 +95,8 @@ type Mi3Data struct {
 	Sixteen            *Mi3Step           `json:"sixteen,omitempty"`
 	Proxies            []string           `json:"proxies,omitempty"`
 	DiskQueuePeakBytes int64              `json:"diskQueuePeakBytes"`
+	StepsStopped       string             `json:"stepsStopped,omitempty"`
+	SixteenStopped     string             `json:"sixteenStopped,omitempty"`
 }
 
 // Budget is one §4.8 budget of a run: the value measured, its limit, and

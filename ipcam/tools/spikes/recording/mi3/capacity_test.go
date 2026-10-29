@@ -4,26 +4,48 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
 // call is one step that runSteps asked for.
 type call struct{ cameras, minutes, attempt int }
 
-// fakeMeasure measures a step as figures says, and records the calls.
+// fakeMeasure measures a step as figures says, or fails it with fail's
+// error when fail is set and gives one, and records the calls.
 type fakeMeasure struct {
 	calls   []call
 	figures func(c call) Figures
+	fail    func(c call) error
 }
 
 func (m *fakeMeasure) measure(_ context.Context, cameras, minutes, attempt int) (Figures, error) {
 	c := call{cameras, minutes, attempt}
 	m.calls = append(m.calls, c)
+	if m.fail != nil {
+		if err := m.fail(c); err != nil {
+			return Figures{}, err
+		}
+	}
 	return m.figures(c), nil
+}
+
+// sixteenCalled reports whether runSteps asked for an hour at 16 cameras.
+func (m *fakeMeasure) sixteenCalled() bool {
+	return slices.ContainsFunc(m.calls, func(c call) bool { return c.cameras == 16 })
+}
+
+// judgePC judges d as the PC's MI3, with the Pi passing and the PC's cold
+// boot at 15 s.
+func judgePC(d *results.Mi3Data) results.Judgement {
+	envs := owners()
+	envs[0] = results.Envelope{Schema: results.Schema, Code: "MI3", RunID: "pc-mi3-1", Set: SetFor("pc"), Host: "pc", OS: "windows", Storage: "ssd", MI3: d}
+	return Judge(envs)
 }
 
 // passIf is a step's figures: the budgets met when pass holds, else 70 %
@@ -73,9 +95,9 @@ func TestMI3_OnFail_StepsDownByHalving(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			m := &fakeMeasure{figures: func(cl call) Figures { return passIf(c.pass(cl)) }}
-			d, err := runSteps(t.Context(), "H3", 8, false, m.measure)
-			if err != nil {
-				t.Fatal(err)
+			d, sixteenErr, err := runSteps(t.Context(), "H3", 8, false, m.measure)
+			if err != nil || sixteenErr != nil {
+				t.Fatal(err, sixteenErr)
 			}
 			if got := stepsText(d.Steps); got != c.steps {
 				t.Errorf("steps %s\nwant  %s", got, c.steps)
@@ -83,9 +105,7 @@ func TestMI3_OnFail_StepsDownByHalving(t *testing.T) {
 			if d.Cameras != 8 || d.CPUPctTotal != 70 || d.Tier != "H3" {
 				t.Errorf("the envelope's figures: %d cameras on %s, %v %% CPU; want the first hour's (8 on H3, 70 %%)", d.Cameras, d.Tier, d.CPUPctTotal)
 			}
-			envs := owners()
-			envs[0] = results.Envelope{Schema: results.Schema, Code: "MI3", RunID: "pc-mi3-1", Set: SetFor("pc"), Host: "pc", OS: "windows", Storage: "ssd", MI3: &d}
-			j := Judge(envs)
+			j := judgePC(d)
 			if j.Verdict != results.Fail || j.PlanB != c.want {
 				t.Errorf("Judge = %q → %q, want pică → %q", j.Verdict, j.PlanB, c.want)
 			}
@@ -94,8 +114,8 @@ func TestMI3_OnFail_StepsDownByHalving(t *testing.T) {
 
 	t.Run("a pass needs no step", func(t *testing.T) {
 		m := &fakeMeasure{figures: func(call) Figures { return passIf(true) }}
-		d, err := runSteps(t.Context(), "H1b", 4, false, m.measure)
-		if err != nil || stepsText(d.Steps) != "4x60#1 pass" {
+		d, _, err := runSteps(t.Context(), "H1b", 4, false, m.measure)
+		if err != nil || d == nil || stepsText(d.Steps) != "4x60#1 pass" {
 			t.Errorf("steps %s, %v; want the hour at 4 only", stepsText(d.Steps), err)
 		}
 	})
@@ -120,7 +140,7 @@ func TestMI3_InvalidPacing_RunRedone(t *testing.T) {
 				}
 				return passIf(true)
 			}}
-			d, err := runSteps(t.Context(), "H3", 8, false, m.measure)
+			d, _, err := runSteps(t.Context(), "H3", 8, false, m.measure)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -142,32 +162,33 @@ func TestMI3_InvalidPacing_RunRedone(t *testing.T) {
 			f.PacingP99Ms = 110
 			return f
 		}}
-		d, err := runSteps(t.Context(), "H3", 8, true, m.measure)
-		if err != nil {
-			t.Fatal(err)
+		d, sixteenErr, err := runSteps(t.Context(), "H3", 8, true, m.measure)
+		if err != nil || sixteenErr != nil {
+			t.Fatal(err, sixteenErr)
 		}
 		if got := stepsText(d.Steps); got != "8x60#1 invalid, 8x60#2 invalid, 8x60#3 invalid" {
 			t.Errorf("steps %s, want three attempts and no more", got)
 		}
-		if d.Sixteen != nil || d.PacingP99Ms != 110 {
-			t.Errorf("sixteen %+v, p99 %d: want no 16-camera hour and the last attempt's pacing", d.Sixteen, d.PacingP99Ms)
+		if d.Sixteen != nil || m.sixteenCalled() || d.PacingP99Ms != 110 {
+			t.Errorf("sixteen %+v, calls %v, p99 %d: want no 16-camera hour and the last attempt's pacing", d.Sixteen, m.calls, d.PacingP99Ms)
 		}
-		envs := owners()
-		envs[0] = results.Envelope{Schema: results.Schema, Code: "MI3", RunID: "pc-mi3-1", Set: SetFor("pc"), Host: "pc", OS: "windows", Storage: "ssd", MI3: &d}
-		if j := Judge(envs); j.Verdict != results.Incomplete {
+		if j := judgePC(d); j.Verdict != results.Incomplete {
 			t.Errorf("Judge = %q, want %q", j.Verdict, results.Incomplete)
 		}
 	})
 }
 
-// TestMI3_SixteenOnlyWithSixCores (R07): with 6 cores or more, a PC whose
-// recommended count passed also runs one hour at 16 cameras, as
-// information; without them it never does.
+// TestMI3_SixteenOnlyWithSixCores (R07): with 6 cores or more, a PC runs
+// one hour at 16 cameras after its steps, as information, whether its
+// recommended count passed or the steps lowered it; without them it never
+// does. The hour is no step. Steps that stopped on the controller's pacing
+// are run again whole, so no hour at 16 follows them
+// (TestMI3_InvalidPacing_RunRedone).
 func TestMI3_SixteenOnlyWithSixCores(t *testing.T) {
 	m := &fakeMeasure{figures: func(c call) Figures { return passIf(c.cameras <= 8) }}
-	d, err := runSteps(t.Context(), "H3", 8, true, m.measure)
-	if err != nil {
-		t.Fatal(err)
+	d, sixteenErr, err := runSteps(t.Context(), "H3", 8, true, m.measure)
+	if err != nil || sixteenErr != nil {
+		t.Fatal(err, sixteenErr)
 	}
 	if !slices.Contains(m.calls, call{16, 60, 1}) || d.Sixteen == nil || d.Sixteen.Cameras != 16 || d.Sixteen.Minutes != 60 || d.Sixteen.Pass || !d.Sixteen.Valid {
 		t.Errorf("with 6 cores: calls %v, sixteen %+v; want one failing hour at 16", m.calls, d.Sixteen)
@@ -175,26 +196,223 @@ func TestMI3_SixteenOnlyWithSixCores(t *testing.T) {
 	if got := stepsText(d.Steps); got != "8x60#1 pass" {
 		t.Errorf("steps %s: the 16-camera hour is no step", got)
 	}
-
-	m = &fakeMeasure{figures: func(call) Figures { return passIf(true) }}
-	d, err = runSteps(t.Context(), "H3", 8, false, m.measure)
-	if err != nil || d.Sixteen != nil || slices.ContainsFunc(m.calls, func(c call) bool { return c.cameras == 16 }) {
-		t.Errorf("without 6 cores: calls %v, sixteen %+v, %v; want no hour at 16", m.calls, d.Sixteen, err)
+	if d.SixteenStopped != "" || d.StepsStopped != "" {
+		t.Errorf("stopped %q, %q; want none", d.SixteenStopped, d.StepsStopped)
 	}
 
-	m = &fakeMeasure{figures: func(c call) Figures { return passIf(c.cameras <= 4) }}
-	d, err = runSteps(t.Context(), "H3", 8, true, m.measure)
-	if err != nil || d.Sixteen != nil || slices.ContainsFunc(m.calls, func(c call) bool { return c.cameras == 16 }) {
-		t.Errorf("8 failed: calls %v, sixteen %+v, %v; want no hour at 16", m.calls, d.Sixteen, err)
+	t.Run("after a failed hour", func(t *testing.T) {
+		m := &fakeMeasure{figures: func(c call) Figures { return passIf(c.cameras <= 4) }}
+		d, sixteenErr, err := runSteps(t.Context(), "H3", 8, true, m.measure)
+		if err != nil || sixteenErr != nil {
+			t.Fatal(err, sixteenErr)
+		}
+		if got := stepsText(d.Steps); got != "8x60#1 fail, 4x15#1 pass, 4x60#1 pass" {
+			t.Errorf("steps %s, want the steps down to 4 first", got)
+		}
+		if m.calls[len(m.calls)-1] != (call{16, 60, 1}) || d.Sixteen == nil || d.Sixteen.Cameras != 16 || d.Sixteen.Pass || !d.Sixteen.Valid {
+			t.Errorf("calls %v, sixteen %+v; want one failing hour at 16 after the steps", m.calls, d.Sixteen)
+		}
+		if j := judgePC(d); j.Verdict != results.Fail || j.PlanB != "pc: numărul recomandat devine 4" {
+			t.Errorf("Judge = %q → %q; the 16-camera hour changed the verdict", j.Verdict, j.PlanB)
+		}
+	})
+
+	t.Run("without 6 cores", func(t *testing.T) {
+		m := &fakeMeasure{figures: func(call) Figures { return passIf(true) }}
+		d, sixteenErr, err := runSteps(t.Context(), "H3", 8, false, m.measure)
+		if err != nil || sixteenErr != nil || d.Sixteen != nil || m.sixteenCalled() {
+			t.Errorf("calls %v, sixteen %+v, %v, %v; want no hour at 16", m.calls, d.Sixteen, err, sixteenErr)
+		}
+	})
+}
+
+// TestMI3_MeasureErrorEndsTheSteps: a first hour that cannot be measured
+// before one of its attempts was valid ends the run with its error, and no
+// envelope is made of it: there is no measured hour to judge.
+func TestMI3_MeasureErrorEndsTheSteps(t *testing.T) {
+	boom := errors.New("boom")
+	for _, at := range []int{1, 2} {
+		t.Run(fmt.Sprintf("attempt %d", at), func(t *testing.T) {
+			m := &fakeMeasure{
+				figures: func(call) Figures { f := passIf(true); f.PacingP99Ms = 110; return f },
+				fail: func(c call) error {
+					if c.attempt == at {
+						return boom
+					}
+					return nil
+				},
+			}
+			d, sixteenErr, err := runSteps(t.Context(), "H3", 8, true, m.measure)
+			if !errors.Is(err, boom) || d != nil || sixteenErr != nil {
+				t.Errorf("runSteps = %+v, %v, %v; want no data and %v", d, sixteenErr, err, boom)
+			}
+		})
 	}
 }
 
-// TestMI3_MeasureErrorEndsTheSteps: a step that cannot be measured ends
-// the run with its error, and no envelope is made of it.
-func TestMI3_MeasureErrorEndsTheSteps(t *testing.T) {
+// hostPath and hostAddr stand for what a step's error may name on the
+// owner's screen and never in an envelope (PH0-22).
+const (
+	hostPath = "/home/owner/recspike/work/mi3/02-16cam-60min-1"
+	hostAddr = "192.0.2.7:7081"
+)
+
+// TestMI3_SixteenErrorIsInformation (R07, G27): an hour at 16 cameras that
+// cannot be measured leaves Sixteen empty and says why, while the first
+// hour's result stands and G12 is judged on it; runSteps gives its error
+// apart, for the owner's screen. The envelope names ipcam-hub's exit or the
+// owner's stop, never an error's own text, which may hold a path or an
+// address (PH0-22).
+func TestMI3_SixteenErrorIsInformation(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"ipcam-hub exits", fmt.Errorf("pasul 2 (16 camere): %w; jurnalele sunt în %s", hubExited(2), hostPath),
+			"16 camere 1 h: nu s-a putut măsura; ipcam-hub s-a oprit în timpul pasului (codul 2)"},
+		{"the link fails", fmt.Errorf("pasul 2 (16 camere): dial tcp %s: i/o timeout; jurnalele sunt în %s", hostAddr, hostPath),
+			"16 camere 1 h: nu s-a putut măsura; eroarea este pe ecranul gazdei și în jurnalele pasului"},
+		{"the owner stops it", fmt.Errorf("pasul 2 (16 camere): %w; jurnalele sunt în %s", context.Canceled, hostPath),
+			"16 camere 1 h: nu s-a putut măsura; proba a fost oprită înainte de final"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := &fakeMeasure{figures: func(call) Figures { return passIf(true) }, fail: func(cl call) error {
+				if cl.cameras == 16 {
+					return c.err
+				}
+				return nil
+			}}
+			d, sixteenErr, err := runSteps(t.Context(), "H3", 8, true, m.measure)
+			if err != nil || !errors.Is(sixteenErr, c.err) || d == nil {
+				t.Fatalf("runSteps = %+v, %v, %v; want the first hour's data and the 16-camera hour's error apart", d, sixteenErr, err)
+			}
+			if d.Sixteen != nil || d.SixteenStopped != c.want {
+				t.Errorf("sixteen %+v, stopped %q; want none, stopped %q", d.Sixteen, d.SixteenStopped, c.want)
+			}
+			if got := stepsText(d.Steps); got != "8x60#1 pass" || d.CPUPctTotal != 55 || d.StepsStopped != "" {
+				t.Errorf("steps %s, CPU %v %%, stopped %q; want the first hour's", got, d.CPUPctTotal, d.StepsStopped)
+			}
+			j := judgePC(d)
+			if j.Verdict != results.Pass {
+				t.Errorf("Judge = %q, reasons %q; want trece on the first hour", j.Verdict, j.Reasons)
+			}
+			if r := row(t, j, "MI3 pc: 16 camere"); r.Value != c.want || r.Pass != nil {
+				t.Errorf("16-camera row %+v, want %q as information", r, c.want)
+			}
+		})
+	}
+}
+
+// TestMI3_StepErrorKeepsTheMeasuredFailure (G20, G27): a step after a
+// failed first hour that cannot be measured stops the steps with its error,
+// but the steps measured so far are kept with why they stopped: the first
+// hour's failure decides G12, and the number goes down, its value open. No
+// hour at 16 follows.
+func TestMI3_StepErrorKeepsTheMeasuredFailure(t *testing.T) {
+	const elsewhere = "eroarea este pe ecranul gazdei și în jurnalele pasului"
+	linkErr := fmt.Errorf("dial tcp %s: i/o timeout; jurnalele sunt în %s", hostAddr, hostPath)
+	cases := []struct {
+		name    string
+		at      call
+		err     error
+		steps   string
+		stopped string
+	}{
+		{"the first step down", call{4, 15, 1}, linkErr, "8x60#1 fail", "4 camere 15 min: nu s-a putut măsura; " + elsewhere},
+		{"the confirmation", call{4, 60, 1}, fmt.Errorf("pasul 3 (4 camere): %w", hubExited(-1)), "8x60#1 fail, 4x15#1 pass",
+			"4 camere 1 h: nu s-a putut măsura; ipcam-hub s-a oprit în timpul pasului (codul -1)"},
+		{"a redone attempt", call{4, 15, 2}, fmt.Errorf("pasul 3 (4 camere): %w", loadEnded(LoadExport)), "8x60#1 fail, 4x15#1 invalid",
+			"4 camere 15 min, încercarea 2: nu s-a putut măsura; încărcarea export s-a oprit în timpul pasului"},
+		{"the owner stops it", call{4, 15, 1}, fmt.Errorf("pasul 2 (4 camere): %w", context.Canceled), "8x60#1 fail",
+			"4 camere 15 min: nu s-a putut măsura; proba a fost oprită înainte de final"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := &fakeMeasure{
+				figures: func(cl call) Figures {
+					f := passIf(cl.cameras <= 4)
+					if c.at.attempt == 2 && cl == (call{c.at.cameras, c.at.minutes, 1}) {
+						f.PacingP99Ms = 110
+					}
+					return f
+				},
+				fail: func(cl call) error {
+					if cl == c.at {
+						return c.err
+					}
+					return nil
+				},
+			}
+			d, sixteenErr, err := runSteps(t.Context(), "H3", 8, true, m.measure)
+			if !errors.Is(err, c.err) || sixteenErr != nil || d == nil {
+				t.Fatalf("runSteps = %+v, %v, %v; want the steps so far and %v", d, sixteenErr, err, c.err)
+			}
+			if got := stepsText(d.Steps); got != c.steps || d.StepsStopped != c.stopped {
+				t.Errorf("steps %s, stopped %q\nwant  %s, stopped %q", got, d.StepsStopped, c.steps, c.stopped)
+			}
+			if strings.Contains(d.StepsStopped, hostPath) || strings.Contains(d.StepsStopped, hostAddr) {
+				t.Errorf("the envelope names the host: %q", d.StepsStopped)
+			}
+			if d.Cameras != 8 || d.CPUPctTotal != 70 || d.Budgets["cpuTotal"].Pass {
+				t.Errorf("the envelope's figures: %d cameras, %v %% CPU; want the first hour's failure", d.Cameras, d.CPUPctTotal)
+			}
+			if d.Sixteen != nil || d.SixteenStopped != "" || m.sixteenCalled() {
+				t.Errorf("calls %v, sixteen %+v %q; want no hour at 16 after an error", m.calls, d.Sixteen, d.SixteenStopped)
+			}
+			j := judgePC(d)
+			if j.Verdict != results.Fail || j.PlanB != "pc: numărul recomandat coboară; pașii nu s-au încheiat" {
+				t.Errorf("Judge = %q → %q; want the measured failure to decide, the number open", j.Verdict, j.PlanB)
+			}
+			if r := row(t, j, "MI3 pc: pașii"); !strings.HasSuffix(r.Value, "; "+c.stopped) {
+				t.Errorf("steps row %q does not end with why they stopped", r.Value)
+			}
+			if !strings.Contains(strings.Join(j.Reasons, "\n"), c.stopped) {
+				t.Errorf("reasons %q do not say why the steps stopped", j.Reasons)
+			}
+		})
+	}
+}
+
+// TestMI3_RunWritesWhatWasMeasured (G27): Run writes the envelope of what
+// the steps measured also when a later step stopped them, then returns that
+// step's error; an hour at 16 cameras that could not be measured is said on
+// the owner's screen, and the run succeeds.
+func TestMI3_RunWritesWhatWasMeasured(t *testing.T) {
 	boom := errors.New("boom")
-	_, err := runSteps(t.Context(), "H3", 8, false, func(context.Context, int, int, int) (Figures, error) { return Figures{}, boom })
-	if !errors.Is(err, boom) {
-		t.Errorf("runSteps = %v, want %v", err, boom)
+	dir := t.TempDir()
+	out := &strings.Builder{}
+	o := Options{Host: mi1.HostState{Pseudonym: "pc", OS: "windows", Storage: "ssd"}, Results: dir, Out: out}
+
+	failed := dataOf("H3", 8, passIf(false))
+	failed.Steps = []results.Mi3Step{step(8, 60, 1, false)}
+	failed.StepsStopped = "4 camere 15 min: nu s-a putut măsura; proba a fost oprită înainte de final"
+	if err := o.finish(failed, nil, boom); !errors.Is(err, boom) {
+		t.Errorf("finish = %v, want the step's error %v", err, boom)
+	}
+	e, err := results.Read(filepath.Join(dir, "MI3", "pc-mi3", "pc-mi3-1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := e.MI3; stepsText(d.Steps) != "8x60#1 fail" || d.StepsStopped != failed.StepsStopped || d.CPUPctTotal != 70 || len(d.Proxies) == 0 {
+		t.Errorf("the envelope %+v is not what the steps measured", d)
+	}
+
+	passed := dataOf("H3", 8, passIf(true))
+	passed.Steps = []results.Mi3Step{step(8, 60, 1, true)}
+	passed.SixteenStopped = "16 camere 1 h: nu s-a putut măsura; ipcam-hub s-a oprit în timpul pasului (codul 2)"
+	out.Reset()
+	if err := o.finish(passed, fmt.Errorf("pasul 2 (16 camere): %w", hubExited(2)), nil); err != nil {
+		t.Errorf("finish = %v; an unmeasured 16-camera hour fails no run", err)
+	}
+	e, err = results.Read(filepath.Join(dir, "MI3", "pc-mi3", "pc-mi3-2.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.MI3.SixteenStopped != passed.SixteenStopped || e.MI3.Sixteen != nil {
+		t.Errorf("the envelope's 16-camera hour: %+v, %q", e.MI3.Sixteen, e.MI3.SixteenStopped)
+	}
+	if !strings.Contains(out.String(), "16 camere") || !strings.Contains(out.String(), "codul 2") {
+		t.Errorf("the screen does not say why the 16-camera hour has no result:\n%s", out)
 	}
 }

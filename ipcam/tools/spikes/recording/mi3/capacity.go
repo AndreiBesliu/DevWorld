@@ -65,21 +65,29 @@ type measureFunc func(ctx context.Context, cameras, minutes, attempt int) (Figur
 // sent unevenly is redone, at most maxAttempts times, and never judged;
 // after the last, the steps stop and the host's MI3 has no verdict. Every
 // attempt goes into Steps, and the envelope's figures are the first hour's
-// last attempt. With sixteen (a PC with 6 cores or more) and the first hour
-// passed, one hour at 16 cameras goes into Sixteen, as information: after a
-// failed first hour it would only fail too. An error of measure ends the
-// run with it.
-func runSteps(ctx context.Context, tier string, cameras int, sixteen bool, measure measureFunc) (results.Mi3Data, error) {
+// last attempt. With sixteen (a PC with 6 cores or more), one hour at 16
+// cameras follows the steps that settled, whatever their count, and goes
+// into Sixteen, as information; steps that stopped are run again whole,
+// with their hour at 16.
+//
+// d is nil only when measure failed before an attempt of the first hour was
+// valid: err is that error, and there is nothing to judge. After a valid
+// first hour, an error of measure stops the steps, err is it, and d keeps
+// what they measured, with StepsStopped saying which step stopped them: the
+// first hour decides G12 (G27). An error of the hour at 16 cameras is
+// sixteenErr, with d.SixteenStopped and no Sixteen: it is information too.
+func runSteps(ctx context.Context, tier string, cameras int, sixteen bool, measure measureFunc) (d *results.Mi3Data, sixteenErr, err error) {
 	var steps []results.Mi3Step
 	// try measures n cameras for minutes until an attempt is valid, at most
-	// maxAttempts times, and returns the last attempt.
+	// maxAttempts times, and returns the last attempt; after an error, the
+	// attempt that it stopped, unmeasured.
 	try := func(n, minutes int, record bool) (results.Mi3Step, Figures, error) {
 		var s results.Mi3Step
 		var f Figures
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			var err error
 			if f, err = measure(ctx, n, minutes, attempt); err != nil {
-				return s, f, err
+				return results.Mi3Step{Cameras: n, Minutes: minutes, Attempt: attempt}, f, err
 			}
 			s = results.Mi3Step{Cameras: n, Minutes: minutes, Attempt: attempt, Valid: Valid(f), PacingP99Ms: f.PacingP99Ms, SkippedAUs: f.SkippedAUs}
 			s.Pass = s.Valid && passes(tier, n, f)
@@ -93,29 +101,65 @@ func runSteps(ctx context.Context, tier string, cameras int, sixteen bool, measu
 		return s, f, nil
 	}
 
-	first, f, err := try(cameras, FullMinutes, true)
+	// try stops at the first valid attempt, so an error here comes before
+	// one.
+	s, f, err := try(cameras, FullMinutes, true)
 	if err != nil {
-		return results.Mi3Data{}, err
+		return nil, nil, err
 	}
-	d := dataOf(tier, cameras, f)
-	for s := first; !last(s); {
+	data := dataOf(tier, cameras, f)
+	d = &data
+	for !last(s) {
 		n, minutes := s.Cameras, FullMinutes // confirm the count that passed
 		if !s.Pass {
 			n, minutes = max(1, s.Cameras/2), ShortMinutes
 		}
 		if s, _, err = try(n, minutes, true); err != nil {
-			return results.Mi3Data{}, err
+			d.Steps, d.StepsStopped = steps, stopText(s, err)
+			return d, nil, err
 		}
 	}
 	d.Steps = steps
-	if sixteen && first.Pass && cameras < sixteenCameras {
-		s, _, err := try(sixteenCameras, FullMinutes, false)
-		if err != nil {
-			return results.Mi3Data{}, err
+	if sixteen && s.Valid && cameras < sixteenCameras {
+		six, _, sixErr := try(sixteenCameras, FullMinutes, false)
+		if sixErr != nil {
+			d.SixteenStopped = stopText(six, sixErr)
+			return d, sixErr, nil
 		}
-		d.Sixteen = &s
+		d.Sixteen = &six
 	}
-	return d, nil
+	return d, nil, nil
+}
+
+// stepFailure is an error of a step whose text names nothing of the host,
+// no path, address or name, so that the envelope may say it (PH0-22).
+type stepFailure struct{ text string }
+
+func (e *stepFailure) Error() string { return e.text }
+
+// hubExited is ipcam-hub's exit, with code, during a step.
+func hubExited(code int) error {
+	return &stepFailure{fmt.Sprintf("ipcam-hub s-a oprit în timpul pasului (codul %d)", code)}
+}
+
+// loadEnded is the end of the load kind during a step.
+func loadEnded(kind string) error {
+	return &stepFailure{fmt.Sprintf("încărcarea %s s-a oprit în timpul pasului", kind)}
+}
+
+// stopText is, for the envelope, why step s could not be measured: err's
+// text when it is a stepFailure, the owner's stop, or else where the error
+// is (PH0-22).
+func stopText(s results.Mi3Step, err error) string {
+	why := "eroarea este pe ecranul gazdei și în jurnalele pasului"
+	var failure *stepFailure
+	switch {
+	case errors.As(err, &failure):
+		why = failure.text
+	case errors.Is(err, context.Canceled):
+		why = "proba a fost oprită înainte de final"
+	}
+	return stepHead(s) + ": nu s-a putut măsura; " + why
 }
 
 // TierFor is the host's tier (§4.8): H3 on the PC; on a Pi, its model's
@@ -183,8 +227,9 @@ const (
 // disk ratio and part fsyncs, and the disk writers' queue peak, and takes
 // the controller's pacing and the live tiles' latency (R07); runSteps
 // steps the count down on a failure. It keeps the host awake (R49) and
-// writes the envelope MI3/<host>-mi3/<run id>.json. Every line it prints
-// is Romanian.
+// writes the envelope MI3/<host>-mi3/<run id>.json, also when a step after
+// the first hour could not be measured (finish). Every line it prints is
+// Romanian.
 func Run(ctx context.Context, o Options) error {
 	tier := TierFor(o.Host)
 	cameras := max(o.Host.Cameras, 1)
@@ -223,10 +268,18 @@ func Run(ctx context.Context, o Options) error {
 		"Lăsați dispozitivul pornit și nefolosit până la final.", tier, camerasText(cameras), Sessions(tier),
 		decimal(float64(UploadBps(tier, cameras))/1e6, -1))
 	r := &stepRunner{o: o, l: l, fx: fx, tier: tier, dir: dir}
-	d, err := runSteps(ctx, tier, cameras, o.Host.Cores6Plus && tier == TierH3, r.measure)
-	if err != nil {
+	d, sixteenErr, err := runSteps(ctx, tier, cameras, o.Host.Cores6Plus && tier == TierH3, r.measure)
+	if d == nil {
 		return err
 	}
+	return o.finish(*d, sixteenErr, err)
+}
+
+// finish writes d, what the steps measured, as the run's envelope, also
+// when stepErr stopped the steps after the first hour, which decides G12
+// (G27), and then returns stepErr. sixteenErr, the hour at 16 cameras', is
+// information: it is said on the screen, and the run succeeds.
+func (o Options) finish(d results.Mi3Data, sixteenErr, stepErr error) error {
 	d.Proxies = Proxies
 	set := SetFor(o.Host.Pseudonym)
 	e := results.Envelope{Schema: results.Schema, Code: "MI3", Set: set, Host: o.Host.Pseudonym, OS: o.Host.OS,
@@ -238,13 +291,22 @@ func Run(ctx context.Context, o Options) error {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("nu pot scrie rezultatul probei: %w", err)
+			return errors.Join(stepErr, fmt.Errorf("nu pot scrie rezultatul probei: %w", err))
 		}
 		break
+	}
+	if stepErr != nil {
+		o.say("Proba MI3 s-a oprit înainte de final; ce s-a măsurat este în rezultatul %s. Pașii: %s.", e.RunID, stepsSummary(d.Steps))
+		return fmt.Errorf("pașii de coborâre nu s-au încheiat: %w. Ora la %s rămâne măsurată; porniți din nou proba ca numărul recomandat să se stabilească",
+			stepErr, camerasText(d.Cameras))
 	}
 	o.say("Proba MI3 s-a încheiat: rezultatul este %s. Pașii: %s.", e.RunID, stepsSummary(d.Steps))
 	if last := d.Steps[len(d.Steps)-1]; !last.Valid {
 		o.say("Controlorul a trimis neuniform de %d ori la rând, deci pasul nu are rezultat: verificați controlorul și rețeaua, apoi porniți din nou proba.", maxAttempts)
+	}
+	if sixteenErr != nil {
+		o.say("Ora la 16 camere nu s-a putut măsura (%v): în raport, 16 camere rămâne o estimare. Rezultatul de la %s nu depinde de ea.",
+			sixteenErr, camerasText(d.Cameras))
 	}
 	return nil
 }
@@ -585,11 +647,11 @@ func (s *stepRun) window(ctx context.Context, roots map[string]int, hub *hubproc
 		case <-ctx.Done():
 			return start, peak, end, ctx.Err()
 		case <-hub.Exited():
-			return start, peak, end, fmt.Errorf("ipcam-hub s-a oprit în timpul pasului (codul %d)", hub.ExitCode())
+			return start, peak, end, hubExited(hub.ExitCode())
 		case <-tick.C:
 			for kind, ld := range loads {
 				if ld.ended() {
-					return start, peak, end, fmt.Errorf("încărcarea %s s-a oprit în timpul pasului", kind)
+					return start, peak, end, loadEnded(kind)
 				}
 			}
 			peak = max(peak, memory(roots))

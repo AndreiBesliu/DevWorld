@@ -218,7 +218,9 @@ func TestEnvelope_MI3(t *testing.T) {
 				{Cameras: 4, Minutes: 15, Attempt: 1, Valid: true, Pass: true, PacingP99Ms: 7},
 			},
 			Sixteen: &Mi3Step{Cameras: 16, Minutes: 60, Attempt: 1, Valid: true, SkippedAUs: 0},
-			Proxies: []string{"live: sesiuni WebRTC"}, DiskQueuePeakBytes: 6 << 20},
+			Proxies: []string{"live: sesiuni WebRTC"}, DiskQueuePeakBytes: 6 << 20,
+			StepsStopped:   "4 camere 1 h: nu s-a putut măsura; proba a fost oprită înainte de final",
+			SixteenStopped: "16 camere 1 h: nu s-a putut măsura; proba a fost oprită înainte de final"},
 	}
 	if err := Write(dir, want); err != nil {
 		t.Fatalf("Write: %v", err)
