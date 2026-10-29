@@ -29,6 +29,10 @@ name: ipcam-spike-recording-release
 
 on:
   push:
+    # THROWAWAY: a branch push registers this workflow, so that a manual run
+    # (workflow_dispatch) can start it; reverted by the next commit.
+    branches:
+      - 'ipcam/phase0c1-recorder-spike'
     tags:
       - 'spike-recording-v*'
     # GitHub does not evaluate path filters for tag pushes: the tag pattern is
