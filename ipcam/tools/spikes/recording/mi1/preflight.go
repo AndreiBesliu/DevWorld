@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
 // Check is one preflight check: Run returns the Romanian reason why the
@@ -86,11 +88,15 @@ type PiProbes struct {
 	Cameras int
 }
 
+// SpaceMargin is the free space that a run leaves beside what it records:
+// 2 GiB on the Pi (G14), and beside each MI3 step.
+const SpaceMargin = 2 << 30
+
 // RequiredFreeBytes is the free space that a Pi needs for one run of
-// cameras main streams: cameras × 4 Mbps × 12 min, plus 2 GiB (G14).
+// cameras main streams: cameras × 4 Mbps × 12 min, plus SpaceMargin (G14).
 func RequiredFreeBytes(cameras int) uint64 {
 	const perCamera = mainKbps * 1000 / 8 * 12 * 60
-	return uint64(cameras)*perCamera + 2<<30 //nolint:gosec // 1 to 16 cameras
+	return uint64(cameras)*perCamera + SpaceMargin //nolint:gosec // 1 to 16 cameras
 }
 
 // PiChecks are the Pi's checks (G14): root, and the free space of one run.
@@ -105,16 +111,16 @@ func PiChecks(p PiProbes) []Check {
 		func(context.Context) string {
 			need := RequiredFreeBytes(max(p.Cameras, 1))
 			if free, err := p.FreeBytes(); err != nil || free < need {
-				return fmt.Sprintf("spațiu liber insuficient: sunt necesari cel puțin %s", gigabytes(need))
+				return fmt.Sprintf("spațiu liber insuficient: sunt necesari cel puțin %s", Gigabytes(need))
 			}
 			return ""
 		},
 	}
 }
 
-// gigabytes renders a size in GB with a decimal comma.
-func gigabytes(n uint64) string {
-	return strings.Replace(fmt.Sprintf("%.1f GB", float64(n)/1e9), ".", ",", 1)
+// Gigabytes renders a size in GB, with one decimal and a decimal comma.
+func Gigabytes(n uint64) string {
+	return results.Decimal(float64(n)/1e9, 1) + " GB"
 }
 
 // LinkProbes check the controller link in both directions (R08); the TCP

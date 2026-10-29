@@ -175,7 +175,9 @@ func deadAnswer(t *testing.T, api *webrtc.API, offer string) string {
 // TestMI3_LiveAnswersEndWithTheirConnection (G20; Task 9 review): the
 // controller waits for a step's live tiles to bind under the connection
 // that sent the answers: when the host disconnects, the step's peers close
-// and the wait ends at once, not after liveAcceptWait.
+// and the wait ends at once, not after liveAcceptWait. The screen says in
+// Romanian that the host disconnected, and the controller refuses nothing
+// on the closed connection (a refusal is said on the screen too).
 func TestMI3_LiveAnswersEndWithTheirConnection(t *testing.T) {
 	waitFor(t, "the answers of earlier tests to end", func() bool { return running(t, "(*ctl).mi3Answers") == 0 })
 	r := newRig(t)
@@ -197,4 +199,11 @@ func TestMI3_LiveAnswersEndWithTheirConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "the wait for the live tiles to end with the connection", func() bool { return running(t, "(*ctl).mi3Answers") == 0 })
+	screen := r.screen.String()
+	if !strings.Contains(screen, "Pasul MI3 pc-mi3-02: gazda s-a deconectat înainte ca sesiunile live să pornească.") {
+		t.Errorf("the screen does not say that the host disconnected:\n%s", screen)
+	}
+	if strings.Contains(screen, "nu a pornit") {
+		t.Errorf("the controller refused the step on the closed connection:\n%s", screen)
+	}
 }

@@ -13,15 +13,9 @@ import (
 // binDir, recspike's folder, holds nothing that the Pi checks.
 func DeviceChecks(_, dataDir string, cameras int) []Check {
 	return PiChecks(PiProbes{
-		Euid: os.Geteuid,
-		FreeBytes: func() (uint64, error) {
-			var st syscall.Statfs_t
-			if err := syscall.Statfs(dataDir, &st); err != nil {
-				return 0, err
-			}
-			return st.Bavail * uint64(st.Bsize), nil //nolint:gosec // a block size
-		},
-		Cameras: cameras,
+		Euid:      os.Geteuid,
+		FreeBytes: func() (uint64, error) { return FreeBytes(dataDir) },
+		Cameras:   cameras,
 	})
 }
 

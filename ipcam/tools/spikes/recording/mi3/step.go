@@ -40,8 +40,13 @@ const (
 // run before (keepStepLogs).
 const previousDir = "mi3-anterior"
 
-// stepLogs are the logs that each step leaves in its folder.
-var stepLogs = []string{"ipcam-hub.log", "loads.log"}
+// stepLogs are the logs that each step leaves in its folder: ipcam-hub's,
+// the loads', and recspike's, which holds the error that stopped the step
+// in its own words (failed).
+var stepLogs = []string{"ipcam-hub.log", "loads.log", errorLog}
+
+// errorLog is the step log of the error that stopped the step.
+const errorLog = "recspike.log"
 
 // keepStepLogs moves the step logs in dir, the folder of the run before,
 // to prev, in place of what prev held: one generation, as MI2 keeps its
@@ -105,16 +110,17 @@ func streams(cameras int) (mains, tiles []string) {
 }
 
 // measure is one step of the run: cameras recorded for minutes, the
-// attempt-th try, with the tier's loads beside them.
+// attempt-th try, with the tier's loads beside them. Its error is a
+// stepError, whose own text is in the step's errorLog too.
 func (r *stepRunner) measure(ctx context.Context, cameras, minutes, attempt int) (Figures, error) {
-	if err := r.room(cameras, minutes); err != nil {
-		return Figures{}, err
-	}
 	r.n++
 	name := fmt.Sprintf("%02d-%dcam-%dmin-%d", r.n, cameras, minutes, attempt)
 	dir := filepath.Join(r.dir, name)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return Figures{}, err
+		return Figures{}, &stepError{dir: dir, err: err}
+	}
+	if err := r.room(cameras, minutes); err != nil {
+		return Figures{}, failed(dir, err)
 	}
 	r.o.say("Pasul %d: %s, %d min, încercarea %d.", r.n, camerasText(cameras), minutes, attempt)
 	s := &stepRun{r: r, runID: SetFor(r.o.Host.Pseudonym) + "-" + name, dir: dir, cameras: cameras, minutes: minutes}
@@ -126,7 +132,7 @@ func (r *stepRunner) measure(ctx context.Context, cameras, minutes, attempt int)
 		r.o.say("Înregistrările pasului %d nu s-au putut șterge (%v); se șterg la următorul recspike mi3.", r.n, err)
 	}
 	if err != nil {
-		return Figures{}, fmt.Errorf("pasul %d (%s): %w; jurnalele sunt în %s", r.n, camerasText(cameras), err, dir)
+		return Figures{}, failed(dir, fmt.Errorf("pasul %d (%s): %w; jurnalele sunt în %s", r.n, camerasText(cameras), err, dir))
 	}
 	verdict := "nevalid (ritmul controlorului), se reface"
 	if Valid(f) {
@@ -140,15 +146,12 @@ func (r *stepRunner) measure(ctx context.Context, cameras, minutes, attempt int)
 	return f, nil
 }
 
-// spaceMargin is the free space that a step leaves beside its recordings:
-// 2 GiB, as MI1's runs on the Pi (G14).
-const spaceMargin = 2 << 30
-
 // stepBytes estimates what a step of cameras writes in window: cameras × 4
-// Mbps × window × 1.03, §4.8's disk budget, plus spaceMargin.
+// Mbps × window × 1.03, §4.8's disk budget, plus the margin that MI1's runs
+// leave on the Pi (G14).
 func stepBytes(cameras int, window time.Duration) uint64 {
 	written := int64(cameras) * cameraBps / 8 * window.Milliseconds() / 1000 * 103 / 100
-	return uint64(written) + spaceMargin //nolint:gosec // a step's bytes, never negative
+	return uint64(written) + mi1.SpaceMargin //nolint:gosec // a step's bytes, never negative
 }
 
 // room refuses a step of cameras for minutes that the free space cannot
@@ -162,11 +165,32 @@ func (r *stepRunner) room(cameras, minutes int) error {
 		return fmt.Errorf("nu pot citi spațiul liber de pe disc: %w", err)
 	}
 	if need := stepBytes(cameras, r.o.window(minutes)); free < need {
-		gb := func(n uint64) string { return results.Decimal(float64(n)/1e9, 1) + " GB" }
-		return fmt.Errorf("pasul cu %s, %d min nu a pornit: %w; eliberați spațiu, apoi porniți din nou proba", camerasText(cameras), minutes,
-			&stepFailure{fmt.Sprintf("pe disc sunt %s liberi, iar pasul are nevoie de %s", gb(free), gb(need))})
+		return fmt.Errorf("pasul cu %s, %d min nu a pornit: %w; eliberați spațiu", camerasText(cameras), minutes,
+			&stepFailure{fmt.Sprintf("pe disc sunt %s liberi, iar pasul are nevoie de %s", mi1.Gigabytes(free), mi1.Gigabytes(need))})
 	}
 	return nil
+}
+
+// stepError is the error of the step whose folder is dir.
+type stepError struct {
+	dir string
+	err error
+}
+
+func (e *stepError) Error() string { return e.err.Error() }
+func (e *stepError) Unwrap() error { return e.err }
+
+// failed is err, the error that stopped the step in dir, as a stepError,
+// once its text is in the step's errorLog: the screen does not always show
+// it (finish), and it may hold English, a path or an address, which no
+// envelope holds (PH0-22).
+func failed(dir string, err error) error {
+	f, ferr := os.OpenFile(filepath.Join(dir, errorLog), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the step's own folder
+	if ferr == nil {
+		_, _ = fmt.Fprintln(f, err)
+		_ = f.Close()
+	}
+	return &stepError{dir: dir, err: err}
 }
 
 // stepRun is one step's processes and what undoes them, last first.

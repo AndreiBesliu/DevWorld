@@ -140,7 +140,7 @@ func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (host
 	}
 	d := e.MI3
 	j.Rows = append(j.Rows, results.Row{Code: prefix + "nivel și camere", Source: host,
-		Value: fmt.Sprintf("%s, %s, %d sesiuni live", d.Tier, camerasText(d.Cameras), Sessions(d.Tier))})
+		Value: fmt.Sprintf("%s, %s, %s", d.Tier, camerasText(d.Cameras), SessionsText(Sessions(d.Tier)))})
 	valid := validPacing(d.PacingP99Ms, d.SkippedAUs)
 	failed, missing := false, false
 	for _, key := range BudgetKeys(d.Tier) {
@@ -329,6 +329,15 @@ func camerasText(n int) string {
 		return "1 cameră"
 	}
 	return fmt.Sprintf("%d camere", n)
+}
+
+// SessionsText is n live sessions, singular for one: «1 sesiune live»,
+// «3 sesiuni live».
+func SessionsText(n int) string {
+	if n == 1 {
+		return "1 sesiune live"
+	}
+	return fmt.Sprintf("%d sesiuni live", n)
 }
 
 // valueText is a budget's value as its row shows it.

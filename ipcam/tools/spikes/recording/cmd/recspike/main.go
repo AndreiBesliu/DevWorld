@@ -69,14 +69,26 @@ const usage = `Folosire:
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, os.Args[1:], bufio.NewReader(os.Stdin), os.Stdout); err != nil {
-		if !errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(os.Stderr, "recspike: eroare:", err)
-		}
-		stop()
-		os.Exit(1)
+	code := report(run(ctx, os.Args[1:], bufio.NewReader(os.Stdin), os.Stdout), os.Stderr)
+	stop()
+	os.Exit(code)
+}
+
+// report prints the last line of a run that ended with err on stderr, and
+// returns recspike's exit code: 0 without an error, else 1. The owner's
+// stop (Ctrl+C), whose error is context.Canceled, ends in a Romanian line
+// of its own: the probe has already said what it kept.
+func report(err error, stderr io.Writer) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, flag.ErrHelp):
+	case errors.Is(err, context.Canceled):
+		_, _ = fmt.Fprintln(stderr, "Proba a fost oprită de dvs.")
+	default:
+		_, _ = fmt.Fprintln(stderr, "recspike: eroare:", err)
 	}
+	return 1
 }
 
 // run runs the command in args; in is the owner's keyboard.

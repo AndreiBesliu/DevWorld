@@ -87,7 +87,7 @@ func (c *ctl) mi3Start(conn *link.Conn, m link.Mi3Start) {
 	if old != nil {
 		old.close() // started again: the latest start counts
 	}
-	c.say("Pasul MI3 %s a început: %d sesiuni live de câte %d plăci.", m.RunID, m.Sessions, len(m.Tiles))
+	c.say("Pasul MI3 %s a început: %s de câte %d plăci.", m.RunID, mi3.SessionsText(m.Sessions), len(m.Tiles))
 	c.reply(conn, link.Mi3Offers{RunID: m.RunID, Offers: offers})
 }
 

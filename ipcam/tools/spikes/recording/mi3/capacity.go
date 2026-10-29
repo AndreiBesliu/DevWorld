@@ -144,10 +144,11 @@ func loadEnded(kind string) error {
 
 // stopText is, for the envelope, why step s could not be measured: err's
 // text when it is a stepFailure, the owner's stop (Ctrl+C), or else where
-// the error is (PH0-22): the step logs stay in work/mi3, and in
-// work/mi3-anterior once the probe starts again (keepStepLogs).
+// the error is (PH0-22): in the step logs (errorLog), which stay in
+// work/mi3, and in work/mi3-anterior once the probe starts again
+// (keepStepLogs).
 func stopText(s results.Mi3Step, err error) string {
-	why := "eroarea este pe ecranul gazdei și în jurnalele pasului (work/mi3; după o nouă pornire, work/" + previousDir + ")"
+	why := "eroarea este în jurnalele pasului (work/mi3; după o nouă pornire, work/" + previousDir + ")"
 	var failure *stepFailure
 	switch {
 	case errors.As(err, &failure):
@@ -253,13 +254,26 @@ func Run(ctx context.Context, o Options) error {
 	r := &stepRunner{o: o, l: l, fx: fx, tier: tier, dir: dir}
 	d, sixteenErr, err := runSteps(ctx, tier, cameras, sixteen, r.measure)
 	if d == nil {
-		if errors.Is(err, context.Canceled) {
-			o.say("Proba MI3 s-a întrerupt înainte de prima oră: nu are rezultat.")
-			return errInterrupted
-		}
-		return err
+		return o.unmeasured(err)
 	}
 	return o.finish(*d, sixteenErr, err)
+}
+
+// unmeasured is Run's error when the first hour has no valid attempt and
+// err stopped it: there is no result to write. It says, as finish does,
+// where the step logs that err names go at the next start.
+func (o Options) unmeasured(err error) error {
+	if errors.Is(err, context.Canceled) {
+		o.say("Proba MI3 s-a întrerupt înainte de prima oră: nu are rezultat.")
+		return errInterrupted
+	}
+	return fmt.Errorf("%w. Prima oră nu are rezultat: porniți din nou proba. %s", err, o.logsMove())
+}
+
+// logsMove says where the step logs of this run go at the next start.
+func (o Options) logsMove() string {
+	return fmt.Sprintf("La pornire, jurnalele pașilor de acum se mută în %s, unde rămân până la pornirea următoare",
+		filepath.Join(o.Work, previousDir))
 }
 
 // errInterrupted is Run's error after the owner's stop (Ctrl+C): recspike
@@ -271,9 +285,9 @@ var errInterrupted = fmt.Errorf("proba MI3 s-a întrerupt: %w", context.Canceled
 // extra hour at 16 cameras when sixteen holds (a PC with 6 cores or more),
 // and the attempts that a step paced unevenly adds.
 func openingText(tier string, cameras int, sixteen bool) string {
-	text := fmt.Sprintf("Proba MI3 începe: nivelul %s, %s, %d sesiuni live, redare, export și upload de %s Mbps, în paralel, timp de 1 h. "+
+	text := fmt.Sprintf("Proba MI3 începe: nivelul %s, %s, %s, redare, export și upload de %s Mbps, în paralel, timp de 1 h. "+
 		"Dacă ora pică, proba continuă cu pași de 15 min la jumătate din camere, iar numărul care trece se confirmă cu încă o oră. ",
-		tier, camerasText(cameras), Sessions(tier), results.Decimal(float64(UploadBps(tier, cameras))/1e6, -1))
+		tier, camerasText(cameras), SessionsText(Sessions(tier)), results.Decimal(float64(UploadBps(tier, cameras))/1e6, -1))
 	if sixteen {
 		text += "Fiindcă acest PC are 6 nuclee sau mai multe, la final urmează încă o oră la 16 camere, informativă. "
 	}
@@ -309,19 +323,36 @@ func (o Options) finish(d results.Mi3Data, sixteenErr, stepErr error) error {
 	}
 	if stepErr != nil {
 		o.say("Proba MI3 s-a oprit înainte de final; ce s-a măsurat este în rezultatul %s. Pașii: %s.", e.RunID, stepsSummary(d.Steps))
-		return fmt.Errorf("pașii de coborâre nu s-au încheiat: %w. Ora la %s rămâne măsurată; porniți din nou proba ca numărul recomandat să se stabilească. "+
-			"La pornire, jurnalele pașilor de acum se mută în %s, unde rămân până la pornirea următoare",
-			stepErr, camerasText(d.Cameras), filepath.Join(o.Work, previousDir))
+		return fmt.Errorf("pașii de coborâre nu s-au încheiat: %w. Ora la %s rămâne măsurată; porniți din nou proba ca numărul recomandat să se stabilească. %s",
+			stepErr, camerasText(d.Cameras), o.logsMove())
 	}
 	o.say("Proba MI3 s-a încheiat: rezultatul este %s. Pașii: %s.", e.RunID, stepsSummary(d.Steps))
 	if last := d.Steps[len(d.Steps)-1]; !last.Valid {
 		o.say("Controlorul a trimis neuniform de %d ori la rând, deci pasul nu are rezultat: verificați controlorul și rețeaua, apoi porniți din nou proba.", maxAttempts)
 	}
 	if sixteenErr != nil {
-		o.say("Ora la 16 camere nu s-a putut măsura (%v): în raport, 16 camere rămâne o estimare. Rezultatul de la %s nu depinde de ea.",
-			sixteenErr, camerasText(d.Cameras))
+		o.say("Ora la 16 camere nu s-a putut măsura%s. În raport, 16 camere rămâne o estimare. Rezultatul de la %s nu depinde de ea.",
+			o.sixteenWhy(sixteenErr), camerasText(d.Cameras))
 	}
 	return nil
+}
+
+// sixteenWhy is why the hour at 16 cameras has no result, as the screen
+// says it: a stepFailure's text, which names nothing of the host, and where
+// the step's logs are. The error's own text is in those logs only
+// (errorLog): it may be English.
+func (o Options) sixteenWhy(err error) string {
+	why := ""
+	var failure *stepFailure
+	if errors.As(err, &failure) {
+		why = ": " + failure.text
+	}
+	dir := filepath.Join(o.Work, "mi3")
+	var se *stepError
+	if errors.As(err, &se) {
+		dir = se.dir
+	}
+	return fmt.Sprintf("%s; eroarea este în jurnalele pasului, în %s. %s", why, dir, o.logsMove())
 }
 
 // stepsSummary is the steps as the owner's screen shows them.

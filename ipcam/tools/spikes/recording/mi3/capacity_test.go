@@ -275,7 +275,7 @@ func TestMI3_SixteenErrorIsInformation(t *testing.T) {
 		{"ipcam-hub exits", fmt.Errorf("pasul 2 (16 camere): %w; jurnalele sunt în %s", hubExited(2), hostPath),
 			"16 camere 1 h: nu s-a putut măsura; ipcam-hub s-a oprit în timpul pasului (codul 2)"},
 		{"the link fails", fmt.Errorf("pasul 2 (16 camere): dial tcp %s: i/o timeout; jurnalele sunt în %s", hostAddr, hostPath),
-			"16 camere 1 h: nu s-a putut măsura; eroarea este pe ecranul gazdei și în jurnalele pasului (work/mi3; după o nouă pornire, work/mi3-anterior)"},
+			"16 camere 1 h: nu s-a putut măsura; eroarea este în jurnalele pasului (work/mi3; după o nouă pornire, work/mi3-anterior)"},
 		{"the owner stops it", fmt.Errorf("pasul 2 (16 camere): %w; jurnalele sunt în %s", context.Canceled, hostPath),
 			"16 camere 1 h: nu s-a putut măsura; " + ownersStop},
 	} {
@@ -313,7 +313,7 @@ func TestMI3_SixteenErrorIsInformation(t *testing.T) {
 // hour's failure decides G12, and the number goes down, its value open. No
 // hour at 16 follows.
 func TestMI3_StepErrorKeepsTheMeasuredFailure(t *testing.T) {
-	const elsewhere = "eroarea este pe ecranul gazdei și în jurnalele pasului (work/mi3; după o nouă pornire, work/mi3-anterior)"
+	const elsewhere = "eroarea este în jurnalele pasului (work/mi3; după o nouă pornire, work/mi3-anterior)"
 	linkErr := fmt.Errorf("dial tcp %s: i/o timeout; jurnalele sunt în %s", hostAddr, hostPath)
 	cases := []struct {
 		name    string

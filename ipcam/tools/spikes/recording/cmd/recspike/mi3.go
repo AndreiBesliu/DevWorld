@@ -29,11 +29,14 @@ func mi3Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	if err := parseFlags(flags, args, out); err != nil {
 		return err
 	}
-	switch {
-	case *controller == "":
+	if *controller == "" {
 		_, _ = fmt.Fprint(out, usage)
 		return errors.New("lipsește --controller: adresa dispozitivului unde rulează reccontroller")
-	case onThisDevice(*controller):
+	}
+	switch here, err := onThisDevice(ctx, *controller); {
+	case err != nil:
+		return fmt.Errorf("--controller %s: %w, deci nu pot verifica că reccontroller rulează pe celălalt dispozitiv", *controller, err)
+	case here:
 		_, _ = fmt.Fprint(out, usage)
 		return fmt.Errorf("--controller %s este chiar acest dispozitiv: proba MI3 ia camerele de la reccontroller de pe celălalt dispozitiv, ca procesorul măsurat să nu le simuleze", *controller)
 	}
@@ -61,28 +64,47 @@ func mi3Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 // interfaceAddrs lists this device's addresses; tests replace it.
 var interfaceAddrs = net.InterfaceAddrs
 
+// lookupIP resolves a host name; tests replace it.
+var lookupIP = func(ctx context.Context, host string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(ctx, "ip", host)
+}
+
 // onThisDevice reports whether addr, a host with or without a port, is this
-// device: localhost, a loopback address, or one of its interfaces', such as
-// its LAN IP, at which a reccontroller started here without -local would
-// listen too.
-func onThisDevice(addr string) bool {
+// device: localhost, or an address, given or that a host name resolves to,
+// that is a loopback address or one of its interfaces', such as its LAN
+// IP, at which a reccontroller started here without -local would listen
+// too. It fails when it cannot tell: a name that does not resolve, or this
+// device's addresses that cannot be listed.
+func onThisDevice(ctx context.Context, addr string) (bool, error) {
 	host, ip := controllerHost(addr)
-	switch {
-	case ip == nil:
-		return strings.EqualFold(host, "localhost")
-	case ip.IsLoopback():
-		return true
-	}
-	addrs, err := interfaceAddrs()
-	if err != nil {
-		return false
-	}
-	for _, a := range addrs {
-		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
-			return true
+	ips := []net.IP{ip}
+	if ip == nil {
+		if strings.EqualFold(host, "localhost") {
+			return true, nil
+		}
+		var err error
+		if ips, err = lookupIP(ctx, host); err != nil {
+			return false, fmt.Errorf("nu pot afla adresa lui %s (%w)", host, err)
 		}
 	}
-	return false
+	var addrs []net.Addr
+	for _, ip := range ips {
+		if ip.IsLoopback() {
+			return true, nil
+		}
+		if addrs == nil {
+			var err error
+			if addrs, err = interfaceAddrs(); err != nil {
+				return false, fmt.Errorf("nu pot citi adresele acestui dispozitiv (%w)", err)
+			}
+		}
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // mi3LoadCommand is `recspike mi3-load live|playback|export|upload`, which

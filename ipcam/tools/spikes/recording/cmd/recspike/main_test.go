@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
@@ -126,5 +128,78 @@ func TestMI3_RefusesAControllerOnThisDevice(t *testing.T) {
 	var out strings.Builder
 	if err := run(t.Context(), []string{"mi3", "--controller", "192.0.2.8"}, nil, &out); err != nil && strings.Contains(err.Error(), "chiar acest dispozitiv") {
 		t.Errorf("recspike mi3 --controller 192.0.2.8 = %v: another device's address was refused", err)
+	}
+}
+
+// TestMI3_ControllerByNameOrUnlistedInterfaces (Task 9b review): recspike
+// mi3 resolves a --controller that is a host name and refuses it when it
+// names this device; it refuses, in Romanian, a name that does not resolve
+// and a device whose own addresses it cannot list, since it then cannot
+// tell that the controller is on the other device.
+func TestMI3_ControllerByNameOrUnlistedInterfaces(t *testing.T) {
+	previousAddrs, previousLookup := interfaceAddrs, lookupIP
+	t.Cleanup(func() { interfaceAddrs, lookupIP = previousAddrs, previousLookup })
+	listed := func() ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.0.2.7"), Mask: net.CIDRMask(24, 32)}}, nil
+	}
+	lookupIP = func(_ context.Context, host string) ([]net.IP, error) {
+		switch host {
+		case "pc.lan":
+			return []net.IP{net.ParseIP("2001:db8::9"), net.ParseIP("192.0.2.7")}, nil
+		case "loop.lan":
+			return []net.IP{net.ParseIP("127.0.1.1")}, nil
+		case "pi.lan":
+			return []net.IP{net.ParseIP("192.0.2.8")}, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	for _, c := range []struct {
+		addr  string
+		addrs func() ([]net.Addr, error)
+		want  string // "" when the address goes on to the host's checks
+	}{
+		{"pc.lan", listed, "chiar acest dispozitiv"},
+		{"pc.lan:7081", listed, "chiar acest dispozitiv"},
+		{"loop.lan", listed, "chiar acest dispozitiv"},
+		{"nowhere.lan", listed, "nu pot afla adresa lui nowhere.lan"},
+		{"pi.lan", listed, ""},
+		{"192.0.2.8", func() ([]net.Addr, error) { return nil, errors.New("netlink: permission denied") }, "nu pot citi adresele acestui dispozitiv"},
+	} {
+		interfaceAddrs = c.addrs
+		var out strings.Builder
+		err := run(t.Context(), []string{"mi3", "--controller", c.addr}, nil, &out)
+		switch {
+		case c.want == "" && err != nil && (strings.Contains(err.Error(), "chiar acest dispozitiv") || strings.Contains(err.Error(), "nu pot")):
+			t.Errorf("recspike mi3 --controller %s = %v: another device's address was refused", c.addr, err)
+		case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+			t.Errorf("recspike mi3 --controller %s = %v, want it refused with %q", c.addr, err, c.want)
+		}
+	}
+}
+
+// TestMain_OwnersStopEndsInARomanianLine (Task 9b review): after Ctrl+C,
+// recspike's last line is wholly Romanian, for MI2 and MI3 alike, never
+// Go's «context canceled», and it exits 1 as before; other errors keep
+// their line.
+func TestMain_OwnersStopEndsInARomanianLine(t *testing.T) {
+	for _, err := range []error{
+		fmt.Errorf("proba MI2 s-a întrerupt: %w", context.Canceled),
+		fmt.Errorf("proba MI3 s-a întrerupt: %w", context.Canceled),
+	} {
+		var stderr strings.Builder
+		if code := report(err, &stderr); code != 1 || stderr.String() != "Proba a fost oprită de dvs.\n" {
+			t.Errorf("report(%v) = %d, printed %q; want 1 and «Proba a fost oprită de dvs.»", err, code, stderr.String())
+		}
+	}
+	var stderr strings.Builder
+	if code := report(errors.New("lipsește comanda"), &stderr); code != 1 || stderr.String() != "recspike: eroare: lipsește comanda\n" {
+		t.Errorf("report of an error = %d, printed %q", code, stderr.String())
+	}
+	stderr.Reset()
+	if code := report(flag.ErrHelp, &stderr); code != 1 || stderr.String() != "" {
+		t.Errorf("report of the help = %d, printed %q", code, stderr.String())
+	}
+	if code := report(nil, &stderr); code != 0 {
+		t.Errorf("report(nil) = %d, want 0", code)
 	}
 }

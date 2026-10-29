@@ -35,7 +35,9 @@ func newLogQueue(w io.Writer, n int) *logQueue {
 }
 
 // add queues line, after the count of the lines dropped before it when
-// there are any and both fit, or drops it. It never waits for w.
+// there are any, or drops it: while lines are dropped, line goes only with
+// the count before it, so the count is never written after a later line.
+// It never waits for w.
 func (q *logQueue) add(line string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -43,12 +45,14 @@ func (q *logQueue) add(line string) {
 		return
 	}
 	// add is the only sender and holds q.mu: room seen here stays.
-	if q.dropped > 0 && len(q.lines) < cap(q.lines)-1 {
+	free := cap(q.lines) - len(q.lines)
+	switch {
+	case q.dropped > 0 && free >= 2:
 		q.lines <- droppedLine(q.dropped)
 		q.dropped = 0
-	}
-	select {
-	case q.lines <- line:
+		q.lines <- line
+	case q.dropped == 0 && free >= 1:
+		q.lines <- line
 	default:
 		q.dropped++
 	}
