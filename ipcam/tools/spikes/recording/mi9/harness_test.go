@@ -137,6 +137,7 @@ func TestMeasureBulk_LoopbackPlumbing(t *testing.T) {
 		t.Error("a seek past the last IDR succeeded")
 	}
 
+	waitBulkIdle(t, h)
 	for range MaxBulkChannels {
 		if err := h.bulk.acquire(); err != nil {
 			t.Fatal(err)
@@ -154,6 +155,27 @@ func TestMeasureBulk_LoopbackPlumbing(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkMeasured(t, r, LAN)
+}
+
+// waitBulkIdle waits until the hub side holds no bulk channel. A call
+// returns once its last byte has arrived; the client then closes the
+// call's channel, and the hub side gives its slot back only when that
+// close reaches it, or after closeGrace.
+func waitBulkIdle(t *testing.T, h *Hub) {
+	t.Helper()
+	deadline := time.Now().Add(closeGrace + 5*time.Second)
+	for {
+		h.bulk.mu.Lock()
+		open := h.bulk.open
+		h.bulk.mu.Unlock()
+		if open == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the hub side still holds %d bulk channels %v after the last call", open, closeGrace+5*time.Second)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // checkMeasured checks the figures of a measurement: a throughput, 20

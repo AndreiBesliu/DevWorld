@@ -124,7 +124,7 @@ func serveOn(ctx context.Context, cfg serveConfig, lns *controller.Listeners, ou
 			}
 			return err
 		}
-		wg.Go(func() { c.serve(ctx, link.NewConn(conn), conn.LocalAddr()) })
+		wg.Go(func() { c.serve(ctx, link.NewConn(conn), conn.LocalAddr(), conn.RemoteAddr()) })
 	}
 }
 

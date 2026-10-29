@@ -13,35 +13,13 @@ import (
 	"strconv"
 	"time"
 
-	"filippo.io/age"
-
-	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubproc"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubrec"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 )
 
-// The camera that MI4 records: the controller's 4 Mbps main stream.
-const (
-	camera  = "cam01"
-	profile = "main"
-)
-
-// Where a recording lies in its folder, <run>/<segment>: its data folder,
-// for ipcam-hub, and the file of RI_g's identity, which decrypts it.
-const (
-	recordingDir = "data"
-	identityFile = "ri_g.key"
-)
-
-// The waits of a recording.
-const (
-	// recordingWait bounds the wait for the camera's first part.
-	recordingWait = 2 * time.Minute
-	// closeSlack is how long after its length a segment may take to close
-	// at the next keyframe: 5 min 10 s for MI4's.
-	closeSlack = 10 * time.Second
-	// endWait bounds the goodbye, with the PC's pull of a Pi's results.
-	endWait = 2 * time.Minute
-)
+// endWait bounds the goodbye at the end of a run, with the PC's pull of a
+// Pi's results.
+const endWait = 2 * time.Minute
 
 // The schemas of ipcam-hub's diag benches.
 const (
@@ -64,93 +42,41 @@ type hubRig struct {
 	url  string
 }
 
-// record records the camera, encrypted, into a segment of segmentSecs and
-// returns that segment once it has closed: name's folder holds the
-// recording, run.json, RI_g's identity (RK's is never kept, PH0-22) and
-// ipcam-hub's log.
-func (h *hubRig) record(ctx context.Context, name string, segmentSecs int) (segment, error) {
+// record records the camera, encrypted, into a segment of segmentSecs
+// through ipcam-hub (hubrec.Record) and returns that segment once it has
+// closed: <run>/<name> holds the recording, run.json, RI_g's identity
+// (RK's is never kept, PH0-22) and ipcam-hub's log.
+func (h *hubRig) record(ctx context.Context, name string, segmentSecs int) (hubrec.Segment, error) {
 	if h.link == nil {
 		l, err := mi1.OpenHostLink(ctx, h.o.Controller, h.host.Pseudonym)
 		if err != nil {
-			return segment{}, err
+			return hubrec.Segment{}, err
 		}
 		h.link = l
-		if h.url, err = l.CameraURL(camera + "_" + profile); err != nil {
-			return segment{}, err
+		if h.url, err = l.CameraURL(hubrec.Camera + "_" + hubrec.Profile); err != nil {
+			return hubrec.Segment{}, err
 		}
 	}
-	dir := filepath.Join(h.dir, name)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return segment{}, err
-	}
-	riG, err := age.GenerateX25519Identity()
-	if err != nil {
-		return segment{}, err
-	}
-	rk, err := age.GenerateX25519Identity()
-	if err != nil {
-		return segment{}, err
-	}
-	identity := filepath.Join(dir, identityFile)
-	if err := os.WriteFile(identity, []byte(riG.String()+"\n"), 0o600); err != nil {
-		return segment{}, err
-	}
-	config := filepath.Join(dir, "run.json")
-	err = hubproc.WriteConfig(config, hubproc.Config{DataDir: filepath.Join(dir, recordingDir), MediaMTX: h.o.MediaMTX, IdentityFile: identity,
-		SDCardConfirmed: h.host.SdConfirmation != nil, Jobs: []hubproc.Job{{Cam: camera, Profile: profile, RestreamURL: h.url,
-			SegmentSecs: segmentSecs, Recipients: []string{riG.Recipient().String(), rk.Recipient().String()}}}})
-	if err != nil {
-		return segment{}, err
-	}
-	logPath := filepath.Join(dir, "ipcam-hub.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the run's own folder
-	if err != nil {
-		return segment{}, err
-	}
-	defer func() { _ = logFile.Close() }()
-	hub, err := hubproc.Start(hubproc.Options{Binary: h.o.Hub, Config: config, Stderr: logFile})
-	if err != nil {
-		return segment{}, fmt.Errorf("nu pot porni ipcam-hub: %w", err)
-	}
-	defer func() {
-		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mi1.StopTimeout)
-		defer cancel()
-		if err := hub.Stop(stopCtx); err != nil {
-			h.o.say("ipcam-hub nu s-a oprit curat: %v", err)
-		}
-	}()
-	waitCtx, cancel := context.WithTimeout(ctx, recordingWait)
-	_, err = hub.WaitRecording(waitCtx)
-	cancel()
-	if err != nil {
-		return segment{}, fmt.Errorf("ipcam-hub nu a început să înregistreze camera: %w; jurnalul este %s", err, logPath)
-	}
-	closeWait := time.Duration(segmentSecs)*time.Second + closeSlack
-	waitCtx, cancel = context.WithTimeout(ctx, closeWait)
-	e, err := hub.WaitEvent(waitCtx, "segment_closed", func(e hubproc.Event) bool { return e.Cam == camera && e.Profile == profile })
-	cancel()
-	if err != nil {
-		return segment{}, fmt.Errorf("segmentul nu s-a închis în %v: %w; jurnalul este %s", closeWait, err, logPath)
-	}
-	return segment{path: e.Path, identity: identity}, nil
+	return hubrec.Record(ctx, hubrec.Options{Hub: h.o.Hub, MediaMTX: h.o.MediaMTX, CameraURL: h.url, Run: h.dir, Name: name,
+		SegmentSecs: segmentSecs, SDCardConfirmed: h.host.SdConfirmation != nil, Say: h.o.say})
 }
 
-func (h *hubRig) readbench(ctx context.Context, seg segment, size string, reads int) (readSet, error) {
+func (h *hubRig) readbench(ctx context.Context, seg hubrec.Segment, size string, reads int) (readSet, error) {
 	var s readSet
-	err := h.diag(ctx, &s, "readbench", "--file", seg.path, "--identity", seg.identity, "--reads", strconv.Itoa(reads), "--size", size)
+	err := h.diag(ctx, &s, "readbench", "--file", seg.Path, "--identity", seg.Identity, "--reads", strconv.Itoa(reads), "--size", size)
 	if err == nil && (s.Schema != readbenchSchema || s.Reads != reads || len(s.ReadMs) != reads) {
 		err = fmt.Errorf("ipcam-hub diag readbench a dat %s cu %d citiri, nu %s cu %d", s.Schema, len(s.ReadMs), readbenchSchema, reads)
 	}
 	return s, err
 }
 
-func (h *hubRig) seekbench(ctx context.Context, seg segment, seeks int, wholeRAM bool) ([]float64, error) {
+func (h *hubRig) seekbench(ctx context.Context, seg hubrec.Segment, seeks int, wholeRAM bool) ([]float64, error) {
 	var s struct {
 		Schema   string    `json:"schema"`
 		WholeRAM bool      `json:"wholeRam"`
 		SeekMs   []float64 `json:"seekMs"`
 	}
-	args := []string{"seekbench", "--file", seg.path, "--identity", seg.identity, "--seeks", strconv.Itoa(seeks)}
+	args := []string{"seekbench", "--file", seg.Path, "--identity", seg.Identity, "--seeks", strconv.Itoa(seeks)}
 	if wholeRAM {
 		args = append(args, "--whole-ram")
 	}

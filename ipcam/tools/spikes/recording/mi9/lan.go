@@ -8,20 +8,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubrec"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi4"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
 // LANSet is the set of MI9's LAN runs, one envelope per device as host.
 const LANSet = "lan"
+
+// SegmentSecs is the length of the segment that MI9 plays: 5 min, as MI4's
+// (G26).
+const SegmentSecs = 300
 
 // The waits of a LAN run on the controller's side: its offer, and its
 // measurement, a 5-min segment's plaintext and 20 seeks.
@@ -47,16 +51,22 @@ type LANOptions struct {
 	Host func(ctx context.Context) (mi1.HostState, error)
 }
 
+// removeAll removes a recording or an identity file; tests replace it.
+var removeAll = os.RemoveAll
+
 // RunLAN is `recspike mi9 --lan` (G26 leg 3), on each of the owner's
-// devices as host: it takes MI4's 5-min segment when the Pi still has one,
-// else records one through ipcam-hub from the other device's cam01_main
-// (SegmentSecs, encrypted); then this host serves it with the hub side's
-// Pion peer, which binds UDP sockets here (R08's exception), and the other
-// device's reccontroller plays it and measures the bulk channel over the
-// LAN. It writes the envelope MI9/lan/<host>-mi9-<n>.json, sends it to the
-// controller (G15), says goodbye (a Pi's results go to the PC then), and
-// removes its recording and RI_g's identity (PH0-22). Every line it prints
-// is Romanian.
+// devices as host. It starts the run on the other device's reccontroller
+// first, whose playback peer offers: a controller that cannot measure this
+// host over the LAN (one started with -local, or one on this same device)
+// refuses before anything is recorded. It takes MI4's 5-min segment when the
+// Pi still has one, else records one through ipcam-hub from the other
+// device's cam01_main (SegmentSecs, encrypted); then this host serves it
+// with the hub side's Pion peer, which binds UDP sockets here (R08's
+// exception), and the controller plays it and measures the bulk channel
+// over the LAN. It writes the envelope MI9/lan/<host>-mi9-<n>.json, sends
+// it to the controller (G15), says goodbye (a Pi's results go to the PC
+// then), and removes its recording and RI_g's identity (PH0-22). Every line
+// it prints is Romanian.
 func RunLAN(ctx context.Context, o LANOptions) (err error) {
 	host, err := o.Host(ctx)
 	if err != nil {
@@ -65,22 +75,12 @@ func RunLAN(ctx context.Context, o LANOptions) (err error) {
 	if m := host.PiModel; m != nil && m.Known && !m.Supported {
 		return errors.New("acest Raspberry Pi nu este suportat (armv6): rulați proba MI9 doar pe PC, cu reccontroller-linux-armv6 pe Pi")
 	}
-	root := filepath.Join(o.Work, "mi9")
-	if err := removeRecordings(root); err != nil {
-		return fmt.Errorf("nu pot șterge înregistrările probelor MI9 de dinainte: %w", err)
+	runs := hubrec.Work{Root: filepath.Join(o.Work, "mi9"), Probe: "MI9", RemoveAll: removeAll}
+	dir, err := runs.Start(time.Now())
+	if err != nil {
+		return err
 	}
-	dir := filepath.Join(root, time.Now().UTC().Format("20060102-150405"))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("nu pot crea dosarul de lucru: %w", err)
-	}
-	defer func() {
-		if rmErr := removeRecordings(root); rmErr != nil {
-			o.say("Nu am putut șterge înregistrarea probei și cheia ei: ștergeți de mână dosarul %s.", root)
-			if err == nil {
-				err = fmt.Errorf("nu am putut șterge înregistrarea și cheia ei din %s: %w", root, rmErr)
-			}
-		}
-	}()
+	defer runs.End(&err, o.say)
 	release, err := mi1.KeepAwake()
 	if err != nil {
 		return fmt.Errorf("nu pot ține dispozitivul treaz: %w", err)
@@ -96,11 +96,16 @@ func RunLAN(ctx context.Context, o LANOptions) (err error) {
 			_ = l.End(context.WithoutCancel(ctx), o.Results, nil)
 		}
 	}()
+	runID := filepath.Base(dir)
+	offer, err := o.start(ctx, l, runID)
+	if err != nil {
+		return err
+	}
 	rec, err := o.segment(ctx, host, l, dir)
 	if err != nil {
 		return err
 	}
-	r, err := o.play(ctx, l, rec, filepath.Base(dir))
+	r, err := o.play(ctx, l, rec, runID, offer)
 	if err != nil {
 		return fmt.Errorf("proba MI9 s-a oprit fără rezultat: %w", err)
 	}
@@ -124,56 +129,50 @@ func RunLAN(ctx context.Context, o LANOptions) (err error) {
 	return nil
 }
 
+// start starts the run runID on the controller and returns its playback
+// peer's offer, or the controller's refusal as the run's error.
+func (o LANOptions) start(ctx context.Context, l *mi1.HostLink, runID string) (string, error) {
+	if err := l.Send(link.Mi9Start{RunID: runID}); err != nil {
+		return "", err
+	}
+	m, err := l.Await(ctx, offerWait, ofRun(runID))
+	if err != nil {
+		return "", err
+	}
+	switch m := m.(type) {
+	case link.Mi9Offer:
+		return m.Offer, nil
+	case link.Refused:
+		return "", fmt.Errorf("controlorul a refuzat proba: %s", m.Reason)
+	}
+	return "", fmt.Errorf("controlorul a trimis %s în loc de offer", m.Type())
+}
+
 // segment is the recording that the run plays: on the Pi, MI4's 5-min
-// segment when one is left; else one recorded now from the controller's
-// camera into dir.
-func (o LANOptions) segment(ctx context.Context, host mi1.HostState, l *mi1.HostLink, dir string) (Recording, error) {
+// segment when one is left (mi4.Runs); else one recorded now from the
+// controller's camera into the run's folder dir.
+func (o LANOptions) segment(ctx context.Context, host mi1.HostState, l *mi1.HostLink, dir string) (hubrec.Segment, error) {
 	if host.Pseudonym == "pi" {
-		if rec, ok := mi4Segment(o.Work); ok {
+		if rec, ok := mi4.Runs(o.Work).Latest(hubrec.FiveMin); ok {
 			o.say("Proba MI9 începe cu segmentul de 5 min al probei MI4 (%s).", rec.Path)
 			return rec, nil
 		}
 	}
-	url, err := l.CameraURL(Camera + "_" + Profile)
+	url, err := l.CameraURL(hubrec.Camera + "_" + hubrec.Profile)
 	if err != nil {
-		return Recording{}, err
+		return hubrec.Segment{}, err
 	}
 	o.say("Proba MI9 începe: înregistrez un segment criptat de %d min de la camera cam01 a controlorului, apoi controlorul îl redă "+
 		"prin canalul de date. Durează în jur de %d min; lăsați ambele dispozitive pornite și nefolosite până la final. Jurnalele sunt în %s.",
 		SegmentSecs/60, SegmentSecs/60+5, dir)
-	return Record(ctx, RecordOptions{Hub: o.Hub, MediaMTX: o.MediaMTX, CameraURL: url, Dir: filepath.Join(dir, "5min"),
-		SegmentSecs: SegmentSecs, SDCardConfirmed: host.SdConfirmation != nil, Out: o.Out})
-}
-
-// mi4Segment is the 5-min segment that MI4 left under work, with its
-// identity, the newest run's: MI4 removes it at its end, so one is left
-// only when that removal failed. Its layout is mi4's (hubrig.go): work/mi4/
-// <run>/5min/{data/…/*.mp4.age, ri_g.key}.
-func mi4Segment(work string) (Recording, bool) {
-	keys, err := filepath.Glob(filepath.Join(work, "mi4", "*", "5min", identityFile))
-	if err != nil || len(keys) == 0 {
-		return Recording{}, false
-	}
-	slices.Sort(keys) // the runs' folders are named by their start
-	key := keys[len(keys)-1]
-	var segments []string
-	_ = filepath.WalkDir(filepath.Join(filepath.Dir(key), recordingDir), func(path string, _ fs.DirEntry, err error) error {
-		if err == nil && strings.HasSuffix(path, ".mp4.age") {
-			segments = append(segments, path)
-		}
-		return nil
-	})
-	if len(segments) == 0 {
-		return Recording{}, false
-	}
-	slices.Sort(segments) // MediaMTX names a segment by its start: the first closed one
-	return Recording{Path: segments[0], Identity: key}, true
+	return hubrec.Record(ctx, hubrec.Options{Hub: o.Hub, MediaMTX: o.MediaMTX, CameraURL: url, Run: dir, Name: hubrec.FiveMin,
+		SegmentSecs: SegmentSecs, SDCardConfirmed: host.SdConfirmation != nil, Say: o.say})
 }
 
 // play serves rec to the controller's playback peer, which measures it:
-// the controller offers, the hub side here answers.
-func (o LANOptions) play(ctx context.Context, l *mi1.HostLink, rec Recording, runID string) (BulkResult, error) {
-	id, err := ReadIdentity(rec.Identity)
+// the hub side here answers the peer's offer.
+func (o LANOptions) play(ctx context.Context, l *mi1.HostLink, rec hubrec.Segment, runID, offer string) (BulkResult, error) {
+	id, err := hubrec.ReadIdentity(rec.Identity)
 	if err != nil {
 		return BulkResult{}, err
 	}
@@ -192,24 +191,15 @@ func (o LANOptions) play(ctx context.Context, l *mi1.HostLink, rec Recording, ru
 	}
 	defer func() { _ = hub.Close() }()
 	o.say("Controlorul redă acum segmentul prin canalul de date: tot segmentul, apoi %d de salturi.", Seeks)
-	if err := l.Send(link.Mi9Start{RunID: runID}); err != nil {
-		return BulkResult{}, err
-	}
-	m, err := l.Await(ctx, offerWait, ofRun(runID))
-	if err != nil {
-		return BulkResult{}, err
-	}
-	if refused, ok := m.(link.Refused); ok {
-		return BulkResult{}, fmt.Errorf("controlorul a refuzat proba: %s", refused.Reason)
-	}
-	answer, err := hub.Answer(ctx, m.(link.Mi9Offer).Offer)
+	answer, err := hub.Answer(ctx, offer)
 	if err != nil {
 		return BulkResult{}, err
 	}
 	if err := l.Send(link.Mi9Answer{RunID: runID, Answer: answer}); err != nil {
 		return BulkResult{}, err
 	}
-	if m, err = l.Await(ctx, measureWait, ofRun(runID)); err != nil {
+	m, err := l.Await(ctx, measureWait, ofRun(runID))
+	if err != nil {
 		return BulkResult{}, err
 	}
 	switch m := m.(type) {
@@ -218,7 +208,7 @@ func (o LANOptions) play(ctx context.Context, l *mi1.HostLink, rec Recording, ru
 	case link.Refused:
 		return BulkResult{}, fmt.Errorf("controlorul nu a putut reda segmentul: %s", m.Reason)
 	}
-	return BulkResult{}, fmt.Errorf("controlorul a trimis %s în loc de offer sau rezultat", m.Type())
+	return BulkResult{}, fmt.Errorf("controlorul a trimis %s în loc de rezultat", m.Type())
 }
 
 // ofRun accepts the controller's offer, result or refusal of the run runID.

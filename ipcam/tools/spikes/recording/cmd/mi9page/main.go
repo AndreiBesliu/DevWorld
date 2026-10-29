@@ -3,10 +3,11 @@
 // Command mi9page is MI9's Chrome leg in the recorder spike's mi9 job (G26
 // leg 2), a CI tool that never ships. `record` records the job's segment:
 // main.h264 served as cam01_main on 127.0.0.1, recorded encrypted through
-// ipcam-hub into one closed segment, whose path and RI_g identity file it
-// prints as one JSON line. `serve` serves the page that plays that segment
-// in Chrome (web/index.html) and the hub side that the page connects to
-// (mi9.Hub, its plaintext over bulk/<id> channels), on 127.0.0.1 only.
+// ipcam-hub (hubrec.Record) into one closed segment, whose path and RI_g
+// identity file it prints as one JSON line. `serve` serves the page that
+// plays that segment in Chrome (web/index.html) and the hub side that the
+// page connects to (mi9.Hub, its plaintext over bulk/<id> channels), on
+// 127.0.0.1 only.
 //
 //	mi9page record -media DIR -hub IPCAM-HUB [-mediamtx MEDIAMTX] -out DIR [-secs 300]
 //	mi9page serve -segment FILE -identity FILE [-listen 127.0.0.1:7090]
@@ -26,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -33,6 +35,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubrec"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi9"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
 )
@@ -85,7 +88,7 @@ func record(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	}
 	var streams []controller.Stream
 	for _, s := range controller.Streams(*media) {
-		if s.Path == mi9.Camera+"_"+mi9.Profile {
+		if s.Path == hubrec.Camera+"_"+hubrec.Profile {
 			streams = append(streams, s)
 		}
 	}
@@ -105,7 +108,9 @@ func record(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	}
 	defer srv.Close()
 	camera := url.URL{Scheme: "rtsp", User: url.UserPassword(creds.User, creds.Pass), Host: ln.Addr().String(), Path: "/" + streams[0].Path}
-	rec, err := mi9.Record(ctx, mi9.RecordOptions{Hub: *hub, MediaMTX: *mediamtx, CameraURL: camera.String(), Dir: *out, SegmentSecs: *secs, Out: stderr})
+	say := func(format string, args ...any) { _, _ = fmt.Fprintf(stderr, format+"\n", args...) }
+	rec, err := hubrec.Record(ctx, hubrec.Options{Hub: *hub, MediaMTX: *mediamtx, CameraURL: camera.String(),
+		Run: filepath.Dir(*out), Name: filepath.Base(*out), SegmentSecs: *secs, Say: say})
 	if err != nil {
 		return err
 	}
@@ -125,7 +130,7 @@ func serve(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if *segment == "" || *identity == "" || flags.NArg() != 0 {
 		return errors.New(usage)
 	}
-	id, err := mi9.ReadIdentity(*identity)
+	id, err := hubrec.ReadIdentity(*identity)
 	if err != nil {
 		return err
 	}

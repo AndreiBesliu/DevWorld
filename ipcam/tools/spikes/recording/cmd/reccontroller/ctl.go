@@ -127,8 +127,9 @@ func (c *ctl) say(format string, args ...any) {
 	_, _ = fmt.Fprintf(c.out, format+"\n", args...)
 }
 
-// serve handles one connection of a host until it ends.
-func (c *ctl) serve(ctx context.Context, conn *link.Conn, local net.Addr) {
+// serve handles one connection of a host until it ends: local is the
+// address that the host reached, remote the host's own.
+func (c *ctl) serve(ctx context.Context, conn *link.Conn, local, remote net.Addr) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
@@ -175,7 +176,7 @@ func (c *ctl) serve(ctx context.Context, conn *link.Conn, local net.Addr) {
 		case link.Mi3End:
 			c.mi3End(conn, m)
 		case link.Mi9Start:
-			c.mi9Start(conn, m)
+			c.mi9Start(conn, m, local, remote)
 		case link.Mi9Answer:
 			go c.mi9Answer(ctx, conn, m)
 		case link.Bye:

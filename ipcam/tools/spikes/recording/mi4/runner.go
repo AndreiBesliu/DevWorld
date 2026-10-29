@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubrec"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
@@ -63,9 +64,12 @@ type Pace struct {
 // 60 s of encryption on one core (G23).
 var RealPace = Pace{SegmentSecs: 300, TwoMinSecs: 120, Reads: 1000, Seeks: 20, CryptoSeconds: 60, InfoSizes: []int{64 << 10, 4 << 20}}
 
-// segment is a closed encrypted segment and the file of RI_g's identity,
-// which decrypts it.
-type segment struct{ path, identity string }
+// Runs is MI4's folder of runs under recspike's work folder work: each
+// run's recordings, their identities and its logs (hubrec.Work). MI9 plays
+// the 5-min segment (hubrec.FiveMin) that MI4 left there on the Pi.
+func Runs(work string) hubrec.Work {
+	return hubrec.Work{Root: filepath.Join(work, "mi4"), Probe: "MI4", RemoveAll: removeAll}
+}
 
 // readSet is a set of reads as `ipcam-hub diag readbench` prints it.
 type readSet struct {
@@ -91,9 +95,9 @@ type cryptoRates struct {
 // controller's camera and its diag benches (C01), and the end of its link
 // to the controller, at which a Pi's results reach the PC (G15).
 type rig interface {
-	record(ctx context.Context, name string, segmentSecs int) (segment, error)
-	readbench(ctx context.Context, seg segment, size string, reads int) (readSet, error)
-	seekbench(ctx context.Context, seg segment, seeks int, wholeRAM bool) ([]float64, error)
+	record(ctx context.Context, name string, segmentSecs int) (hubrec.Segment, error)
+	readbench(ctx context.Context, seg hubrec.Segment, size string, reads int) (readSet, error)
+	seekbench(ctx context.Context, seg hubrec.Segment, seeks int, wholeRAM bool) ([]float64, error)
 	cryptobench(ctx context.Context, seconds int) (cryptoRates, error)
 	end(ctx context.Context) error
 }
@@ -120,29 +124,17 @@ func Run(ctx context.Context, o Options) (err error) {
 	if m := host.PiModel; m != nil && m.Known && !m.Supported {
 		return errors.New("acest Raspberry Pi nu este suportat (armv6): proba MI4 se amână în Faza 0-bis")
 	}
-	root := filepath.Join(o.Work, "mi4")
-	// The recordings of the runs before would only take space, and their
-	// identities decrypt nothing then; their logs stay, each run in its own
-	// folder.
-	if err := removeRecordings(root); err != nil {
-		return fmt.Errorf("nu pot șterge înregistrările probelor MI4 de dinainte: %w", err)
+	// The recordings of the runs before go first; each segment's recording
+	// and identity stay until the last bench, the 2-min one's included, and
+	// go however the run ends (PH0-22). When they cannot, the owner deletes
+	// them by hand: a run that would otherwise succeed fails with that
+	// error, and a failed run keeps its own.
+	runs := Runs(o.Work)
+	dir, err := runs.Start(time.Now())
+	if err != nil {
+		return err
 	}
-	dir := filepath.Join(root, time.Now().UTC().Format("20060102-150405"))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("nu pot crea dosarul de lucru: %w", err)
-	}
-	// Each segment's recording and identity stay until the last bench, the
-	// 2-min one's included, and go however the run ends (PH0-22). When they
-	// cannot, the owner deletes them by hand: a run that would otherwise
-	// succeed fails with that error, and a failed run keeps its own.
-	defer func() {
-		if rmErr := removeRecordings(root); rmErr != nil {
-			o.say("Nu am putut șterge înregistrarea probei și cheia ei: ștergeți de mână dosarul %s.", root)
-			if err == nil {
-				err = fmt.Errorf("nu am putut șterge înregistrarea și cheia ei din %s: %w", root, rmErr)
-			}
-		}
-	}()
+	defer runs.End(&err, o.say)
 	r := o.rig
 	if r == nil {
 		r = &hubRig{o: o, host: host, dir: dir}
@@ -184,7 +176,7 @@ func (o Options) measure(ctx context.Context, r rig, host mi1.HostState, p Pace)
 	if host.PiModel != nil {
 		d.Model = host.PiModel.Raw
 	}
-	seg, err := r.record(ctx, "5min", p.SegmentSecs)
+	seg, err := r.record(ctx, hubrec.FiveMin, p.SegmentSecs)
 	if err != nil {
 		return d, err
 	}
@@ -234,7 +226,7 @@ func (o Options) measure(ctx context.Context, r rig, host mi1.HostState, p Pace)
 }
 
 // readSet runs one set of reads of size after a drop of the page cache.
-func (o Options) readSet(ctx context.Context, r rig, seg segment, size string, reads int) (readSet, error) {
+func (o Options) readSet(ctx context.Context, r rig, seg hubrec.Segment, size string, reads int) (readSet, error) {
 	if err := o.drop(); err != nil {
 		return readSet{}, err
 	}
@@ -246,7 +238,7 @@ func (o Options) readSet(ctx context.Context, r rig, seg segment, size string, r
 }
 
 // seekSet runs one set of seeks after a drop of the page cache.
-func (o Options) seekSet(ctx context.Context, r rig, seg segment, seeks int, wholeRAM bool) ([]float64, error) {
+func (o Options) seekSet(ctx context.Context, r rig, seg hubrec.Segment, seeks int, wholeRAM bool) ([]float64, error) {
 	if err := o.drop(); err != nil {
 		return nil, err
 	}
@@ -286,23 +278,6 @@ func (o Options) write(host mi1.HostState, d results.Mi4Data) (string, error) {
 		}
 		return e.RunID, nil
 	}
-}
-
-// removeRecordings removes the recordings under the runs' folders in root,
-// <run>/<segment>/data, with RI_g's identity file beside each, and keeps
-// the rest: the logs.
-func removeRecordings(root string) error {
-	var errs []error
-	for _, name := range []string{recordingDir, identityFile} {
-		paths, err := filepath.Glob(filepath.Join(root, "*", "*", name))
-		if err != nil {
-			return err
-		}
-		for _, path := range paths {
-			errs = append(errs, removeAll(path))
-		}
-	}
-	return errors.Join(errs...)
 }
 
 // removeAll removes a recording or an identity file; tests replace it.

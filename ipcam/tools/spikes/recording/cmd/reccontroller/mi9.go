@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/netip"
 	"slices"
 	"time"
 
@@ -17,6 +19,33 @@ import (
 // recording on the other device, and its Pion sockets would listen beyond
 // 127.0.0.1.
 const noLocalMI9 = "MI9 are nevoie de reccontroller pornit fără -local, pe celălalt dispozitiv"
+
+// sameDeviceMI9 is why a controller refuses an MI9 run of a host on its
+// own device: the run would measure the loopback, hundreds of Mbps, and
+// count it as the LAN's (G26 leg 3).
+const sameDeviceMI9 = "gazda rulează pe același dispozitiv cu acest reccontroller: " +
+	"porniți recspike mi9 --lan cu --controller adresa celuilalt dispozitiv"
+
+// sameDevice reports whether a host's link came from this device: from a
+// loopback address, or from the very address that it reached, as a host
+// that dials its own device's LAN address does. local is the address that
+// the host reached, remote the host's own. A link without two IP addresses
+// counts as the same device, since nothing shows that the host is the
+// other one.
+func sameDevice(local, remote net.Addr) bool {
+	l, okLocal := local.(*net.TCPAddr)
+	r, okRemote := remote.(*net.TCPAddr)
+	if !okLocal || !okRemote {
+		return true
+	}
+	la, okLocal := netip.AddrFromSlice(l.IP)
+	ra, okRemote := netip.AddrFromSlice(r.IP)
+	if !okLocal || !okRemote {
+		return true
+	}
+	ra = ra.Unmap()
+	return ra.IsLoopback() || ra == la.Unmap()
+}
 
 // The waits of an MI9 run: the rpc channel's opening after the host's
 // answer, and the measurement, a 5-min segment's plaintext and 20 seeks.
@@ -32,15 +61,22 @@ type mi9Run struct {
 	client *mi9.Client
 }
 
-// mi9Start starts a LAN run of MI9: the controller makes its playback
-// peer, which offers; a run that it cannot play is refused, in Romanian.
-func (c *ctl) mi9Start(conn *link.Conn, m link.Mi9Start) {
+// mi9Start starts a LAN run of MI9, before the host records its segment:
+// the controller makes its playback peer, which offers. A run that it
+// cannot measure over the LAN is refused at once, in Romanian: on a -local
+// controller, or from a host on this same device (local is the address
+// that the host's link reached, remote the host's own).
+func (c *ctl) mi9Start(conn *link.Conn, m link.Mi9Start, local, remote net.Addr) {
 	refuse := func(reason string) {
 		c.say("Proba MI9 %s nu se măsoară: %s.", m.RunID, reason)
 		c.reply(conn, link.Refused{RunID: m.RunID, Reason: reason})
 	}
-	if c.mi9API == nil {
+	switch {
+	case c.mi9API == nil:
 		refuse(noLocalMI9)
+		return
+	case sameDevice(local, remote):
+		refuse(sameDeviceMI9)
 		return
 	}
 	client, err := mi9.NewClient(c.mi9API, mi9.Configuration(mi9.LAN, nil))
@@ -55,7 +91,7 @@ func (c *ctl) mi9Start(conn *link.Conn, m link.Mi9Start) {
 	if old != nil {
 		_ = old.client.Close() // started again: the latest start counts
 	}
-	c.say("Proba MI9 %s: gazda îmi dă înregistrarea; o redau prin canalul de date.", m.RunID)
+	c.say("Proba MI9 %s: gazda pregătește înregistrarea; o redau prin canalul de date când este gata.", m.RunID)
 	c.reply(conn, link.Mi9Offer{RunID: m.RunID, Offer: client.Offer()})
 }
 

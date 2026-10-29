@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubrec"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
@@ -40,16 +41,16 @@ func (f *fakeRig) call(c string) error {
 	return nil
 }
 
-func (f *fakeRig) record(_ context.Context, name string, segmentSecs int) (segment, error) {
-	seg := segment{path: name + ".mp4.age", identity: name + ".key"}
+func (f *fakeRig) record(_ context.Context, name string, segmentSecs int) (hubrec.Segment, error) {
+	seg := hubrec.Segment{Path: name + ".mp4.age", Identity: name + ".key"}
 	if f.work != "" {
 		runs, err := filepath.Glob(filepath.Join(f.work, "mi4", "*"))
 		if err != nil || len(runs) != 1 {
 			return seg, fmt.Errorf("the run folders %q: %v", runs, err)
 		}
 		dir := filepath.Join(runs[0], name)
-		seg.identity = filepath.Join(dir, identityFile)
-		for _, file := range []string{filepath.Join(dir, recordingDir, "rec", seg.path), seg.identity} {
+		seg.Identity = filepath.Join(dir, hubrec.IdentityFile)
+		for _, file := range []string{filepath.Join(dir, hubrec.RecordingDir, "rec", seg.Path), seg.Identity} {
 			if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
 				return seg, err
 			}
@@ -62,23 +63,23 @@ func (f *fakeRig) record(_ context.Context, name string, segmentSecs int) (segme
 }
 
 // bench notes a bench whose segment's identity file is gone.
-func (f *fakeRig) bench(seg segment, c string) {
-	if _, err := os.Stat(seg.identity); f.work != "" && err != nil {
+func (f *fakeRig) bench(seg hubrec.Segment, c string) {
+	if _, err := os.Stat(seg.Identity); f.work != "" && err != nil {
 		f.keyless = append(f.keyless, c)
 	}
 }
 
-func (f *fakeRig) readbench(_ context.Context, seg segment, size string, reads int) (readSet, error) {
-	f.bench(seg, "readbench "+seg.path+" "+size)
-	err := f.call(fmt.Sprintf("readbench %s %s ×%d", seg.path, size, reads))
+func (f *fakeRig) readbench(_ context.Context, seg hubrec.Segment, size string, reads int) (readSet, error) {
+	f.bench(seg, "readbench "+seg.Path+" "+size)
+	err := f.call(fmt.Sprintf("readbench %s %s ×%d", seg.Path, size, reads))
 	if size != "part" {
 		return readSet{ReadBytes: 65536, ReadMs: repeat(3, reads), MaxMs: 3, P50Ms: 3, P99Ms: 3}, err
 	}
 	return readSet{ReadBytes: 524288, ReadMs: append(repeat(10, reads-1), 30), MaxMs: 30, P50Ms: 10, P99Ms: 10}, err
 }
 
-func (f *fakeRig) seekbench(_ context.Context, seg segment, seeks int, wholeRAM bool) ([]float64, error) {
-	key := fmt.Sprintf("%s ram=%v", seg.path, wholeRAM)
+func (f *fakeRig) seekbench(_ context.Context, seg hubrec.Segment, seeks int, wholeRAM bool) ([]float64, error) {
+	key := fmt.Sprintf("%s ram=%v", seg.Path, wholeRAM)
 	f.bench(seg, "seekbench "+key)
 	return f.seekMs[key], f.call(fmt.Sprintf("seekbench %s ×%d", key, seeks))
 }
@@ -250,7 +251,7 @@ func TestMI4_RemovesTheIdentityWithTheRecording(t *testing.T) {
 			}
 			var left []string
 			err := filepath.WalkDir(filepath.Join(work, "mi4"), func(path string, d fs.DirEntry, err error) error {
-				if err == nil && (strings.HasSuffix(path, ".key") || d.Name() == recordingDir) {
+				if err == nil && (strings.HasSuffix(path, ".key") || d.Name() == hubrec.RecordingDir) {
 					left = append(left, path)
 				}
 				return err
@@ -271,7 +272,7 @@ func TestMI4_SaysWhenTheIdentityStays(t *testing.T) {
 	realRemoveAll := removeAll
 	t.Cleanup(func() { removeAll = realRemoveAll })
 	removeAll = func(path string) error {
-		if filepath.Base(path) == identityFile {
+		if filepath.Base(path) == hubrec.IdentityFile {
 			return &fs.PathError{Op: "unlinkat", Path: path, Err: fs.ErrPermission}
 		}
 		return realRemoveAll(path)

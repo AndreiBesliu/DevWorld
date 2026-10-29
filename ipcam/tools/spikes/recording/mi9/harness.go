@@ -4,8 +4,9 @@
 // its own two-peer Pion harness (C19), an offerer that plays a recording
 // (the playback client) and an answerer on the hub side that reads it with
 // age.DecryptReaderAt and sends its plaintext fMP4 over bulk/<call_id>
-// channels by §7.6's rules; JudgeBulk and Judge, G18's rules (G25); the
-// recording of a segment through ipcam-hub; and recspike's LAN run.
+// channels by §7.6's rules; JudgeBulk and Judge, G18's rules (G25); and
+// recspike's LAN run, which plays a segment recorded through ipcam-hub
+// (hubrec).
 package mi9
 
 import (

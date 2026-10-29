@@ -152,11 +152,19 @@ func newRig(t *testing.T) *rig {
 	return r
 }
 
-// connect opens a host connection to the controller and says hello.
+// connect opens a host connection to the controller and says hello: the
+// host is on the controller's device and dials it at 127.0.0.1.
 func (r *rig) connect(host string) *link.Conn {
 	r.t.Helper()
+	return r.connectFrom(host, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: link.Port}, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 50000})
+}
+
+// connectFrom is connect from the host's address remote to the
+// controller's address local, as the link's TCP connection shows them.
+func (r *rig) connectFrom(host string, local, remote net.Addr) *link.Conn {
+	r.t.Helper()
 	a, b := net.Pipe()
-	go r.c.serve(r.t.Context(), link.NewConn(a), &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: link.Port})
+	go r.c.serve(r.t.Context(), link.NewConn(a), local, remote)
 	conn := link.NewConn(b)
 	r.t.Cleanup(func() { _ = conn.Close() })
 	r.send(conn, link.Hello{Role: "host", Host: host, Version: "c1"})

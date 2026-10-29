@@ -3,104 +3,30 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"filippo.io/age"
 	"github.com/pion/webrtc/v4"
 
-	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubproc"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/internal/spiketest"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi9"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
-// The test binary stands in for ipcam-hub when fakeHubEnv is set: "diag host"
-// prints a host on an SSD with no Pi model; "run --config <run.json>
-// --stop-on-stdin-eof" appends each job of run.json, as JSON, to the file
-// that fakeLogEnv names, writes a 10-s encrypted test recording for the
-// first job's recipients (spiketest.WriteSegment), prints reconcile, ready,
-// the job's recording and its segment_closed, and exits at the end of its
-// stdin.
-const (
-	fakeHubEnv = "RECSPIKE_FAKE_HUB"
-	fakeLogEnv = "RECSPIKE_FAKE_LOG"
-)
-
+// The test binary stands in for ipcam-hub when spiketest.FakeHubEnv is set
+// (spiketest.FakeHub).
 func TestMain(m *testing.M) {
-	if os.Getenv(fakeHubEnv) == "1" {
-		os.Exit(fakeHub(os.Args[1:]))
+	if os.Getenv(spiketest.FakeHubEnv) == "1" {
+		os.Exit(spiketest.FakeHub(os.Args[1:]))
 	}
 	os.Exit(m.Run())
-}
-
-func fakeHub(args []string) int {
-	fail := func(err error) int {
-		fmt.Fprintln(os.Stderr, "fake ipcam-hub:", err)
-		return 1
-	}
-	if len(args) >= 2 && args[0] == "diag" && args[1] == "host" {
-		fmt.Println(`{"schema":"ipcam.diag.host/1","os":"` + runtime.GOOS + `","arch":"amd64","physicalCores":4,"logicalCpus":8,"ramMb":8000,"piModel":null,"storage":"ssd","writeCache":"on","recommendedCameras":4,"cores6Plus":false}`)
-		return 0
-	}
-	if len(args) != 4 || args[0] != "run" || args[1] != "--config" || args[3] != "--stop-on-stdin-eof" {
-		return fail(errors.New("usage: run --config <run.json> --stop-on-stdin-eof"))
-	}
-	cfg, err := hubproc.ReadConfig(args[2])
-	if err != nil {
-		return fail(err)
-	}
-	log, err := os.OpenFile(os.Getenv(fakeLogEnv), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the test's own log
-	if err != nil {
-		return fail(err)
-	}
-	for _, j := range cfg.Jobs {
-		b, _ := json.Marshal(j)
-		_, _ = log.Write(append(b, '\n'))
-	}
-	_ = log.Close()
-	if len(cfg.Jobs) == 0 {
-		return fail(errors.New("no job"))
-	}
-	j := cfg.Jobs[0]
-	var recipients []age.Recipient
-	for _, r := range j.Recipients {
-		rec, err := age.ParseX25519Recipient(r)
-		if err != nil {
-			return fail(err)
-		}
-		recipients = append(recipients, rec)
-	}
-	dir := filepath.Join(cfg.DataDir, "rec", j.Cam, j.Profile, "2026-10-29")
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fail(err)
-	}
-	segment := filepath.Join(dir, "120000_000000.mp4.age")
-	if _, err := spiketest.WriteSegment(segment, 10, recipients...); err != nil {
-		return fail(err)
-	}
-	emit := func(fields map[string]any) {
-		fields["atMs"] = time.Now().UnixMilli()
-		b, _ := json.Marshal(fields)
-		_, _ = os.Stdout.Write(append(b, '\n'))
-	}
-	emit(map[string]any{"type": "reconcile", "seq": 1, "final": true, "aborted": false})
-	emit(map[string]any{"type": "ready", "jobs": []any{}})
-	emit(map[string]any{"type": "recording", "cam": j.Cam, "profile": j.Profile})
-	emit(map[string]any{"type": "segment_closed", "cam": j.Cam, "profile": j.Profile, "path": segment})
-	_, _ = io.Copy(io.Discard, os.Stdin)
-	return 0
 }
 
 // fakeController is the other device's reccontroller as MI9 sees it: it
@@ -191,20 +117,7 @@ func TestMI9Lan_RecordsSegmentWhenNoneExists(t *testing.T) {
 	realExecutable := executable
 	t.Cleanup(func() { executable = realExecutable })
 	executable = func() (string, error) { return filepath.Join(dir, "recspike"), nil }
-	hub := filepath.Join(dir, "ipcam-hub")
-	if runtime.GOOS == "windows" {
-		hub += ".exe"
-	}
-	self, err := os.ReadFile(os.Args[0]) //nolint:gosec // the test binary, the fake ipcam-hub
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(hub, self, 0o700); err != nil { //nolint:gosec // the test binary as the fake ipcam-hub
-		t.Fatal(err)
-	}
-	jobs := filepath.Join(dir, "jobs.log")
-	t.Setenv(fakeHubEnv, "1")
-	t.Setenv(fakeLogEnv, jobs)
+	_, jobs := spiketest.InstallFakeHub(t, dir)
 	ctl := startFakeController(t)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
@@ -219,14 +132,9 @@ func TestMI9Lan_RecordsSegmentWhenNoneExists(t *testing.T) {
 		t.Fatalf("recspike mi9 --lan = %v\n%s", err, out.String())
 	}
 
-	b, err := os.ReadFile(jobs) //nolint:gosec // the test's own log
-	if err != nil {
-		t.Fatal(err)
-	}
-	var j hubproc.Job
-	if lines := strings.Split(strings.TrimSpace(string(b)), "\n"); len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &j) != nil ||
-		j.Cam != "cam01" || j.Profile != "main" || j.SegmentSecs != 300 || len(j.Recipients) != 2 || !strings.HasPrefix(j.RestreamURL, "rtsp://") {
-		t.Errorf("ipcam-hub's jobs: %s; want one encrypted cam01_main job of 300 s", b)
+	if got := spiketest.HubJobs(t, jobs); len(got) != 1 || got[0].Cam != "cam01" || got[0].Profile != "main" || got[0].SegmentSecs != 300 ||
+		len(got[0].Recipients) != 2 || !strings.HasPrefix(got[0].RestreamURL, "rtsp://") {
+		t.Errorf("ipcam-hub's jobs: %+v; want one encrypted cam01_main job of 300 s", got)
 	}
 	host := ownerHost()
 	runID := host + "-mi9-1"
