@@ -1016,7 +1016,7 @@ Rulings: C24 (consumption), G20, R02, R07.
 
 ```go
 package results
-type Mi3Data struct{ Tier string; Cameras int; CpuPctTotal float64; RamMb float64; Budgets map[string]Budget; DiskRatio map[string]float64 /* "clear","encrypted" */; FsyncPerSecPerFile float64; LatencyP95Ms float64; PacingP99Ms int64; SkippedAUs int; Steps []Mi3Step; Sixteen *Mi3Step; Proxies []string }
+type Mi3Data struct{ Tier string; Cameras int; CPUPctTotal float64 /* json "cpuPctTotal" */; RAMMb float64 /* json "ramMb" */; Budgets map[string]Budget; DiskRatio map[string]float64 /* "clear","encrypted" */; FsyncPerSecPerFile float64; LatencyP95Ms float64; PacingP99Ms int64; SkippedAUs int; Steps []Mi3Step; Sixteen *Mi3Step; Proxies []string; DiskQueuePeakBytes int64; StepsStopped, SixteenStopped string /* Romanian, why a step could not be measured */ }
 type Budget struct{ Value, Limit float64; Pass bool }
 type Mi3Step struct{ Cameras, Minutes, Attempt int; Pass, Valid bool; PacingP99Ms int64; SkippedAUs int }
 // Envelope gains: MI3 *Mi3Data
@@ -1041,7 +1041,8 @@ func Judge(envs []results.Envelope) results.Judgement // G12; reads the MI3 enve
   - **Camera count.** MI3 runs at `recommendedCameras` (C24: `RecommendedMax`; an unknown model uses the owner's number, default 1).
   - **Pacing (R07).** reccontroller records `PacingStats` for every MI3 run and step, as for MI1. While the PC is measured, the Pi controller serves about 70 Mbps: 8 × (4 + 0.5) Mbps of RTSP, the live peers and the 10 Mbps sink. A run or step with p99 > 100 ms or a skipped AU is invalid and redone, so the controller's own delay never counts against the host's latency or CPU. There are at most 3 attempts per step; after that, the host's MI3 is `Incomplete` and the report shows the pacing figures.
   - **On failure (G20).** It steps down by halving with 15-min runs until a count passes, then confirms that count with a full 1 h run (halving again if the confirmation fails). The minimum is 1. The steps go into `Steps[]`.
-  - **16 cameras (R07).** With `cores6Plus`, one extra hour at 16 cameras goes into `Sixteen`, as information.
+  - **16 cameras (R07).** With `cores6Plus`, one extra hour at 16 cameras follows the steps, whatever count they settled on, and goes into `Sixteen`, as information. Steps that stopped (3 invalid attempts, or an error) are run again whole, with their hour at 16.
+  - **A step that cannot be measured.** An error before the first valid hour ends the run without an envelope. After it, the envelope keeps the steps measured so far, `StepsStopped` says which step stopped them, and the run then reports the error: the first hour decides G12 (G27). An error of the hour at 16 cameras is information: `SixteenStopped`, no `Sixteen`. Neither field carries an error's own text (PH0-22).
 - **`Judge`.** It gives `trece`, or `pică → numărul recomandat devine <n>` (for the cold-boot row: `pică → pornirea la rece: Decizie tehnică în PR`).
 
 - [ ] **Step 1: Write the failing tests.**
