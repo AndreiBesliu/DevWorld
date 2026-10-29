@@ -1016,7 +1016,7 @@ Rulings: C24 (consumption), G20, R02, R07.
 
 ```go
 package results
-type Mi3Data struct{ Tier string; Cameras int; CPUPctTotal float64 /* json "cpuPctTotal" */; RAMMb float64 /* json "ramMb" */; Budgets map[string]Budget; DiskRatio map[string]float64 /* "clear","encrypted" */; FsyncPerSecPerFile float64; LatencyP95Ms float64; PacingP99Ms int64; SkippedAUs int; Steps []Mi3Step; Sixteen *Mi3Step; Proxies []string; DiskQueuePeakBytes int64; StepsStopped, SixteenStopped string /* Romanian, why a step could not be measured */ }
+type Mi3Data struct{ Tier string; Cameras int; CPUPctTotal float64 /* json "cpuPctTotal" */; RAMMb float64 /* json "ramMb" */; Budgets map[string]Budget; DiskRatio map[string]float64 /* "clear","encrypted" */; FsyncPerSecPerFile float64; LatencyP95Ms float64; PacingP99Ms int64; SkippedAUs int; Steps []Mi3Step; Sixteen *Mi3Step; Proxies []string; DiskQueuePeakBytes int64; StepsStopped, SixteenStopped string /* Romanian, why a step could not be measured */; LoadCPUPct map[string]float64 /* json "loadCpuPct": "live","playback","export","upload", % of the machine (C1-R19) */ }
 type Budget struct{ Value, Limit float64; Pass bool }
 type Mi3Step struct{ Cameras, Minutes, Attempt int; Pass, Valid bool; PacingP99Ms int64; SkippedAUs int }
 // Envelope gains: MI3 *Mi3Data
@@ -1029,6 +1029,7 @@ func Judge(envs []results.Envelope) results.Judgement // G12; reads the MI3 enve
   - **Live.** The tier's session count: H3 3, H1 2, H1b 1, H1c 1. Each session is a grid of every camera's sub stream plus one main stream, answered by the video `session` package over `source.NewRTSP` from the controller. Its consumer is a receive-only Pion peer in reccontroller (`controller/livepeer.go`). This ingests main twice, so the CPU figure is conservative. recspike's answerer binds Pion UDP sockets on the host (the R08 exception in Global Constraints).
   - **Playback.** A 1× (4 Mbps) decrypt-read of a closed segment.
   - **Export.** A full-speed decrypt and re-encrypt of one 5-min segment.
+    - It runs continuously for the whole step, so one export is always in progress (C1-R19). `LoadCPUPct` carries each load's CPU, and Judge adds a Note when `cpuTotal` fails only through the export's share.
   - **Upload.** age encryption plus an HTTPS PUT paced to 10 Mbps (on H1b and H1c: the cameras' total throughput) into the discard sink (`controller/sink.go`). This costs nothing and needs no account.
 - **Budgets per tier (§4.8, G20).** The keys of `Budgets`:
   - **H3:** `cpuTotal` (total CPU ≤ 60 %), `tileSub` (CPU per tile sent ≤ 1 %), `tileMain` (≤ 3 %), `encUpload` (encryption + upload ≤ 5 % per 10 Mbps), `ram` (≤ 250 MB + 20 MB per camera + 15 MB per session), `disk` (≤ 1.03 × bitrate, clear cameras only, R02), `fsyncPerFile` (≤ 1 fsync/s per open file) and `latencyP95` (added latency ≤ 150 ms p95: controller send time to receive time of the SEI index on the live peer, both on the controller's clock).
@@ -1041,7 +1042,7 @@ func Judge(envs []results.Envelope) results.Judgement // G12; reads the MI3 enve
   - **Camera count.** MI3 runs at `recommendedCameras` (C24: `RecommendedMax`; an unknown model uses the owner's number, default 1).
   - **Pacing (R07).** reccontroller records `PacingStats` for every MI3 run and step, as for MI1. While the PC is measured, the Pi controller serves about 70 Mbps: 8 × (4 + 0.5) Mbps of RTSP, the live peers and the 10 Mbps sink. A run or step with p99 > 100 ms or a skipped AU is invalid and redone, so the controller's own delay never counts against the host's latency or CPU. There are at most 3 attempts per step; after that, the host's MI3 is `Incomplete` and the report shows the pacing figures.
   - **On failure (G20).** It steps down by halving with 15-min runs until a count passes, then confirms that count with a full 1 h run (halving again if the confirmation fails). The minimum is 1. The steps go into `Steps[]`.
-  - **16 cameras (R07).** With `cores6Plus`, one extra hour at 16 cameras follows the steps, whatever count they settled on, and goes into `Sixteen`, as information. Steps that stopped (3 invalid attempts, or an error) are run again whole, with their hour at 16.
+  - **16 cameras (R07).** With `cores6Plus`, one extra hour at 16 cameras follows the steps, whatever count they settled on, and goes into `Sixteen`, as information. After steps that stopped (3 invalid attempts, or an error), no hour at 16 cameras runs (C1-R20): the owner runs the probe again, and the re-run measures it.
   - **A step that cannot be measured.** An error before the first valid hour ends the run without an envelope. After it, the envelope keeps the steps measured so far, `StepsStopped` says which step stopped them, and the run then reports the error: the first hour decides G12 (G27). An error of the hour at 16 cameras is information: `SixteenStopped`, no `Sixteen`. Neither field carries an error's own text (PH0-22).
 - **`Judge`.** It gives `trece`, or `pică → numărul recomandat devine <n>` (for the cold-boot row: `pică → pornirea la rece: Decizie tehnică în PR`).
 

@@ -46,7 +46,7 @@ var rowNames = map[string]string{
 	keyIngestPerCamera: "CPU ingest + înregistrare per cameră, dintr-un nucleu",
 	keyRAM:             "RAM",
 	keyDisk:            "disc ÷ bitrate, camere în clar",
-	keyFsyncPerFile:    "fsync pe secundă per fișier deschis",
+	keyFsyncPerFile:    "părți închise pe secundă per fișier deschis (MTX-1: un fsync la fiecare parte)",
 	keyLatencyP95:      "latența adăugată, p95",
 }
 
@@ -141,7 +141,7 @@ func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (host
 	d := e.MI3
 	j.Rows = append(j.Rows, results.Row{Code: prefix + "nivel și camere", Source: host,
 		Value: fmt.Sprintf("%s, %s, %d sesiuni live", d.Tier, camerasText(d.Cameras), Sessions(d.Tier))})
-	valid := d.PacingP99Ms <= mi1.MaxPacingP99Ms && d.SkippedAUs == 0
+	valid := validPacing(d.PacingP99Ms, d.SkippedAUs)
 	failed, missing := false, false
 	for _, key := range BudgetKeys(d.Tier) {
 		lim := limit(key, d.Tier, d.Cameras)
@@ -163,6 +163,9 @@ func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (host
 		j.Rows = append(j.Rows, r)
 	}
 	infoRows(j, prefix, host, e)
+	if note, ok := exportNote(host, d); ok && valid {
+		j.Notes = append(j.Notes, note)
+	}
 	switch {
 	case !valid:
 		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: ora la %s nu are nicio rulare validă (%s)", host, camerasText(d.Cameras), invalidText(d)))
@@ -183,6 +186,24 @@ func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (host
 		return hostIncomplete, ""
 	}
 	return hostPass, ""
+}
+
+// exportNote is the Note of C1-R19 on host's first hour d: total CPU fails,
+// but would pass without the export's share. The export runs at full speed
+// for the whole step, a floor of CPU that no camera count lowers, so the
+// result comes from the export, and the report's PR (Task 14) proposes a
+// Technical Decision instead of the lower count alone.
+func exportNote(host string, d *results.Mi3Data) (string, bool) {
+	b, measured := d.Budgets[keyCPUTotal]
+	export, ran := d.LoadCPUPct[LoadExport]
+	lim := limit(keyCPUTotal, d.Tier, d.Cameras)
+	if !measured || !ran || b.Value <= lim || b.Value-export > lim {
+		return "", false
+	}
+	return fmt.Sprintf("%s: CPU-ul total de %s %% depășește limita de %s %% doar prin export, care ia %s %% din mașină: fără el ar fi %s %%. "+
+		"Exportul rulează la viteză maximă tot timpul probei (C1-R19), deci rezultatul îl dă exportul continuu; PR-ul raportului (Task 14) "+
+		"propune o Decizie tehnică, de exemplu un export cu ritm fix sau cu prioritate mică.", host, results.Decimal(b.Value, 1),
+		results.Decimal(lim, -1), results.Decimal(export, 1), results.Decimal(b.Value-export, 1)), true
 }
 
 // recommended is the count that the steps after a failed first hour settled
@@ -240,15 +261,15 @@ func infoRows(j *results.Judgement, prefix, host string, e *results.Envelope) {
 		j.Rows = append(j.Rows, results.Row{Code: prefix + sixteenRow, Value: d.SixteenStopped, Source: host})
 	}
 	if ratio, ok := d.DiskRatio["encrypted"]; ok {
-		j.Rows = append(j.Rows, results.Row{Code: prefix + "disc ÷ bitrate, camere criptate (R02, informativ)", Value: decimal(ratio, 3), Source: host})
+		j.Rows = append(j.Rows, results.Row{Code: prefix + "disc ÷ bitrate, camere criptate (R02, informativ)", Value: results.Decimal(ratio, 3), Source: host})
 	}
 	j.Rows = append(j.Rows,
 		results.Row{Code: prefix + "ritmul controlorului (R07)", Value: pacingText(d.PacingP99Ms, d.SkippedAUs),
 			Limit: fmt.Sprintf("≤ %d ms, cadre sărite 0", mi1.MaxPacingP99Ms), Source: host},
 		results.Row{Code: prefix + "stocare", Value: storageText(e.Storage), Source: host})
 	if d.DiskQueuePeakBytes > 0 {
-		j.Notes = append(j.Notes, fmt.Sprintf("%s: coada de scriere pe disc a MediaMTX a ajuns la cel mult %s MiB (suma vârfurilor fiecărei înregistrări, "+
-			"o limită superioară), lângă bugetul de RAM (C1-R17); informativ.", host, decimal(float64(d.DiskQueuePeakBytes)/(1<<20), 1)))
+		j.Notes = append(j.Notes, fmt.Sprintf("%s: coada de scriere pe disc a MediaMTX a ajuns la cel mult %s MB (suma vârfurilor fiecărei înregistrări, "+
+			"o limită superioară), lângă bugetul de RAM (C1-R17); informativ.", host, results.Decimal(float64(d.DiskQueuePeakBytes)/1e6, 1)))
 	}
 	for _, p := range d.Proxies {
 		if !slices.Contains(j.Notes, p) {
@@ -314,48 +335,30 @@ func camerasText(n int) string {
 func valueText(key string, v float64) string {
 	switch key {
 	case keyCPUTotal:
-		return decimal(v, 1) + " %"
+		return results.Decimal(v, 1) + " %"
 	case keyTileSub, keyTileMain, keyEncUpload, keyIngestPerCamera:
-		return decimal(v, 2) + " %"
+		return results.Decimal(v, 2) + " %"
 	case keyRAM:
-		return decimal(v, 0) + " MB"
+		return results.Decimal(v, 0) + " MB"
 	case keyDisk:
-		return decimal(v, 3)
+		return results.Decimal(v, 3)
 	case keyFsyncPerFile:
-		return decimal(v, 2)
+		return results.Decimal(v, 2)
 	case keyLatencyP95:
-		return decimal(v, 0) + " ms"
+		return results.Decimal(v, 0) + " ms"
 	}
-	return decimal(v, -1)
+	return results.Decimal(v, -1)
 }
 
 // limitText is a budget's limit as its row shows it.
 func limitText(key string, lim float64) string {
 	switch key {
 	case keyCPUTotal, keyTileSub, keyTileMain, keyEncUpload, keyIngestPerCamera:
-		return "≤ " + decimal(lim, -1) + " %"
+		return "≤ " + results.Decimal(lim, -1) + " %"
 	case keyRAM:
-		return "≤ " + decimal(lim, 0) + " MB"
+		return "≤ " + results.Decimal(lim, 0) + " MB"
 	case keyLatencyP95:
-		return "≤ " + decimal(lim, 0) + " ms"
+		return "≤ " + results.Decimal(lim, 0) + " ms"
 	}
-	return "≤ " + decimal(lim, -1)
-}
-
-// decimal renders f with prec decimals (-1: as few as it needs) and a
-// decimal comma.
-func decimal(f float64, prec int) string {
-	return strings.Replace(strconv.FormatFloat(f, 'f', prec, 64), ".", ",", 1)
-}
-
-// verdict is a row's pass value: false when ok fails, true when ok holds on
-// a complete part, and none while it is incomplete.
-func verdict(ok, complete bool) *bool {
-	switch {
-	case !ok:
-		return new(false)
-	case complete:
-		return new(true)
-	}
-	return nil
+	return "≤ " + results.Decimal(lim, -1)
 }

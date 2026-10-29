@@ -1,11 +1,11 @@
 // SPIKE-ONLY: ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md
 
-package mi2
+package mi1
 
 import "golang.org/x/sys/windows"
 
-// freeBytes is the space that this user has free on dir's volume.
-func freeBytes(dir string) (uint64, error) {
+// FreeBytes is the space that this user has free on dir's volume.
+func FreeBytes(dir string) (uint64, error) {
 	path, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
 		return 0, err

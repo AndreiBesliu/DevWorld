@@ -1,6 +1,8 @@
 package mi3
 
 import (
+	"bufio"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -13,7 +15,9 @@ import (
 
 // The test binary stands in for a load when helperEnv is set: "burn" spins
 // on a CPU until its stdin ends; "parent" starts a burning child of its own
-// and waits for its stdin's end too.
+// and waits for its stdin's end too; "noisyload" is a load child that
+// prints a line that is no report before its first report, and its last
+// report once its stdin ends.
 const helperEnv = "MI3_TEST_HELPER"
 
 func TestMain(m *testing.M) {
@@ -38,6 +42,16 @@ func TestMain(m *testing.M) {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		_ = stdin.Close()
 		_ = child.Wait()
+		os.Exit(0)
+	case "noisyload":
+		in := bufio.NewReader(os.Stdin)
+		if _, err := in.ReadBytes('\n'); err != nil { // the spec
+			os.Exit(1)
+		}
+		fmt.Println("a line that is no report")
+		fmt.Println(`{"bytes":0,"seconds":0}`)
+		_, _ = io.Copy(io.Discard, in)
+		fmt.Println(`{"bytes":5,"seconds":1}`)
 		os.Exit(0)
 	}
 	os.Exit(m.Run())

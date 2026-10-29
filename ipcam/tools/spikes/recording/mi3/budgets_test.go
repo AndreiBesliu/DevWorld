@@ -116,3 +116,20 @@ func sameSet(a, b []string) bool {
 	slices.Sort(b)
 	return slices.Equal(a, b)
 }
+
+// TestMI3_RAMInMegabytes (§4.8; Task 9 review): RAM is in MB of 10^6 bytes,
+// §4.8's unit and the stricter reading, in the figure, its row and its
+// limit: a peak of 455,000,001 bytes, 433.9 MiB, fails the 455 MB that 8
+// cameras and 3 sessions have on H3.
+func TestMI3_RAMInMegabytes(t *testing.T) {
+	f := meeting()
+	f.RAMMb = ramMb(455_000_001)
+	if b := Budgets(TierH3, 8, f)[keyRAM]; b.Pass || b.Limit != 455 || b.Value <= 455 {
+		t.Errorf("RAM budget %+v of a 455,000,001-byte peak, want over its 455 MB limit", b)
+	}
+	envs := owners()
+	envs[0] = envelope("pc", TierH3, 8, f, step(8, 60, 1, false))
+	if r := row(t, Judge(envs), "MI3 pc: RAM"); r.Value != "455 MB" || r.Limit != "≤ 455 MB" || passOf(r) != "false" {
+		t.Errorf("RAM row %+v, want 455 MB over ≤ 455 MB", r)
+	}
+}

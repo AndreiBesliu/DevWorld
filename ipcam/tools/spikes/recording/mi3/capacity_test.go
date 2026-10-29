@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -272,9 +275,9 @@ func TestMI3_SixteenErrorIsInformation(t *testing.T) {
 		{"ipcam-hub exits", fmt.Errorf("pasul 2 (16 camere): %w; jurnalele sunt în %s", hubExited(2), hostPath),
 			"16 camere 1 h: nu s-a putut măsura; ipcam-hub s-a oprit în timpul pasului (codul 2)"},
 		{"the link fails", fmt.Errorf("pasul 2 (16 camere): dial tcp %s: i/o timeout; jurnalele sunt în %s", hostAddr, hostPath),
-			"16 camere 1 h: nu s-a putut măsura; eroarea este pe ecranul gazdei și în jurnalele pasului"},
+			"16 camere 1 h: nu s-a putut măsura; eroarea este pe ecranul gazdei și în jurnalele pasului (work/mi3; după o nouă pornire, work/mi3-anterior)"},
 		{"the owner stops it", fmt.Errorf("pasul 2 (16 camere): %w; jurnalele sunt în %s", context.Canceled, hostPath),
-			"16 camere 1 h: nu s-a putut măsura; proba a fost oprită înainte de final"},
+			"16 camere 1 h: nu s-a putut măsura; " + ownersStop},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m := &fakeMeasure{figures: func(call) Figures { return passIf(true) }, fail: func(cl call) error {
@@ -310,7 +313,7 @@ func TestMI3_SixteenErrorIsInformation(t *testing.T) {
 // hour's failure decides G12, and the number goes down, its value open. No
 // hour at 16 follows.
 func TestMI3_StepErrorKeepsTheMeasuredFailure(t *testing.T) {
-	const elsewhere = "eroarea este pe ecranul gazdei și în jurnalele pasului"
+	const elsewhere = "eroarea este pe ecranul gazdei și în jurnalele pasului (work/mi3; după o nouă pornire, work/mi3-anterior)"
 	linkErr := fmt.Errorf("dial tcp %s: i/o timeout; jurnalele sunt în %s", hostAddr, hostPath)
 	cases := []struct {
 		name    string
@@ -325,7 +328,7 @@ func TestMI3_StepErrorKeepsTheMeasuredFailure(t *testing.T) {
 		{"a redone attempt", call{4, 15, 2}, fmt.Errorf("pasul 3 (4 camere): %w", loadEnded(LoadExport)), "8x60#1 fail, 4x15#1 invalid",
 			"4 camere 15 min, încercarea 2: nu s-a putut măsura; încărcarea export s-a oprit în timpul pasului"},
 		{"the owner stops it", call{4, 15, 1}, fmt.Errorf("pasul 2 (4 camere): %w", context.Canceled), "8x60#1 fail",
-			"4 camere 15 min: nu s-a putut măsura; proba a fost oprită înainte de final"},
+			"4 camere 15 min: nu s-a putut măsura; " + ownersStop},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -386,7 +389,7 @@ func TestMI3_RunWritesWhatWasMeasured(t *testing.T) {
 
 	failed := dataOf("H3", 8, passIf(false))
 	failed.Steps = []results.Mi3Step{step(8, 60, 1, false)}
-	failed.StepsStopped = "4 camere 15 min: nu s-a putut măsura; proba a fost oprită înainte de final"
+	failed.StepsStopped = "4 camere 15 min: nu s-a putut măsura; " + ownersStop
 	if err := o.finish(failed, nil, boom); !errors.Is(err, boom) {
 		t.Errorf("finish = %v, want the step's error %v", err, boom)
 	}
@@ -414,5 +417,130 @@ func TestMI3_RunWritesWhatWasMeasured(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "16 camere") || !strings.Contains(out.String(), "codul 2") {
 		t.Errorf("the screen does not say why the 16-camera hour has no result:\n%s", out)
+	}
+}
+
+// ownersStop is why a step has no result when the owner stopped the probe.
+const ownersStop = "proprietarul a oprit proba"
+
+// TestMI3_OwnersStopIsAnInterruption (R07; Task 9 review): Ctrl+C is the
+// owner's stop, not a failure to report. During the hour at 16 cameras, or
+// a step after the first hour, the run keeps what it measured, the envelope
+// says in a fixed Romanian text that the owner stopped the probe, and
+// recspike ends as its other Ctrl+C paths end, MI2's: a Romanian line, then
+// an error that is context.Canceled, never a success. Nothing on the
+// screen or in the envelope is an error's English text.
+func TestMI3_OwnersStopIsAnInterruption(t *testing.T) {
+	stop := fmt.Errorf("pasul 2: %w; jurnalele sunt în %s", context.Canceled, hostPath)
+	for _, c := range []struct {
+		name string
+		at   func(call) bool
+	}{
+		{"the hour at 16 cameras", func(cl call) bool { return cl.cameras == 16 }},
+		{"a step down", func(cl call) bool { return cl.cameras == 4 }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := &fakeMeasure{figures: func(cl call) Figures { return passIf(cl.cameras != 8) }, fail: func(cl call) error {
+				if c.at(cl) {
+					return stop
+				}
+				return nil
+			}}
+			d, sixteenErr, err := runSteps(t.Context(), "H3", 8, true, m.measure)
+			if d == nil {
+				t.Fatalf("runSteps = nil, %v, %v; want the first hour kept", sixteenErr, err)
+			}
+			stopped := d.StepsStopped + d.SixteenStopped
+			if !strings.HasSuffix(stopped, ": nu s-a putut măsura; "+ownersStop) {
+				t.Errorf("the envelope says %q, want the owner's stop", stopped)
+			}
+			out := &strings.Builder{}
+			dir := t.TempDir()
+			o := Options{Host: mi1.HostState{Pseudonym: "pc", OS: "windows", Storage: "ssd"}, Results: dir, Out: out}
+			err = o.finish(*d, sixteenErr, err)
+			if !errors.Is(err, context.Canceled) || !strings.HasPrefix(err.Error(), "proba MI3 s-a întrerupt") {
+				t.Errorf("finish = %v, want the interruption, context.Canceled, as recspike's other Ctrl+C paths end", err)
+			}
+			e, rerr := results.Read(filepath.Join(dir, "MI3", "pc-mi3", "pc-mi3-1.json"))
+			if rerr != nil {
+				t.Fatalf("the measured first hour was not kept: %v", rerr)
+			}
+			if e.MI3.CPUPctTotal != 70 || e.MI3.StepsStopped+e.MI3.SixteenStopped != stopped {
+				t.Errorf("the envelope %+v is not what the steps measured", e.MI3)
+			}
+			if !strings.Contains(out.String(), "Proba MI3 s-a întrerupt") || strings.Contains(out.String(), "context canceled") {
+				t.Errorf("the screen does not say in Romanian that the probe was stopped:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestMI3_RunKeepsThePreviousRunsStepLogs (Task 9 review): the screen and
+// the envelope of a run that stopped send the owner to the step logs, and
+// the owner then starts the probe again. The new run keeps the step logs of
+// the run before, one generation, in work/mi3-anterior, as MI2 keeps its
+// last log, and nothing else of that run: no recording, key or fixture. A
+// start that stops before any step keeps that generation as it is.
+func TestMI3_RunKeepsThePreviousRunsStepLogs(t *testing.T) {
+	work := t.TempDir()
+	write := func(rel, text string) {
+		t.Helper()
+		path := filepath.Join(work, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const stepDir = "mi3/02-4cam-15min-1/"
+	write(stepDir+"ipcam-hub.log", "the step's error")
+	write(stepDir+"loads.log", "the loads' log")
+	write(stepDir+"ri_g.key", "an identity")
+	write(stepDir+"run.json", "{}")
+	write(stepDir+"data/rec/cam01/main/x.mp4", "a recording")
+	write("mi3/fixture/segment.mp4", "the fixture")
+	write("mi3-anterior/01-8cam-60min-1/ipcam-hub.log", "two runs ago")
+	o := Options{Host: mi1.HostState{Pseudonym: "pc", OS: "windows", Storage: "ssd"}, Controller: "nowhere", Work: work, Results: t.TempDir(), Out: io.Discard}
+	for range 2 { // the second start finds no step of the first
+		if err := Run(t.Context(), o); err == nil {
+			t.Fatal("Run without a controller succeeded")
+		}
+	}
+
+	var files []string
+	if err := filepath.WalkDir(work, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			rel, _ := filepath.Rel(work, path)
+			files = append(files, filepath.ToSlash(rel))
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mi3-anterior/02-4cam-15min-1/ipcam-hub.log", "mi3-anterior/02-4cam-15min-1/loads.log"}
+	if !slices.Equal(files, want) {
+		t.Errorf("work holds %q, want only the step logs of the run before, in mi3-anterior: %q", files, want)
+	}
+	if b, err := os.ReadFile(filepath.Join(work, "mi3-anterior", "02-4cam-15min-1", "ipcam-hub.log")); err != nil || string(b) != "the step's error" { //nolint:gosec // the test's own file
+		t.Errorf("the kept log: %q, %v", b, err)
+	}
+}
+
+// TestMI3_OpeningSaysHowLongTheRunCanTake (G20, R07; Task 9 review): Run's
+// first line says what can make the run longer than its hour and 15-min
+// steps: on a PC with 6 cores or more, the extra hour at 16 cameras, and,
+// on every host, up to 3 attempts of a step that the controller paced
+// unevenly.
+func TestMI3_OpeningSaysHowLongTheRunCanTake(t *testing.T) {
+	pc := openingText("H3", 8, true)
+	for _, want := range []string{"încă o oră la 16 camere", "6 nuclee", "3 încercări"} {
+		if !strings.Contains(pc, want) {
+			t.Errorf("the PC's opening %q lacks %q", pc, want)
+		}
+	}
+	pi := openingText("H1b", 4, false)
+	if strings.Contains(pi, "16 camere") || !strings.Contains(pi, "3 încercări") {
+		t.Errorf("the Pi's opening %q: want the attempts and no hour at 16 cameras", pi)
 	}
 }

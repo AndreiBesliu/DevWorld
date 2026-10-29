@@ -17,41 +17,11 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/internal/spiketest"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/lastindex"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/band"
 )
-
-// required returns the path that the environment variable name holds; it
-// skips without one, and fails instead when require is "1", as CI sets it.
-func required(t *testing.T, name, require string) string {
-	t.Helper()
-	path := os.Getenv(name)
-	if path == "" {
-		if os.Getenv(require) == "1" {
-			t.Fatalf("%s=1, but %s is empty", require, name)
-		}
-		t.Skipf("%s is unset", name)
-	}
-	if _, err := os.Stat(path); err != nil { //nolint:gosec // the test run's own path
-		t.Fatalf("%s: %v", name, err)
-	}
-	return path
-}
-
-// buildBinary builds the command pkg into dir and returns its path.
-func buildBinary(t *testing.T, dir, name, pkg string) string {
-	t.Helper()
-	out := filepath.Join(dir, name)
-	if runtime.GOOS == "windows" {
-		out += ".exe"
-	}
-	cmd := exec.Command("go", "build", "-o", out, pkg) //nolint:gosec // the test's own build
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build %s: %v\n%s", pkg, err, b)
-	}
-	return out
-}
 
 // labChain is the lab's chain on loopback: reccontroller -local serving the
 // media, with its screen, and ipcam-hub with the MediaMTX fork, as a
@@ -66,11 +36,11 @@ type labChain struct {
 // without the fork or the media.
 func startLabChain(ctx context.Context, t *testing.T) labChain {
 	t.Helper()
-	mediamtx := required(t, "MEDIAMTX_BIN", "RECSPIKE_REQUIRE_MEDIAMTX")
-	media := required(t, "MEDIAGEN_DIR", "SPIKE_REQUIRE_MEDIA")
+	mediamtx := spiketest.Required(t, "MEDIAMTX_BIN", "RECSPIKE_REQUIRE_MEDIAMTX")
+	media := spiketest.Required(t, "MEDIAGEN_DIR", "SPIKE_REQUIRE_MEDIA")
 	bin := t.TempDir()
-	hub := buildBinary(t, bin, "ipcam-hub", "github.com/AndreiBesliu/DevWorld/ipcam/hub/cmd/ipcam-hub")
-	ctlBin := buildBinary(t, bin, "reccontroller", "github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cmd/reccontroller")
+	hub := spiketest.BuildBinary(t, bin, "ipcam-hub", "github.com/AndreiBesliu/DevWorld/ipcam/hub/cmd/ipcam-hub")
+	ctlBin := spiketest.BuildBinary(t, bin, "reccontroller", "github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cmd/reccontroller")
 
 	ctl := exec.CommandContext(ctx, ctlBin, "-local", "-media", media) //nolint:gosec // the test's build
 	stdout, err := ctl.StdoutPipe()

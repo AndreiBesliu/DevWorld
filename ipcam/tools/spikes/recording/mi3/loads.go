@@ -58,7 +58,8 @@ var Proxies = []string{
 	"Încărcarea live (proxy): sesiunile nivelului, fiecare o grilă cu substream-ul fiecărei camere și un main, servite de pachetul session al " +
 		"spike-ului video din recspike, din RTSP-ul controlorului, către câte un peer Pion doar de recepție în reccontroller; main se preia de două ori, " +
 		"deci CPU-ul e o estimare acoperitoare. CPU-ul procesului live se împarte pe plăci după debitul lor (sub 512 kbps, main 4 Mbps).",
-	"Redarea (proxy): citirea cu decriptare, la 1× (4 Mbps), a unui segment criptat de 5 min, în buclă.",
+	"Redarea (proxy): citirea cu decriptare, la 1× (4 Mbps), a unui segment criptat de 5 min, în buclă. Segmentul este cel sintetic de mai jos, " +
+		"nu un segment înregistrat și închis, și rămâne în cache-ul de pagini al sistemului: decriptarea costă la fel, dar citirea de pe disc nu se măsoară.",
 	"Exportul (proxy): decriptarea și recriptarea, la viteză maximă, a unui segment de 5 min, repetată fără pauză tot timpul probei; ieșirea se aruncă.",
 	"Upload-ul (proxy): criptare age și HTTPS PUT, cu ritm fix (10 Mbps; pe H1b și H1c, debitul camerelor), spre un receptor din reccontroller " +
 		"care aruncă datele (fără cost, fără cont); CPU-ul se raportează la debitul atins.",
@@ -67,7 +68,8 @@ var Proxies = []string{
 		"din CPU-ul ipcam-hub și al MediaMTX.",
 	"RAM (proxy): vârful sumei memoriei rezidente a ipcam-hub, MediaMTX și celor patru încărcări (pe Windows, setul de lucru): fiecare " +
 		"încărcare are propriul runtime Go, deci cifra e acoperitoare.",
-	"fsync pe secundă per fișier: închiderile de părți pe secundă de înregistrare (MTX-1 face fsync la fiecare parte de 1 s); fsync-ul de la " +
+	"Părțile închise pe secundă per fișier (proxy): rândul de fsync pe secundă din §4.8 se măsoară ca (părți − 1) ÷ durata lor, din înregistrări; " +
+		"MTX-1 face un fsync la fiecare parte de 1 s, deci cifra stă aproape de 1 prin construcție și nu vede un fsync în plus. Fsync-ul de la " +
 		"închiderea segmentului, unul la 5 min, nu intră în ritm.",
 }
 
@@ -404,12 +406,15 @@ func startLoad(ctx context.Context, self, kind string, spec LoadSpec, stderr io.
 	go func() {
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 64<<10), 4<<20) // the live load's answers
-		for n := 0; sc.Scan(); n++ {
+		// Only the lines that are reports count: a stray line, such as a
+		// library's, is no first report.
+		reports := 0
+		for sc.Scan() {
 			var r LoadReport
 			if json.Unmarshal(sc.Bytes(), &r) != nil {
 				continue
 			}
-			if n == 0 {
+			if reports == 0 {
 				first <- r
 			} else {
 				select {
@@ -417,6 +422,7 @@ func startLoad(ctx context.Context, self, kind string, spec LoadSpec, stderr io.
 				default:
 				}
 			}
+			reports++
 		}
 		ld.waitErr = cmd.Wait()
 		close(ld.exited)
@@ -435,6 +441,7 @@ func startLoad(ctx context.Context, self, kind string, spec LoadSpec, stderr io.
 	case ld.first = <-first:
 		return ld, nil
 	case <-ld.exited:
+		_ = stdin.Close()
 		return nil, fmt.Errorf("s-a oprit înainte să pornească (%v)", ld.waitErr)
 	case <-timeout.C:
 		_, _ = ld.stop()

@@ -60,7 +60,7 @@ func judgeColdBoot(j *results.Judgement, envs []results.Envelope) hostState {
 	j.Rows = append(j.Rows, results.Row{
 		Code:  "MI3 pc: pornire la rece (" + coldBootWhat + "Windows)",
 		Value: coldBootValue(measured, slowest), Limit: "≤ " + mi1.WholeSecondsText(MaxColdBootMs), Source: "pc",
-		Pass: verdict(!failed, complete),
+		Pass: results.RowPass(!failed, complete),
 	})
 	switch {
 	case failed:

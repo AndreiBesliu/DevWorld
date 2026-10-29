@@ -108,8 +108,10 @@ func limit(key, tier string, cameras int) float64 {
 // machine, as §4.8's total is: TileSubPct and TileMainPct per tile sent,
 // EncUploadPct per 10 Mbps uploaded; IngestPerCameraPct is a percentage of
 // one core per camera (§4.8: "dintr-un nucleu"). RAMMb is the peak of the
-// hub's processes and the loads together, in MiB. DiskRatio is file bytes
-// ÷ stream bytes, per mode, "clear" and "encrypted".
+// hub's processes and the loads together, in MB of 10^6 bytes, §4.8's
+// unit. DiskRatio is file bytes ÷ stream bytes, per mode, "clear" and
+// "encrypted". LoadCPUPct is each load's CPU, with its children's, as a
+// percentage of the whole machine (C1-R19).
 type Figures struct {
 	CPUPctTotal        float64
 	TileSubPct         float64
@@ -123,6 +125,7 @@ type Figures struct {
 	PacingP99Ms        int64
 	SkippedAUs         int
 	DiskQueuePeakBytes int64
+	LoadCPUPct         map[string]float64
 }
 
 // value is f's measurement of key; ok is false when f has none, as for
@@ -167,10 +170,14 @@ func Budgets(tier string, cameras int, f Figures) map[string]results.Budget {
 }
 
 // Valid reports whether a step counts (R07): the controller's send p99 at
-// most 100 ms and no skipped access unit. One that does not is redone and
-// never judged.
-func Valid(f Figures) bool {
-	return f.PacingP99Ms <= mi1.MaxPacingP99Ms && f.SkippedAUs == 0
+// most 100 ms and no skipped access unit (validPacing). One that does not
+// is redone and never judged.
+func Valid(f Figures) bool { return validPacing(f.PacingP99Ms, f.SkippedAUs) }
+
+// validPacing reports whether the controller sent a step evenly (R07): its
+// p99 at most 100 ms and no skipped access unit.
+func validPacing(p99Ms int64, skippedAUs int) bool {
+	return p99Ms <= mi1.MaxPacingP99Ms && skippedAUs == 0
 }
 
 // passes reports whether a valid step met every budget of its tier.
@@ -190,6 +197,6 @@ func dataOf(tier string, cameras int, f Figures) results.Mi3Data {
 	return results.Mi3Data{
 		Tier: tier, Cameras: cameras, CPUPctTotal: f.CPUPctTotal, RAMMb: f.RAMMb, Budgets: Budgets(tier, cameras, f),
 		DiskRatio: f.DiskRatio, FsyncPerSecPerFile: f.FsyncPerSecPerFile, LatencyP95Ms: f.LatencyP95Ms,
-		PacingP99Ms: f.PacingP99Ms, SkippedAUs: f.SkippedAUs, DiskQueuePeakBytes: f.DiskQueuePeakBytes,
+		PacingP99Ms: f.PacingP99Ms, SkippedAUs: f.SkippedAUs, DiskQueuePeakBytes: f.DiskQueuePeakBytes, LoadCPUPct: f.LoadCPUPct,
 	}
 }

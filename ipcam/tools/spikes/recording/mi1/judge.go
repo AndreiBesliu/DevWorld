@@ -421,11 +421,11 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 		j.Rows = append(j.Rows,
 			// An incomplete set's median decides nothing yet.
 			results.Row{Code: prefix + "mediana", Value: SecondsText(median), Limit: "≤ " + WholeSecondsText(GeneralMedianMs), Source: s.source,
-				Pass: verdict(median <= GeneralMedianMs || !complete, complete)},
+				Pass: results.RowPass(median <= GeneralMedianMs || !complete, complete)},
 			results.Row{Code: prefix + "maximul", Value: SecondsText(maximum), Limit: "≤ " + WholeSecondsText(GeneralMaxMs), Source: s.source,
-				Pass: verdict(maximum <= GeneralMaxMs, complete)},
+				Pass: results.RowPass(maximum <= GeneralMaxMs, complete)},
 			results.Row{Code: prefix + "rulări eșuate", Value: fmt.Sprintf("%d din %d", res.failed, res.counted), Limit: "0", Source: s.source,
-				Pass: verdict(res.failed == 0, complete)})
+				Pass: results.RowPass(res.failed == 0, complete)})
 	}
 	if !s.real {
 		j.Rows = append(j.Rows, o17Row(j, prefix, s.name, s.source, o17))
@@ -524,18 +524,6 @@ func failureRates(j *results.Judgement, res map[string]setResult) {
 		}
 		j.Rows = append(j.Rows, results.Row{Code: g.code + ": rata de eșec (95 %)", Value: value, Limit: g.limit, Source: g.source})
 	}
-}
-
-// verdict is a row's pass value: false when ok fails, true when ok holds
-// on a complete set, and none while the set is incomplete.
-func verdict(ok, complete bool) *bool {
-	switch {
-	case !ok:
-		return new(false)
-	case complete:
-		return new(true)
-	}
-	return nil
 }
 
 // medianMs is the median of sorted values, 0 without any.

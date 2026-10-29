@@ -234,9 +234,89 @@ func TestMI3_ReportsWhatIsNotAGate(t *testing.T) {
 		t.Errorf("storage row %+v", r)
 	}
 	notes := strings.Join(j.Notes, "\n")
-	for _, want := range []string{"6,0 MiB", "live: test", "timeline", "O17"} {
+	for _, want := range []string{"6,3 MB", "live: test", "timeline", "O17"} {
 		if !strings.Contains(notes, want) {
 			t.Errorf("notes %q lack %q", notes, want)
 		}
+	}
+}
+
+// TestMI3_FsyncRowCountsClosedParts (§4.8; Task 9 review): the fsync figure
+// comes from the parts' count, (parts − 1) ÷ their seconds, so it sits near
+// 1 by construction and cannot see an fsync more: its row says it counts
+// closed parts, which MTX-1 fsyncs one each, and the proxies say so too.
+func TestMI3_FsyncRowCountsClosedParts(t *testing.T) {
+	j := Judge(owners())
+	if r := row(t, j, "MI3 pc: părți închise pe secundă"); !strings.Contains(r.Code, "MTX-1") {
+		t.Errorf("fsync row %q, want it named a count of closed parts, one fsync each (MTX-1)", r.Code)
+	}
+	var proxy string
+	for _, p := range Proxies {
+		if strings.HasPrefix(p, "Părțile închise pe secundă") {
+			proxy = p
+		}
+	}
+	if !strings.Contains(proxy, "(proxy)") || !strings.Contains(proxy, "fsync") || !strings.Contains(proxy, "în plus") {
+		t.Errorf("proxies %q, want one that says the fsync figure counts closed parts and sees no fsync in plus", Proxies)
+	}
+}
+
+// TestMI3_PlaybackProxyNamesItsFixture (G20; Task 9 review): the playback
+// reads the synthetic 5-min fixture, which stays in the page cache, not a
+// recorded closed segment: its proxy says so.
+func TestMI3_PlaybackProxyNamesItsFixture(t *testing.T) {
+	for _, p := range Proxies {
+		if strings.HasPrefix(p, "Redarea (proxy)") {
+			if !strings.Contains(p, "sintetic") || !strings.Contains(p, "cache") {
+				t.Errorf("playback proxy %q, want it to say it reads the synthetic fixture from the page cache", p)
+			}
+			return
+		}
+	}
+	t.Fatalf("no playback proxy in %q", Proxies)
+}
+
+// TestMI3_ExportShareNote (C1-R19): the export runs for the whole step, a
+// floor of CPU that the camera count cannot lower. When cpuTotal fails but
+// would pass without the export's share, Judge adds a Romanian Note that
+// the result comes from the continuous export and that Task 14 proposes a
+// Technical Decision; the verdict stays. Without that condition, on either
+// side, there is no such Note.
+func TestMI3_ExportShareNote(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		total, export float64
+		note          bool
+	}{
+		{"cpuTotal fails only with the export", 65, 10, true},
+		{"cpuTotal fails without the export too", 75, 10, false},
+		{"cpuTotal passes", 55, 10, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := meeting()
+			f.CPUPctTotal = c.total
+			f.LoadCPUPct = map[string]float64{LoadLive: 6, LoadPlayback: 1, LoadExport: c.export, LoadUpload: 2}
+			envs := owners()
+			envs[0] = envelope("pc", TierH3, 8, f, step(8, 60, 1, c.total <= 60), step(4, 15, 1, true), step(4, 60, 1, true))
+			j := Judge(envs)
+			var note string
+			for _, n := range j.Notes {
+				if strings.Contains(n, "exportul") && strings.Contains(n, "C1-R19") {
+					note = n
+				}
+			}
+			if (note != "") != c.note {
+				t.Fatalf("export note %q, want one: %v; notes %q", note, c.note, j.Notes)
+			}
+			if c.note && (!strings.Contains(note, "Decizie tehnică") || !strings.Contains(note, "Task 14") || !strings.Contains(note, "10,0 %")) {
+				t.Errorf("export note %q, want the export's share and Task 14's Technical Decision", note)
+			}
+			if want := map[bool]results.Verdict{true: results.Pass, false: results.Fail}[c.total <= 60]; j.Verdict != want {
+				t.Errorf("Judge = %q, want %q: the note changes no verdict", j.Verdict, want)
+			}
+		})
+	}
+	if d := dataOf(TierH3, 8, Figures{LoadCPUPct: map[string]float64{LoadExport: 10}}); d.LoadCPUPct[LoadExport] != 10 {
+		t.Errorf("the envelope's load CPU %v, want the step's", d.LoadCPUPct)
 	}
 }

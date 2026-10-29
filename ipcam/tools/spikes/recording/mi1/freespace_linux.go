@@ -1,12 +1,12 @@
 // SPIKE-ONLY: ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md
 
-package mi2
+package mi1
 
 import "syscall"
 
-// freeBytes is the space that an unprivileged writer has free on dir's
+// FreeBytes is the space that an unprivileged writer has free on dir's
 // file system.
-func freeBytes(dir string) (uint64, error) {
+func FreeBytes(dir string) (uint64, error) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(dir, &st); err != nil {
 		return 0, err

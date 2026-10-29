@@ -97,6 +97,7 @@ type Mi3Data struct {
 	DiskQueuePeakBytes int64              `json:"diskQueuePeakBytes"`
 	StepsStopped       string             `json:"stepsStopped,omitempty"`
 	SixteenStopped     string             `json:"sixteenStopped,omitempty"`
+	LoadCPUPct         map[string]float64 `json:"loadCpuPct"`
 }
 
 // Budget is one §4.8 budget of a run: the value measured, its limit, and

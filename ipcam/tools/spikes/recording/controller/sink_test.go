@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -119,8 +120,8 @@ func TestSink_ClientTrustsOnlyThatCertificate(t *testing.T) {
 		t.Fatal("a client that trusts another certificate reached the sink")
 	}
 	var unknown x509.UnknownAuthorityError
-	if !strings.Contains(err.Error(), "certificate") {
-		t.Errorf("error %v, want a certificate error (%T)", err, unknown)
+	if !errors.As(err, &unknown) {
+		t.Errorf("error %v, want x509.UnknownAuthorityError: the sink's certificate is not the one trusted", err)
 	}
 	if _, err := SinkClientTLS([]byte("not a certificate")); err == nil {
 		t.Error("SinkClientTLS took bytes that are no certificate")

@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -117,5 +118,22 @@ func TestLoads_RunUntilTheirEnd(t *testing.T) {
 	}
 	if _, err := RunLoad(t.Context(), "stream", LoadSpec{}, nil); err == nil {
 		t.Error("an unknown load ran")
+	}
+}
+
+// TestLoads_StartCountsOnlyReports (G20; Task 9 review): a line of a load's
+// stdout that is no report, such as a library's stray print, neither
+// counts as its first report nor shifts the reports after it: the start
+// gets the first report, and the stop the last.
+func TestLoads_StartCountsOnlyReports(t *testing.T) {
+	t.Setenv(helperEnv, "noisyload")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	ld, err := startLoad(ctx, os.Args[0], LoadPlayback, LoadSpec{}, io.Discard)
+	if err != nil {
+		t.Fatalf("startLoad = %v, want the load started on its first report", err)
+	}
+	if report, err := ld.stop(); err != nil || report.Bytes != 5 {
+		t.Errorf("stop = %+v, %v; want the last report, 5 bytes", report, err)
 	}
 }

@@ -134,7 +134,7 @@ func judgeResumes(j *results.Judgement, host, kill9 string, envs []results.Envel
 	case measured > 0:
 		row.Value = fmt.Sprintf("%s (%d din %d)", mi1.SecondsText(slowest), measured, Kill9Runs)
 	}
-	row.Pass = verdict(!failed, complete)
+	row.Pass = results.RowPass(!failed, complete)
 	j.Rows = append(j.Rows, row)
 	switch {
 	case failed:
@@ -168,11 +168,11 @@ func judgeRun(j *results.Judgement, host string, envs []results.Envelope) hostSt
 	}
 	d := run.MI2
 	complete := d.Hours >= RunHours
-	crashRow.Value = fmt.Sprintf("%d (în %s h)", d.Crashes72h, decimal(d.Hours, 1))
-	crashRow.Pass = verdict(d.Crashes72h == 0, complete)
+	crashRow.Value = fmt.Sprintf("%d (în %s h)", d.Crashes72h, results.Decimal(d.Hours, 1))
+	crashRow.Pass = results.RowPass(d.Crashes72h == 0, complete)
 	j.Rows = append(j.Rows, crashRow,
 		results.Row{Code: prefix + "reporniri MediaMTX (HUB-13)", Value: strconv.Itoa(d.ChildRestarts), Source: host},
-		results.Row{Code: prefix + "fereastra păstrată", Value: decimal(d.WindowHours, 2) + " h", Source: host})
+		results.Row{Code: prefix + "fereastra păstrată", Value: results.Decimal(d.WindowHours, 2) + " h", Source: host})
 	if d.OnSdCard {
 		j.Rows = append(j.Rows, results.Row{Code: prefix + "starea cardului SD", Value: cardText(d.CardStates), Source: host})
 	}
@@ -181,10 +181,10 @@ func judgeRun(j *results.Judgement, host string, envs []results.Envelope) hostSt
 	}
 	switch {
 	case d.Crashes72h > 0:
-		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: rularea %s: %d crash-uri ipcam-hub în %s h", run.Set, run.RunID, d.Crashes72h, decimal(d.Hours, 1)))
+		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: rularea %s: %d crash-uri ipcam-hub în %s h", run.Set, run.RunID, d.Crashes72h, results.Decimal(d.Hours, 1)))
 		return hostFail
 	case !complete:
-		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: proba de 72 h a rulat doar %s h", host, decimal(d.Hours, 1)))
+		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: proba de 72 h a rulat doar %s h", host, results.Decimal(d.Hours, 1)))
 		return hostIncomplete
 	}
 	return hostPass
@@ -206,16 +206,4 @@ func cardText(states []results.CardState) string {
 		}
 	}
 	return strings.Join(names, " → ")
-}
-
-// verdict is a row's pass value: false when ok fails, true when ok holds on
-// a complete part, and none while it is incomplete.
-func verdict(ok, complete bool) *bool {
-	switch {
-	case !ok:
-		return new(false)
-	case complete:
-		return new(true)
-	}
-	return nil
 }

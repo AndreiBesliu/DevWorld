@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"flag"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -99,5 +100,31 @@ func TestMI1_RefusesAnotherSetBeforeAskingTheOwner(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "Scrieți DA") {
 		t.Errorf("the owner was asked:\n%s", out.String())
+	}
+}
+
+// TestMI3_RefusesAControllerOnThisDevice (G20; Task 9 review): recspike mi3
+// refuses a --controller that is this device, also by one of its own
+// interface addresses, such as its LAN IP: a reccontroller started there
+// without -local would load the CPU that MI3 measures. Another device's
+// address goes on to the host's checks.
+func TestMI3_RefusesAControllerOnThisDevice(t *testing.T) {
+	previous := interfaceAddrs
+	interfaceAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{
+			&net.IPNet{IP: net.ParseIP("192.0.2.7"), Mask: net.CIDRMask(24, 32)},
+			&net.IPNet{IP: net.ParseIP("2001:db8::7"), Mask: net.CIDRMask(64, 128)},
+		}, nil
+	}
+	t.Cleanup(func() { interfaceAddrs = previous })
+	for _, addr := range []string{"192.0.2.7", "192.0.2.7:7081", "[2001:db8::7]:7081", "127.0.0.1"} {
+		var out strings.Builder
+		if err := run(t.Context(), []string{"mi3", "--controller", addr}, nil, &out); err == nil || !strings.Contains(err.Error(), "chiar acest dispozitiv") {
+			t.Errorf("recspike mi3 --controller %s = %v, want it refused as this device", addr, err)
+		}
+	}
+	var out strings.Builder
+	if err := run(t.Context(), []string{"mi3", "--controller", "192.0.2.8"}, nil, &out); err != nil && strings.Contains(err.Error(), "chiar acest dispozitiv") {
+		t.Errorf("recspike mi3 --controller 192.0.2.8 = %v: another device's address was refused", err)
 	}
 }

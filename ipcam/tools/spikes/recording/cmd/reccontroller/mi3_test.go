@@ -4,51 +4,21 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/pion/webrtc/v4"
+
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/internal/spiketest"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi3"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
-
-// required returns the path that the environment variable name holds; it
-// skips without one, and fails instead when require is "1", as CI sets it.
-func required(t *testing.T, name, require string) string {
-	t.Helper()
-	path := os.Getenv(name)
-	if path == "" {
-		if os.Getenv(require) == "1" {
-			t.Fatalf("%s=1, but %s is empty", require, name)
-		}
-		t.Skipf("%s is unset", name)
-	}
-	if _, err := os.Stat(path); err != nil { //nolint:gosec // the test run's own path
-		t.Fatalf("%s: %v", name, err)
-	}
-	return path
-}
-
-// buildBinary builds the command pkg into dir and returns its path.
-func buildBinary(t *testing.T, dir, name, pkg string) string {
-	t.Helper()
-	out := filepath.Join(dir, name)
-	if runtime.GOOS == "windows" {
-		out += ".exe"
-	}
-	cmd := exec.Command("go", "build", "-o", out, pkg) //nolint:gosec // the test's own build
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build %s: %v\n%s", pkg, err, b)
-	}
-	return out
-}
 
 // TestMI3_SmokeEndToEnd (G20, R07, C1-R17, G15): short MI3 runs with the
 // real chain: reccontroller serving the media on this machine's ports, not
@@ -62,11 +32,11 @@ func buildBinary(t *testing.T, dir, name, pkg string) string {
 // is H3, with 3 live sessions; a Pi 4 is H1b, with 1, judged on its CPU and
 // RAM, and its results reach the PC's controller at the goodbye.
 func TestMI3_SmokeEndToEnd(t *testing.T) {
-	mediamtx := required(t, "MEDIAMTX_BIN", "RECSPIKE_REQUIRE_MEDIAMTX")
-	media := required(t, "MEDIAGEN_DIR", "SPIKE_REQUIRE_MEDIA")
+	mediamtx := spiketest.Required(t, "MEDIAMTX_BIN", "RECSPIKE_REQUIRE_MEDIAMTX")
+	media := spiketest.Required(t, "MEDIAGEN_DIR", "SPIKE_REQUIRE_MEDIA")
 	bin := t.TempDir()
-	hub := buildBinary(t, bin, "ipcam-hub", "github.com/AndreiBesliu/DevWorld/ipcam/hub/cmd/ipcam-hub")
-	recspike := buildBinary(t, bin, "recspike", "github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cmd/recspike")
+	hub := spiketest.BuildBinary(t, bin, "ipcam-hub", "github.com/AndreiBesliu/DevWorld/ipcam/hub/cmd/ipcam-hub")
+	recspike := spiketest.BuildBinary(t, bin, "recspike", "github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cmd/recspike")
 
 	// serve sends the controller's log to its file; serveOn uses slog's.
 	defaultLog := slog.Default()
@@ -119,8 +89,8 @@ func TestMI3_SmokeEndToEnd(t *testing.T) {
 				t.Fatal(err)
 			}
 			d := e.MI3
-			t.Logf("CPU %.1f %%, RAM %.0f MB, budgets %v, disk %v, fsync/s %.3f, latency p95 %v ms, pacing p99 %d ms, skipped %d, disk queue peak %d",
-				d.CPUPctTotal, d.RAMMb, d.Budgets, d.DiskRatio, d.FsyncPerSecPerFile, d.LatencyP95Ms, d.PacingP99Ms, d.SkippedAUs, d.DiskQueuePeakBytes)
+			t.Logf("CPU %.1f %%, RAM %.0f MB, budgets %v, disk %v, fsync/s %.3f, latency p95 %v ms, pacing p99 %d ms, skipped %d, disk queue peak %d, load CPU %v",
+				d.CPUPctTotal, d.RAMMb, d.Budgets, d.DiskRatio, d.FsyncPerSecPerFile, d.LatencyP95Ms, d.PacingP99Ms, d.SkippedAUs, d.DiskQueuePeakBytes, d.LoadCPUPct)
 			if d.Tier != c.tier || d.Cameras != 2 || len(d.Steps) == 0 || d.Steps[0].Cameras != 2 || d.Steps[0].Minutes != mi3.FullMinutes {
 				t.Errorf("tier %s, %d cameras, steps %+v; want %s at 2 cameras for its hour first", d.Tier, d.Cameras, d.Steps, c.tier)
 			}
@@ -145,6 +115,11 @@ func TestMI3_SmokeEndToEnd(t *testing.T) {
 			}
 			if d.LatencyP95Ms < 0 || d.LatencyP95Ms > 5000 || d.DiskQueuePeakBytes <= 0 || len(d.Proxies) == 0 {
 				t.Errorf("latency p95 %v ms, disk queue peak %d, proxies %d: not measured", d.LatencyP95Ms, d.DiskQueuePeakBytes, len(d.Proxies))
+			}
+			// Each load's CPU, as a share of the whole machine (C1-R19); the
+			// export runs at full speed, so it always takes some.
+			if len(d.LoadCPUPct) != len(mi3.Loads) || d.LoadCPUPct[mi3.LoadExport] <= 0 || d.LoadCPUPct[mi3.LoadExport] > 100 {
+				t.Errorf("load CPU %v, want each load's share of the machine", d.LoadCPUPct)
 			}
 			if c.pulled != "" {
 				// The host is done once it has sent its folder, which the
@@ -173,4 +148,53 @@ func TestMI3_LocalControllerRefusesAStep(t *testing.T) {
 	if refused, ok := r.receive(conn).(link.Refused); !ok || refused.RunID != "pc-mi3-01" || refused.Reason != noLocalMI3 {
 		t.Errorf("got %#v, want the step refused: %s", refused, noLocalMI3)
 	}
+}
+
+// deadAnswer answers offer as a peer of api that closes at once would: the
+// live peer takes the answer, and its channel never opens.
+func deadAnswer(t *testing.T, api *webrtc.API, offer string) string {
+	t.Helper()
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = pc.Close() }()
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := pc.CreateAnswer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pc.SetLocalDescription(answer); err != nil {
+		t.Fatal(err)
+	}
+	return pc.LocalDescription().SDP
+}
+
+// TestMI3_LiveAnswersEndWithTheirConnection (G20; Task 9 review): the
+// controller waits for a step's live tiles to bind under the connection
+// that sent the answers: when the host disconnects, the step's peers close
+// and the wait ends at once, not after liveAcceptWait.
+func TestMI3_LiveAnswersEndWithTheirConnection(t *testing.T) {
+	waitFor(t, "the answers of earlier tests to end", func() bool { return running(t, "(*ctl).mi3Answers") == 0 })
+	r := newRig(t)
+	api, err := controller.NewLiveAPI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.c.liveAPI, r.c.streams = api, []controller.Stream{{Path: "cam01_sub"}}
+	conn := r.connect("pc")
+	r.send(conn, link.Mi3Start{RunID: "pc-mi3-02", Sessions: 1, Tiles: []string{"cam01_sub"}})
+	offers, ok := r.receive(conn).(link.Mi3Offers)
+	if !ok || len(offers.Offers) != 1 {
+		t.Fatalf("got %#v, want one offer", offers)
+	}
+	r.send(conn, link.Mi3Answers{RunID: "pc-mi3-02", Answers: []string{deadAnswer(t, api, offers.Offers[0])}})
+	waitFor(t, "the wait for the live tiles", func() bool { return running(t, "(*ctl).mi3Answers") == 1 })
+
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the wait for the live tiles to end with the connection", func() bool { return running(t, "(*ctl).mi3Answers") == 0 })
 }

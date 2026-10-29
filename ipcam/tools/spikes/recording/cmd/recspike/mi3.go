@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"runtime"
 	"slices"
 	"strings"
@@ -57,14 +58,31 @@ func mi3Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 		Results: f.results, Work: f.work, Out: out})
 }
 
+// interfaceAddrs lists this device's addresses; tests replace it.
+var interfaceAddrs = net.InterfaceAddrs
+
 // onThisDevice reports whether addr, a host with or without a port, is this
-// device: a loopback address, or localhost.
+// device: localhost, a loopback address, or one of its interfaces', such as
+// its LAN IP, at which a reccontroller started here without -local would
+// listen too.
 func onThisDevice(addr string) bool {
 	host, ip := controllerHost(addr)
-	if ip != nil {
-		return ip.IsLoopback()
+	switch {
+	case ip == nil:
+		return strings.EqualFold(host, "localhost")
+	case ip.IsLoopback():
+		return true
 	}
-	return strings.EqualFold(host, "localhost")
+	addrs, err := interfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // mi3LoadCommand is `recspike mi3-load live|playback|export|upload`, which

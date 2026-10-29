@@ -166,7 +166,7 @@ func (c *ctl) serve(ctx context.Context, conn *link.Conn, local net.Addr) {
 		case link.Mi3Start:
 			c.mi3Start(conn, m)
 		case link.Mi3Answers:
-			go c.mi3Answers(conn, m)
+			go c.mi3Answers(ctx, conn, m)
 		case link.Mi3End:
 			c.mi3End(conn, m)
 		case link.Bye:

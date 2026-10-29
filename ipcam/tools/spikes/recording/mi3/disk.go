@@ -52,7 +52,9 @@ type segmentStats struct {
 // each part's close, so a file of n parts closed n − 1 of them over its
 // first n − 1 parts; its last part, which a segment's close or the stop
 // may cut short, is left out. The fsync at a segment's close, one per 5
-// min, is not in the rate.
+// min, is not in the rate. It counts closed parts, so it sits near 1 by
+// construction and cannot see an fsync in plus: the report names it so
+// (Proxies).
 func measureDisk(rec string, id age.Identity) (diskFigures, error) {
 	sizes, payloads := map[string]int64{}, map[string]int64{}
 	var closes, seconds float64

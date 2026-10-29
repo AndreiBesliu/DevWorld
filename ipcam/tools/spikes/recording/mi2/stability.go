@@ -16,7 +16,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -177,7 +176,7 @@ func Run(ctx context.Context, o Options) error {
 		}
 	}()
 
-	o.say("Proba MI2 %s începe: %s h, %d camere. Lăsați dispozitivul pornit, cu reccontroller -local pornit tot timpul.", runID, decimal(o.Hours, -1), cameras)
+	o.say("Proba MI2 %s începe: %s h, %d camere. Lăsați dispozitivul pornit, cu reccontroller -local pornit tot timpul.", runID, results.Decimal(o.Hours, -1), cameras)
 	data, err := o.record(ctx, config, log, window)
 	switch {
 	case errors.Is(err, errNeverReady):
@@ -201,7 +200,7 @@ func Run(ctx context.Context, o Options) error {
 	if err := finishRun(statePath, st); err != nil {
 		return err
 	}
-	o.say("Proba MI2 %s s-a încheiat după %s h. Crash-uri ipcam-hub: %d; reporniri MediaMTX: %d.", runID, decimal(data.Hours, 2), data.Crashes72h, data.ChildRestarts)
+	o.say("Proba MI2 %s s-a încheiat după %s h. Crash-uri ipcam-hub: %d; reporniri MediaMTX: %d.", runID, results.Decimal(data.Hours, 2), data.Crashes72h, data.ChildRestarts)
 	return nil
 }
 
@@ -403,10 +402,10 @@ func (o Options) writeRun(dir string, streams []string, urls map[string]string) 
 // sayWindow prints the free space that the run needs on this host and the
 // window that it has (G19).
 func (o Options) sayWindow(free uint64, cameras int, window time.Duration) {
-	o.say("Proba de %s h înregistrează %d camere de 4 Mbps (jumătate criptate): %s GB pe oră.", decimal(o.Hours, -1), cameras, decimal(WriteRate(cameras)*3600/1e9, 1))
+	o.say("Proba de %s h înregistrează %d camere de 4 Mbps (jumătate criptate): %s GB pe oră.", results.Decimal(o.Hours, -1), cameras, results.Decimal(WriteRate(cameras)*3600/1e9, 1))
 	o.say("Păstrează doar ultimele N ore: N = min(6 h, jumătate din spațiul liber ÷ ritmul de scriere), cel puțin 1 h. Sunt necesari cel puțin %d GB liberi; pentru fereastra întreagă de 6 h, ≈ %d GB.",
 		NeededGB(cameras, MinWindow), NeededGB(cameras, MaxWindow))
-	o.say("Spațiu liber aici: %s GB; fereastra este %s h.", decimal(float64(free)/1e9, 0), decimal(window.Hours(), 2))
+	o.say("Spațiu liber aici: %s GB; fereastra este %s h.", results.Decimal(float64(free)/1e9, 0), results.Decimal(window.Hours(), 2))
 }
 
 func (o Options) say(format string, args ...any) {
@@ -419,7 +418,7 @@ func (o Options) freeBytes() (uint64, error) {
 	if o.FreeBytes != nil {
 		return o.FreeBytes()
 	}
-	return freeBytes(o.Work)
+	return mi1.FreeBytes(o.Work)
 }
 
 func (o Options) clock() source.Clock {
@@ -441,12 +440,6 @@ func (o Options) startHub(config string, stderr io.Writer, onEvent func(hubproc.
 		return o.StartHub(config, stderr, onEvent)
 	}
 	return hubproc.Start(hubproc.Options{Binary: o.Hub, Config: config, Stderr: stderr, OnEvent: onEvent})
-}
-
-// decimal renders f with prec decimals (-1: as few as it needs) and a
-// decimal comma.
-func decimal(f float64, prec int) string {
-	return strings.Replace(strconv.FormatFloat(f, 'f', prec, 64), ".", ",", 1)
 }
 
 // runState is where the host's 72 h runs stand, in

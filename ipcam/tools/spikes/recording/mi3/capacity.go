@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -67,8 +68,8 @@ type measureFunc func(ctx context.Context, cameras, minutes, attempt int) (Figur
 // attempt goes into Steps, and the envelope's figures are the first hour's
 // last attempt. With sixteen (a PC with 6 cores or more), one hour at 16
 // cameras follows the steps that settled, whatever their count, and goes
-// into Sixteen, as information; steps that stopped are run again whole,
-// with their hour at 16.
+// into Sixteen, as information; after steps that stopped, none runs
+// (C1-R20): the owner runs the probe again.
 //
 // d is nil only when measure failed before an attempt of the first hour was
 // valid: err is that error, and there is nothing to judge. After a valid
@@ -148,16 +149,17 @@ func loadEnded(kind string) error {
 }
 
 // stopText is, for the envelope, why step s could not be measured: err's
-// text when it is a stepFailure, the owner's stop, or else where the error
-// is (PH0-22).
+// text when it is a stepFailure, the owner's stop (Ctrl+C), or else where
+// the error is (PH0-22): the step logs stay in work/mi3, and in
+// work/mi3-anterior once the probe starts again (keepStepLogs).
 func stopText(s results.Mi3Step, err error) string {
-	why := "eroarea este pe ecranul gazdei și în jurnalele pasului"
+	why := "eroarea este pe ecranul gazdei și în jurnalele pasului (work/mi3; după o nouă pornire, work/" + previousDir + ")"
 	var failure *stepFailure
 	switch {
 	case errors.As(err, &failure):
 		why = failure.text
 	case errors.Is(err, context.Canceled):
-		why = "proba a fost oprită înainte de final"
+		why = "proprietarul a oprit proba"
 	}
 	return stepHead(s) + ": nu s-a putut măsura; " + why
 }
@@ -198,6 +200,9 @@ type Options struct {
 	// Tests shorten both.
 	Window       func(minutes int) time.Duration
 	FixtureBytes int64
+	// FreeBytes is the space free under Work; nil reads it from the file
+	// system (mi1.FreeBytes). Tests replace it.
+	FreeBytes func() (uint64, error)
 }
 
 // The pace of a step.
@@ -234,8 +239,11 @@ func Run(ctx context.Context, o Options) error {
 	tier := TierFor(o.Host)
 	cameras := max(o.Host.Cameras, 1)
 	dir := filepath.Join(o.Work, "mi3")
-	// The steps of an earlier run, which an interruption left: their
-	// recordings would only take space.
+	// The steps of the run before: their logs, which its screen and envelope
+	// name, stay for one more run; the rest would only take space.
+	if err := keepStepLogs(dir, filepath.Join(o.Work, previousDir)); err != nil {
+		return fmt.Errorf("nu pot păstra jurnalele probei MI3 de dinainte: %w", err)
+	}
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("nu pot șterge probele MI3 de dinainte: %w", err)
 	}
@@ -263,22 +271,93 @@ func Run(ctx context.Context, o Options) error {
 	}
 	defer release()
 
-	o.say("Proba MI3 începe: nivelul %s, %s, %d sesiuni live, redare, export și upload de %s Mbps, în paralel, timp de 1 h. "+
-		"Dacă ora pică, proba continuă cu pași de 15 min la jumătate din camere, iar numărul care trece se confirmă cu încă o oră. "+
-		"Lăsați dispozitivul pornit și nefolosit până la final.", tier, camerasText(cameras), Sessions(tier),
-		decimal(float64(UploadBps(tier, cameras))/1e6, -1))
+	sixteen := o.Host.Cores6Plus && tier == TierH3
+	o.say("%s", openingText(tier, cameras, sixteen))
 	r := &stepRunner{o: o, l: l, fx: fx, tier: tier, dir: dir}
-	d, sixteenErr, err := runSteps(ctx, tier, cameras, o.Host.Cores6Plus && tier == TierH3, r.measure)
+	d, sixteenErr, err := runSteps(ctx, tier, cameras, sixteen, r.measure)
 	if d == nil {
+		if errors.Is(err, context.Canceled) {
+			o.say("Proba MI3 s-a întrerupt înainte de prima oră: nu are rezultat.")
+			return errInterrupted
+		}
 		return err
 	}
 	return o.finish(*d, sixteenErr, err)
 }
 
+// errInterrupted is Run's error after the owner's stop (Ctrl+C): recspike
+// ends as on its other interruptions, MI2's.
+var errInterrupted = fmt.Errorf("proba MI3 s-a întrerupt: %w", context.Canceled)
+
+// previousDir is the folder under work/ that keeps the step logs of the
+// run before (keepStepLogs).
+const previousDir = "mi3-anterior"
+
+// stepLogs are the logs that each step leaves in its folder.
+var stepLogs = []string{"ipcam-hub.log", "loads.log"}
+
+// keepStepLogs moves the step logs in dir, the folder of the run before,
+// to prev, in place of what prev held: one generation, as MI2 keeps its
+// last log. The screen and the envelope of a run that stopped name those
+// logs, and the owner then starts the probe again. A dir without any step
+// log, as after a start that stopped before its first step, leaves prev as
+// it is.
+func keepStepLogs(dir, prev string) error {
+	steps, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var logs []string // relative to dir
+	for _, st := range steps {
+		for _, name := range stepLogs {
+			rel := filepath.Join(st.Name(), name)
+			if info, err := os.Stat(filepath.Join(dir, rel)); err == nil && info.Mode().IsRegular() {
+				logs = append(logs, rel)
+			}
+		}
+	}
+	if len(logs) == 0 {
+		return nil
+	}
+	if err := os.RemoveAll(prev); err != nil {
+		return err
+	}
+	for _, rel := range logs {
+		to := filepath.Join(prev, rel)
+		if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
+			return err
+		}
+		if err := os.Rename(filepath.Join(dir, rel), to); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// openingText is Run's first line on the owner's screen: what runs, and
+// for how long: the hour, the 15-min steps and their confirming hour, the
+// extra hour at 16 cameras when sixteen holds (a PC with 6 cores or more),
+// and the attempts that a step paced unevenly adds.
+func openingText(tier string, cameras int, sixteen bool) string {
+	text := fmt.Sprintf("Proba MI3 începe: nivelul %s, %s, %d sesiuni live, redare, export și upload de %s Mbps, în paralel, timp de 1 h. "+
+		"Dacă ora pică, proba continuă cu pași de 15 min la jumătate din camere, iar numărul care trece se confirmă cu încă o oră. ",
+		tier, camerasText(cameras), Sessions(tier), results.Decimal(float64(UploadBps(tier, cameras))/1e6, -1))
+	if sixteen {
+		text += "Fiindcă acest PC are 6 nuclee sau mai multe, la final urmează încă o oră la 16 camere, informativă. "
+	}
+	return text + fmt.Sprintf("Un pas pe care controlorul l-a trimis neuniform se reface, în cel mult %d încercări, deci proba poate dura mai mult. "+
+		"Lăsați dispozitivul pornit și nefolosit până la final.", maxAttempts)
+}
+
 // finish writes d, what the steps measured, as the run's envelope, also
 // when stepErr stopped the steps after the first hour, which decides G12
 // (G27), and then returns stepErr. sixteenErr, the hour at 16 cameras', is
-// information: it is said on the screen, and the run succeeds.
+// information: it is said on the screen, and the run succeeds. The owner's
+// stop (Ctrl+C) of either is an interruption, errInterrupted, as on
+// recspike's other interruptions.
 func (o Options) finish(d results.Mi3Data, sixteenErr, stepErr error) error {
 	d.Proxies = Proxies
 	set := SetFor(o.Host.Pseudonym)
@@ -295,10 +374,15 @@ func (o Options) finish(d results.Mi3Data, sixteenErr, stepErr error) error {
 		}
 		break
 	}
+	if errors.Is(stepErr, context.Canceled) || errors.Is(sixteenErr, context.Canceled) {
+		o.say("Proba MI3 s-a întrerupt; ce s-a măsurat este în rezultatul %s. Pașii: %s.", e.RunID, stepsSummary(d.Steps))
+		return errInterrupted
+	}
 	if stepErr != nil {
 		o.say("Proba MI3 s-a oprit înainte de final; ce s-a măsurat este în rezultatul %s. Pașii: %s.", e.RunID, stepsSummary(d.Steps))
-		return fmt.Errorf("pașii de coborâre nu s-au încheiat: %w. Ora la %s rămâne măsurată; porniți din nou proba ca numărul recomandat să se stabilească",
-			stepErr, camerasText(d.Cameras))
+		return fmt.Errorf("pașii de coborâre nu s-au încheiat: %w. Ora la %s rămâne măsurată; porniți din nou proba ca numărul recomandat să se stabilească. "+
+			"La pornire, jurnalele pașilor de acum se mută în %s, unde rămân până la pornirea următoare",
+			stepErr, camerasText(d.Cameras), filepath.Join(o.Work, previousDir))
 	}
 	o.say("Proba MI3 s-a încheiat: rezultatul este %s. Pașii: %s.", e.RunID, stepsSummary(d.Steps))
 	if last := d.Steps[len(d.Steps)-1]; !last.Valid {
@@ -331,6 +415,13 @@ func (o Options) window(minutes int) time.Duration {
 		return o.Window(minutes)
 	}
 	return time.Duration(minutes) * time.Minute
+}
+
+func (o Options) freeBytes() (uint64, error) {
+	if o.FreeBytes != nil {
+		return o.FreeBytes()
+	}
+	return mi1.FreeBytes(o.Work)
 }
 
 func (o Options) fixtureBytes() int64 {
@@ -424,6 +515,9 @@ func streams(cameras int) (mains, tiles []string) {
 // measure is one step of the run: cameras recorded for minutes, the
 // attempt-th try, with the tier's loads beside them.
 func (r *stepRunner) measure(ctx context.Context, cameras, minutes, attempt int) (Figures, error) {
+	if err := r.room(cameras, minutes); err != nil {
+		return Figures{}, err
+	}
 	r.n++
 	name := fmt.Sprintf("%02d-%dcam-%dmin-%d", r.n, cameras, minutes, attempt)
 	dir := filepath.Join(r.dir, name)
@@ -450,8 +544,37 @@ func (r *stepRunner) measure(ctx context.Context, cameras, minutes, attempt int)
 		}
 	}
 	r.o.say("Pasul %d: CPU total %s %%, RAM %s MB, latență p95 %s ms, ritm p99 %d ms, cadre sărite %d: %s.",
-		r.n, decimal(f.CPUPctTotal, 1), decimal(f.RAMMb, 0), decimal(f.LatencyP95Ms, 0), f.PacingP99Ms, f.SkippedAUs, verdict)
+		r.n, results.Decimal(f.CPUPctTotal, 1), results.Decimal(f.RAMMb, 0), results.Decimal(f.LatencyP95Ms, 0), f.PacingP99Ms, f.SkippedAUs, verdict)
 	return f, nil
+}
+
+// spaceMargin is the free space that a step leaves beside its recordings:
+// 2 GiB, as MI1's runs on the Pi (G14).
+const spaceMargin = 2 << 30
+
+// stepBytes estimates what a step of cameras writes in window: cameras × 4
+// Mbps × window × 1.03, §4.8's disk budget, plus spaceMargin.
+func stepBytes(cameras int, window time.Duration) uint64 {
+	written := int64(cameras) * cameraBps / 8 * window.Milliseconds() / 1000 * 103 / 100
+	return uint64(written) + spaceMargin //nolint:gosec // a step's bytes, never negative
+}
+
+// room refuses a step of cameras for minutes that the free space cannot
+// hold: a full disk would fail it midway. The refusal is a step's error,
+// before anything starts (C1-R21): after a valid first hour, the envelope
+// keeps that hour and says, in stepFailure's words, how much space the step
+// needed.
+func (r *stepRunner) room(cameras, minutes int) error {
+	free, err := r.o.freeBytes()
+	if err != nil {
+		return fmt.Errorf("nu pot citi spațiul liber de pe disc: %w", err)
+	}
+	if need := stepBytes(cameras, r.o.window(minutes)); free < need {
+		gb := func(n uint64) string { return results.Decimal(float64(n)/1e9, 1) + " GB" }
+		return fmt.Errorf("pasul cu %s, %d min nu a pornit: %w; eliberați spațiu, apoi porniți din nou proba", camerasText(cameras), minutes,
+			&stepFailure{fmt.Sprintf("pe disc sunt %s liberi, iar pasul are nevoie de %s", gb(free), gb(need))})
+	}
+	return nil
 }
 
 // stepRun is one step's processes and what undoes them, last first.
@@ -663,6 +786,10 @@ func (s *stepRun) window(ctx context.Context, roots map[string]int, hub *hubproc
 	}
 }
 
+// ramMb is peak bytes in MB of 10^6 bytes: §4.8's unit, that of its RAM
+// formula, and the stricter reading.
+func ramMb(peak uint64) float64 { return float64(peak) / 1e6 }
+
 // subBps is a camera's sub stream, 512 kbps.
 const subBps = 512_000
 
@@ -693,6 +820,10 @@ func (s *stepRun) figures(start, end usage, peak uint64, res link.Mi3Result, upl
 		return Figures{}, err
 	}
 	machine := func(kind string) float64 { return end.pctOfMachine(start, end.cpuSince(start, kind)) }
+	loads := map[string]float64{}
+	for _, kind := range Loads {
+		loads[kind] = machine(kind)
+	}
 	live := machine(LoadLive) / float64(Sessions(s.r.tier)*(s.cameras*subBps+cameraBps))
 	uploaded := float64(upload.Bytes*8) / upload.Seconds
 	return Figures{
@@ -701,12 +832,13 @@ func (s *stepRun) figures(start, end usage, peak uint64, res link.Mi3Result, upl
 		TileMainPct:        live * cameraBps,
 		EncUploadPct:       machine(LoadUpload) * uploadBps / uploaded,
 		IngestPerCameraPct: end.pctOfCore(start, end.cpuSince(start, "hub")) / float64(s.cameras),
-		RAMMb:              float64(peak) / (1 << 20),
+		RAMMb:              ramMb(peak),
 		DiskRatio:          disk.ratio,
 		FsyncPerSecPerFile: disk.fsyncPerSec,
 		LatencyP95Ms:       res.LatencyP95Ms,
 		PacingP99Ms:        res.PacingP99Ms,
 		SkippedAUs:         res.SkippedAUs,
 		DiskQueuePeakBytes: queuePeak,
+		LoadCPUPct:         loads,
 	}, nil
 }
