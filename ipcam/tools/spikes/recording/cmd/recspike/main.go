@@ -6,7 +6,8 @@
 // owner's window, the owner's real cuts, and the lab's shards, MI2's 72 h
 // run against a reccontroller on the same device, and MI3's capacity run
 // against the one on the other device, with its loads as recspike mi3-load
-// children; it installs the autostart that continues a set after each reboot (G14), and pushes
+// children, and MI4's age rig against the PC's; it installs the autostart
+// that continues a set after each reboot (G14), and pushes
 // the Pi's results to the PC at the end (G15). Its results folder,
 // results/ next to it, is published; its private folder, work/, holds the
 // runs' recordings and keys and the controller's address. Every line it
@@ -57,6 +58,10 @@ const usage = `Folosire:
       dispozitiv, cu sesiunile live, redarea, exportul și upload-ul în paralel, 1 h (plus pașii, dacă pică).
   recspike mi3-load live|playback|export|upload
       intern: o încărcare a probei MI3, pornită de recspike mi3.
+  recspike mi4 --controller ADRESA_PC
+      proba MI4 (citiri, salturi și criptare age): înregistrează un segment criptat de 5 min de la reccontroller
+      de pe PC, apoi măsoară. Pe Pi se pornește cu sudo (sudo ./recspike mi4 …), care golește memoria cache
+      a discului înaintea fiecărui set de citiri și salturi.
   recspike push --controller ADRESA_PC
       trimite rezultatele Pi-ului către reccontroller pull de pe PC.
   recspike annotate split PLIC.json… --first PARTEA --out DOSAR
@@ -110,6 +115,8 @@ func run(ctx context.Context, args []string, in *bufio.Reader, out io.Writer) er
 		return mi3Command(ctx, rest, in, out)
 	case "mi3-load":
 		return mi3LoadCommand(ctx, rest, in, out)
+	case "mi4":
+		return mi4Command(ctx, rest, in, out)
 	case "resume":
 		return resumeCommand(ctx, rest, out)
 	case "push":

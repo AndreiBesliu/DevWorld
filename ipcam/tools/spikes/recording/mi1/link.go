@@ -137,22 +137,56 @@ func Push(ctx context.Context, addr, dir, host string, out io.Writer) error {
 // run records the cameras of a reccontroller on the same device (G18, G19).
 // The addresses hold the credentials: they go only to the private run.json.
 func CameraURLs(ctx context.Context, addr, host string, streams []string) (map[string]string, error) {
+	h, err := OpenHostLink(ctx, addr, host)
+	if err != nil {
+		return nil, err
+	}
+	defer h.s.close()
+	urls := map[string]string{}
+	for _, stream := range streams {
+		if urls[stream], err = h.CameraURL(stream); err != nil {
+			return nil, err
+		}
+	}
+	return urls, h.s.send(link.Bye{})
+}
+
+// HostLink is a host's link to the controller, held for a whole probe, as
+// MI4's: the cameras' addresses at its start, and at its end the goodbye,
+// at which the PC's controller pulls a Pi's results folder (G15). A
+// goodbye at the start would have the controller pull before there is
+// anything to pull, from a link that is closing.
+type HostLink struct{ s *session }
+
+// OpenHostLink connects to the controller at addr as host, dialing again
+// for up to a minute, and reads its session.
+func OpenHostLink(ctx context.Context, addr, host string) (*HostLink, error) {
 	d := &Driver{Controller: addr, Host: HostState{Pseudonym: host}}
 	s, err := d.connectWithin(ctx, time.Minute)
 	if err != nil {
 		return nil, err
 	}
-	defer s.close()
-	urls := map[string]string{}
-	for _, stream := range streams {
-		if !slices.Contains(s.info.Streams, stream) {
-			return nil, fmt.Errorf("controlorul nu servește camera %s", stream)
-		}
-		if urls[stream], err = s.cameraURL(stream); err != nil {
-			return nil, err
-		}
+	return &HostLink{s: s}, nil
+}
+
+// CameraURL is the RTSP address of stream, with the session's credentials,
+// which go only to the private run.json.
+func (h *HostLink) CameraURL(stream string) (string, error) {
+	if !slices.Contains(h.s.info.Streams, stream) {
+		return "", fmt.Errorf("controlorul nu servește camera %s", stream)
 	}
-	return urls, s.send(link.Bye{})
+	return h.s.cameraURL(stream)
+}
+
+// End says goodbye and answers the controller's pull of the results folder
+// dir, if it asks (a Pi's link to the PC's controller), until the
+// controller closes the link, then closes it.
+func (h *HostLink) End(ctx context.Context, dir string, out io.Writer) error {
+	defer h.s.close()
+	if err := h.s.send(link.Bye{}); err != nil {
+		return err
+	}
+	return answerPull(ctx, h.s, dir, out)
 }
 
 // session is the host's link to the controller: one goroutine reads its

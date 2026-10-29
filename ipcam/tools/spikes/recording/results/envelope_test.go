@@ -244,3 +244,45 @@ func TestEnvelope_MI3(t *testing.T) {
 		t.Error("an MI1 envelope with mi3 is valid")
 	}
 }
+
+// TestEnvelope_MI4 (G13): an MI4 envelope carries the age rig's run in mi4
+// and reads back the same; the ENC-06 envelope that recreport builds from
+// CI's annotation carries its result there too; an MI4 envelope without
+// mi4, or another code's with it, is refused.
+func TestEnvelope_MI4(t *testing.T) {
+	dir := t.TempDir()
+	agerange := 13.5
+	want := Envelope{
+		Schema: Schema, Code: "MI4", RunID: "pi-mi4-1", Set: "pi-mi4", Host: "pi", OS: "linux", Storage: "sd",
+		PiModel: &PiModelInfo{Raw: "Raspberry Pi 4 Model B Rev 1.5", Tier: "H1b", Supported: true, Known: true, RecommendedMin: 4, RecommendedMax: 4},
+		MI4: &Mi4Data{Model: "Raspberry Pi 4 Model B Rev 1.5", ReadMs: []float64{12.5, 30.25}, ReadMaxMs: 30.25, ReadP50Ms: 12.5, ReadP99Ms: 30.25,
+			ReadSize: 524288, Cold: true, InfoReads: []Mi4Reads{{Size: 65536, MaxMs: 4.5, P50Ms: 2, P99Ms: 4}},
+			SeekMs: []float64{1700}, SeekRAMMs: []float64{1300}, Seek2MinMs: []float64{600},
+			CryptoMBs: 18, CryptoMBsAllCores: 60, ThresholdMBs: 20, RecommendedAfter: 3, AgerangeMbps: &agerange},
+	}
+	if err := Write(dir, want); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got, err := Read(filepath.Join(dir, "MI4", "pi-mi4", "pi-mi4-1.json"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Read = %+v\nwant %+v", got, want)
+	}
+	pass := true
+	enc06 := Envelope{Schema: Schema, Code: "ENC-06", RunID: "ci-enc06-1", Set: "ci-enc06", Host: "lab-linux", OS: "linux", MI4: &Mi4Data{Enc06: &pass}}
+	if err := enc06.Validate(); err != nil {
+		t.Errorf("the ENC-06 envelope is refused: %v", err)
+	}
+	without := want
+	without.MI4 = nil
+	if err := without.Validate(); err == nil {
+		t.Error("an MI4 envelope without mi4 is valid")
+	}
+	misplaced := sample()
+	misplaced.MI4 = want.MI4
+	if err := misplaced.Validate(); err == nil {
+		t.Error("an MI1 envelope with mi4 is valid")
+	}
+}

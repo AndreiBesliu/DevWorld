@@ -45,6 +45,8 @@ func TestCLI_RomanianUsageAndErrors(t *testing.T) {
 		"mi3 --controller 127.0.0.1":                                   "chiar acest dispozitiv",
 		"mi3 --controller localhost:7081":                              "chiar acest dispozitiv",
 		"mi3 --controller 192.0.2.1 extra":                             "argument necunoscut: extra",
+		"mi4":                                                          "--controller",
+		"mi4 --controller 192.0.2.1 extra":                             "argument necunoscut: extra",
 		"mi3-load":                                                     "mi3-load primește una dintre încărcările live, playback, export, upload",
 		"mi3-load stream":                                              "mi3-load primește una dintre încărcările",
 		"push":                                                         "--controller",

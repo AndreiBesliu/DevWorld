@@ -7,6 +7,7 @@
 //	ipcam-hub hook segment-complete      (run by MediaMTX)
 //	ipcam-hub diag host [--rec <dir>]    (the host, its Pi model and storage)
 //	ipcam-hub diag pimodel --raw <model> (§4.8's row for a model string)
+//	ipcam-hub diag cryptobench|readbench|seekbench … (ENC-08's benches)
 //
 // The events are described with the events type (events.go). Exit codes: 0
 // after SIGTERM, Ctrl-C or Ctrl-Break (or the end of stdin, with

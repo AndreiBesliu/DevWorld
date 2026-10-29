@@ -3,7 +3,7 @@
 // closed hub or a dropped Wi-Fi never loses a run (Review Focus 5).
 import type { Platform } from './device';
 
-export type ScenarioId = 'S1' | 'S2' | 'S3-4' | 'S3-9' | 'S3-16' | 'S4' | 'S5' | 'S6' | 'S7' | 'S8' | 'S9' | 'S10';
+export type ScenarioId = 'S1' | 'S2' | 'S3-4' | 'S3-9' | 'S3-16' | 'S4' | 'S5' | 'S6' | 'S7' | 'S8' | 'S9' | 'S10' | 'AGE';
 
 export const SCENARIO_IDS: readonly ScenarioId[] = [
   'S1',
@@ -18,6 +18,8 @@ export const SCENARIO_IDS: readonly ScenarioId[] = [
   'S8',
   'S9',
   'S10',
+  // The recorder spike's MI4 bench (phase0c1 plan, Task 10), posted to reccontroller.
+  'AGE',
 ];
 
 /**

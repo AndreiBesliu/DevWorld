@@ -61,6 +61,56 @@ type Envelope struct {
 	// MI3 is an MI3 envelope's capacity run (G12), and only an MI3
 	// envelope's.
 	MI3 *Mi3Data `json:"mi3,omitempty"`
+	// MI4 is an MI4 envelope's age rig run (G13), and only an MI4 or an
+	// ENC-06 envelope's: recreport builds the ENC-06 envelope from CI's
+	// annotation, with Enc06, and the phone's AGE result as an MI4 envelope
+	// with AgerangeMbps.
+	MI4 *Mi4Data `json:"mi4,omitempty"`
+}
+
+// Mi4Data is MI4's age random-access rig on a host (G13, ENC-08, HUB-33):
+//   - Model is the host's model, the Pi's as diag host reads it, or "PC".
+//   - ReadMs are the 1000 timed reads of one fMP4 part each (G22), ReadSize
+//     their mean bytes; the max decides (C26), p50 and p99 are information.
+//     Cold is true when the page cache was dropped before each set (on the
+//     Pi, as root), false for warm reads (Windows).
+//   - InfoReads are the reads of 64 KiB and 4 MiB, information only.
+//   - SeekMs are the seeks' first-frame times in a 5-min segment (G21);
+//     after a failure, SeekRAMMs are those with the whole segment decrypted
+//     into RAM and Seek2MinMs those in a 2-min segment, also from RAM.
+//   - CryptoMBs is the encryption rate on one core (G23), CryptoMBsAllCores
+//     on all of them (information); ThresholdMBs is the threshold of the
+//     model (C25), 0 on the PC, where the rate is information, and
+//     RecommendedAfter the recommended number that follows from the rate.
+//   - AgerangeMbps is the phone's AGE run (G24), and Enc06 the ENC-06
+//     check of CI (identical bytes to the age CLI and rage), each in the
+//     envelope that recreport builds for it.
+type Mi4Data struct {
+	Model             string     `json:"model,omitempty"`
+	ReadMs            []float64  `json:"readMs,omitempty"`
+	ReadMaxMs         float64    `json:"readMaxMs,omitempty"`
+	ReadP50Ms         float64    `json:"readP50Ms,omitempty"`
+	ReadP99Ms         float64    `json:"readP99Ms,omitempty"`
+	ReadSize          int        `json:"readSize,omitempty"`
+	Cold              bool       `json:"cold,omitempty"`
+	InfoReads         []Mi4Reads `json:"infoReads,omitempty"`
+	SeekMs            []float64  `json:"seekMs,omitempty"`
+	SeekRAMMs         []float64  `json:"seekRamMs,omitempty"`
+	Seek2MinMs        []float64  `json:"seek2MinMs,omitempty"`
+	CryptoMBs         float64    `json:"cryptoMBs,omitempty"`
+	CryptoMBsAllCores float64    `json:"cryptoMBsAllCores,omitempty"`
+	ThresholdMBs      float64    `json:"thresholdMBs,omitempty"`
+	RecommendedAfter  int        `json:"recommendedAfter,omitempty"`
+	AgerangeMbps      *float64   `json:"agerangeMbps,omitempty"`
+	Enc06             *bool      `json:"enc06,omitempty"`
+}
+
+// Mi4Reads is a set of MI4's information reads of Size bytes each.
+type Mi4Reads struct {
+	Size  int     `json:"size"`
+	MaxMs float64 `json:"maxMs"`
+	P50Ms float64 `json:"p50Ms"`
+	P99Ms float64 `json:"p99Ms"`
 }
 
 // Mi3Data is MI3's capacity run on a host (G12, HUB-32, G20): its tier
@@ -243,6 +293,8 @@ func (e Envelope) Validate() error {
 		return fmt.Errorf("results: an %s envelope with mi2 %v: only MI2's has it, always", e.Code, e.MI2 != nil)
 	case (e.Code == "MI3") != (e.MI3 != nil):
 		return fmt.Errorf("results: an %s envelope with mi3 %v: only MI3's has it, always", e.Code, e.MI3 != nil)
+	case e.Code == "MI4" && e.MI4 == nil, e.MI4 != nil && e.Code != "MI4" && e.Code != "ENC-06":
+		return fmt.Errorf("results: an %s envelope with mi4 %v: MI4's has it always, and ENC-06's may", e.Code, e.MI4 != nil)
 	}
 	if !fileName(e.Set) {
 		return fmt.Errorf("results: set %q is not a file name", e.Set)

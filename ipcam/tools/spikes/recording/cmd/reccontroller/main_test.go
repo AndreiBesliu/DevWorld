@@ -567,8 +567,11 @@ func writeEnvelope(t *testing.T, dir, code, set, host string, piModel *results.P
 	t.Helper()
 	e := results.Envelope{Schema: results.Schema, Code: code, RunID: set + "-1", Set: set, Host: host, OS: "linux", PiModel: piModel,
 		Runs: []results.Run{{RunID: set + "-1", Valid: true}}}
-	if code == "MI2" { // its 72 h run, not runs
+	switch code {
+	case "MI2": // its 72 h run, not runs
 		e.Runs, e.MI2 = nil, &results.Mi2Data{Hours: 72, Cameras: 4, WindowHours: 6}
+	case "MI4": // its age rig run, not runs
+		e.Runs, e.MI4 = nil, &results.Mi4Data{ReadMs: []float64{10}, ReadMaxMs: 10, SeekMs: []float64{900}}
 	}
 	if err := results.Write(dir, e); err != nil {
 		t.Fatal(err)

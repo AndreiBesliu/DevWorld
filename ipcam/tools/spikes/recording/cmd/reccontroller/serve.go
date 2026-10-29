@@ -88,8 +88,9 @@ func serveOn(ctx context.Context, cfg serveConfig, lns *controller.Listeners, ou
 	go superviseBeacons(ctx, func(ctx context.Context) error {
 		return controller.ReceiveBeacons(ctx, lns.Beacon, c.beacons, clock)
 	}, c.say)
-	// Tasks 10 and 11 serve the app endpoints here.
-	app := &http.Server{Handler: http.NotFoundHandler(), ReadHeaderTimeout: 10 * time.Second}
+	// The spike app's endpoints, for MI4's phone step (G24); Task 11 adds
+	// MI9's.
+	app := &http.Server{Handler: controller.NewAppAPI(filepath.Join(c.results, "app")), ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = app.Serve(lns.App) }()
 	defer func() { _ = app.Close() }()
 	sink := &http.Server{Handler: controller.NewSink(), ReadHeaderTimeout: 10 * time.Second, TLSConfig: controller.SinkServerTLS(sinkCert),
