@@ -3,10 +3,15 @@ package mi9
 import (
 	"context"
 	"errors"
+	"go/parser"
+	"go/token"
+	"io"
 	"io/fs"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +22,6 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/internal/spiketest"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
-	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi4"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
@@ -33,15 +37,24 @@ func TestMain(m *testing.M) {
 // lanController is the other device's reccontroller as RunLAN sees it: it
 // gives the host its session, offers with a playback client (Client) when
 // the host starts the run, plays the host's recording with the host's
-// answer, and keeps the results that the host sends. refuseStart and
-// refuseAnswer, when set, are its refusals of the start and of the answer.
+// answer, as reccontroller does, and keeps the results that the host sends.
+// Its zero fields are reccontroller's own behaviour; set, they change it:
+//   - refuseStart and refuseAnswer are its refusals of the start and of the
+//     answer;
+//   - strayStart and strayAnswer are messages of the run that it sends
+//     instead of its offer and of its result;
+//   - measureWait is its measurement's wait, reccontroller's
+//     mi9MeasureWait, 2 min when unset.
 type lanController struct {
-	addr                      string
 	refuseStart, refuseAnswer string
-	results                   chan link.Results
+	strayStart, strayAnswer   func(runID string) link.Message
+	measureWait               time.Duration
+
+	addr    string
+	results chan link.Results
 }
 
-func startLANController(t *testing.T, refuseStart, refuseAnswer string) *lanController {
+func startLANController(t *testing.T, c *lanController) *lanController {
 	t.Helper()
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -52,7 +65,10 @@ func startLANController(t *testing.T, refuseStart, refuseAnswer string) *lanCont
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &lanController{addr: ln.Addr().String(), refuseStart: refuseStart, refuseAnswer: refuseAnswer, results: make(chan link.Results, 4)}
+	c.addr, c.results = ln.Addr().String(), make(chan link.Results, 4)
+	if c.measureWait == 0 {
+		c.measureWait = 2 * time.Minute
+	}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -82,8 +98,12 @@ func (c *lanController) serve(t *testing.T, api *webrtc.API, conn *link.Conn) {
 		case link.Hello:
 			_ = conn.Send(link.Session{RTSPBase: "rtsp://127.0.0.1:8554", User: "u", Pass: "p", Streams: []string{"cam01_main"}})
 		case link.Mi9Start:
-			if c.refuseStart != "" {
+			switch {
+			case c.refuseStart != "":
 				_ = conn.Send(link.Refused{RunID: m.RunID, Reason: c.refuseStart})
+				continue
+			case c.strayStart != nil:
+				_ = conn.Send(c.strayStart(m.RunID))
 				continue
 			}
 			if client, err = NewClient(api, Configuration(LAN, nil)); err != nil {
@@ -92,22 +112,28 @@ func (c *lanController) serve(t *testing.T, api *webrtc.API, conn *link.Conn) {
 			}
 			_ = conn.Send(link.Mi9Offer{RunID: m.RunID, Offer: client.Offer()})
 		case link.Mi9Answer:
-			if c.refuseAnswer != "" {
+			switch {
+			case c.refuseAnswer != "":
 				_ = conn.Send(link.Refused{RunID: m.RunID, Reason: c.refuseAnswer})
+				continue
+			case c.strayAnswer != nil:
+				_ = conn.Send(c.strayAnswer(m.RunID))
 				continue
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			err := client.Accept(ctx, m.Answer)
+			cancel()
 			var r BulkResult
 			if err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), c.measureWait)
 				r, err = client.Measure(ctx)
+				cancel()
 			}
-			cancel()
 			if err != nil {
 				_ = conn.Send(link.Refused{RunID: m.RunID, Reason: err.Error()})
 				continue
 			}
-			_ = conn.Send(link.Mi9Result{RunID: m.RunID, ThroughputMbps: r.ThroughputMbps, SeekMs: r.SeekMs, RTTMs: r.RTTMs})
+			_ = conn.Send(link.Mi9Result{RunID: m.RunID, ThroughputMbps: r.ThroughputMbps, SeekMs: r.SeekMs, RTTMs: r.RTTMs, Partial: r.Partial})
 		case link.Results:
 			c.results <- m
 		case link.Bye:
@@ -145,12 +171,13 @@ func leftUnder(t *testing.T, root string) []string {
 
 // TestRunLAN_PiPlaysMI4sSegment (G26 leg 3): on the Pi, RunLAN plays the
 // 5-min segment that MI4 left in its runs' folder, recorded there as MI4
-// records it (mi4.Runs, hubrec.FiveMin), and records nothing itself; the
-// PC records its own segment even then. Each writes its lan envelope.
+// records it (hubrec.Runs(work, "mi4"), hubrec.FiveMin), and records
+// nothing itself; the PC records its own segment even then. Each writes
+// its lan envelope.
 func TestRunLAN_PiPlaysMI4sSegment(t *testing.T) {
 	dir := t.TempDir()
 	hub, jobs := spiketest.InstallFakeHub(t, dir)
-	run, err := mi4.Runs(filepath.Join(dir, "work")).Start(time.Now())
+	run, err := hubrec.Runs(filepath.Join(dir, "work"), "mi4").Start(time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +186,7 @@ func TestRunLAN_PiPlaysMI4sSegment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := startLANController(t, "", "")
+	c := startLANController(t, &lanController{})
 
 	screen, err := lanRun(t, dir, hub, "pi", c)
 	if err != nil {
@@ -200,7 +227,7 @@ func TestRunLAN_ControllerRefusesBeforeRecording(t *testing.T) {
 	dir := t.TempDir()
 	hub, jobs := spiketest.InstallFakeHub(t, dir)
 	const reason = "gazda și reccontroller sunt pe același dispozitiv"
-	screen, err := lanRun(t, dir, hub, "pc", startLANController(t, reason, ""))
+	screen, err := lanRun(t, dir, hub, "pc", startLANController(t, &lanController{refuseStart: reason}))
 	if err == nil || !strings.Contains(err.Error(), "controlorul a refuzat proba: "+reason) {
 		t.Errorf("RunLAN = %v, want the controller's refusal: %s\n%s", err, reason, screen)
 	}
@@ -229,7 +256,7 @@ func TestRunLAN_SaysWhenTheIdentityStays(t *testing.T) {
 		t.Run("refuse="+refuse, func(t *testing.T) {
 			dir := t.TempDir()
 			hub, _ := spiketest.InstallFakeHub(t, dir)
-			screen, err := lanRun(t, dir, hub, "pc", startLANController(t, "", refuse))
+			screen, err := lanRun(t, dir, hub, "pc", startLANController(t, &lanController{refuseAnswer: refuse}))
 			folder := filepath.Join(dir, "work", "mi9")
 			line := "Nu am putut șterge înregistrarea probei și cheia ei: ștergeți de mână dosarul " + folder + "."
 			if !strings.Contains(screen, line) {
@@ -245,5 +272,137 @@ func TestRunLAN_SaysWhenTheIdentityStays(t *testing.T) {
 				t.Errorf("left under work/mi9: %q, want only the identity that could not be removed", left)
 			}
 		})
+	}
+}
+
+// stallAfter makes the hub side a peer too slow for the measurement's
+// wait: it sends the first n bytes of each range, then nothing more until
+// it closes.
+func stallAfter(t *testing.T, n int64) {
+	t.Helper()
+	realSend := sendBulk
+	t.Cleanup(func() { sendBulk = realSend })
+	sendBulk = func(ctx context.Context, ch channel, src io.ReaderAt, off, size int64, message int) error {
+		if err := realSend(ctx, ch, src, off, min(size, n), message); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+}
+
+// TestRunLAN_SlowRunWritesAMeasuredFailure (G27): a LAN too slow for the
+// controller's measurement wait still decides. When the wait ends during
+// the transfer, the controller stops it and sends the throughput of the
+// bytes received by then, with those bytes and the time elapsed; RunLAN
+// writes the lan envelope with that leg, partial and without seeks, and
+// JudgeBulk and Judge fail it on the throughput: «pică», not «fără
+// verdict».
+func TestRunLAN_SlowRunWritesAMeasuredFailure(t *testing.T) {
+	const sent = 64 << 10
+	stallAfter(t, sent)
+	dir := t.TempDir()
+	hub, _ := spiketest.InstallFakeHub(t, dir)
+	screen, err := lanRun(t, dir, hub, "pc", startLANController(t, &lanController{measureWait: 8 * time.Second}))
+	if err != nil {
+		t.Fatalf("RunLAN of a run too slow for its wait = %v, want its measured failure\n%s", err, screen)
+	}
+	e, err := results.Read(filepath.Join(dir, "results", "MI9", LANSet, "pc-mi9-1.json"))
+	if err != nil || e.MI9 == nil || len(e.MI9.Legs) != 1 || e.MI9.Legs[0].Partial == nil {
+		t.Fatalf("the envelope: %+v, %v; want one lan leg, partial", e, err)
+	}
+	leg := e.MI9.Legs[0]
+	p := leg.Partial
+	if p.ReceivedBytes != sent || p.SizeBytes <= sent || p.ElapsedMs <= 0 || len(leg.SeekMs) != 0 {
+		t.Errorf("the leg: %+v, partial %+v; want the %d bytes received of the segment's, the time elapsed, and no seek", leg, *p, sent)
+	}
+	if want := float64(sent*8) / p.ElapsedMs / 1e3; math.Abs(leg.ThroughputMbps-want) > want/1e3 {
+		t.Errorf("the leg's throughput is %v Mbps, want %v: the bytes received over the time elapsed", leg.ThroughputMbps, want)
+	}
+	r := BulkResult{Transport: Transport(leg.Transport), ThroughputMbps: leg.ThroughputMbps, SeekMs: leg.SeekMs, RTTMs: leg.RTTMs, Partial: p}
+	if pass, reasons := JudgeBulk(r); pass || !strings.Contains(strings.Join(reasons, "\n"), "pe LAN (pragul ≥ 8 Mbps)") {
+		t.Errorf("JudgeBulk = %v %q, want a failure on the LAN throughput", pass, reasons)
+	}
+	if j := Judge([]results.Envelope{e}); j.Verdict != results.Fail || j.PlanB != PlanB {
+		t.Errorf("Judge = %q → %q, want the measured failure: pică → %s", j.Verdict, j.PlanB, PlanB)
+	}
+	if want := "Redarea nu s-a încheiat în timpul probei: au sosit 0,1 MB"; !strings.Contains(screen, want) {
+		t.Errorf("the screen does not say «%s…»:\n%s", want, screen)
+	}
+	if left := leftUnder(t, filepath.Join(dir, "work", "mi9")); len(left) != 0 {
+		t.Errorf("left under work/mi9: %q", left)
+	}
+}
+
+// TestRunLAN_UnexpectedMessageIsAnError: a message of the run that the
+// controller should not send at that point, a result instead of its offer
+// or an offer instead of its result, stops RunLAN with a Romanian error,
+// never a panic, and writes no envelope.
+func TestRunLAN_UnexpectedMessageIsAnError(t *testing.T) {
+	for name, c := range map[string]struct {
+		ctl  *lanController
+		want string
+	}{
+		"a result for the offer": {&lanController{strayStart: func(runID string) link.Message {
+			return link.Mi9Result{RunID: runID, ThroughputMbps: 99, SeekMs: seeks(100)}
+		}}, "controlorul a trimis mi9_result în loc de offer"},
+		"an offer for the result": {&lanController{strayAnswer: func(runID string) link.Message {
+			return link.Mi9Offer{RunID: runID, Offer: "v=0"}
+		}}, "controlorul a trimis mi9_offer în loc de rezultat"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			hub, _ := spiketest.InstallFakeHub(t, dir)
+			screen, err := lanRun(t, dir, hub, "pc", startLANController(t, c.ctl))
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("RunLAN = %v, want the error «%s»\n%s", err, c.want, screen)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "results", "MI9")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("results/MI9: %v, want no envelope", err)
+			}
+		})
+	}
+}
+
+// TestMI9_DoesNotImportMI4: MI9 finds MI4's runs' folder through hubrec
+// (hubrec.Runs), so neither mi9 nor any package that it imports is MI4's
+// runner: reccontroller and mi9page, which import mi9, do not link it.
+func TestMI9_DoesNotImportMI4(t *testing.T) {
+	const module = "github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/"
+	importers := map[string][]string{} // a package of the module → the module's packages that import it
+	seen := map[string]bool{}
+	var visit func(pkg string)
+	visit = func(pkg string) {
+		if seen[pkg] {
+			return
+		}
+		seen[pkg] = true
+		files, err := filepath.Glob(filepath.Join("..", filepath.FromSlash(strings.TrimPrefix(pkg, module)), "*.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, file := range files {
+			if strings.HasSuffix(file, "_test.go") {
+				continue
+			}
+			f, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.ImportsOnly)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, imp := range f.Imports {
+				path, err := strconv.Unquote(imp.Path.Value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.HasPrefix(path, module) {
+					importers[path] = append(importers[path], pkg)
+					visit(path)
+				}
+			}
+		}
+	}
+	visit(module + "mi9")
+	if by := importers[module+"mi4"]; len(by) > 0 {
+		t.Errorf("mi9 links MI4's runner: mi4 is imported by %q", by)
 	}
 }

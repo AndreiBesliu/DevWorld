@@ -75,7 +75,7 @@ func JudgeBulk(r BulkResult) (pass bool, reasons []string) {
 // Leg is r as an envelope's leg from source.
 func Leg(r BulkResult, source string) results.Mi9Leg {
 	return results.Mi9Leg{Transport: string(r.Transport), ThroughputMbps: r.ThroughputMbps, SeekMs: r.SeekMs, DisplayMs: r.DisplayMs,
-		RTTMs: r.RTTMs, Source: source}
+		RTTMs: r.RTTMs, Source: source, Partial: r.Partial}
 }
 
 // leg is a leg with the host of its envelope.
@@ -98,10 +98,11 @@ func (v *verdict) row(code, value, limit, source string, pass *bool) {
 // measures it: the LAN throughput (≥ 8 Mbps) by every lan leg of the
 // owner's devices, at least one needed; the relay throughput (≥ 5 Mbps) by
 // every ci-relay leg; the seeks (the slowest first IDR within 1.5 s) by
-// the lan and ci-relay legs; the first frame shown after a seek (within
+// every lan and ci-relay leg; the first frame shown after a seek (within
 // 1.5 s) by the ci-chrome legs' DisplayMs alone. CI's loopback leg is
-// information only. A part with no deciding leg is incomplete; a measured
-// failure decides all the same (G27), with PlanB.
+// information only. A part with no deciding leg, or a deciding leg that
+// its wait ended before its seeks, is incomplete; a measured failure
+// decides all the same (G27), with PlanB.
 func Judge(envs []results.Envelope) results.Judgement {
 	v := &verdict{j: results.Judgement{Gate: "G18"}}
 	var lan, relay, chrome, loop []leg
@@ -160,27 +161,31 @@ func (v *verdict) throughput(legs []leg, part string, limit int, missing string)
 	}
 }
 
-// seeks judges each deciding leg's slowest seek.
+// seeks judges each deciding leg's slowest seek. A leg without seeks, one
+// that its wait ended (Partial), leaves the part missing.
 func (v *verdict) seeks(legs []leg) {
 	const code, limit = "MI9 salt: primul cadru întreg (IDR) primit", "fiecare ≤ 1500 ms"
-	measured := false
+	if len(legs) == 0 {
+		v.row(code, "lipsește", limit, "", nil)
+		v.j.Reasons = append(v.j.Reasons, "lipsesc salturile pe LAN și prin TURN-TLS/443")
+		v.missing = true
+		return
+	}
 	for _, l := range legs {
+		rowCode := fmt.Sprintf("%s (%s, %s)", code, l.Source, l.host)
 		if len(l.SeekMs) == 0 {
+			v.row(rowCode, "lipsește", limit, l.host, nil)
+			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s (%s): lipsesc salturile", l.host, l.Source))
+			v.missing = true
 			continue
 		}
-		measured = true
 		worst := slices.Max(l.SeekMs)
 		ok := worst <= MaxSeekMs
-		v.row(fmt.Sprintf("%s (%s, %s)", code, l.Source, l.host), fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, l.host, results.RowPass(ok, true))
+		v.row(rowCode, fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, l.host, results.RowPass(ok, true))
 		if !ok {
 			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s (%s): un salt a adus primul IDR în %s ms (limita ≤ 1500 ms)", l.host, l.Source, ms(worst)))
 			v.failed = true
 		}
-	}
-	if !measured {
-		v.row(code, "lipsește", limit, "", nil)
-		v.j.Reasons = append(v.j.Reasons, "lipsesc salturile pe LAN și prin TURN-TLS/443")
-		v.missing = true
 	}
 }
 

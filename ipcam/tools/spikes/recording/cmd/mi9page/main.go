@@ -86,11 +86,9 @@ func record(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	if *media == "" || *hub == "" || *out == "" || flags.NArg() != 0 {
 		return errors.New(usage)
 	}
-	var streams []controller.Stream
-	for _, s := range controller.Streams(*media) {
-		if s.Path == hubrec.Camera+"_"+hubrec.Profile {
-			streams = append(streams, s)
-		}
+	stream, err := cameraStream(controller.Streams(*media))
+	if err != nil {
+		return err
 	}
 	creds, err := controller.NewCredentials()
 	if err != nil {
@@ -102,19 +100,40 @@ func record(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return err
 	}
 	defer func() { _ = ln.Close() }()
-	srv, err := controller.ServePrecodedOn(ctx, ln, streams, creds, controller.NewSendLog(), source.SystemClock{})
+	srv, err := controller.ServePrecodedOn(ctx, ln, []controller.Stream{stream}, creds, controller.NewSendLog(), source.SystemClock{})
 	if err != nil {
 		return err
 	}
 	defer srv.Close()
-	camera := url.URL{Scheme: "rtsp", User: url.UserPassword(creds.User, creds.Pass), Host: ln.Addr().String(), Path: "/" + streams[0].Path}
+	camera := url.URL{Scheme: "rtsp", User: url.UserPassword(creds.User, creds.Pass), Host: ln.Addr().String(), Path: "/" + stream.Path}
 	say := func(format string, args ...any) { _, _ = fmt.Fprintf(stderr, format+"\n", args...) }
+	run, name := recordingPlace(*out)
 	rec, err := hubrec.Record(ctx, hubrec.Options{Hub: *hub, MediaMTX: *mediamtx, CameraURL: camera.String(),
-		Run: filepath.Dir(*out), Name: filepath.Base(*out), SegmentSecs: *secs, Say: say})
+		Run: run, Name: name, SegmentSecs: *secs, Say: say})
 	if err != nil {
 		return err
 	}
 	return json.NewEncoder(stdout).Encode(map[string]string{"segment": rec.Path, "identity": rec.Identity})
+}
+
+// cameraStream is the stream that the job records, hubrec's camera, among
+// streams; none is an error.
+func cameraStream(streams []controller.Stream) (controller.Stream, error) {
+	path := hubrec.Camera + "_" + hubrec.Profile
+	for _, s := range streams {
+		if s.Path == path {
+			return s, nil
+		}
+	}
+	return controller.Stream{}, fmt.Errorf("the media folder serves no %s stream", path)
+}
+
+// recordingPlace is where -out puts the recording: hubrec.Record's run
+// folder and the recording's name in it, so that the recording's folder is
+// out itself, spelled with a trailing separator or not.
+func recordingPlace(out string) (run, name string) {
+	out = filepath.Clean(out)
+	return filepath.Dir(out), filepath.Base(out)
 }
 
 // serve serves the page and its hub side until ctx ends.

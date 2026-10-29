@@ -94,14 +94,27 @@ type Mi9Data struct {
 //     requestVideoFrameCallback after it;
 //   - RTTMs is the selected candidate pair's round trip;
 //   - Source is "lan" (the owner's devices), "ci-relay", "ci-chrome" or
-//     "ci-loopback", which decides what the leg may judge (mi9.Judge).
+//     "ci-loopback", which decides what the leg may judge (mi9.Judge);
+//   - Partial is set when the measurement's wait ended it first (G27): its
+//     throughput is then that of the bytes received by then, and it has
+//     no seek.
 type Mi9Leg struct {
-	Transport      string    `json:"transport"`
-	ThroughputMbps float64   `json:"throughputMbps,omitempty"`
-	SeekMs         []float64 `json:"seekMs,omitempty"`
-	DisplayMs      []float64 `json:"displayMs,omitempty"`
-	RTTMs          float64   `json:"rttMs,omitempty"`
-	Source         string    `json:"source"`
+	Transport      string      `json:"transport"`
+	ThroughputMbps float64     `json:"throughputMbps,omitempty"`
+	SeekMs         []float64   `json:"seekMs,omitempty"`
+	DisplayMs      []float64   `json:"displayMs,omitempty"`
+	RTTMs          float64     `json:"rttMs,omitempty"`
+	Source         string      `json:"source"`
+	Partial        *Mi9Partial `json:"partial,omitempty"`
+}
+
+// Mi9Partial is a measurement that its wait ended (G27): ReceivedBytes of
+// the segment's SizeBytes of plaintext had arrived over the bulk channel
+// in ElapsedMs, all of them when the wait ended during the seeks.
+type Mi9Partial struct {
+	ReceivedBytes int64   `json:"receivedBytes"`
+	SizeBytes     int64   `json:"sizeBytes"`
+	ElapsedMs     float64 `json:"elapsedMs"`
 }
 
 // Mi4Data is MI4's age random-access rig on a host (G13, ENC-08, HUB-33):

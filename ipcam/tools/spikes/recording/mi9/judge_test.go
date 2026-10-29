@@ -107,8 +107,17 @@ func TestMI9_Judge_LoopbackNeverDecidesLAN(t *testing.T) {
 	slowPi := mi9Env("pi", "lan", results.Mi9Leg{Transport: "lan", ThroughputMbps: 7, SeekMs: seeks(600), Source: SourceLAN})
 	fastPC := mi9Env("pc", "lan", results.Mi9Leg{Transport: "lan", ThroughputMbps: 9, SeekMs: seeks(300), Source: SourceLAN})
 	j = Judge([]results.Envelope{fastPC, slowPi, loop})
-	if j.Verdict != results.Fail || j.PlanB != PlanB || !strings.Contains(strings.Join(j.Reasons, "\n"), "pi") {
-		t.Errorf("PC at 9 Mbps, Pi at 7: Judge = %q → %q, reasons %q; want a failure of the Pi's LAN leg, measured, with the relay and Chrome missing", j.Verdict, j.PlanB, j.Reasons)
+	if j.Verdict != results.Fail || j.PlanB != PlanB {
+		t.Errorf("PC at 9 Mbps, Pi at 7: Judge = %q → %q, want a failure, measured, with the relay and Chrome missing", j.Verdict, j.PlanB)
+	}
+	if r := rowOf(t, j, "MI9 LAN (pc)"); r.Pass == nil || !*r.Pass || r.Value != "9,0 Mbps (RTT 0 ms)" {
+		t.Errorf("the PC's LAN row: %+v, want 9,0 Mbps passing", r)
+	}
+	if r := rowOf(t, j, "MI9 LAN (pi)"); r.Pass == nil || *r.Pass || r.Value != "7,0 Mbps (RTT 0 ms)" || r.Limit != "≥ 8 Mbps" {
+		t.Errorf("the Pi's LAN row: %+v, want 7,0 Mbps failing ≥ 8 Mbps", r)
+	}
+	if want := "pi: MI9 LAN: canalul bulk a dus 7,0 Mbps (pragul ≥ 8 Mbps)"; !slices.Contains(j.Reasons, want) || slices.ContainsFunc(j.Reasons, func(r string) bool { return strings.HasPrefix(r, "pc:") }) {
+		t.Errorf("reasons %q, want «%s» and none for the PC", j.Reasons, want)
 	}
 
 	lanDisplay := mi9Env("pc", "lan", results.Mi9Leg{Transport: "lan", ThroughputMbps: 90, SeekMs: seeks(300), DisplayMs: seeks(5000), Source: SourceLAN})
@@ -127,5 +136,26 @@ func TestMI9_Judge_LoopbackNeverDecidesLAN(t *testing.T) {
 	slowLoopSeek := mi9Env("lab-linux", "ci-loopback", results.Mi9Leg{Transport: "lan", ThroughputMbps: 1, SeekMs: seeks(9000), Source: SourceLoopback})
 	if j := Judge([]results.Envelope{pcLAN, relay, chrome, slowLoopSeek}); j.Verdict != results.Pass {
 		t.Errorf("a slow loopback leg decided: Judge = %q, reasons %q", j.Verdict, j.Reasons)
+	}
+}
+
+// TestMI9_Judge_PartialLeg (G27): a lan leg that the measurement's wait
+// ended has the throughput of the bytes received by then and no seek. Its
+// throughput below 8 Mbps is a measured failure, which decides; its seeks
+// are missing, so a leg cut during the seeks, its throughput passing,
+// leaves G18 without a verdict instead of passing on the other legs'
+// seeks.
+func TestMI9_Judge_PartialLeg(t *testing.T) {
+	cut := func(mbps float64, received int64) results.Envelope {
+		return mi9Env("pi", "lan", results.Mi9Leg{Transport: "lan", ThroughputMbps: mbps, RTTMs: 3, Source: SourceLAN,
+			Partial: &results.Mi9Partial{ReceivedBytes: received, SizeBytes: 150e6, ElapsedMs: 900e3}})
+	}
+	j := Judge([]results.Envelope{pcLAN, cut(1.1, 124e6), relay, chrome})
+	if j.Verdict != results.Fail || j.PlanB != PlanB || !slices.Contains(j.Reasons, "pi: MI9 LAN: canalul bulk a dus 1,1 Mbps (pragul ≥ 8 Mbps)") {
+		t.Errorf("a Pi leg cut at 1,1 Mbps: Judge = %q → %q, reasons %q; want its measured failure", j.Verdict, j.PlanB, j.Reasons)
+	}
+	j = Judge([]results.Envelope{pcLAN, cut(50, 150e6), relay, chrome})
+	if j.Verdict != results.Incomplete || rowOf(t, j, "(lan, pi)").Value != "lipsește" {
+		t.Errorf("a Pi leg cut during its seeks: Judge = %q, reasons %q; want no verdict, the Pi's seeks missing", j.Verdict, j.Reasons)
 	}
 }

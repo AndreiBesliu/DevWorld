@@ -16,7 +16,6 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubrec"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
-	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi4"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
@@ -75,7 +74,8 @@ func RunLAN(ctx context.Context, o LANOptions) (err error) {
 	if m := host.PiModel; m != nil && m.Known && !m.Supported {
 		return errors.New("acest Raspberry Pi nu este suportat (armv6): rulați proba MI9 doar pe PC, cu reccontroller-linux-armv6 pe Pi")
 	}
-	runs := hubrec.Work{Root: filepath.Join(o.Work, "mi9"), Probe: "MI9", RemoveAll: removeAll}
+	runs := hubrec.Runs(o.Work, "mi9")
+	runs.RemoveAll = removeAll
 	dir, err := runs.Start(time.Now())
 	if err != nil {
 		return err
@@ -116,6 +116,9 @@ func RunLAN(ctx context.Context, o LANOptions) (err error) {
 	if err := l.Send(link.Results{Name: strings.Join([]string{"MI9", LANSet, runID + ".json"}, "/"), Data: data}); err != nil {
 		o.say("Rezultatul nu a ajuns la controlor (%v): îl aduce colectarea de la final (recspike push sau reccontroller pull).", err)
 	}
+	if p := r.Partial; p != nil {
+		o.say("Redarea nu s-a încheiat în timpul probei: %s.", PartialText(p))
+	}
 	verdict := "trece"
 	if pass, reasons := JudgeBulk(r); !pass {
 		verdict = strings.Join(reasons, "; ")
@@ -149,11 +152,11 @@ func (o LANOptions) start(ctx context.Context, l *mi1.HostLink, runID string) (s
 }
 
 // segment is the recording that the run plays: on the Pi, MI4's 5-min
-// segment when one is left (mi4.Runs); else one recorded now from the
-// controller's camera into the run's folder dir.
+// segment when one is left in MI4's runs (hubrec.Runs); else one recorded
+// now from the controller's camera into the run's folder dir.
 func (o LANOptions) segment(ctx context.Context, host mi1.HostState, l *mi1.HostLink, dir string) (hubrec.Segment, error) {
 	if host.Pseudonym == "pi" {
-		if rec, ok := mi4.Runs(o.Work).Latest(hubrec.FiveMin); ok {
+		if rec, ok := hubrec.Runs(o.Work, "mi4").Latest(hubrec.FiveMin); ok {
 			o.say("Proba MI9 începe cu segmentul de 5 min al probei MI4 (%s).", rec.Path)
 			return rec, nil
 		}
@@ -204,11 +207,18 @@ func (o LANOptions) play(ctx context.Context, l *mi1.HostLink, rec hubrec.Segmen
 	}
 	switch m := m.(type) {
 	case link.Mi9Result:
-		return BulkResult{Transport: LAN, ThroughputMbps: m.ThroughputMbps, SeekMs: m.SeekMs, RTTMs: m.RTTMs}, nil
+		return BulkResult{Transport: LAN, ThroughputMbps: m.ThroughputMbps, SeekMs: m.SeekMs, RTTMs: m.RTTMs, Partial: m.Partial}, nil
 	case link.Refused:
 		return BulkResult{}, fmt.Errorf("controlorul nu a putut reda segmentul: %s", m.Reason)
 	}
 	return BulkResult{}, fmt.Errorf("controlorul a trimis %s în loc de rezultat", m.Type())
+}
+
+// PartialText says, in Romanian, how far a measurement that its wait ended
+// got: the bytes of the segment's plaintext that had arrived, and when.
+func PartialText(p *results.Mi9Partial) string {
+	return fmt.Sprintf("au sosit %s MB din %s MB în %s s; salturile nu s-au măsurat",
+		results.Decimal(float64(p.ReceivedBytes)/1e6, 1), results.Decimal(float64(p.SizeBytes)/1e6, 1), results.Decimal(p.ElapsedMs/1000, 0))
 }
 
 // ofRun accepts the controller's offer, result or refusal of the run runID.

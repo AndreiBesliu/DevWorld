@@ -47,12 +47,12 @@ func sameDevice(local, remote net.Addr) bool {
 	return ra.IsLoopback() || ra == la.Unmap()
 }
 
-// The waits of an MI9 run: the rpc channel's opening after the host's
-// answer, and the measurement, a 5-min segment's plaintext and 20 seeks.
-const (
-	mi9AcceptWait  = 90 * time.Second
-	mi9MeasureWait = 15 * time.Minute
-)
+// mi9AcceptWait bounds the rpc channel's opening after the host's answer.
+const mi9AcceptWait = 90 * time.Second
+
+// mi9MeasureWait bounds the measurement, a 5-min segment's plaintext and 20
+// seeks; a test shortens it.
+var mi9MeasureWait = 15 * time.Minute
 
 // mi9Run is one LAN run of MI9 that a host serves to this controller (G26
 // leg 3): its host's connection and the playback peer.
@@ -98,6 +98,9 @@ func (c *ctl) mi9Start(conn *link.Conn, m link.Mi9Start, local, remote net.Addr)
 // mi9Answer applies the host's answer and measures the bulk channel: the
 // whole segment, then the seeks. It runs on its own goroutine, under ctx,
 // the connection's: once the host is gone, the measurement ends with it.
+// A run too slow for mi9MeasureWait is answered with what was measured by
+// then (mi9.Client.Measure's Partial), a measured failure that decides
+// (G27), never refused.
 func (c *ctl) mi9Answer(ctx context.Context, conn *link.Conn, m link.Mi9Answer) {
 	c.mu.Lock()
 	run := c.mi9Runs[m.RunID]
@@ -128,9 +131,14 @@ func (c *ctl) mi9Answer(ctx context.Context, conn *link.Conn, m link.Mi9Answer) 
 		c.reply(conn, link.Refused{RunID: m.RunID, Reason: reason})
 		return
 	}
-	c.say("Proba MI9 %s: debit %s Mbps; primul cadru întreg după salt: max %s ms (%d salturi); RTT %s ms.",
-		m.RunID, results.Decimal(r.ThroughputMbps, 1), results.Decimal(slices.Max(r.SeekMs), -1), len(r.SeekMs), results.Decimal(r.RTTMs, -1))
-	c.reply(conn, link.Mi9Result{RunID: m.RunID, ThroughputMbps: r.ThroughputMbps, SeekMs: r.SeekMs, RTTMs: r.RTTMs})
+	if r.Partial != nil {
+		c.say("Proba MI9 %s: redarea nu s-a încheiat în timpul probei: %s. Debit %s Mbps; RTT %s ms.",
+			m.RunID, mi9.PartialText(r.Partial), results.Decimal(r.ThroughputMbps, 1), results.Decimal(r.RTTMs, -1))
+	} else {
+		c.say("Proba MI9 %s: debit %s Mbps; primul cadru întreg după salt: max %s ms (%d salturi); RTT %s ms.",
+			m.RunID, results.Decimal(r.ThroughputMbps, 1), results.Decimal(slices.Max(r.SeekMs), -1), len(r.SeekMs), results.Decimal(r.RTTMs, -1))
+	}
+	c.reply(conn, link.Mi9Result{RunID: m.RunID, ThroughputMbps: r.ThroughputMbps, SeekMs: r.SeekMs, RTTMs: r.RTTMs, Partial: r.Partial})
 }
 
 // dropMI9 closes the playback peers of a connection that ended before its

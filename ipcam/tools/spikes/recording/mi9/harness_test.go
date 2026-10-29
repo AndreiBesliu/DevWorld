@@ -11,6 +11,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -115,7 +117,7 @@ func TestMeasureBulk_LoopbackPlumbing(t *testing.T) {
 		t.Errorf("info %+v, want %d bytes, the init's length, avc1.42c028 and the last IDR at 28500 ms", in, len(plain))
 	}
 	sum := sha256.New()
-	if err := c.read(ctx, 0, in.Size, sum); err != nil {
+	if _, err := c.read(ctx, 0, in.Size, sum); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := sum.Sum(nil), sha256.Sum256(plain); !bytes.Equal(got, want[:]) {
@@ -143,7 +145,7 @@ func TestMeasureBulk_LoopbackPlumbing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := c.read(ctx, 0, 1000, io.Discard); err == nil || !strings.Contains(err.Error(), "resource_exhausted") {
+	if _, err := c.read(ctx, 0, 1000, io.Discard); err == nil || !strings.Contains(err.Error(), "resource_exhausted") {
 		t.Errorf("a read with %d bulk channels open = %v, want resource_exhausted", MaxBulkChannels, err)
 	}
 	for range MaxBulkChannels {
@@ -376,5 +378,62 @@ func TestMeasureBulk_Coturn443(t *testing.T) {
 	checkMeasured(t, r, TURNS443)
 	if r.RTTMs < 45 || r.RTTMs > 60 {
 		t.Errorf("the relay's round trip is %.1f ms, want 45–60 ms", r.RTTMs)
+	}
+}
+
+// heldReader is a recording whose every read waits until release is
+// closed, then fails: a call still under way when Close waits for it.
+// reads counts the reads begun.
+type heldReader struct {
+	release <-chan struct{}
+	reads   *atomic.Int64
+}
+
+func (r heldReader) ReadAt([]byte, int64) (int, error) {
+	r.reads.Add(1)
+	<-r.release
+	return 0, errors.New("the test released the read")
+}
+
+// TestHub_CloseDoesNotRaceItsCalls: Close waits for the hub side's calls
+// while Pion may still be running an rpc callback that starts one. A call
+// that a callback starts as Close begins must not race Close's wait
+// (sync.WaitGroup's rule, which -race checks), and a call that arrives
+// once Close has begun starts nothing.
+func TestHub_CloseDoesNotRaceItsCalls(t *testing.T) {
+	path, id, _ := testSegment(t, 2)
+	seg, err := OpenSegment(path, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = seg.Close() }()
+	api, err := NewAPI(LAN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHub(api, Configuration(LAN, nil), seg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	var reads atomic.Int64
+	seg.r = heldReader{release: release, reads: &reads}
+	seek := func(call int) webrtc.DataChannelMessage {
+		return webrtc.DataChannelMessage{IsString: true, Data: fmt.Appendf(nil, `{"t":"seek","call":%d,"ms":0}`, call)}
+	}
+	// As Pion's read loop delivers a request: on a goroutine of its own,
+	// with nothing that orders it before Close, whose wait then finds the
+	// call under way until a timer releases its read.
+	go h.onRequest(seek(1))
+	time.Sleep(200 * time.Millisecond)
+	time.AfterFunc(time.Second, func() { close(release) })
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := reads.Load()
+	h.onRequest(seek(2))
+	h.calls.Wait()
+	if n := reads.Load(); n != before {
+		t.Errorf("a call that arrived after Close read the recording: %d reads, %d before it", n, before)
 	}
 }

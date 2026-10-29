@@ -14,6 +14,15 @@ import (
 // mdat per part, with free boxes as padding. A part's moof indexes the
 // samples of its mdat; a seek ends at the first sync sample (an IDR) of the
 // video track at or after its target.
+//
+// The recorder spike's MI9 hub side walks recordings with a copy of this
+// file, tools/spikes/recording/mi9/reader.go, since tools cannot import the
+// hub (C01). A fix to one goes into the other, since both must keep the
+// same rules: the first-IDR rule of a seek above; the trun bounds
+// (maxTrunSamples per trun, entries that fit the box, one trun of the
+// video track per traf); and the first IDR inside the plaintext, checked
+// without an overflow. The spike's TestReader_TrunBoundsAsTheHubs pins
+// the corrupt recordings of this package's TestFMP4_* tests.
 
 // span is a byte range of the plaintext.
 type span struct{ off, n int64 }

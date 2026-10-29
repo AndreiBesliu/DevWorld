@@ -145,6 +145,14 @@ func ReadIdentity(path string) (age.Identity, error) {
 	return age.ParseX25519Identity(strings.TrimSpace(string(b)))
 }
 
+// Runs is the folder of runs of the probe whose code, in lower case, is
+// probe ("mi4", "mi9") under recspike's work folder work: work/<probe>.
+// MI9 plays the 5-min segment (FiveMin) that MI4 left in Runs(work, "mi4")
+// on the Pi.
+func Runs(work, probe string) Work {
+	return Work{Root: filepath.Join(work, probe), Probe: strings.ToUpper(probe)}
+}
+
 // Work is a probe's folder of runs under recspike's work folder.
 type Work struct {
 	// Root is the probe's folder, work/<probe>.

@@ -1190,14 +1190,15 @@ Rulings: C01 (hub-side reader), C19, C20, G25, G26, G36, R06, R08 (exception).
 ```go
 package mi9 // SPIKE-ONLY
 type Transport string // "lan" | "turns443" | "chrome"
-type BulkResult struct{ Transport Transport; ThroughputMbps float64; SeekMs []float64 /* 20 seeks */; DisplayMs []float64 /* chrome leg */; RTTMs float64 }
+type BulkResult struct{ Transport Transport; ThroughputMbps float64; SeekMs []float64 /* 20 seeks */; DisplayMs []float64 /* chrome leg */; RTTMs float64; Partial *results.Mi9Partial /* set when the wait ended it (G27) */ }
 func MeasureBulk(ctx context.Context, recPath string, id age.Identity, t Transport, ice []webrtc.ICEServer) (BulkResult, error)
 func JudgeBulk(r BulkResult) (pass bool, reasons []string)
 func Judge(envs []results.Envelope) results.Judgement // G18; see "Judge" below for which Source decides which threshold
 
 package results
 type Mi9Data struct{ Legs []Mi9Leg }
-type Mi9Leg struct{ Transport string; ThroughputMbps float64; SeekMs, DisplayMs []float64; RTTMs float64; Source string /* "ci-loopback" | "ci-relay" | "ci-chrome" | "lan" */ }
+type Mi9Leg struct{ Transport string; ThroughputMbps float64; SeekMs, DisplayMs []float64; RTTMs float64; Source string /* "ci-loopback" | "ci-relay" | "ci-chrome" | "lan" */; Partial *Mi9Partial }
+type Mi9Partial struct{ ReceivedBytes, SizeBytes int64; ElapsedMs float64 } // a measurement that its wait ended: ThroughputMbps is that of ReceivedBytes, and there is no seek
 // Envelope gains: MI9 *Mi9Data
 ```
 
@@ -1205,7 +1206,7 @@ type Mi9Leg struct{ Transport string; ThroughputMbps float64; SeekMs, DisplayMs 
   - **Hub-side reader (§8.5 step 4, C01 exception).** The hub side opens the `.mp4.age` segment with `age.DecryptReaderAt` and the run's identity. It sends **plaintext** fMP4 byte ranges, as hubd does: the Chrome leg appends them to MSE, which needs plaintext.
   - **Relay.** `turns443` uses `ICEServers` + `ICETransportPolicyRelay`.
   - **Channels (§7.6).** `bulk/<call_id>` channels are reliable and ordered, with at most 4 open at once. Messages are ≤ min(64 KiB, the negotiated `max-message-size`). Sending pauses above 1 MiB `bufferedAmount` and resumes below 256 KiB (`SetBufferedAmountLowThreshold` + `OnBufferedAmountLow`).
-  - **Throughput.** One channel transfers the whole segment's plaintext; throughput = bits ÷ time.
+  - **Throughput.** One channel transfers the whole segment's plaintext; throughput = bits ÷ time. When the measurement's wait (reccontroller's 15 min) ends it first, the transfer stops and the leg keeps the throughput of the bytes received by then, as `Partial`, without seeks: a measured failure that decides (G27), its seeks missing.
   - **Seek.** 20 timeline seeks. Each is timed from the request until the first IDR sample's bytes at or after the target are received.
   - **RTT.** `RTTMs` is the selected ICE candidate pair's `CurrentRoundTripTime` from Pion's stats.
 - **Legs (G26).**

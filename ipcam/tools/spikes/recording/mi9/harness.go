@@ -28,6 +28,7 @@ import (
 	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/session"
 )
 
@@ -49,13 +50,16 @@ const (
 // BulkResult is one measurement of a bulk channel: the throughput of the
 // whole segment's plaintext over one channel, the 20 seeks' times to the
 // first IDR's bytes, the Chrome leg's times to the first frame shown after
-// each seek, and the selected candidate pair's round trip.
+// each seek, and the selected candidate pair's round trip. Partial is set
+// when the measurement's wait ended it first (G27): the throughput is then
+// that of the bytes received by then, and there is no seek.
 type BulkResult struct {
 	Transport      Transport
 	ThroughputMbps float64
 	SeekMs         []float64
 	DisplayMs      []float64
 	RTTMs          float64
+	Partial        *results.Mi9Partial
 }
 
 // Option configures a measurement beyond its transport.
@@ -282,6 +286,8 @@ type Hub struct {
 	mu      sync.Mutex
 	rpc     *webrtc.DataChannel
 	lastIDR *time.Duration
+	// closed is set once Close has begun: no call starts after it (goCall).
+	closed bool
 }
 
 // NewHub makes the hub side of seg.
@@ -317,12 +323,28 @@ func (h *Hub) Answer(ctx context.Context, offer string) (string, error) {
 	return gather(ctx, h.pc, answer)
 }
 
-// Close closes the hub side and waits for its calls.
+// Close closes the hub side and waits for its calls. Pion's Close does not
+// wait for an rpc callback under way, which may still start a call: closed,
+// set first, makes goCall drop it, so that no call joins calls while Close
+// waits for them (sync.WaitGroup's rule).
 func (h *Hub) Close() error {
+	h.mu.Lock()
+	h.closed = true
+	h.mu.Unlock()
 	h.cancel()
 	err := h.pc.Close()
 	h.calls.Wait()
 	return err
+}
+
+// goCall runs f, a call's work, on a goroutine that Close waits for, unless
+// Close has begun.
+func (h *Hub) goCall(f func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.closed {
+		h.calls.Go(f)
+	}
 }
 
 // onRequest serves one call of the client: the info at once, a range or a
@@ -336,7 +358,7 @@ func (h *Hub) onRequest(m webrtc.DataChannelMessage) {
 	case "info":
 		h.info(req.Call)
 	case "read":
-		h.calls.Go(func() {
+		h.goCall(func() {
 			if req.Off < 0 || req.N < 0 || req.Off > h.seg.Size()-req.N {
 				h.fail(req.Call, "invalid_argument", fmt.Errorf("the range [%d, +%d) is outside the plaintext", req.Off, req.N))
 				return
@@ -344,7 +366,7 @@ func (h *Hub) onRequest(m webrtc.DataChannelMessage) {
 			h.serveRange(req.Call, reply{T: "range", Call: req.Call, Off: req.Off, N: req.N})
 		})
 	case "seek":
-		h.calls.Go(func() { h.serveSeek(req.Call, time.Duration(req.Ms)*time.Millisecond) })
+		h.goCall(func() { h.serveSeek(req.Call, time.Duration(req.Ms)*time.Millisecond) })
 	default:
 		h.fail(req.Call, "invalid_argument", fmt.Errorf("unknown call %q", req.T))
 	}
@@ -399,7 +421,7 @@ func (h *Hub) serveRange(call uint64, r reply) {
 	if sctp := h.pc.SCTP(); sctp != nil {
 		size = messageSize(sctp.GetCapabilities().MaxMessageSize)
 	}
-	if err := send(h.ctx, dc, h.seg, r.Off, r.N, size); err != nil {
+	if err := sendBulk(h.ctx, dc, h.seg, r.Off, r.N, size); err != nil {
 		slog.Warn("mi9: a bulk channel stopped", "call", call, "err", err)
 		return
 	}
@@ -409,6 +431,10 @@ func (h *Hub) serveRange(call uint64, r reply) {
 	case <-time.After(closeGrace):
 	}
 }
+
+// sendBulk sends a range's bytes on its bulk channel (send); a test
+// replaces it with a slower peer's.
+var sendBulk = send
 
 // reply sends r on the rpc channel.
 func (h *Hub) reply(r reply) {
@@ -626,7 +652,27 @@ func (cl *call) progress(now time.Time) {
 	}
 }
 
-// wait waits for the call's reply and, for a range, all of its bytes.
+// count is how many bytes of the call's range have arrived.
+func (cl *call) count() int64 {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return cl.got
+}
+
+// stop stops the call's transfer: it closes the call's bulk channel when
+// the hub side has opened it, and the client then drops one that opens
+// later (onBulk).
+func (cl *call) stop() {
+	cl.mu.Lock()
+	dc := cl.dc
+	cl.mu.Unlock()
+	if dc != nil {
+		_ = dc.Close()
+	}
+}
+
+// wait waits for the call's reply and, for a range, all of its bytes. When
+// ctx ends first, it stops the call's transfer.
 func (c *Client) wait(ctx context.Context, cl *call) (reply, error) {
 	defer c.forget(cl.id)
 	var r reply
@@ -635,6 +681,7 @@ func (c *Client) wait(ctx context.Context, cl *call) (reply, error) {
 	case <-c.failed:
 		return reply{}, errors.New("mi9: the connection failed")
 	case <-ctx.Done():
+		cl.stop()
 		return reply{}, ctx.Err()
 	}
 	if r.T == "error" {
@@ -656,13 +703,11 @@ func (c *Client) wait(ctx context.Context, cl *call) (reply, error) {
 			return r, nil
 		default:
 		}
-		cl.mu.Lock()
-		got := cl.got
-		cl.mu.Unlock()
-		return r, fmt.Errorf("mi9: the bulk channel closed after %d of %d bytes", got, r.N)
+		return r, fmt.Errorf("mi9: the bulk channel closed after %d of %d bytes", cl.count(), r.N)
 	case <-c.failed:
 		return r, errors.New("mi9: the connection failed")
 	case <-ctx.Done():
+		cl.stop()
 		return r, ctx.Err()
 	}
 }
@@ -686,17 +731,19 @@ type info struct {
 	Codec                      string
 }
 
-// read reads the n plaintext bytes at off into w, over one bulk channel.
-func (c *Client) read(ctx context.Context, off, n int64, w io.Writer) error {
+// read reads the n plaintext bytes at off into w, over one bulk channel,
+// and returns how many of them arrived: all n, or fewer with the error that
+// ended the call.
+func (c *Client) read(ctx context.Context, off, n int64, w io.Writer) (int64, error) {
 	cl, err := c.start(request{T: "read", Off: off, N: n}, w, false)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	r, err := c.wait(ctx, cl)
 	if err == nil && (r.Off != off || r.N != n) {
 		err = fmt.Errorf("mi9: asked for [%d, +%d), the hub side sent [%d, +%d)", off, n, r.Off, r.N)
 	}
-	return err
+	return cl.count(), err
 }
 
 // rttWait bounds the wait for the pair's round trip at rest: its first
@@ -731,7 +778,11 @@ func (c *Client) rtt(ctx context.Context) (float64, error) {
 
 // Measure times the bulk channel (G25): the pair's round trip at rest, the
 // whole segment's plaintext over one channel (throughput = bits ÷ time),
-// then Seeks seeks to uniform targets up to the last IDR.
+// then Seeks seeks to uniform targets up to the last IDR. When ctx's
+// deadline, the measurement's wait, passes during the transfer or the
+// seeks, Measure stops the transfer and returns what it measured, without
+// error, since a measured failure decides (G27): the throughput of the
+// bytes received by then, as Partial, and no seek.
 func (c *Client) Measure(ctx context.Context) (BulkResult, error) {
 	var r BulkResult
 	in, err := c.info(ctx)
@@ -742,16 +793,38 @@ func (c *Client) Measure(ctx context.Context) (BulkResult, error) {
 		return r, err
 	}
 	start := time.Now()
-	if err := c.read(ctx, 0, in.Size, io.Discard); err != nil {
-		return r, err
+	got, err := c.read(ctx, 0, in.Size, io.Discard)
+	elapsed := time.Since(start)
+	if err != nil {
+		return cut(r, got, in.Size, elapsed, err)
 	}
-	r.ThroughputMbps = float64(in.Size*8) / time.Since(start).Seconds() / 1e6
+	r.ThroughputMbps = throughput(in.Size, elapsed)
 	for _, target := range seekTargets(in.LastIDRMs, Seeks) {
 		s, err := c.seek(ctx, target)
 		if err != nil {
-			return r, fmt.Errorf("mi9: seek to %d ms: %w", target, err)
+			return cut(r, in.Size, in.Size, elapsed, fmt.Errorf("mi9: seek to %d ms: %w", target, err))
 		}
 		r.SeekMs = append(r.SeekMs, s.ms)
 	}
 	return r, nil
+}
+
+// cut ends a measurement that err stopped. When err is the measurement's
+// wait, ctx's deadline, r is a measurement all the same, without error:
+// received of the plaintext's size bytes arrived in elapsed, its
+// throughput, as Partial, and no seek, since fewer than Seeks would not
+// decide. Any other error stays the measurement's.
+func cut(r BulkResult, received, size int64, elapsed time.Duration, err error) (BulkResult, error) {
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return r, err
+	}
+	r.ThroughputMbps = throughput(received, elapsed)
+	r.SeekMs = nil
+	r.Partial = &results.Mi9Partial{ReceivedBytes: received, SizeBytes: size, ElapsedMs: float64(elapsed.Microseconds()) / 1000}
+	return r, nil
+}
+
+// throughput is n bytes in elapsed, in Mbps.
+func throughput(n int64, elapsed time.Duration) float64 {
+	return float64(n*8) / elapsed.Seconds() / 1e6
 }

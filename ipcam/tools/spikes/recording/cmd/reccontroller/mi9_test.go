@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"github.com/pion/webrtc/v4"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/internal/spiketest"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
@@ -121,5 +124,103 @@ func TestMI9_RefusesAHostOnTheSameDevice(t *testing.T) {
 				t.Errorf("%d playback peers kept after the refusal", kept)
 			}
 		})
+	}
+}
+
+// slowHub is a hub side too slow for the measurement's wait: it answers
+// the playback peer's calls as mi9.Hub does, the info at once and a read
+// with its range of size bytes, but sends only the range's first sent
+// bytes on bulk/<call>, then nothing more. It returns its answer to offer.
+func slowHub(t *testing.T, api *webrtc.API, offer string, size, sent int64) string {
+	t.Helper()
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	pc.OnDataChannel(func(rpc *webrtc.DataChannel) {
+		if rpc.Label() != "rpc" {
+			return
+		}
+		rpc.OnMessage(func(m webrtc.DataChannelMessage) {
+			var req struct {
+				T    string `json:"t"`
+				Call uint64 `json:"call"`
+			}
+			if json.Unmarshal(m.Data, &req) != nil {
+				return
+			}
+			switch req.T {
+			case "info":
+				_ = rpc.SendText(fmt.Sprintf(`{"t":"info","call":%d,"size":%d,"initBytes":1000,"codec":"avc1.42c028","lastIdrMs":9000}`, req.Call, size))
+			case "read":
+				go func() {
+					bulk, err := pc.CreateDataChannel(fmt.Sprintf("bulk/%d", req.Call), nil)
+					if err != nil {
+						return
+					}
+					bulk.OnOpen(func() { _ = bulk.Send(make([]byte, sent)) })
+					_ = rpc.SendText(fmt.Sprintf(`{"t":"range","call":%d,"n":%d}`, req.Call, size))
+				}()
+			}
+		})
+	})
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer}); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := pc.CreateAnswer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gathered := webrtc.GatheringCompletePromise(pc)
+	if err := pc.SetLocalDescription(answer); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-gathered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the slow hub side gathered no candidates")
+	}
+	return pc.LocalDescription().SDP
+}
+
+// TestMI9_SlowRunGivesItsPartialMeasurement (G27): a run too slow for the
+// measurement's wait still decides. At the wait the controller stops the
+// transfer and answers with what it measured: the throughput of the bytes
+// received by then, those bytes and the time elapsed, and no seek. It
+// does not refuse the run, which would leave the LAN part without a
+// verdict.
+func TestMI9_SlowRunGivesItsPartialMeasurement(t *testing.T) {
+	realWait := mi9MeasureWait
+	t.Cleanup(func() { mi9MeasureWait = realWait })
+	mi9MeasureWait = 8 * time.Second
+	r := newRig(t)
+	api, err := mi9.NewAPI(mi9.LAN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.c.mi9API = api
+	conn := r.connectFrom("pi", &net.TCPAddr{IP: net.IPv4(192, 168, 1, 10), Port: link.Port}, &net.TCPAddr{IP: net.IPv4(192, 168, 1, 20), Port: 51000})
+	r.send(conn, link.Mi9Start{RunID: "mi9-1"})
+	offer, ok := r.receive(conn).(link.Mi9Offer)
+	if !ok {
+		t.Fatalf("got %#v, want the playback peer's offer", offer)
+	}
+	const size, sent = 4 << 20, 32 << 10
+	r.send(conn, link.Mi9Answer{RunID: "mi9-1", Answer: slowHub(t, api, offer.Offer, size, sent)})
+	m := r.receiveWithin(conn, time.Minute)
+	res, ok := m.(link.Mi9Result)
+	switch p := res.Partial; {
+	case !ok || res.RunID != "mi9-1" || p == nil:
+		t.Fatalf("got %#v, want the run's partial measurement", m)
+	case p.ReceivedBytes != sent || p.SizeBytes != size || p.ElapsedMs <= 0 || len(res.SeekMs) != 0:
+		t.Errorf("partial %+v and %d seeks, want the %d bytes received of %d, the time elapsed and no seek", *p, len(res.SeekMs), sent, size)
+	case res.ThroughputMbps <= 0 || res.ThroughputMbps >= mi9.MinLANMbps:
+		t.Errorf("throughput %v Mbps, want that of %d bytes in %v ms", res.ThroughputMbps, sent, p.ElapsedMs)
+	}
+	for _, want := range []string{"Proba MI9 mi9-1: redarea nu s-a încheiat în timpul probei: au sosit 0,0 MB din 4,2 MB în ", "; salturile nu s-au măsurat."} {
+		if !strings.Contains(r.screen.String(), want) {
+			t.Errorf("the screen does not say «%s»:\n%s", want, r.screen.String())
+		}
 	}
 }

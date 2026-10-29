@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -63,13 +62,6 @@ type Pace struct {
 // fail (G21), 1000 reads of a part (G22) and of 64 KiB and 4 MiB, 20 seeks,
 // 60 s of encryption on one core (G23).
 var RealPace = Pace{SegmentSecs: 300, TwoMinSecs: 120, Reads: 1000, Seeks: 20, CryptoSeconds: 60, InfoSizes: []int{64 << 10, 4 << 20}}
-
-// Runs is MI4's folder of runs under recspike's work folder work: each
-// run's recordings, their identities and its logs (hubrec.Work). MI9 plays
-// the 5-min segment (hubrec.FiveMin) that MI4 left there on the Pi.
-func Runs(work string) hubrec.Work {
-	return hubrec.Work{Root: filepath.Join(work, "mi4"), Probe: "MI4", RemoveAll: removeAll}
-}
 
 // readSet is a set of reads as `ipcam-hub diag readbench` prints it.
 type readSet struct {
@@ -129,7 +121,8 @@ func Run(ctx context.Context, o Options) (err error) {
 	// go however the run ends (PH0-22). When they cannot, the owner deletes
 	// them by hand: a run that would otherwise succeed fails with that
 	// error, and a failed run keeps its own.
-	runs := Runs(o.Work)
+	runs := hubrec.Runs(o.Work, "mi4")
+	runs.RemoveAll = removeAll
 	dir, err := runs.Start(time.Now())
 	if err != nil {
 		return err

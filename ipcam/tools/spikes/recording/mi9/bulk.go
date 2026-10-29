@@ -11,8 +11,13 @@ import (
 )
 
 // The rules of §7.6 for bulk channels: the hub opens bulk/<call_id>,
-// reliable and ordered, at most four at once, for a call's bytes; its close
-// marks their end.
+// reliable and ordered, at most four at once, for a call's bytes. §7.6 has
+// the hub's close mark their end; here the client closes the channel once
+// it has every byte (the reply names the range's length), and the hub side
+// only after closeGrace: when the hub side reset the stream right after
+// its last byte, Chrome now and then lost the bytes of the next bulk
+// channel, which opened while that reset was under way (1 local run in 7,
+// Chrome 155).
 const (
 	// MaxBulkChannels is how many bulk channels a session holds open at
 	// once.

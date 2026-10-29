@@ -17,15 +17,26 @@ import (
 // exception): its plaintext through age.DecryptReaderAt with the run's
 // identity, and in it the fMP4 that MediaMTX writes (§4.2): an init (ftyp,
 // moov), then one moof and one mdat per part, with free boxes as padding.
-// Tools cannot import the hub (C01), so this is the walk of ipcam-hub's
-// diag benches (hub/cmd/ipcam-hub/diag_fmp4.go) again, with the same rule
-// for a seek: the first sync sample of the video track whose decode time
-// from the recording's first sample is the target or later.
+//
+// Tools cannot import the hub (C01), so this is a copy of the walk of
+// ipcam-hub's diag benches, hub/cmd/ipcam-hub/diag_fmp4.go, which names
+// this file in turn. A fix to one goes into the other, since both must
+// keep the same rules:
+//   - the first-IDR rule of a seek: the first sync sample of the video
+//     track whose decode time from the recording's first sample is the
+//     target or later;
+//   - the trun bounds: at most maxTrunSamples samples in a trun, whose
+//     entries must fit its box, and one trun of the video track per traf,
+//     so that a corrupt moof is refused before its samples are allocated;
+//   - the first IDR lies inside the plaintext, checked without an
+//     overflow.
+//
+// TestReader_TrunBoundsAsTheHubs pins here the corrupt recordings of the
+// hub's TestFMP4_CorruptIndexFailsWithBoundedMemory and
+// TestFMP4_ManyTrunsPerMoofAreBounded.
 
 // span is a byte range of the plaintext.
 type span struct{ off, n int64 }
-
-func (s span) end() int64 { return s.off + s.n }
 
 // errNotFMP4 is a recording that is not laid out as MediaMTX writes one.
 var errNotFMP4 = errors.New("the plaintext is not an fMP4 recording")
@@ -551,7 +562,9 @@ func (s *Segment) firstIDR(target time.Duration) (idr, error) {
 	if found == nil {
 		return idr{}, fmt.Errorf("no IDR at or after %v", target)
 	}
-	if found.sample.off < found.part.off || found.sample.end() > found.part.end() {
+	// Checked without an overflow: a corrupt base data offset can put the
+	// sample near the largest int64.
+	if s, p := found.sample, found.part; s.off < p.off || s.n > p.n || s.off-p.off > p.n-s.n {
 		return idr{}, fmt.Errorf("%w: an IDR outside its part", errNotFMP4)
 	}
 	return *found, nil

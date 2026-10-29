@@ -184,6 +184,12 @@ func (r *rig) send(conn *link.Conn, m link.Message) {
 // receive returns the controller's next message, within 10 s.
 func (r *rig) receive(conn *link.Conn) link.Message {
 	r.t.Helper()
+	return r.receiveWithin(conn, 10*time.Second)
+}
+
+// receiveWithin returns the controller's next message, within wait.
+func (r *rig) receiveWithin(conn *link.Conn, wait time.Duration) link.Message {
+	r.t.Helper()
 	type got struct {
 		m   link.Message
 		err error
@@ -199,7 +205,7 @@ func (r *rig) receive(conn *link.Conn) link.Message {
 			r.t.Fatalf("receive: %v", g.err)
 		}
 		return g.m
-	case <-time.After(10 * time.Second):
+	case <-time.After(wait):
 		r.t.Fatal("the controller sent nothing")
 		return nil
 	}

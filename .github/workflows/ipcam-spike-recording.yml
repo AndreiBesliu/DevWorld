@@ -917,8 +917,10 @@ jobs:
         # G26 leg 1: TestMeasureBulk_LiveLoopback over host candidates on the runner (information
         # only) and TestMeasureBulk_Coturn443, the relay verdict's leg, which fails when the
         # measured round trip is outside 45–60 ms. Each prints one "mi9: <envelope json>" line,
-        # which goes out as a notice even when a test fails, at most 10 (C32); the relay's round
-        # trip goes out as a notice of its own, and the step checks its range too.
+        # which goes out as a notice even when a test fails; the relay's round trip goes out as a
+        # notice of its own, and the step checks its range too. A step keeps at most 10 notices
+        # (C32), so at most 9 mi9 lines go out beside the RTT notice: those that decide verdicts
+        # first, ci-relay's, then ci-loopback's.
         id: go-live
         if: ${{ !cancelled() && steps.record.outcome == 'success' && steps.coturn.outcome == 'success' }}
         env:
@@ -929,9 +931,12 @@ jobs:
           status=0
           go test -count=1 -timeout 30m -v -run '^(TestMeasureBulk_LiveLoopback|TestMeasureBulk_Coturn443)$' \
             ./tools/spikes/recording/mi9/ 2>&1 | tee "${log}" || status=$?
-          sed -n 's/^mi9: //p' "${log}" | head -n 10 | while IFS= read -r line; do
-            printf '%s\n' "${line}" | tools/scripts/annotate.sh mi9 1 notice
-          done || true
+          sed -n 's/^mi9: //p' "${log}" |
+            jq -Rrs 'def rank: (try (fromjson | .set) catch null) as $s | ["ci-relay", "ci-loopback"] | index($s) // 2;
+              split("\n") | map(select(length > 0)) | sort_by(rank) | .[:9][]' |
+            while IFS= read -r line; do
+              printf '%s\n' "${line}" | tools/scripts/annotate.sh mi9 1 notice
+            done || true
           relay=$(sed -n 's/^mi9: //p' "${log}" | jq -c 'select(.set == "ci-relay") | .mi9.legs[0]' 2> /dev/null | head -n 1) || true
           if [[ -z "${relay}" ]]; then
             echo "mi9: the relay test printed no ci-relay line" | tee -a "${log}"
