@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -23,7 +22,8 @@ import (
 const readbenchSchema = "ipcam.diag.readbench/1"
 
 // readbenchReport is the output of diag readbench: each read's time in ms,
-// in the order read, their max, p50 and p99, and the mean bytes read.
+// in the order read, their max, p50 and p99, and the reads' length, the
+// same for every read of the set.
 type readbenchReport struct {
 	Schema    string    `json:"schema"`
 	Size      string    `json:"size"`
@@ -41,16 +41,19 @@ var readPlaintext = func(r io.ReaderAt, p []byte, off int64) (int, error) { retu
 // diagReadbenchCommand is "ipcam-hub diag readbench --file <seg.mp4.age>
 // --identity <file> [--reads 1000] [--size part|<bytes>]" (ENC-08, G22):
 // it times reads of a recording's plaintext through the hub's read path,
-// crypto's random-access reader. Each read starts at a uniform random offset
-// in the plaintext. With --size part, it is as long as one fMP4 part of the
-// recording, its moof and mdat (the HLS byte-range unit, about 512 KiB at 4
-// Mbps), the part drawn uniformly: not that part itself, because MTX-2 pads
-// most parts to the 64 KiB chunk boundary, so a read from a part's start
-// would touch one age chunk less than a read of the same length elsewhere
-// (C26 judges the slowest read). With a number of bytes, each read is that
-// long. Before the reads, it drops the file's pages from the page cache
-// where the system can (Linux), so that the index it reads first does not
-// warm them: on a Pi, MI4 drops the whole cache before it starts the bench.
+// crypto's random-access reader. Every read of the set has one length, and
+// starts at a uniform random offset in the plaintext. With --size part, the
+// length is that of one full fMP4 part of the recording, its moof and mdat
+// (the HLS byte-range unit, about 512 KiB at 4 Mbps): the median length of
+// its parts (partLength), so that no read is as short as a segment's last
+// part, which C26, judging the slowest read, would favour. A read is not
+// that part itself, because MTX-2 pads most parts to the 64 KiB chunk
+// boundary, so a read from a part's start would touch one age chunk less
+// than a read of the same length elsewhere. With a number of bytes, each
+// read is that long. Before the reads, it drops the file's pages from the
+// page cache where the system can (Linux), so that the index it reads first
+// does not warm them: on a Pi, MI4 drops the whole cache before it starts
+// the bench.
 func diagReadbenchCommand(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("diag readbench", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -79,17 +82,16 @@ func readbench(file, identity string, reads int, size string) (readbenchReport, 
 		return readbenchReport{}, err
 	}
 	defer seg.close()
-	ranges, err := readRanges(seg, reads, size)
+	n, err := readLength(seg, size)
 	if err != nil {
 		return readbenchReport{}, err
 	}
 	if err := dropFileCache(seg.f); err != nil {
 		return readbenchReport{}, fmt.Errorf("drop the segment from the page cache: %w", err)
 	}
-	r := readbenchReport{Schema: readbenchSchema, Size: size, Reads: reads}
-	var total int64
-	buf := make([]byte, slices.MaxFunc(ranges, func(a, b span) int { return cmp.Compare(a.n, b.n) }).n)
-	for _, s := range ranges {
+	r := readbenchReport{Schema: readbenchSchema, Size: size, ReadBytes: n, Reads: reads}
+	buf := make([]byte, n)
+	for _, s := range readRanges(seg, reads, n) {
 		start := time.Now()
 		n, err := readPlaintext(seg.r, buf[:s.n], s.off)
 		ms := float64(time.Since(start).Microseconds()) / 1000
@@ -100,35 +102,28 @@ func readbench(file, identity string, reads int, size string) (readbenchReport, 
 			return readbenchReport{}, fmt.Errorf("read [%d, +%d): %w", s.off, s.n, err)
 		}
 		r.ReadMs = append(r.ReadMs, ms)
-		total += s.n
 	}
-	r.ReadBytes = total / int64(reads)
 	r.MaxMs, r.P50Ms, r.P99Ms = slices.Max(r.ReadMs), percentile(r.ReadMs, 50), percentile(r.ReadMs, 99)
 	return r, nil
 }
 
-// readRanges draws the reads of a set, each at a uniform offset in the
-// plaintext: as long as a part drawn uniformly for "part", else size bytes.
-func readRanges(seg *segment, reads int, size string) ([]span, error) {
-	lengths, err := readLengths(seg, size)
-	if err != nil {
-		return nil, err
-	}
+// readRanges draws the reads of a set, each n bytes at a uniform offset in
+// the plaintext.
+func readRanges(seg *segment, reads int, n int64) []span {
 	ranges := make([]span, reads)
 	for i := range ranges {
-		n := lengths[rand.IntN(len(lengths))]                      //nolint:gosec // a bench's draw, not a secret
 		ranges[i] = span{off: rand.Int64N(seg.size - n + 1), n: n} //nolint:gosec // a bench's draw, not a secret
 	}
-	return ranges, nil
+	return ranges
 }
 
-// readLengths are the lengths that a set's reads draw from: each part's,
-// from its moof to the end of its mdat, for "part", else size bytes.
-func readLengths(seg *segment, size string) ([]int64, error) {
+// readLength is the length of a set's reads: a full part's (partLength) for
+// "part", else size bytes.
+func readLength(seg *segment, size string) (int64, error) {
 	if size == "part" {
 		m, err := openFMP4(seg.r, seg.size)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
 		var lengths []int64
 		err = m.eachPart(func(p span, _ []fmp4Sample) (bool, error) {
@@ -136,21 +131,38 @@ func readLengths(seg *segment, size string) ([]int64, error) {
 			return true, nil
 		})
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		if len(lengths) == 0 {
-			return nil, errors.New("the segment has no part")
-		}
-		return lengths, nil
+		return partLength(lengths)
 	}
 	n, err := strconv.ParseInt(size, 10, 64)
 	switch {
 	case err != nil || n < 1:
-		return nil, fmt.Errorf("--size %q is neither part nor a number of bytes", size)
+		return 0, fmt.Errorf("--size %q is neither part nor a number of bytes", size)
 	case n > seg.size:
-		return nil, fmt.Errorf("--size %d is larger than the %d-byte plaintext", n, seg.size)
+		return 0, fmt.Errorf("--size %d is larger than the %d-byte plaintext", n, seg.size)
 	}
-	return []int64{n}, nil
+	return n, nil
+}
+
+// partLength is the length of a full part among a segment's parts, in
+// order, each from its moof to the end of its mdat: the median length of
+// the parts without the last one, which the segment's close can cut short,
+// and without any part shorter than half that median, such as a stream's
+// quiet second. The median is the nearest-rank one, as p50 is.
+func partLength(lengths []int64) (int64, error) {
+	if len(lengths) < 2 {
+		return 0, errors.New("the segment has no part before its last one")
+	}
+	parts := lengths[:len(lengths)-1]
+	m := median(parts)
+	return median(slices.DeleteFunc(slices.Clone(parts), func(n int64) bool { return 2*n < m })), nil
+}
+
+// median is the nearest-rank median of lengths, which are not empty.
+func median(lengths []int64) int64 {
+	sorted := slices.Sorted(slices.Values(lengths))
+	return sorted[(len(sorted)+1)/2-1]
 }
 
 // percentile is the nearest-rank p-th percentile of values.

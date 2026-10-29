@@ -56,17 +56,28 @@ type benchSample struct {
 // size + 4p bytes, so that no two parts have the same length.
 func writeBenchSegment(t *testing.T, dir string, parts, perPart, size int) benchSegment {
 	t.Helper()
+	sizes := make([]int, parts)
+	for p := range sizes {
+		sizes[p] = size + 4*p
+	}
+	return writeBenchSegmentOf(t, dir, perPart, sizes)
+}
+
+// writeBenchSegmentOf writes a recording of len(sizes) parts of perPart
+// samples into dir, the samples of part p sizes[p] bytes, a multiple of 4.
+func writeBenchSegmentOf(t *testing.T, dir string, perPart int, sizes []int) benchSegment {
+	t.Helper()
 	var buf seekablebuffer.Buffer
 	init := fmp4.Init{Tracks: []*fmp4.InitTrack{{ID: 1, TimeScale: benchTimeScale, Codec: &codecs.H264{SPS: benchSPS, PPS: benchPPS}}}}
 	if err := init.Marshal(&buf); err != nil {
 		t.Fatal(err)
 	}
 	var seg benchSegment
-	for p := range parts {
+	for p, size := range sizes {
 		track := &fmp4.PartTrack{ID: 1, BaseTime: uint64(p * perPart * benchSampleDur)} //nolint:gosec // small test values
 		for s := range perPart {
 			i := p*perPart + s
-			payload := bytes.Repeat(binary.BigEndian.AppendUint32(nil, uint32(i)), size/4+p) //nolint:gosec // small test values
+			payload := bytes.Repeat(binary.BigEndian.AppendUint32(nil, uint32(i)), size/4) //nolint:gosec // small test values
 			sync := i%benchGOP == 0
 			track.Samples = append(track.Samples, &fmp4.Sample{Duration: benchSampleDur, IsNonSyncSample: !sync, Payload: payload})
 			seg.samples = append(seg.samples, benchSample{time: uint64(i * benchSampleDur), sync: sync, payload: payload}) //nolint:gosec // small test values

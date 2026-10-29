@@ -33,6 +33,7 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cli"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi4"
 )
 
 // usage is the command's help, in Romanian.
@@ -82,7 +83,8 @@ func main() {
 // report prints the last line of a run that ended with err on stderr, and
 // returns recspike's exit code: 0 without an error, else 1. The owner's
 // stop (Ctrl+C), whose error is context.Canceled, ends in a Romanian line
-// of its own: the probe has already said what it kept.
+// of its own: the probe has already said what it kept. MI4's refusal
+// without sudo is a whole line that says what to run, printed alone.
 func report(err error, stderr io.Writer) int {
 	switch {
 	case err == nil:
@@ -90,6 +92,8 @@ func report(err error, stderr io.Writer) int {
 	case errors.Is(err, flag.ErrHelp):
 	case errors.Is(err, context.Canceled):
 		_, _ = fmt.Fprintln(stderr, "Proba a fost oprită de dvs.")
+	case errors.Is(err, mi4.ErrNeedsSudo):
+		_, _ = fmt.Fprintln(stderr, err)
 	default:
 		_, _ = fmt.Fprintln(stderr, "recspike: eroare:", err)
 	}

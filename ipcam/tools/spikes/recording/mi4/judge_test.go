@@ -121,6 +121,38 @@ func TestMI4_SeekFirstFrame(t *testing.T) {
 	}
 }
 
+// TestMI4_SeekPlanB_OnlyWhatWasMeasured (G21, G27): a seek beyond 1.5 s
+// still fails G13, but its plan B is chosen only from measured stages: the
+// RAM buffer first, then 2-min segments. When a stage that the choice needs
+// was not measured, the plan B reads «planul B nemăsurat», never an
+// escalation that nothing measured; the escalation needs both stages
+// measured and both beyond 1.5 s.
+func TestMI4_SeekPlanB_OnlyWhatWasMeasured(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		ram, twoMin []float64
+		planB       string
+	}{
+		{"no plan-B stage", nil, nil, PlanBUnmeasured},
+		{"RAM at 1.6 s, no 2-min segments", repeat(1600, 20), nil, PlanBUnmeasured},
+		{"no RAM, 2-min segments at 1.4 s", nil, repeat(1400, 20), PlanBUnmeasured},
+		{"both measured above 1.5 s", repeat(1600, 20), repeat(1550, 20), PlanBEscalate},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := passing()
+			d.SeekMs, d.SeekRAMMs, d.Seek2MinMs = append(repeat(500, 19), 1700), c.ram, c.twoMin
+			j := judge(d)
+			if j.Verdict != results.Fail || j.PlanB != c.planB {
+				t.Errorf("Judge = %q → %q, reasons %q; want pică → %q", j.Verdict, j.PlanB, j.Reasons, c.planB)
+			}
+			unmeasured := slices.ContainsFunc(j.Reasons, func(r string) bool { return strings.Contains(r, "nemăsurat") })
+			if unmeasured != (c.planB == PlanBUnmeasured) || (c.planB == PlanBUnmeasured && strings.Contains(j.PlanB, "escaladare")) {
+				t.Errorf("reasons %q, plan B %q: want «nemăsurat» exactly when a stage is missing", j.Reasons, j.PlanB)
+			}
+		})
+	}
+}
+
 // TestMI4_ThroughputPerModel (C25, G23, ENC-08 (1)): the single-core
 // encryption rate must reach 50 MB/s on H1 (Pi 5) and 5 MB/s per
 // recommended camera on the other models (Pi 4: 20, H1c: 10); a failure
@@ -254,6 +286,61 @@ func runIDs(envs []results.Envelope) string {
 		ids[i] = e.RunID
 	}
 	return strings.Join(ids, ", ")
+}
+
+// TestMI4_LatestRun_WhateverTheOrder (G15): the Pi's latest run, the
+// phone's latest AGE run and CI's latest ENC-06 check are picked by one
+// rule, the run id's number, then, on the same number, a stable key, so
+// that the order of the envelopes never changes the verdict: every order
+// of two Pi runs, two AGE runs and two ENC-06 checks that share a number
+// gives the same judgement.
+func TestMI4_LatestRun_WhateverTheOrder(t *testing.T) {
+	slow := passing()
+	slow.ReadMs, slow.ReadMaxMs = append(repeat(10, 999), 51), 51
+	piA, piB, older := onPi(passing(), pi4), onPi(slow, pi4), onPi(slow, pi4)
+	piA.RunID, piB.RunID = "pi-mi4-2", "pi-mi4-2"
+	envs := []results.Envelope{piA, piB, older, AgerangeRun(3, DeviceOS, 11), AgerangeRun(3, DeviceOS, 13), enc06Run(true), enc06Run(false)}
+	var first []byte
+	for order := range permutations(len(envs)) {
+		in := make([]results.Envelope, len(envs))
+		for i, at := range order {
+			in[i] = envs[at]
+		}
+		got, err := json.Marshal(Judge(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first == nil {
+			first = got
+		} else if string(got) != string(first) {
+			t.Fatalf("in the order %v, Judge =\n%s\nin the first order:\n%s", order, got, first)
+		}
+	}
+}
+
+// permutations yields every order of n items, as their indexes.
+func permutations(n int) func(yield func([]int) bool) {
+	return func(yield func([]int) bool) {
+		order := make([]int, n)
+		for i := range order {
+			order[i] = i
+		}
+		var permute func(k int) bool
+		permute = func(k int) bool {
+			if k == n {
+				return yield(slices.Clone(order))
+			}
+			for i := k; i < n; i++ {
+				order[k], order[i] = order[i], order[k]
+				if !permute(k + 1) {
+					return false
+				}
+				order[k], order[i] = order[i], order[k]
+			}
+			return true
+		}
+		permute(0)
+	}
 }
 
 // TestMI4_AgeMismatch_PlanBRamBuffer (ENC-06, G21): files that the age CLI

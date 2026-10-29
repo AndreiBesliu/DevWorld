@@ -3,7 +3,6 @@
 package mi4
 
 import (
-	"errors"
 	"os"
 	"syscall"
 )
@@ -12,14 +11,10 @@ import (
 // reads and seeks are cold (G22).
 const coldReads = true
 
-// errNeedsSudo is MI4's refusal without root on Linux, where dropping the
-// page cache needs it.
-var errNeedsSudo = errors.New("MI4 trebuie pornit cu sudo: ./recspike mi4 …")
-
 // requireRoot refuses an euid other than root's.
 func requireRoot(euid int) error {
 	if euid != 0 {
-		return errNeedsSudo
+		return ErrNeedsSudo
 	}
 	return nil
 }

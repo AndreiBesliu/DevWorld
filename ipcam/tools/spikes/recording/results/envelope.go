@@ -71,9 +71,10 @@ type Envelope struct {
 
 // Mi4Data is MI4's age random-access rig on a host (G13, ENC-08, HUB-33):
 //   - Model is the host's model, the Pi's as diag host reads it, or "PC".
-//   - ReadMs are the 1000 timed reads, each as long as one fMP4 part at a
-//     uniform random offset (G22), ReadSize their mean bytes; the max
-//     decides (C26), p50 and p99 are information.
+//   - ReadMs are the 1000 timed reads, each as long as one full fMP4 part
+//     at a uniform random offset (G22), and ReadSize that length, the
+//     median of the segment's parts without its last; the max decides
+//     (C26), p50 and p99 are information.
 //     Cold is true when the page cache was dropped before each set (on the
 //     Pi, as root), false for warm reads (Windows).
 //   - InfoReads are the reads of 64 KiB and 4 MiB, information only.

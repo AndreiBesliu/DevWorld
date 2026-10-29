@@ -25,6 +25,13 @@ const (
 	profile = "main"
 )
 
+// Where a recording lies in its folder, <run>/<segment>: its data folder,
+// for ipcam-hub, and the file of RI_g's identity, which decrypts it.
+const (
+	recordingDir = "data"
+	identityFile = "ri_g.key"
+)
+
 // The waits of a recording.
 const (
 	// recordingWait bounds the wait for the camera's first part.
@@ -84,12 +91,12 @@ func (h *hubRig) record(ctx context.Context, name string, segmentSecs int) (segm
 	if err != nil {
 		return segment{}, err
 	}
-	identity := filepath.Join(dir, "ri_g.key")
+	identity := filepath.Join(dir, identityFile)
 	if err := os.WriteFile(identity, []byte(riG.String()+"\n"), 0o600); err != nil {
 		return segment{}, err
 	}
 	config := filepath.Join(dir, "run.json")
-	err = hubproc.WriteConfig(config, hubproc.Config{DataDir: filepath.Join(dir, "data"), MediaMTX: h.o.MediaMTX, IdentityFile: identity,
+	err = hubproc.WriteConfig(config, hubproc.Config{DataDir: filepath.Join(dir, recordingDir), MediaMTX: h.o.MediaMTX, IdentityFile: identity,
 		SDCardConfirmed: h.host.SdConfirmation != nil, Jobs: []hubproc.Job{{Cam: camera, Profile: profile, RestreamURL: h.url,
 			SegmentSecs: segmentSecs, Recipients: []string{riG.Recipient().String(), rk.Recipient().String()}}}})
 	if err != nil {

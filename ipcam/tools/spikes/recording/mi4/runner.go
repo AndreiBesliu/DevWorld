@@ -18,6 +18,10 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
+// ErrNeedsSudo is MI4's refusal without root on Linux, where dropping the
+// page cache needs it: a whole line for the owner, which says what to run.
+var ErrNeedsSudo = errors.New("MI4 trebuie pornit cu sudo: ./recspike mi4 …")
+
 // Options are what MI4's run on a host needs.
 type Options struct {
 	// Controller is reccontroller's link address, on the PC: MI4 records
@@ -97,10 +101,10 @@ type rig interface {
 // Run is MI4 on this host (G13, ENC-08, HUB-33): it records one encrypted
 // segment of the controller's cam01_main (4 Mbps), 5 min, through
 // ipcam-hub, then, each set after a drop of the page cache (G22), times
-// 1000 reads of one fMP4 part's length at random offsets, which decide, and
-// 1000 of 64 KiB and of 4 MiB, information; then 20 seeks to the first IDR
-// (G21), and when one takes more than 1.5 s, the same with the whole
-// segment in RAM and in a 2-min segment recorded for it; then the
+// 1000 reads of one full fMP4 part's length at random offsets, which
+// decide, and 1000 of 64 KiB and of 4 MiB, information; then 20 seeks to
+// the first IDR (G21), and when one takes more than 1.5 s, the same with
+// the whole segment in RAM and in a 2-min segment recorded for it; then the
 // encryption on one core for 60 s (G23). It writes the envelope
 // MI4/<host>-mi4/<run id>.json, and a Pi sends it to the PC. On Linux it
 // must run as root, which drops the cache; without root it refuses before
@@ -117,8 +121,9 @@ func Run(ctx context.Context, o Options) error {
 		return errors.New("acest Raspberry Pi nu este suportat (armv6): proba MI4 se amână în Faza 0-bis")
 	}
 	root := filepath.Join(o.Work, "mi4")
-	// The recordings of the runs before would only take space; their logs
-	// stay, each run in its own folder.
+	// The recordings of the runs before would only take space, and their
+	// identities decrypt nothing then; their logs stay, each run in its own
+	// folder.
 	if err := removeRecordings(root); err != nil {
 		return fmt.Errorf("nu pot șterge înregistrările probelor MI4 de dinainte: %w", err)
 	}
@@ -126,6 +131,8 @@ func Run(ctx context.Context, o Options) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("nu pot crea dosarul de lucru: %w", err)
 	}
+	// Each segment's recording and identity stay until the last bench, the
+	// 2-min one's included, and go however the run ends (PH0-22).
 	defer func() { _ = removeRecordings(root) }()
 	r := o.rig
 	if r == nil {
@@ -272,15 +279,18 @@ func (o Options) write(host mi1.HostState, d results.Mi4Data) (string, error) {
 }
 
 // removeRecordings removes the recordings under the runs' folders in root,
-// <run>/<segment>/data, and keeps the rest: the logs.
+// <run>/<segment>/data, with RI_g's identity file beside each, and keeps
+// the rest: the logs.
 func removeRecordings(root string) error {
-	data, err := filepath.Glob(filepath.Join(root, "*", "*", "data"))
-	if err != nil {
-		return err
-	}
 	var errs []error
-	for _, dir := range data {
-		errs = append(errs, os.RemoveAll(dir))
+	for _, name := range []string{recordingDir, identityFile} {
+		paths, err := filepath.Glob(filepath.Join(root, "*", "*", name))
+		if err != nil {
+			return err
+		}
+		for _, path := range paths {
+			errs = append(errs, os.RemoveAll(path))
+		}
 	}
 	return errors.Join(errs...)
 }

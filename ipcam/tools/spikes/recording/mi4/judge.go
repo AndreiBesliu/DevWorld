@@ -9,6 +9,7 @@ package mi4
 
 import (
 	"cmp"
+	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
@@ -37,7 +38,10 @@ const (
 	PlanBRAM      = "bufferul RAM: segmentul întreg decriptat în RAM (≤ 256 MiB)"
 	PlanBTwoMin   = "segmente criptate de 2 min, citite din bufferul RAM"
 	PlanBEscalate = "escaladare: nici bufferul RAM, nici segmentele de 2 min nu aduc primul cadru în 1,5 s"
-	PlanBF6       = "F6 descarcă și decriptează segmentul întreg pe telefon"
+	// PlanBUnmeasured is a slow seek's plan B when a stage that chooses it
+	// was not measured (G27).
+	PlanBUnmeasured = "planul B nemăsurat"
+	PlanBF6         = "F6 descarcă și decriptează segmentul întreg pe telefon"
 )
 
 // piDeferral is why the Pi's part moves to Faza 0-bis (G31).
@@ -138,7 +142,8 @@ func (v *verdict) row(code, value, limit, source string, pass *bool) {
 // envelope that recreport builds for it. Each failure names its plan B
 // (G21): a slow read or an age mismatch the RAM buffer; a slow seek the
 // RAM buffer, or 2-min segments, or an escalation, after what their own
-// seeks measured; the rate a lower recommended number; agerange F6's
+// seeks measured, and PlanBUnmeasured when a stage that the choice needs
+// was not measured; the rate a lower recommended number; agerange F6's
 // whole-segment download. A measured failure decides even with other parts
 // missing (G27); a missing Pi part on an unsupported Pi moves G13 to Faza
 // 0-bis (G31).
@@ -209,27 +214,38 @@ func (v *verdict) judgeSeek(d *results.Mi4Data) {
 	seekMax := slices.Max(d.SeekMs)
 	ok := seekMax <= MaxSeekMs
 	v.row("MI4 pi: primul cadru după salt (segment de 5 min)", fmt.Sprintf("max %s ms (%d salturi)", ms(seekMax), len(d.SeekMs)), "≤ 1500 ms", "pi", results.RowPass(ok, true))
-	stage := func(code string, seeks []float64) bool {
+	var unmeasured []string
+	// stage adds the row of a plan-B stage, and whether it was measured and
+	// brings the first frame within 1.5 s.
+	stage := func(code, what string, seeks []float64) (measured, pass bool) {
 		if len(seeks) == 0 {
 			v.row(code, "nemăsurat", "", "pi", nil)
-			return false
+			unmeasured = append(unmeasured, what)
+			return false, false
 		}
 		v.row(code, fmt.Sprintf("max %s ms", ms(slices.Max(seeks))), "", "pi", nil)
-		return slices.Max(seeks) <= MaxSeekMs
+		return true, slices.Max(seeks) <= MaxSeekMs
 	}
 	if ok {
 		return
 	}
 	v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("pi: primul cadru după salt a venit în %s ms (limita ≤ 1500 ms)", ms(seekMax)))
-	ram := stage("MI4 pi: salt cu segmentul întreg în RAM (planul B)", d.SeekRAMMs)
-	twoMin := stage("MI4 pi: salt în segmente de 2 min, din RAM (planul B)", d.Seek2MinMs)
+	ramMeasured, ram := stage("MI4 pi: salt cu segmentul întreg în RAM (planul B)", "cu segmentul întreg în RAM", d.SeekRAMMs)
+	twoMinMeasured, twoMin := stage("MI4 pi: salt în segmente de 2 min, din RAM (planul B)", "în segmente de 2 min", d.Seek2MinMs)
+	// The RAM buffer comes first, then 2-min segments (G21): each is chosen
+	// only on what was measured, and the escalation needs both measured.
 	switch {
 	case ram:
 		v.add(partFail, PlanBRAM)
-	case twoMin:
+	case ramMeasured && twoMin:
 		v.add(partFail, PlanBTwoMin)
-	default:
+	case ramMeasured && twoMinMeasured:
 		v.add(partFail, PlanBEscalate)
+	default:
+		// The seek failed, measured (G27); the choice of its plan B was not.
+		v.j.Reasons = append(v.j.Reasons, "pi: planul B al saltului este nemăsurat: lipsesc salturile "+strings.Join(unmeasured, " și "))
+		v.add(partFail, PlanBUnmeasured)
+		v.add(partMissing, "")
 	}
 }
 
@@ -268,16 +284,14 @@ func (v *verdict) informPC(e *results.Envelope) {
 	v.row("MI4 pc: criptare pe un nucleu (informativ, H3)", mbs(d.CryptoMBs), "", "pc", nil)
 }
 
-// judgeAgerange judges the phone's latest AGE run: the one of the device
-// with the highest run number, whatever the order of envs; recreport
-// de-duplicates run ids (G15), so no two of them tie. When the device has
-// none, the reason names the other platforms whose AGE runs do not count.
+// judgeAgerange judges the phone's latest AGE run: the device's run that is
+// later than its others (later). When the device has none, the reason
+// names the other platforms whose AGE runs do not count.
 func (v *verdict) judgeAgerange(envs []results.Envelope) {
 	const code, limit = "MI4: agerange în WebView-ul telefonului", "≥ 12 Mbps"
-	var mbps *float64
+	var run *results.Envelope
 	var others []string
-	best := -1
-	for _, e := range envs {
+	for i, e := range envs {
 		if e.Code != "MI4" || e.Set != AgerangeSet || e.MI4 == nil || e.MI4.AgerangeMbps == nil {
 			continue
 		}
@@ -287,11 +301,11 @@ func (v *verdict) judgeAgerange(envs []results.Envelope) {
 			}
 			continue
 		}
-		if n := runNumber(e.RunID); n > best {
-			best, mbps = n, e.MI4.AgerangeMbps
+		if run == nil || later(&envs[i], run) {
+			run = &envs[i]
 		}
 	}
-	if mbps == nil {
+	if run == nil {
 		why := "lipsește rularea AGE din aplicația Android a telefonului"
 		if len(others) > 0 {
 			slices.Sort(others)
@@ -302,6 +316,7 @@ func (v *verdict) judgeAgerange(envs []results.Envelope) {
 		v.add(partMissing, "")
 		return
 	}
+	mbps := run.MI4.AgerangeMbps
 	ok := *mbps >= MinAgerangeMbps
 	v.row(code, results.Decimal(*mbps, 1)+" Mbps", limit, "telefon", results.RowPass(ok, true))
 	if !ok {
@@ -310,14 +325,18 @@ func (v *verdict) judgeAgerange(envs []results.Envelope) {
 	}
 }
 
-// judgeEnc06 judges CI's ENC-06 check.
+// judgeEnc06 judges CI's latest ENC-06 check (later).
 func (v *verdict) judgeEnc06(envs []results.Envelope) {
 	const code, limit = "ENC-06: aceiași octeți ca age și rage", "identici"
-	var same *bool
-	for _, e := range envs {
-		if e.Code == "ENC-06" && e.MI4 != nil && e.MI4.Enc06 != nil {
-			same = e.MI4.Enc06
+	var check *results.Envelope
+	for i, e := range envs {
+		if e.Code == "ENC-06" && e.MI4 != nil && e.MI4.Enc06 != nil && (check == nil || later(&envs[i], check)) {
+			check = &envs[i]
 		}
+	}
+	var same *bool
+	if check != nil {
+		same = check.MI4.Enc06
 	}
 	switch {
 	case same == nil:
@@ -333,20 +352,40 @@ func (v *verdict) judgeEnc06(envs []results.Envelope) {
 	}
 }
 
-// latest is host's latest MI4 run, by its run id's number, or nil; an
-// envelope of the phone's agerange alone is not a run.
+// latest is host's latest MI4 run (later), or nil; an envelope of the
+// phone's agerange alone is not a run.
 func latest(envs []results.Envelope, host string) *results.Envelope {
 	var out *results.Envelope
-	best := -1
 	for i, e := range envs {
 		if e.Code != "MI4" || e.Host != host || e.MI4 == nil || e.Set != SetFor(host) {
 			continue
 		}
-		if n := runNumber(e.RunID); n >= best {
-			best, out = n, &envs[i]
+		if out == nil || later(&envs[i], out) {
+			out = &envs[i]
 		}
 	}
 	return out
+}
+
+// later reports whether run a is later than run b: by the number that ends
+// its run id, then, on the same number, by a stable key, the greater of
+// their JSON encodings, since an envelope carries no time of its own. The
+// run picked thus never depends on the order of the envelopes.
+func later(a, b *results.Envelope) bool {
+	if na, nb := runNumber(a.RunID), runNumber(b.RunID); na != nb {
+		return na > nb
+	}
+	return stableKey(a) > stableKey(b)
+}
+
+// stableKey is e's JSON encoding, "" in the one case that has none, a
+// figure that is not a number.
+func stableKey(e *results.Envelope) string {
+	b, err := json.Marshal(e)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // runNumber is the number that ends a run id, as in pi-mi4-3 or

@@ -1,9 +1,13 @@
 package mi4
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,6 +24,11 @@ type fakeRig struct {
 	calls  []string
 	seekMs map[string][]float64
 	fail   string // the call that fails
+	// work, when set, is MI4's work folder: each recording then leaves its
+	// data and its identity file where ipcam-hub's would be, and a bench
+	// whose identity file is gone is noted in keyless.
+	work    string
+	keyless []string
 }
 
 func (f *fakeRig) call(c string) error {
@@ -31,10 +40,35 @@ func (f *fakeRig) call(c string) error {
 }
 
 func (f *fakeRig) record(_ context.Context, name string, segmentSecs int) (segment, error) {
-	return segment{path: name + ".mp4.age", identity: name + ".key"}, f.call(fmt.Sprintf("record %s %d s", name, segmentSecs))
+	seg := segment{path: name + ".mp4.age", identity: name + ".key"}
+	if f.work != "" {
+		runs, err := filepath.Glob(filepath.Join(f.work, "mi4", "*"))
+		if err != nil || len(runs) != 1 {
+			return seg, fmt.Errorf("the run folders %q: %v", runs, err)
+		}
+		dir := filepath.Join(runs[0], name)
+		seg.identity = filepath.Join(dir, identityFile)
+		for _, file := range []string{filepath.Join(dir, recordingDir, "rec", seg.path), seg.identity} {
+			if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+				return seg, err
+			}
+			if err := os.WriteFile(file, []byte(name), 0o600); err != nil {
+				return seg, err
+			}
+		}
+	}
+	return seg, f.call(fmt.Sprintf("record %s %d s", name, segmentSecs))
+}
+
+// bench notes a bench whose segment's identity file is gone.
+func (f *fakeRig) bench(seg segment, c string) {
+	if _, err := os.Stat(seg.identity); f.work != "" && err != nil {
+		f.keyless = append(f.keyless, c)
+	}
 }
 
 func (f *fakeRig) readbench(_ context.Context, seg segment, size string, reads int) (readSet, error) {
+	f.bench(seg, "readbench "+seg.path+" "+size)
 	err := f.call(fmt.Sprintf("readbench %s %s ×%d", seg.path, size, reads))
 	if size != "part" {
 		return readSet{ReadBytes: 65536, ReadMs: repeat(3, reads), MaxMs: 3, P50Ms: 3, P99Ms: 3}, err
@@ -44,6 +78,7 @@ func (f *fakeRig) readbench(_ context.Context, seg segment, size string, reads i
 
 func (f *fakeRig) seekbench(_ context.Context, seg segment, seeks int, wholeRAM bool) ([]float64, error) {
 	key := fmt.Sprintf("%s ram=%v", seg.path, wholeRAM)
+	f.bench(seg, "seekbench "+key)
 	return f.seekMs[key], f.call(fmt.Sprintf("seekbench %s ×%d", key, seeks))
 }
 
@@ -179,6 +214,42 @@ func TestMI4_StopsOnAFailedStep(t *testing.T) {
 			}
 			if last := rig.calls[len(rig.calls)-1]; last != "end" {
 				t.Errorf("calls %v, want the end of the link last", rig.calls)
+			}
+		})
+	}
+}
+
+// TestMI4_RemovesTheIdentityWithTheRecording (PH0-22): RI_g's identity
+// file goes with the recording it decrypts, when the run ends and on every
+// error after a recording: no identity is left under work/mi4. Until then
+// every bench of a segment, the 2-min one's included, still has it.
+func TestMI4_RemovesTheIdentityWithTheRecording(t *testing.T) {
+	for _, fail := range []string{"", "readbench 5min.mp4.age part ×1000", "record 2min 120 s", "seekbench 2min.mp4.age ram=true ×20", "cryptobench 60 s"} {
+		t.Run(cmp.Or(fail, "a whole run"), func(t *testing.T) {
+			dir := t.TempDir()
+			work := filepath.Join(dir, "work")
+			rig := &fakeRig{work: work, fail: fail, seekMs: map[string][]float64{
+				"5min.mp4.age ram=false": append(repeat(900, 19), 1700),
+				"5min.mp4.age ram=true":  repeat(1600, 20),
+				"2min.mp4.age ram=true":  repeat(1400, 20),
+			}}
+			o := Options{Controller: "192.0.2.1:7081", Results: filepath.Join(dir, "results"), Work: work, Out: io.Discard,
+				Host: piHost, Euid: func() int { return 0 }, DropCaches: func() error { return nil }, rig: rig}
+			if err := Run(t.Context(), o); (err != nil) != (fail != "") {
+				t.Fatalf("Run = %v when %q failed", err, fail)
+			}
+			if len(rig.keyless) != 0 {
+				t.Errorf("benches without their identity: %q", rig.keyless)
+			}
+			var left []string
+			err := filepath.WalkDir(filepath.Join(work, "mi4"), func(path string, d fs.DirEntry, err error) error {
+				if err == nil && (strings.HasSuffix(path, ".key") || d.Name() == recordingDir) {
+					left = append(left, path)
+				}
+				return err
+			})
+			if err != nil || len(left) != 0 {
+				t.Errorf("left under work/mi4 after the run: %q (%v)", left, err)
 			}
 		})
 	}

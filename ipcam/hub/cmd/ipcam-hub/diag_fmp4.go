@@ -231,6 +231,11 @@ const (
 	nonSyncSample      = 0x10000
 )
 
+// maxTrunSamples bounds a trun's sample count: a 1-s part holds tens of
+// samples, so more than this is a corrupt box, which would otherwise make
+// the walker allocate one sample per counted entry.
+const maxTrunSamples = 1 << 20
+
 // eachPart calls visit with each part of the recording, in order: its span,
 // from its moof to the end of its mdat, and the video track's samples in
 // it. It stops when visit returns false.
@@ -342,14 +347,19 @@ func (m *fmp4Recording) readTraf(traf []byte, moof int64) ([]fmp4Sample, error) 
 }
 
 // readTrun reads a trun's samples, which start at decode time start, their
-// data at base plus the trun's data offset.
+// data at base plus the trun's data offset. Their count is at most
+// maxTrunSamples, and their fields, when they have their own, must fit the
+// box: a corrupt count is an error before anything is allocated.
 func readTrun(b []byte, base int64, start uint64, d sampleDefaults) ([]fmp4Sample, error) {
 	if len(b) < 8 {
 		return nil, errNotFMP4
 	}
 	flags := binary.BigEndian.Uint32(b) & 0xffffff
-	count := int(binary.BigEndian.Uint32(b[4:]))
-	at := 8
+	n := binary.BigEndian.Uint32(b[4:])
+	if n > maxTrunSamples {
+		return nil, fmt.Errorf("%w: a trun of %d samples", errNotFMP4, n)
+	}
+	count, at := int(n), 8
 	if flags&trunDataOffset == 0 {
 		return nil, fmt.Errorf("%w: a trun without a data offset", errNotFMP4)
 	}
@@ -372,8 +382,8 @@ func readTrun(b []byte, base int64, start uint64, d sampleDefaults) ([]fmp4Sampl
 			entry += 4
 		}
 	}
-	if count < 0 || len(b) < at+count*entry {
-		return nil, errNotFMP4
+	if entry > 0 && count > (len(b)-at)/entry {
+		return nil, fmt.Errorf("%w: a trun of %d samples in %d bytes", errNotFMP4, count, len(b))
 	}
 	samples := make([]fmp4Sample, count)
 	t := start
@@ -439,7 +449,8 @@ func firstIDR(r io.ReaderAt, size int64, target time.Duration) ([]byte, error) {
 	if found == nil {
 		return nil, fmt.Errorf("no IDR at or after %v", target)
 	}
-	if found.off < 0 || found.off+found.size > size {
+	// Checked before its bytes are allocated, without an overflow.
+	if found.off < 0 || found.size > size || found.off > size-found.size {
 		return nil, fmt.Errorf("%w: a sample outside the plaintext", errNotFMP4)
 	}
 	data := make([]byte, found.size)
