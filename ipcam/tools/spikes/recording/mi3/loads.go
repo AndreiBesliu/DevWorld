@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"filippo.io/age"
@@ -90,13 +91,15 @@ const pacedChunk = 64 << 10
 
 // paced reads its reader no faster than bps bits per second, from its
 // first read: after each read, it sleeps until the bytes read so far are
-// due.
+// due. sent is atomic: http's transport may still read a request's body
+// after Do returns (net/http.RoundTripper), and the PUT reads its count
+// then.
 type paced struct {
 	r     io.Reader
 	bps   int64
 	clock pacingClock
 	start time.Time
-	sent  int64
+	sent  atomic.Int64
 }
 
 func newPaced(r io.Reader, bps int64, clock pacingClock) *paced {
@@ -108,8 +111,7 @@ func (p *paced) Read(b []byte) (int, error) {
 		p.start = p.clock.Now()
 	}
 	n, err := p.r.Read(b[:min(len(b), pacedChunk)])
-	p.sent += int64(n)
-	bits := p.sent * 8
+	bits := p.sent.Add(int64(n)) * 8
 	due := p.start.Add(time.Duration(bits/p.bps)*time.Second + time.Duration(bits%p.bps*int64(time.Second)/p.bps))
 	if wait := due.Sub(p.clock.Now()); wait > 0 {
 		p.clock.Sleep(wait)
@@ -347,19 +349,20 @@ func putSegment(ctx context.Context, client *http.Client, spec LoadSpec, to age.
 	res, err := client.Do(req)
 	_ = pr.Close() // ends the encryption, if the PUT ended first
 	if err != nil {
-		return body.sent, err
+		return body.sent.Load(), err
 	}
 	defer func() { _ = res.Body.Close() }()
 	var got struct {
 		Bytes int64 `json:"bytes"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&got); err != nil || res.StatusCode != http.StatusOK {
-		return body.sent, fmt.Errorf("the sink answered %s (%v)", res.Status, err)
+		return body.sent.Load(), fmt.Errorf("the sink answered %s (%v)", res.Status, err)
 	}
-	if got.Bytes != body.sent {
-		return body.sent, fmt.Errorf("the sink counted %d bytes of %d", got.Bytes, body.sent)
+	sent := body.sent.Load()
+	if got.Bytes != sent {
+		return sent, fmt.Errorf("the sink counted %d bytes of %d", got.Bytes, sent)
 	}
-	return body.sent, nil
+	return sent, nil
 }
 
 // splitTile is a tile's stream, "cam01_sub", as the live load's source
