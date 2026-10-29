@@ -41,13 +41,16 @@ var readPlaintext = func(r io.ReaderAt, p []byte, off int64) (int, error) { retu
 // diagReadbenchCommand is "ipcam-hub diag readbench --file <seg.mp4.age>
 // --identity <file> [--reads 1000] [--size part|<bytes>]" (ENC-08, G22):
 // it times reads of a recording's plaintext through the hub's read path,
-// crypto's random-access reader. With --size part, each read is one fMP4
-// part, its moof and mdat (the HLS byte-range unit, about 512 KiB at 4
-// Mbps), chosen uniformly; with a number of bytes, each read is that long
-// at a uniform random offset. Before the reads, it drops the file's pages
-// from the page cache where the system can (Linux), so that the index it
-// reads first does not warm them: on a Pi, MI4 drops the whole cache
-// before it starts the bench.
+// crypto's random-access reader. Each read starts at a uniform random offset
+// in the plaintext. With --size part, it is as long as one fMP4 part of the
+// recording, its moof and mdat (the HLS byte-range unit, about 512 KiB at 4
+// Mbps), the part drawn uniformly: not that part itself, because MTX-2 pads
+// most parts to the 64 KiB chunk boundary, so a read from a part's start
+// would touch one age chunk less than a read of the same length elsewhere
+// (C26 judges the slowest read). With a number of bytes, each read is that
+// long. Before the reads, it drops the file's pages from the page cache
+// where the system can (Linux), so that the index it reads first does not
+// warm them: on a Pi, MI4 drops the whole cache before it starts the bench.
 func diagReadbenchCommand(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("diag readbench", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -104,30 +107,41 @@ func readbench(file, identity string, reads int, size string) (readbenchReport, 
 	return r, nil
 }
 
-// readRanges draws the reads of a set: whole parts for "part", else size
-// bytes at uniform offsets.
+// readRanges draws the reads of a set, each at a uniform offset in the
+// plaintext: as long as a part drawn uniformly for "part", else size bytes.
 func readRanges(seg *segment, reads int, size string) ([]span, error) {
+	lengths, err := readLengths(seg, size)
+	if err != nil {
+		return nil, err
+	}
 	ranges := make([]span, reads)
+	for i := range ranges {
+		n := lengths[rand.IntN(len(lengths))]                      //nolint:gosec // a bench's draw, not a secret
+		ranges[i] = span{off: rand.Int64N(seg.size - n + 1), n: n} //nolint:gosec // a bench's draw, not a secret
+	}
+	return ranges, nil
+}
+
+// readLengths are the lengths that a set's reads draw from: each part's,
+// from its moof to the end of its mdat, for "part", else size bytes.
+func readLengths(seg *segment, size string) ([]int64, error) {
 	if size == "part" {
 		m, err := openFMP4(seg.r, seg.size)
 		if err != nil {
 			return nil, err
 		}
-		var parts []span
+		var lengths []int64
 		err = m.eachPart(func(p span, _ []fmp4Sample) (bool, error) {
-			parts = append(parts, p)
+			lengths = append(lengths, p.n)
 			return true, nil
 		})
 		if err != nil {
 			return nil, err
 		}
-		if len(parts) == 0 {
+		if len(lengths) == 0 {
 			return nil, errors.New("the segment has no part")
 		}
-		for i := range ranges {
-			ranges[i] = parts[rand.IntN(len(parts))] //nolint:gosec // a bench's draw, not a secret
-		}
-		return ranges, nil
+		return lengths, nil
 	}
 	n, err := strconv.ParseInt(size, 10, 64)
 	switch {
@@ -136,10 +150,7 @@ func readRanges(seg *segment, reads int, size string) ([]span, error) {
 	case n > seg.size:
 		return nil, fmt.Errorf("--size %d is larger than the %d-byte plaintext", n, seg.size)
 	}
-	for i := range ranges {
-		ranges[i] = span{off: rand.Int64N(seg.size - n + 1), n: n} //nolint:gosec // a bench's draw, not a secret
-	}
-	return ranges, nil
+	return []int64{n}, nil
 }
 
 // percentile is the nearest-rank p-th percentile of values.

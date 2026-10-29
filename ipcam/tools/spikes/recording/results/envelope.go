@@ -63,15 +63,17 @@ type Envelope struct {
 	MI3 *Mi3Data `json:"mi3,omitempty"`
 	// MI4 is an MI4 envelope's age rig run (G13), and only an MI4 or an
 	// ENC-06 envelope's: recreport builds the ENC-06 envelope from CI's
-	// annotation, with Enc06, and the phone's AGE result as an MI4 envelope
-	// with AgerangeMbps.
+	// annotation, with Enc06, and each AGE result of the app as an MI4
+	// envelope with AgerangeMbps (mi4.AgerangeRun: set app-age, OS the
+	// app's platform, "android" on the phone).
 	MI4 *Mi4Data `json:"mi4,omitempty"`
 }
 
 // Mi4Data is MI4's age random-access rig on a host (G13, ENC-08, HUB-33):
 //   - Model is the host's model, the Pi's as diag host reads it, or "PC".
-//   - ReadMs are the 1000 timed reads of one fMP4 part each (G22), ReadSize
-//     their mean bytes; the max decides (C26), p50 and p99 are information.
+//   - ReadMs are the 1000 timed reads, each as long as one fMP4 part at a
+//     uniform random offset (G22), ReadSize their mean bytes; the max
+//     decides (C26), p50 and p99 are information.
 //     Cold is true when the page cache was dropped before each set (on the
 //     Pi, as root), false for warm reads (Windows).
 //   - InfoReads are the reads of 64 KiB and 4 MiB, information only.
@@ -82,9 +84,10 @@ type Envelope struct {
 //     on all of them (information); ThresholdMBs is the threshold of the
 //     model (C25), 0 on the PC, where the rate is information, and
 //     RecommendedAfter the recommended number that follows from the rate.
-//   - AgerangeMbps is the phone's AGE run (G24), and Enc06 the ENC-06
-//     check of CI (identical bytes to the age CLI and rage), each in the
-//     envelope that recreport builds for it.
+//   - AgerangeMbps is an AGE run of the app (G24), which decides only when
+//     it ran on the phone, and Enc06 the ENC-06 check of CI (identical
+//     bytes to the age CLI and rage), each in the envelope that recreport
+//     builds for it.
 type Mi4Data struct {
 	Model             string     `json:"model,omitempty"`
 	ReadMs            []float64  `json:"readMs,omitempty"`

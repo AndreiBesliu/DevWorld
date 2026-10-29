@@ -51,8 +51,9 @@ type benchSample struct {
 	payload []byte
 }
 
-// writeBenchSegment writes a recording of parts parts of perPart samples,
-// each sample size bytes that name its index, into dir.
+// writeBenchSegment writes a recording of parts parts of perPart samples
+// into dir. Each sample's bytes name its index; the samples of part p are
+// size + 4p bytes, so that no two parts have the same length.
 func writeBenchSegment(t *testing.T, dir string, parts, perPart, size int) benchSegment {
 	t.Helper()
 	var buf seekablebuffer.Buffer
@@ -65,7 +66,7 @@ func writeBenchSegment(t *testing.T, dir string, parts, perPart, size int) bench
 		track := &fmp4.PartTrack{ID: 1, BaseTime: uint64(p * perPart * benchSampleDur)} //nolint:gosec // small test values
 		for s := range perPart {
 			i := p*perPart + s
-			payload := bytes.Repeat(binary.BigEndian.AppendUint32(nil, uint32(i)), size/4) //nolint:gosec // small test values
+			payload := bytes.Repeat(binary.BigEndian.AppendUint32(nil, uint32(i)), size/4+p) //nolint:gosec // small test values
 			sync := i%benchGOP == 0
 			track.Samples = append(track.Samples, &fmp4.Sample{Duration: benchSampleDur, IsNonSyncSample: !sync, Payload: payload})
 			seg.samples = append(seg.samples, benchSample{time: uint64(i * benchSampleDur), sync: sync, payload: payload}) //nolint:gosec // small test values

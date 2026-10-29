@@ -40,11 +40,27 @@ export type InterruptReason =
   | { kind: 'pip-left'; pipS: number };
 
 /**
- * One run of a scenario, as the hub stores it and the report reads it. The
- * sample keys and the notes of each scenario are documented in its file under
- * scenarios/. Nothing in it names an address, a network or a camera URL (PH0-22).
+ * The numbers that a result carries at its top level, one each, beside its
+ * samples: the AGE scenario's, which the recorder spike's MI4 reads as
+ * `{scenario: "AGE", mbps, bytes, ms}` (phase0c1 plan, Task 10). The other
+ * scenarios have none.
  */
-export interface ScenarioResult {
+export interface Figures {
+  /** agerange's rate: megabits of plaintext per second. */
+  mbps?: number;
+  /** The plaintext's size, in bytes. */
+  bytes?: number;
+  /** agerange's time, in ms, from opening the file to the end of the read. */
+  ms?: number;
+}
+
+/**
+ * One run of a scenario, as the hub stores it and the report reads it. The
+ * sample keys, figures and notes of each scenario are documented in its file
+ * under scenarios/. Nothing in it names an address, a network or a camera URL
+ * (PH0-22).
+ */
+export interface ScenarioResult extends Figures {
   scenario: ScenarioId;
   /**
    * The device as the page and its shell tell it: `ramMb` is the physical

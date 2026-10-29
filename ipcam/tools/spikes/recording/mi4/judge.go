@@ -8,6 +8,7 @@
 package mi4
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"slices"
@@ -41,6 +42,32 @@ const (
 
 // piDeferral is why the Pi's part moves to Faza 0-bis (G31).
 const piDeferral = "Pi armv6"
+
+// The phone's AGE run (G24, ENC-08 (3)). The video spike app's AGE scenario
+// posts its result to reccontroller, which keeps it under results/app/, and
+// recreport turns each result into an envelope with AgerangeRun. agerange is
+// judged in the AND-1 WebView, so Judge reads it only from the device's
+// runs, those marked with AgerangeSet and DeviceOS; an AGE run of a desktop
+// shell or a browser carries its own platform and is left out.
+const (
+	// AgerangeSet is the set of the app's AGE runs.
+	AgerangeSet = "app-age"
+	// DeviceOS is the platform of the device that decides agerange: the
+	// app's Android shell, AND-1's WebView ("android" in the result's
+	// device.platform).
+	DeviceOS = "android"
+)
+
+// AgerangeRun is the envelope of the app's n-th AGE result (n from 1, in
+// the order reccontroller stored them), on platform, the result's
+// device.platform, at mbps: the set AgerangeSet, the run id app-age-<n>,
+// the platform as its OS, and the host pc, whose reccontroller received
+// it. An interrupted result, or one without mbps, measured nothing and has
+// no envelope.
+func AgerangeRun(n int, platform string, mbps float64) results.Envelope {
+	return results.Envelope{Schema: results.Schema, Code: "MI4", RunID: AgerangeSet + "-" + strconv.Itoa(n), Set: AgerangeSet,
+		Host: "pc", OS: platform, MI4: &results.Mi4Data{AgerangeMbps: &mbps}}
+}
 
 // SetFor is MI4's set on host: pi-mi4, or pc-mi4 for information.
 func SetFor(host string) string { return host + "-mi4" }
@@ -105,8 +132,9 @@ func (v *verdict) row(code, value, limit, source string, pass *bool) {
 // Judge is G13 (C17, ENC-08, HUB-33). The Pi's latest MI4 envelope decides
 // the reads (each of 1000 within 50 ms, C26), the seek (the first frame
 // within 1.5 s, G21) and the encryption rate (Throughput, C25); the PC's
-// is information only. The phone's AGE run decides agerange (at least 12
-// Mbps, G24), and CI's ENC-06 check the identical bytes, each from the
+// is information only. The phone's latest AGE run decides agerange (at
+// least 12 Mbps, G24), only a run of the device (AgerangeRun on
+// DeviceOS), and CI's ENC-06 check the identical bytes, each from the
 // envelope that recreport builds for it. Each failure names its plan B
 // (G21): a slow read or an age mismatch the RAM buffer; a slow seek the
 // RAM buffer, or 2-min segments, or an escalation, after what their own
@@ -240,18 +268,37 @@ func (v *verdict) informPC(e *results.Envelope) {
 	v.row("MI4 pc: criptare pe un nucleu (informativ, H3)", mbs(d.CryptoMBs), "", "pc", nil)
 }
 
-// judgeAgerange judges the phone's AGE run.
+// judgeAgerange judges the phone's latest AGE run: the one of the device
+// with the highest run number, whatever the order of envs; recreport
+// de-duplicates run ids (G15), so no two of them tie. When the device has
+// none, the reason names the other platforms whose AGE runs do not count.
 func (v *verdict) judgeAgerange(envs []results.Envelope) {
 	const code, limit = "MI4: agerange în WebView-ul telefonului", "≥ 12 Mbps"
 	var mbps *float64
+	var others []string
+	best := -1
 	for _, e := range envs {
-		if e.Code == "MI4" && e.MI4 != nil && e.MI4.AgerangeMbps != nil {
-			mbps = e.MI4.AgerangeMbps
+		if e.Code != "MI4" || e.Set != AgerangeSet || e.MI4 == nil || e.MI4.AgerangeMbps == nil {
+			continue
+		}
+		if e.OS != DeviceOS {
+			if platform := cmp.Or(e.OS, "platformă necunoscută"); !slices.Contains(others, platform) {
+				others = append(others, platform)
+			}
+			continue
+		}
+		if n := runNumber(e.RunID); n > best {
+			best, mbps = n, e.MI4.AgerangeMbps
 		}
 	}
 	if mbps == nil {
+		why := "lipsește rularea AGE din aplicația Android a telefonului"
+		if len(others) > 0 {
+			slices.Sort(others)
+			why += " (cele de pe " + strings.Join(others, ", ") + " nu contează: agerange se judecă în WebView-ul telefonului)"
+		}
 		v.row(code, "lipsește", limit, "telefon", nil)
-		v.j.Reasons = append(v.j.Reasons, "lipsește rularea AGE de pe telefon")
+		v.j.Reasons = append(v.j.Reasons, why)
 		v.add(partMissing, "")
 		return
 	}
@@ -295,12 +342,18 @@ func latest(envs []results.Envelope, host string) *results.Envelope {
 		if e.Code != "MI4" || e.Host != host || e.MI4 == nil || e.Set != SetFor(host) {
 			continue
 		}
-		n, _ := strconv.Atoi(e.RunID[strings.LastIndexByte(e.RunID, '-')+1:])
-		if n >= best {
+		if n := runNumber(e.RunID); n >= best {
 			best, out = n, &envs[i]
 		}
 	}
 	return out
+}
+
+// runNumber is the number that ends a run id, as in pi-mi4-3 or
+// app-age-12, or 0 when it does not end in one.
+func runNumber(id string) int {
+	n, _ := strconv.Atoi(id[strings.LastIndexByte(id, '-')+1:])
+	return n
 }
 
 // piUnsupported reports whether an envelope names the Pi as unsupported.
@@ -316,7 +369,7 @@ func readsCode(host string, d *results.Mi4Data) string {
 	if !d.Cold {
 		how = "la cald"
 	}
-	return fmt.Sprintf("MI4 %s: citiri aleatoare de câte o parte (%d, %s, ~%s)", host, len(d.ReadMs), how, sizeText(d.ReadSize))
+	return fmt.Sprintf("MI4 %s: citiri aleatoare de lungimea unei părți (%d, %s, ~%s)", host, len(d.ReadMs), how, sizeText(d.ReadSize))
 }
 
 func ms(v float64) string { return results.Decimal(v, 1) }

@@ -97,14 +97,14 @@ type rig interface {
 // Run is MI4 on this host (G13, ENC-08, HUB-33): it records one encrypted
 // segment of the controller's cam01_main (4 Mbps), 5 min, through
 // ipcam-hub, then, each set after a drop of the page cache (G22), times
-// 1000 reads of one fMP4 part, which decide, and 1000 of 64 KiB and of 4
-// MiB, information; then 20 seeks to the first IDR (G21), and when one
-// takes more than 1.5 s, the same with the whole segment in RAM and in a
-// 2-min segment recorded for it; then the encryption on one core for 60 s
-// (G23). It writes the envelope MI4/<host>-mi4/<run id>.json, and a Pi
-// sends it to the PC. On Linux it must run as root, which drops the cache;
-// without root it refuses before it reads the host or records anything.
-// Every line it prints is Romanian.
+// 1000 reads of one fMP4 part's length at random offsets, which decide, and
+// 1000 of 64 KiB and of 4 MiB, information; then 20 seeks to the first IDR
+// (G21), and when one takes more than 1.5 s, the same with the whole
+// segment in RAM and in a 2-min segment recorded for it; then the
+// encryption on one core for 60 s (G23). It writes the envelope
+// MI4/<host>-mi4/<run id>.json, and a Pi sends it to the PC. On Linux it
+// must run as root, which drops the cache; without root it refuses before
+// it reads the host or records anything. Every line it prints is Romanian.
 func Run(ctx context.Context, o Options) error {
 	if err := requireRoot(o.euid()); err != nil {
 		return err
@@ -172,7 +172,7 @@ func (o Options) measure(ctx context.Context, r rig, host mi1.HostState, p Pace)
 	if err != nil {
 		return d, err
 	}
-	sizes := []string{"câte o parte"}
+	sizes := []string{"de lungimea unei părți"}
 	for _, size := range p.InfoSizes {
 		sizes = append(sizes, "câte "+sizeText(size))
 	}

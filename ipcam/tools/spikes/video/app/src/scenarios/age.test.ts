@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path';
 import { Decrypter, Encrypter } from 'age-encryption';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createI18n } from '../i18n';
-import { SCENARIO_IDS } from '../results';
+import { ResultsQueue, SCENARIO_IDS } from '../results';
 import { ageScenario, BENCH_BYTES, benchAgerange, MIN_MBPS, seededBytes } from './age';
 import { setup } from './fakes';
 import { SCENARIOS } from './index';
@@ -88,10 +88,52 @@ describe('AGE', () => {
     const header = decryptHeader.mock.calls[0]![0];
     expect(new TextDecoder().decode(header).startsWith('age-encryption.org/v1\n')).toBe(true);
     expect(new TextDecoder().decode(header).endsWith('\n')).toBe(true);
-    // agerange is timed alone: one 100 ms step of the clock for 1 MiB.
-    expect(result.scenario).toBe('AGE');
-    expect(result.samples).toEqual({ mbps: [(2 ** 20 * 8) / 1000 / 100], bytes: [2 ** 20], ms: [100] });
+    // agerange is timed alone: one 100 ms step of the clock for 1 MiB. The
+    // figures are at the top of the result, {scenario: "AGE", mbps, bytes, ms},
+    // beside the device facts that every result carries.
+    expect(result).toMatchObject({ scenario: 'AGE', mbps: (2 ** 20 * 8) / 1000 / 100, bytes: 2 ** 20, ms: 100 });
+    expect(result.samples).toEqual({});
     expect(t.sessions).toHaveLength(0);
+  });
+
+  it('ageScenario_postsScenarioMbpsBytesMsToTheHub', async () => {
+    // The phase0c1 plan's contract: the app posts {scenario: "AGE", mbps, bytes, ms}
+    // to <hub>/spike/v1/results, where reccontroller keeps it under results/app/.
+    let now = 0;
+    const t = setup({
+      overrides: {
+        clock: {
+          now: () => (now += 50),
+          setTimer: (fn, ms) => {
+            const id = setTimeout(fn, ms);
+            return () => {
+              clearTimeout(id);
+            };
+          },
+        },
+      },
+    });
+    const result = await runDefinition('AGE', ageScenario(2 ** 16), t.env);
+    const posted: { url: string; body: string }[] = [];
+    const queue = new ResultsQueue({
+      fetch: (input, init) => {
+        posted.push({ url: String(input), body: String(init?.body) });
+        return Promise.resolve(new Response(null, { status: 201 }));
+      },
+      hubUrl: () => 'http://pc.test:7080/',
+    });
+
+    queue.add(result);
+
+    expect(await queue.flush()).toBe(0);
+    expect(posted.map((p) => p.url)).toEqual(['http://pc.test:7080/spike/v1/results']);
+    expect(JSON.parse(posted[0]!.body)).toMatchObject({
+      scenario: 'AGE',
+      mbps: (2 ** 16 * 8) / 1000 / 50,
+      bytes: 2 ** 16,
+      ms: 50,
+      device: { platform: 'chrome' },
+    });
   });
 
   it('ageScenario_isListedWithItsRomanianLabel', () => {

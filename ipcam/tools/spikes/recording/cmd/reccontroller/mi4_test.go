@@ -71,7 +71,7 @@ func TestMI4_SmokeEndToEnd(t *testing.T) {
 		d.ReadMaxMs, d.ReadP50Ms, d.ReadP99Ms, d.ReadSize, d.InfoReads, d.SeekMs, d.SeekRAMMs, d.Seek2MinMs, d.CryptoMBs, d.CryptoMBsAllCores, d.ThresholdMBs, d.RecommendedAfter)
 	// A 1 s part of the 4 Mbps stream is about 500 KB.
 	if len(d.ReadMs) != 20 || d.ReadSize < 100_000 || d.ReadSize > 2_000_000 || d.ReadMaxMs <= 0 {
-		t.Errorf("reads %v of %d bytes, want 20 reads of one part", d.ReadMs, d.ReadSize)
+		t.Errorf("reads %v of %d bytes, want 20 reads of one part's length", d.ReadMs, d.ReadSize)
 	}
 	if len(d.InfoReads) != 1 || d.InfoReads[0].Size != 64<<10 || len(d.SeekMs) != 5 || d.CryptoMBs <= 0 || d.CryptoMBsAllCores <= 0 {
 		t.Errorf("info reads %+v, seeks %v, crypto %v / %v: not measured", d.InfoReads, d.SeekMs, d.CryptoMBs, d.CryptoMBsAllCores)

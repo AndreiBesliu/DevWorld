@@ -1,6 +1,7 @@
 package mi4
 
 import (
+	"encoding/json"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,11 +34,8 @@ func onPi(d results.Mi4Data, model *results.PiModelInfo) results.Envelope {
 		Storage: "sd", PiModel: model, MI4: &d}
 }
 
-// agerangeRun is the phone's AGE result as recreport's envelope.
-func agerangeRun(mbps float64) results.Envelope {
-	return results.Envelope{Schema: results.Schema, Code: "MI4", RunID: "app-age-1", Set: "app-age", Host: "pc", OS: "android",
-		MI4: &results.Mi4Data{AgerangeMbps: &mbps}}
-}
+// agerangeRun is the phone's AGE result, from the app's Android shell.
+func agerangeRun(mbps float64) results.Envelope { return AgerangeRun(1, DeviceOS, mbps) }
 
 // enc06Run is CI's ENC-06 result as recreport's envelope.
 func enc06Run(pass bool) results.Envelope {
@@ -196,6 +194,66 @@ func TestMI4_AgerangeMissing_Incomplete(t *testing.T) {
 	if j.Verdict != results.Fail || j.PlanB != PlanBF6 {
 		t.Errorf("agerange at 11 Mbps: Judge = %q → %q, want pică → %s", j.Verdict, j.PlanB, PlanBF6)
 	}
+}
+
+// TestMI4_Agerange_FromTheDeviceRunOnly (G24, ENC-08 (3)): agerange is
+// judged in the AND-1 WebView, so only an AGE run of the app's Android
+// shell decides it, the latest by its run number whatever the order of the
+// envelopes; a desktop shell's or a browser's AGE run, or a rate in another
+// MI4 envelope, is not the device's: alone it leaves agerange missing, and
+// beside the device's run it changes nothing.
+func TestMI4_Agerange_FromTheDeviceRunOnly(t *testing.T) {
+	// The envelope that recreport writes for the phone's result keeps its
+	// device marker through a results file.
+	data, err := json.Marshal(AgerangeRun(3, DeviceOS, 12.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, err := results.Parse(data); err != nil || e.Code != "MI4" || e.RunID != "app-age-3" || e.Set != "app-age" || e.OS != "android" ||
+		e.MI4.AgerangeMbps == nil || *e.MI4.AgerangeMbps != 12.5 {
+		t.Errorf("AgerangeRun's envelope read back as %+v, %v", e, err)
+	}
+
+	pi, enc06 := onPi(passing(), pi4), enc06Run(true)
+	misplaced := passing()
+	misplaced.AgerangeMbps = new(30.0)
+	notTheDevice := []results.Envelope{AgerangeRun(7, "windows-tauri", 30), AgerangeRun(8, "chrome", 30), onPi(misplaced, pi4)}
+	for i, other := range notTheDevice {
+		j := Judge([]results.Envelope{pi, other, enc06})
+		if r := row(t, j, "agerange"); j.Verdict != results.Incomplete || r.Value != "lipsește" {
+			t.Errorf("only %s %s (%d): Judge = %q, agerange %q; want %q, «lipsește»", other.Set, other.OS, i, j.Verdict, r.Value, results.Incomplete)
+		}
+		// The owner learns why a desktop AGE run did not count.
+		if why := strings.Join(j.Reasons, "\n"); other.Set == AgerangeSet && !strings.Contains(why, "cele de pe "+other.OS+" nu contează") {
+			t.Errorf("only %s %s: reasons %q do not say that its run does not count", other.Set, other.OS, j.Reasons)
+		}
+		for _, envs := range [][]results.Envelope{{pi, AgerangeRun(1, "android", 11), other, enc06}, {pi, other, AgerangeRun(1, "android", 11), enc06}} {
+			if j := Judge(envs); j.Verdict != results.Fail || j.PlanB != PlanBF6 || row(t, j, "agerange").Value != "11,0 Mbps" {
+				t.Errorf("the device at 11 Mbps beside %s %s: Judge = %q → %q, want pică → %s", other.Set, other.OS, j.Verdict, j.PlanB, PlanBF6)
+			}
+		}
+	}
+	// Run 10 is later than run 9, in either order.
+	for _, c := range []struct {
+		early, late float64
+		want        results.Verdict
+	}{{11, 13, results.Pass}, {13, 11, results.Fail}} {
+		early, late := AgerangeRun(9, "android", c.early), AgerangeRun(10, "android", c.late)
+		for _, envs := range [][]results.Envelope{{pi, early, late, enc06}, {pi, late, early, enc06}, {late, enc06, early, pi}} {
+			if j := Judge(envs); j.Verdict != c.want {
+				t.Errorf("run 9 at %v and run 10 at %v Mbps, in the order %s: Judge = %q, want %q (run 10 decides)", c.early, c.late, runIDs(envs), j.Verdict, c.want)
+			}
+		}
+	}
+}
+
+// runIDs are the run ids of envs, in order.
+func runIDs(envs []results.Envelope) string {
+	ids := make([]string, len(envs))
+	for i, e := range envs {
+		ids[i] = e.RunID
+	}
+	return strings.Join(ids, ", ")
 }
 
 // TestMI4_AgeMismatch_PlanBRamBuffer (ENC-06, G21): files that the age CLI

@@ -16,10 +16,12 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
-// ageResult is the AGE scenario's result as the spike app posts it.
-const ageResult = `{"scenario":"AGE","device":{"platform":"android","model":"SM-A245F","ua":"Mozilla/5.0 (Linux; Android 14)"},` +
+// ageResult is the AGE scenario's result as the spike app posts it:
+// {scenario: "AGE", mbps, bytes, ms} beside the facts of every result.
+const ageResult = `{"scenario":"AGE","mbps":85.5,"bytes":33554432,"ms":3139.5,` +
+	`"device":{"platform":"android","model":"SM-A245F","ua":"Mozilla/5.0 (Linux; Android 14)"},` +
 	`"startedAt":"2026-10-29T12:00:00.000Z","durationS":14.2,"interrupted":false,"hubJitterMs":[],` +
-	`"samples":{"mbps":[85.5],"bytes":[33554432],"ms":[3139.5]},"notes":["x < y & z"]}`
+	`"samples":{},"notes":["x < y & z"]}`
 
 // post sends body to the API's results endpoint from origin, as the app's
 // fetch does (text/plain needs no preflight).

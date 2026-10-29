@@ -6,8 +6,11 @@
 // memory. The phone's run decides; agerange must reach 12 Mbps there, else
 // F6 downloads and decrypts whole segments on that platform (G21).
 //
-// Samples: `mbps` (the plaintext's megabits per second), `bytes` (the
-// plaintext's size) and `ms` (the time agerange took), one each.
+// Result: `{scenario: "AGE", mbps, bytes, ms}`, the figures at the top of the
+// result (Figures): `mbps` (the plaintext's megabits per second), `bytes` (the
+// plaintext's size) and `ms` (the time agerange took), beside the device facts
+// of every result, which tell the phone's WebView from a desktop run (G24). No
+// samples.
 import { headerLength, openAgeRange, type RangeSource } from '@ipcam/core/agerange';
 import { Decrypter, Encrypter, generateX25519Identity, identityToRecipient } from 'age-encryption';
 import type { ScenarioDefinition } from './runner';
@@ -76,9 +79,9 @@ export function ageScenario(bytes: number): ScenarioDefinition {
         times.push(now);
         return now;
       });
-      run.sample('mbps', mbps);
-      run.sample('bytes', bytes);
-      run.sample('ms', times[times.length - 1]! - times[0]!);
+      run.figure('mbps', mbps);
+      run.figure('bytes', bytes);
+      run.figure('ms', times[times.length - 1]! - times[0]!);
     },
   };
 }
