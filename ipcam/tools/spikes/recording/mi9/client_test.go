@@ -2,6 +2,7 @@ package mi9
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"math"
 	"slices"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/pion/webrtc/v4"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
@@ -149,5 +152,27 @@ func TestMeasure_CutDuringTheSeeksKeepsThem(t *testing.T) {
 				t.Errorf("Judge = %q, reasons %q; want %q", j.Verdict, j.Reasons, c.verdict)
 			}
 		})
+	}
+}
+
+// TestClient_LateBulkChannelAfterStopIsClosed (Task 11b review, M2): a
+// call's bulk channel that the hub side opens after the client stopped the
+// call, while the call is still known, is closed at once, not left open.
+func TestClient_LateBulkChannelAfterStopIsClosed(t *testing.T) {
+	cl := &call{id: 7, replied: make(chan reply, 1), sink: io.Discard, done: make(chan struct{}), closing: make(chan struct{})}
+	c := &Client{calls: map[uint64]*call{cl.id: cl}}
+	cl.stop()
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = pc.Close() }()
+	dc, err := pc.CreateDataChannel(fmt.Sprintf("bulk/%d", cl.id), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.onBulk(dc)
+	if s := dc.ReadyState(); s != webrtc.DataChannelStateClosing && s != webrtc.DataChannelStateClosed {
+		t.Errorf("the bulk channel that opened after stop is %s, want it closed", s)
 	}
 }

@@ -1176,7 +1176,7 @@ func Judge(envs []results.Envelope) results.Judgement // G13; reads Enc06 from t
 Rulings: C01 (hub-side reader), C19, C20, G25, G26, G36, R06, R08 (exception).
 
 **Files:**
-- Create: `ipcam/tools/spikes/recording/mi9/{harness.go,bulk.go,seek.go,reader.go,judge.go}` + tests
+- Create: `ipcam/tools/spikes/recording/mi9/{harness.go,rpc.go,hub.go,client.go,bulk.go,seek.go,reader.go,lan.go,judge.go}` + tests
 - Create: `ipcam/tools/spikes/recording/cmd/recspike/mi9.go` (`recspike mi9 --lan --controller <addr>`); Create: `ipcam/tools/spikes/recording/cmd/mi9page/{main.go,web/index.html}` (serves the page and the hub-side harness for the Chrome leg); Modify: `ipcam/tools/spikes/recording/cmd/reccontroller/main.go` (MI9 Pion peer, the playback side)
 - Create: `ipcam/tools/spikes/video/e2e/mi9.spec.ts` (SPIKE-ONLY; skipped unless `MI9_PAGE` is set)
 - Modify: `ipcam/tools/spikes/recording/markers_test.go` (adds `../video/e2e/mi9.spec.ts` and `cmd/mi9page/web/index.html` to `TestMarkedNonGoFiles`)
@@ -1208,7 +1208,7 @@ type Mi9Partial struct{ ReceivedBytes, SizeBytes int64; ElapsedMs float64; LastS
   - **Channels (§7.6).** `bulk/<call_id>` channels are reliable and ordered, with at most 4 open at once. Messages are ≤ min(64 KiB, the negotiated `max-message-size`). Sending pauses above 1 MiB `bufferedAmount` and resumes below 256 KiB (`SetBufferedAmountLowThreshold` + `OnBufferedAmountLow`).
   - **Throughput.** One channel transfers the whole segment's plaintext; throughput = bits ÷ time. When the measurement's wait (reccontroller's 15 min) ends it first, the transfer stops and the leg keeps what was measured, as `Partial` (G27):
     - during the transfer, the throughput of the bytes received by then, without seeks: a measured failure that decides, its seeks missing;
-    - during the seeks, the whole transfer's throughput and the seeks timed by then. The seek under way counts with its time to the IDR when its IDR had arrived; else, when it had already waited longer than 1.5 s, with that wait, a lower bound that fails it (`LastSeekCut`); else not at all. With a passing LAN transfer of a ≈ 150 MB segment (≤ 2.5 min), a wait that ends during the seeks leaves about 12.5 min for at most 20 seeks, so one of them took about 36 s or more, and the leg fails.
+    - during the seeks, the whole transfer's throughput and the seeks timed by then. The seek under way counts with its time to the IDR when its IDR had arrived; else, when it had already waited longer than 1.5 s, with that wait, a lower bound that fails it (`LastSeekCut`); else not at all. With a passing LAN transfer of a ≈ 150 MB segment (≤ 2.5 min), a wait that ends during the seeks leaves about 12.5 min for at most 20 seeks, so one of them took about 36 s or more. The leg fails when that time passed before the seek's IDR arrived; a stall after a seek's IDR leaves the timed seeks within 1.5 s, and the leg then reads Incomplete.
   - **Seek.** 20 timeline seeks. Each is timed from the request until the first IDR sample's bytes at or after the target are received.
   - **RTT.** `RTTMs` is the selected ICE candidate pair's `CurrentRoundTripTime` from Pion's stats.
 - **Legs (G26).**

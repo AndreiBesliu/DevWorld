@@ -106,6 +106,8 @@ type call struct {
 	closed  bool
 	closing chan struct{}
 	dc      *webrtc.DataChannel
+	// stopped is set by stop: a bulk channel that opens later is closed.
+	stopped bool
 }
 
 // start starts a call with req: its bytes go to sink, and are kept too
@@ -165,6 +167,11 @@ func (c *Client) onBulk(dc *webrtc.DataChannel) {
 		return
 	}
 	cl.mu.Lock()
+	if cl.stopped {
+		cl.mu.Unlock()
+		_ = dc.Close()
+		return
+	}
 	cl.dc = dc
 	cl.mu.Unlock()
 	dc.OnMessage(func(m webrtc.DataChannelMessage) {
@@ -222,10 +229,10 @@ func (cl *call) count() int64 {
 }
 
 // stop stops the call's transfer: it closes the call's bulk channel when
-// the hub side has opened it, and the client then drops one that opens
-// later (onBulk).
+// the hub side has opened it, and onBulk closes one that opens later.
 func (cl *call) stop() {
 	cl.mu.Lock()
+	cl.stopped = true
 	dc := cl.dc
 	cl.mu.Unlock()
 	if dc != nil {

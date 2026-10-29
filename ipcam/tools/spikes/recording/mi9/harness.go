@@ -146,7 +146,9 @@ func (d tlsDialer) Dial(network, addr string) (net.Conn, error) {
 // recPath with id, and the client times the whole plaintext over one
 // channel, 20 seeks to uniform targets, and the pair's round trip. For
 // TURNS443, ice holds the TURN server, every URL a turns: one over TCP, and
-// both peers use relay candidates only.
+// both peers use relay candidates only. When ctx's deadline ends the
+// measurement first, MeasureBulk returns what was measured by then as a
+// Partial result, and a nil error (G27).
 func MeasureBulk(ctx context.Context, recPath string, id age.Identity, t Transport, ice []webrtc.ICEServer, opts ...Option) (BulkResult, error) {
 	var o options
 	for _, opt := range opts {

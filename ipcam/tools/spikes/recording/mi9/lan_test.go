@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -399,6 +400,9 @@ func TestPartialText(t *testing.T) {
 			"tot segmentul a sosit (150,0 MB în 120 s), dar s-au măsurat doar 2 din 20 de salturi"},
 		{BulkResult{Partial: seeks(false)},
 			"tot segmentul a sosit (150,0 MB în 120 s), dar s-au măsurat doar 0 din 20 de salturi"},
+		// The wait ended after the 20th seek: no «doar 20 din 20».
+		{BulkResult{SeekMs: slices.Repeat([]float64{300}, Seeks), Partial: seeks(false)},
+			"tot segmentul a sosit (150,0 MB în 120 s) și s-au măsurat toate cele 20 de salturi"},
 	} {
 		if got := PartialText(c.r); got != c.want {
 			t.Errorf("PartialText(%v, %+v) = «%s», want «%s»", c.r.SeekMs, *c.r.Partial, got, c.want)

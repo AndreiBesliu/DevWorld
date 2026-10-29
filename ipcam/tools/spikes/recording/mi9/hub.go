@@ -170,7 +170,12 @@ func (h *Hub) serveRange(call uint64, r reply) {
 		size = messageSize(sctp.GetCapabilities().MaxMessageSize)
 	}
 	if err := sendBulk(h.ctx, dc, h.seg, r.Off, r.N, size); err != nil {
-		slog.Warn("mi9: a bulk channel stopped", "call", call, "err", err)
+		// A stop of the hub side, or of the client, which closes the
+		// channel when its measurement's wait ends, is normal: only a send
+		// that failed with the channel open is worth a line on the screen.
+		if h.ctx.Err() == nil && dc.ReadyState() == webrtc.DataChannelStateOpen {
+			slog.Warn("mi9: a bulk channel stopped", "call", call, "err", err)
+		}
 		return
 	}
 	select {

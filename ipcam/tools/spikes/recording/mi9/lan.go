@@ -223,8 +223,9 @@ func (o LANOptions) play(ctx context.Context, l *mi1.HostLink, rec hubrec.Segmen
 // PartialText says, in Romanian, how far r, a measurement that its wait
 // ended (Partial), got: during the transfer, the bytes of the segment's
 // plaintext that had arrived, and when; during the seeks, the whole
-// segment, how many of the seeks were measured, and the seek under way
-// when it had not brought its IDR by then (LastSeekCut).
+// segment, how many of the seeks were measured (all of them when the wait
+// ended after the last), and the seek under way when it had not brought
+// its IDR by then (LastSeekCut).
 func PartialText(r BulkResult) string {
 	p := r.Partial
 	size, secs := results.Decimal(float64(p.SizeBytes)/1e6, 1), results.Decimal(p.ElapsedMs/1000, 0)
@@ -234,6 +235,9 @@ func PartialText(r BulkResult) string {
 	measured := len(r.SeekMs)
 	if p.LastSeekCut {
 		measured--
+	}
+	if measured >= Seeks {
+		return fmt.Sprintf("tot segmentul a sosit (%s MB în %s s) și s-au măsurat toate cele %d de salturi", size, secs, Seeks)
 	}
 	text := fmt.Sprintf("tot segmentul a sosit (%s MB în %s s), dar s-au măsurat doar %d din %d de salturi", size, secs, measured, Seeks)
 	if p.LastSeekCut {
