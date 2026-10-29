@@ -13,7 +13,7 @@ func ptr[T any](v T) *T { return &v }
 // sample is a two-run MI1 envelope with every field set.
 func sample() Envelope {
 	return Envelope{
-		Schema: Schema, Code: "MI1", RunID: "pi-kill9-07", Set: "pi-kill9", Host: "pi", OS: "linux",
+		Schema: Schema, Code: "MI1", RunID: "pi-kill9-07", AtMs: 1792000600000, Set: "pi-kill9", Host: "pi", OS: "linux",
 		PiModel: &PiModelInfo{
 			Raw: "Raspberry Pi 4 Model B Rev 1.5", Revision: "d03115", Tier: "H1b", Source: "cpuinfo",
 			Supported: true, Known: true, RecommendedMin: 4, RecommendedMax: 4,

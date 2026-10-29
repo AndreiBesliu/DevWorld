@@ -260,11 +260,12 @@ func (o Options) drop() error {
 	return nil
 }
 
-// write writes d as the run's envelope and returns its run id.
+// write writes d as the run's envelope, stamped with the host's clock now,
+// and returns its run id.
 func (o Options) write(host mi1.HostState, d results.Mi4Data) (string, error) {
 	set := SetFor(host.Pseudonym)
-	e := results.Envelope{Schema: results.Schema, Code: "MI4", Set: set, Host: host.Pseudonym, OS: host.OS, PiModel: host.PiModel,
-		Storage: host.Storage, SdConfirmation: host.SdConfirmation, MI4: &d}
+	e := results.Envelope{Schema: results.Schema, Code: "MI4", AtMs: time.Now().UnixMilli(), Set: set, Host: host.Pseudonym, OS: host.OS,
+		PiModel: host.PiModel, Storage: host.Storage, SdConfirmation: host.SdConfirmation, MI4: &d}
 	for n := 1; ; n++ {
 		e.RunID = fmt.Sprintf("%s-%d", set, n)
 		err := results.Create(o.Results, e)

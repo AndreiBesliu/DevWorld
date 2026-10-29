@@ -38,6 +38,13 @@ type Envelope struct {
 	Code string `json:"code"`
 	// RunID names the file; for a one-run envelope it is the run's id.
 	RunID string `json:"runId"`
+	// AtMs is when the envelope's result was made, in Unix ms on its
+	// writer's clock, 0 when the writer gives none. MI4's envelopes carry
+	// it: mi4.Run's when it writes the run, mi4.AgerangeRun's when
+	// reccontroller stored the AGE result, and recreport's ENC-06 envelope
+	// when CI's check ran. mi4.Judge picks the later of two runs that end
+	// in the same number by it.
+	AtMs int64 `json:"atMs,omitempty"`
 	// Set is "lab-linux-kill9", "lab-linux-qemu-reset", "lab-windows-kill9",
 	// "pc-kill9", "pc-bugcheck", "pi-kill9", "pi-sysrq", "real-pc",
 	// "real-pi", or another measurement's set.
@@ -63,9 +70,10 @@ type Envelope struct {
 	MI3 *Mi3Data `json:"mi3,omitempty"`
 	// MI4 is an MI4 envelope's age rig run (G13), and only an MI4 or an
 	// ENC-06 envelope's: recreport builds the ENC-06 envelope from CI's
-	// annotation, with Enc06, and each AGE result of the app as an MI4
-	// envelope with AgerangeMbps (mi4.AgerangeRun: set app-age, OS the
-	// app's platform, "android" on the phone).
+	// annotation, with Enc06 and the check's time as AtMs, and each AGE
+	// result of the app as an MI4 envelope with AgerangeMbps
+	// (mi4.AgerangeRun: set app-age, OS the app's platform, "android" on
+	// the phone, AtMs the time that reccontroller stored the result).
 	MI4 *Mi4Data `json:"mi4,omitempty"`
 }
 

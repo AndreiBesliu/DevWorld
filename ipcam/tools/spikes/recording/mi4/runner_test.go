@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
@@ -111,11 +112,14 @@ func runWith(t *testing.T, rig *fakeRig, dir string) (string, error) {
 // before the seeks, reads 1000 parts (the verdict) and 1000 reads of 64 KiB
 // and 4 MiB (information), seeks 20 times, measures the encryption, writes
 // the Pi's envelope with the threshold of its model, and sends it to the
-// PC. Fast seeks need no plan B measured.
+// PC, stamped with the time it was written (AtMs). Fast seeks need no plan
+// B measured.
 func TestMI4_RunMeasuresEachSetCold(t *testing.T) {
 	dir := t.TempDir()
 	rig := &fakeRig{seekMs: map[string][]float64{"5min.mp4.age ram=false": repeat(900, 20)}}
+	before := time.Now().UnixMilli()
 	screen, err := runWith(t, rig, dir)
+	after := time.Now().UnixMilli()
 	if err != nil {
 		t.Fatalf("Run = %v\n%s", err, screen)
 	}
@@ -150,6 +154,9 @@ func TestMI4_RunMeasuresEachSetCold(t *testing.T) {
 	}
 	if e.PiModel == nil || e.Storage != "sd" || e.SdConfirmation == nil || e.Host != "pi" {
 		t.Errorf("the envelope's host: %+v", e)
+	}
+	if e.AtMs < before || e.AtMs > after {
+		t.Errorf("the envelope's time %d ms is not when Run wrote it, within [%d, %d]", e.AtMs, before, after)
 	}
 	if j := Judge([]results.Envelope{e, agerangeRun(13), enc06Run(true)}); j.Verdict != results.Pass {
 		t.Errorf("Judge of the run = %q, reasons %q", j.Verdict, j.Reasons)

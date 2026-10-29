@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
@@ -66,11 +67,17 @@ const (
 // the order reccontroller stored them), on platform, the result's
 // device.platform, at mbps: the set AgerangeSet, the run id app-age-<n>,
 // the platform as its OS, and the host pc, whose reccontroller received
-// it. An interrupted result, or one without mbps, measured nothing and has
-// no envelope.
-func AgerangeRun(n int, platform string, mbps float64) results.Envelope {
-	return results.Envelope{Schema: results.Schema, Code: "MI4", RunID: AgerangeSet + "-" + strconv.Itoa(n), Set: AgerangeSet,
-		Host: "pc", OS: platform, MI4: &results.Mi4Data{AgerangeMbps: &mbps}}
+// it. Its AtMs is stored, the time that reccontroller stored the result
+// (the UTC time in the result file's name), or 0 when stored is zero. An
+// interrupted result, or one without mbps, measured nothing and has no
+// envelope.
+func AgerangeRun(n int, stored time.Time, platform string, mbps float64) results.Envelope {
+	var atMs int64
+	if !stored.IsZero() {
+		atMs = stored.UnixMilli()
+	}
+	return results.Envelope{Schema: results.Schema, Code: "MI4", RunID: AgerangeSet + "-" + strconv.Itoa(n), AtMs: atMs,
+		Set: AgerangeSet, Host: "pc", OS: platform, MI4: &results.Mi4Data{AgerangeMbps: &mbps}}
 }
 
 // SetFor is MI4's set on host: pi-mi4, or pc-mi4 for information.
@@ -138,8 +145,10 @@ func (v *verdict) row(code, value, limit, source string, pass *bool) {
 // within 1.5 s, G21) and the encryption rate (Throughput, C25); the PC's
 // is information only. The phone's latest AGE run decides agerange (at
 // least 12 Mbps, G24), only a run of the device (AgerangeRun on
-// DeviceOS), and CI's ENC-06 check the identical bytes, each from the
-// envelope that recreport builds for it. Each failure names its plan B
+// DeviceOS), and CI's latest ENC-06 check the identical bytes, each from
+// the envelope that recreport builds for it; latest is by the run id's
+// number, then the envelope's time, then a stable key (later), whatever
+// the order of envs. Each failure names its plan B
 // (G21): a slow read or an age mismatch the RAM buffer; a slow seek the
 // RAM buffer, or 2-min segments, or an escalation, after what their own
 // seeks measured, and PlanBUnmeasured when a stage that the choice needs
@@ -368,12 +377,16 @@ func latest(envs []results.Envelope, host string) *results.Envelope {
 }
 
 // later reports whether run a is later than run b: by the number that ends
-// its run id, then, on the same number, by a stable key, the greater of
-// their JSON encodings, since an envelope carries no time of its own. The
-// run picked thus never depends on the order of the envelopes.
+// its run id; on the same number, by the envelope's time (AtMs, 0 when its
+// writer gave none); on the same time too, by a stable key, the greater of
+// their JSON encodings. The run picked thus never depends on the order of
+// the envelopes.
 func later(a, b *results.Envelope) bool {
 	if na, nb := runNumber(a.RunID), runNumber(b.RunID); na != nb {
 		return na > nb
+	}
+	if a.AtMs != b.AtMs {
+		return a.AtMs > b.AtMs
 	}
 	return stableKey(a) > stableKey(b)
 }

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
@@ -34,8 +35,11 @@ func onPi(d results.Mi4Data, model *results.PiModelInfo) results.Envelope {
 		Storage: "sd", PiModel: model, MI4: &d}
 }
 
+// stored is when reccontroller stored the tests' AGE results.
+var stored = time.Date(2026, 10, 29, 8, 0, 0, 0, time.UTC)
+
 // agerangeRun is the phone's AGE result, from the app's Android shell.
-func agerangeRun(mbps float64) results.Envelope { return AgerangeRun(1, DeviceOS, mbps) }
+func agerangeRun(mbps float64) results.Envelope { return AgerangeRun(1, stored, DeviceOS, mbps) }
 
 // enc06Run is CI's ENC-06 result as recreport's envelope.
 func enc06Run(pass bool) results.Envelope {
@@ -237,19 +241,22 @@ func TestMI4_AgerangeMissing_Incomplete(t *testing.T) {
 func TestMI4_Agerange_FromTheDeviceRunOnly(t *testing.T) {
 	// The envelope that recreport writes for the phone's result keeps its
 	// device marker through a results file.
-	data, err := json.Marshal(AgerangeRun(3, DeviceOS, 12.5))
+	data, err := json.Marshal(AgerangeRun(3, stored, DeviceOS, 12.5))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e, err := results.Parse(data); err != nil || e.Code != "MI4" || e.RunID != "app-age-3" || e.Set != "app-age" || e.OS != "android" ||
-		e.MI4.AgerangeMbps == nil || *e.MI4.AgerangeMbps != 12.5 {
+	if e, err := results.Parse(data); err != nil || e.Code != "MI4" || e.RunID != "app-age-3" || e.AtMs != stored.UnixMilli() || e.Set != "app-age" ||
+		e.OS != "android" || e.MI4.AgerangeMbps == nil || *e.MI4.AgerangeMbps != 12.5 {
 		t.Errorf("AgerangeRun's envelope read back as %+v, %v", e, err)
+	}
+	if e := AgerangeRun(3, time.Time{}, DeviceOS, 12.5); e.AtMs != 0 {
+		t.Errorf("AgerangeRun without the time it was stored: AtMs = %d, want 0", e.AtMs)
 	}
 
 	pi, enc06 := onPi(passing(), pi4), enc06Run(true)
 	misplaced := passing()
 	misplaced.AgerangeMbps = new(30.0)
-	notTheDevice := []results.Envelope{AgerangeRun(7, "windows-tauri", 30), AgerangeRun(8, "chrome", 30), onPi(misplaced, pi4)}
+	notTheDevice := []results.Envelope{AgerangeRun(7, stored, "windows-tauri", 30), AgerangeRun(8, stored, "chrome", 30), onPi(misplaced, pi4)}
 	for i, other := range notTheDevice {
 		j := Judge([]results.Envelope{pi, other, enc06})
 		if r := row(t, j, "agerange"); j.Verdict != results.Incomplete || r.Value != "lipsește" {
@@ -259,7 +266,7 @@ func TestMI4_Agerange_FromTheDeviceRunOnly(t *testing.T) {
 		if why := strings.Join(j.Reasons, "\n"); other.Set == AgerangeSet && !strings.Contains(why, "cele de pe "+other.OS+" nu contează") {
 			t.Errorf("only %s %s: reasons %q do not say that its run does not count", other.Set, other.OS, j.Reasons)
 		}
-		for _, envs := range [][]results.Envelope{{pi, AgerangeRun(1, "android", 11), other, enc06}, {pi, other, AgerangeRun(1, "android", 11), enc06}} {
+		for _, envs := range [][]results.Envelope{{pi, AgerangeRun(1, stored, "android", 11), other, enc06}, {pi, other, AgerangeRun(1, stored, "android", 11), enc06}} {
 			if j := Judge(envs); j.Verdict != results.Fail || j.PlanB != PlanBF6 || row(t, j, "agerange").Value != "11,0 Mbps" {
 				t.Errorf("the device at 11 Mbps beside %s %s: Judge = %q → %q, want pică → %s", other.Set, other.OS, j.Verdict, j.PlanB, PlanBF6)
 			}
@@ -270,7 +277,7 @@ func TestMI4_Agerange_FromTheDeviceRunOnly(t *testing.T) {
 		early, late float64
 		want        results.Verdict
 	}{{11, 13, results.Pass}, {13, 11, results.Fail}} {
-		early, late := AgerangeRun(9, "android", c.early), AgerangeRun(10, "android", c.late)
+		early, late := AgerangeRun(9, stored, "android", c.early), AgerangeRun(10, stored, "android", c.late)
 		for _, envs := range [][]results.Envelope{{pi, early, late, enc06}, {pi, late, early, enc06}, {late, enc06, early, pi}} {
 			if j := Judge(envs); j.Verdict != c.want {
 				t.Errorf("run 9 at %v and run 10 at %v Mbps, in the order %s: Judge = %q, want %q (run 10 decides)", c.early, c.late, runIDs(envs), j.Verdict, c.want)
@@ -288,18 +295,67 @@ func runIDs(envs []results.Envelope) string {
 	return strings.Join(ids, ", ")
 }
 
+// TestMI4_LatestRun_LaterTimeOnTheSameNumber (G15): of two runs whose ids
+// end in the same number, the one whose envelope is later (AtMs) decides,
+// for the Pi's run, the phone's AGE run and CI's ENC-06 check alike, in
+// either order; a greater number still beats a later time. The times are
+// chosen so that, as text, the earlier one sorts after the later one:
+// neither the envelopes' JSON nor their order can pick the later run.
+func TestMI4_LatestRun_LaterTimeOnTheSameNumber(t *testing.T) {
+	const early, late = 9_000, 10_000
+	slow := passing()
+	slow.ReadMs, slow.ReadMaxMs = append(repeat(10, 999), 51), 51
+	pi := func(d results.Mi4Data, n int, atMs int64) results.Envelope {
+		e := onPi(d, pi4)
+		e.RunID, e.AtMs = "pi-mi4-"+strconv.Itoa(n), atMs
+		return e
+	}
+	age := func(atMs int64, mbps float64) results.Envelope {
+		return AgerangeRun(3, time.UnixMilli(atMs), DeviceOS, mbps)
+	}
+	enc06 := func(same bool, atMs int64) results.Envelope {
+		e := enc06Run(same)
+		e.AtMs = atMs
+		return e
+	}
+	onePi, oneAge, oneEnc06 := onPi(passing(), pi4), agerangeRun(13), enc06Run(true)
+	for _, c := range []struct {
+		name         string
+		a, b         results.Envelope
+		others       []results.Envelope
+		verdict      results.Verdict
+		planB        string
+		decidingPart string
+	}{
+		{"the Pi's slow run is later", pi(passing(), 2, early), pi(slow, 2, late), []results.Envelope{oneAge, oneEnc06}, results.Fail, PlanBRAM, "pi"},
+		{"the Pi's passing run is later", pi(slow, 2, early), pi(passing(), 2, late), []results.Envelope{oneAge, oneEnc06}, results.Pass, "", "pi"},
+		{"the Pi's greater number beats a later time", pi(passing(), 2, late), pi(slow, 3, early), []results.Envelope{oneAge, oneEnc06}, results.Fail, PlanBRAM, "pi"},
+		{"the slow AGE run is later", age(early, 13), age(late, 11), []results.Envelope{onePi, oneEnc06}, results.Fail, PlanBF6, "agerange"},
+		{"the fast AGE run is later", age(early, 11), age(late, 13), []results.Envelope{onePi, oneEnc06}, results.Pass, "", "agerange"},
+		{"the failed ENC-06 check is later", enc06(true, early), enc06(false, late), []results.Envelope{onePi, oneAge}, results.Fail, PlanBRAM, "ENC-06"},
+		{"the passed ENC-06 check is later", enc06(false, early), enc06(true, late), []results.Envelope{onePi, oneAge}, results.Pass, "", "ENC-06"},
+	} {
+		for _, envs := range [][]results.Envelope{append([]results.Envelope{c.a, c.b}, c.others...), append([]results.Envelope{c.b, c.a}, c.others...)} {
+			if j := Judge(envs); j.Verdict != c.verdict || j.PlanB != c.planB {
+				t.Errorf("%s, in the order %s: Judge = %q → %q, %s %q; want %q → %q", c.name, runIDs(envs),
+					j.Verdict, j.PlanB, c.decidingPart, row(t, j, c.decidingPart).Value, c.verdict, c.planB)
+			}
+		}
+	}
+}
+
 // TestMI4_LatestRun_WhateverTheOrder (G15): the Pi's latest run, the
 // phone's latest AGE run and CI's latest ENC-06 check are picked by one
-// rule, the run id's number, then, on the same number, a stable key, so
-// that the order of the envelopes never changes the verdict: every order
-// of two Pi runs, two AGE runs and two ENC-06 checks that share a number
-// gives the same judgement.
+// rule, the run id's number, then the envelope's time, then, on the same
+// number and time, a stable key, so that the order of the envelopes never
+// changes the verdict: every order of two Pi runs, two AGE runs and two
+// ENC-06 checks that share a number and a time gives the same judgement.
 func TestMI4_LatestRun_WhateverTheOrder(t *testing.T) {
 	slow := passing()
 	slow.ReadMs, slow.ReadMaxMs = append(repeat(10, 999), 51), 51
 	piA, piB, older := onPi(passing(), pi4), onPi(slow, pi4), onPi(slow, pi4)
 	piA.RunID, piB.RunID = "pi-mi4-2", "pi-mi4-2"
-	envs := []results.Envelope{piA, piB, older, AgerangeRun(3, DeviceOS, 11), AgerangeRun(3, DeviceOS, 13), enc06Run(true), enc06Run(false)}
+	envs := []results.Envelope{piA, piB, older, AgerangeRun(3, stored, DeviceOS, 11), AgerangeRun(3, stored, DeviceOS, 13), enc06Run(true), enc06Run(false)}
 	var first []byte
 	for order := range permutations(len(envs)) {
 		in := make([]results.Envelope, len(envs))
