@@ -386,6 +386,10 @@ func (h *Hub) beacon(ctx context.Context, conn net.Conn, runID string) {
 // Exited is closed when the child has exited.
 func (h *Hub) Exited() <-chan struct{} { return h.exited }
 
+// Pid is the child's process id: MI3 measures its CPU and memory, with
+// MediaMTX's, its own child (G20).
+func (h *Hub) Pid() int { return h.cmd.Process.Pid }
+
 // ExitCode is the child's exit code once it has exited (-1 when a signal
 // ended it), else -1.
 func (h *Hub) ExitCode() int {

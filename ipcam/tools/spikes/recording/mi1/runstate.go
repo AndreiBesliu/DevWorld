@@ -72,6 +72,9 @@ type HostState struct {
 	SdConfirmation *results.SdConfirmation `json:"sdConfirmation,omitempty"`
 	// Cameras is the recommended camera count, which kill9 runs record.
 	Cameras int `json:"cameras"`
+	// Cores6Plus is diag host's: 6 physical cores or more, with which a PC
+	// also runs MI3 at 16 cameras (R07).
+	Cores6Plus bool `json:"cores6Plus,omitempty"`
 }
 
 // DoneRun is a run that ended, as the controller judged it, at its plan

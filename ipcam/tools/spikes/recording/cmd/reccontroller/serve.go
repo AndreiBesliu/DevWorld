@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pion/webrtc/v4"
+
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
@@ -36,15 +38,20 @@ func serve(ctx context.Context, cfg serveConfig, out io.Writer) error {
 	defer func() { _ = logFile.Close() }()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logFile, nil)))
 
-	creds, err := controller.NewCredentials()
-	if err != nil {
-		return err
-	}
 	lns, err := controller.ListenAll(ctx, cfg.listen)
 	if err != nil {
 		return fmt.Errorf("nu pot asculta pe porturile probei (rulează deja un reccontroller?): %w", err)
 	}
 	defer func() { _ = lns.Close() }()
+	return serveOn(ctx, cfg, lns, out)
+}
+
+// serveOn serves on the listeners lns until ctx is done.
+func serveOn(ctx context.Context, cfg serveConfig, lns *controller.Listeners, out io.Writer) error {
+	creds, err := controller.NewCredentials()
+	if err != nil {
+		return err
+	}
 
 	clock := source.SystemClock{}
 	sendLog := controller.NewSendLog()
@@ -58,26 +65,43 @@ func serve(ctx context.Context, cfg serveConfig, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("nu pot citi fișierele video din %s: %w", cfg.media, err)
 	}
+	// MI3's upload sink, HTTPS with a certificate of this start (G20), and
+	// its live peers, which a -local controller does not have: their Pion
+	// sockets would listen beyond 127.0.0.1, and MI3 measures a host whose
+	// cameras come from the other device.
+	sinkCert, sinkDER, err := controller.NewSinkCertificate()
+	if err != nil {
+		return err
+	}
+	var liveAPI *webrtc.API
+	if !cfg.local {
+		if liveAPI, err = controller.NewLiveAPI(); err != nil {
+			return err
+		}
+	}
 	c := newCtl(ctx, ctlConfig{
 		pacer: srv, sendLog: sendLog, clock: clock, out: out, results: filepath.Join(cfg.dir, "results"), local: cfg.local,
-		rtspPort: lns.RTSP.Addr().(*net.TCPAddr).Port, beaconPort: lns.Beacon.LocalAddr().(*net.UDPAddr).Port,
+		rtspPort: port(lns.RTSP), beaconPort: lns.Beacon.LocalAddr().(*net.UDPAddr).Port,
 		creds: creds, streams: streams, needles: needles,
+		sinkPort: port(lns.Upload), sinkCert: sinkDER, liveAPI: liveAPI,
 	})
 	go superviseBeacons(ctx, func(ctx context.Context) error {
 		return controller.ReceiveBeacons(ctx, lns.Beacon, c.beacons, clock)
 	}, c.say)
-	// Tasks 9 to 11 serve the app endpoints and the upload sink here.
-	for _, ln := range []net.Listener{lns.App, lns.Upload} {
-		hs := &http.Server{Handler: http.NotFoundHandler(), ReadHeaderTimeout: 10 * time.Second}
-		go func() { _ = hs.Serve(ln) }()
-		defer func() { _ = hs.Close() }()
-	}
+	// Tasks 10 and 11 serve the app endpoints here.
+	app := &http.Server{Handler: http.NotFoundHandler(), ReadHeaderTimeout: 10 * time.Second}
+	go func() { _ = app.Serve(lns.App) }()
+	defer func() { _ = app.Close() }()
+	sink := &http.Server{Handler: controller.NewSink(), ReadHeaderTimeout: 10 * time.Second, TLSConfig: controller.SinkServerTLS(sinkCert),
+		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn)}
+	go func() { _ = sink.ServeTLS(lns.Upload, "", "") }()
+	defer func() { _ = sink.Close() }()
 	where := "pe toate interfețele IPv4"
 	if cfg.local {
 		where = "doar pe acest dispozitiv (127.0.0.1)"
 	}
 	c.say("reccontroller rulează %s: RTSP %d, legătură %d, semnal %d, aplicație %d, încărcare %d.",
-		where, cfg.listen.RTSPPort, cfg.listen.LinkPort, cfg.listen.BeaconPort, cfg.listen.AppPort, cfg.listen.UploadPort)
+		where, port(lns.RTSP), port(lns.Link), c.beaconPort, port(lns.App), port(lns.Upload))
 	c.say("Rezultatele se păstrează în %s. Oprire: Ctrl+C.", c.results)
 
 	go func() {
@@ -98,6 +122,9 @@ func serve(ctx context.Context, cfg serveConfig, out io.Writer) error {
 		wg.Go(func() { c.serve(ctx, link.NewConn(conn), conn.LocalAddr()) })
 	}
 }
+
+// port is the port that ln listens on.
+func port(ln net.Listener) int { return ln.Addr().(*net.TCPAddr).Port }
 
 // mediaFiles is each media file of the streams, once.
 func mediaFiles(streams []controller.Stream) []string {

@@ -30,6 +30,8 @@ type Hello struct {
 // its results or logs. BeaconPort is where the beacon goes on the same
 // address (0: BeaconPort). Needles are the byte strings of the served media
 // that HUB-04's scan looks for in an encrypted camera's files (G08).
+// SinkPort and SinkCert are MI3's upload sink on the same address, HTTPS
+// with this self-signed certificate (DER), which the upload trusts alone.
 type Session struct {
 	RTSPBase   string   `json:"rtspBase"`
 	User       string   `json:"user"`
@@ -37,6 +39,8 @@ type Session struct {
 	Streams    []string `json:"streams"`
 	BeaconPort int      `json:"beaconPort,omitempty"`
 	Needles    [][]byte `json:"needles,omitempty"`
+	SinkPort   int      `json:"sinkPort,omitempty"`
+	SinkCert   []byte   `json:"sinkCert,omitempty"`
 }
 
 // RunStart announces a run before the host starts ipcam-hub for it, with
@@ -150,6 +154,53 @@ type ResultsTar struct {
 	Data []byte `json:"data"`
 }
 
+// Mi3Start starts one step of MI3 on the host (G12, R07): the controller
+// marks its pacing and makes Sessions receive-only live peers, each a grid
+// of Tiles, the streams it binds, every camera's sub then one main (G20).
+// It answers with Mi3Offers, or Refused.
+type Mi3Start struct {
+	RunID    string   `json:"runId"`
+	Sessions int      `json:"sessions"`
+	Tiles    []string `json:"tiles"`
+}
+
+// Mi3Offers are the live peers' offers, which the host's live load answers.
+type Mi3Offers struct {
+	RunID  string   `json:"runId"`
+	Offers []string `json:"offers"`
+}
+
+// Mi3Answers are the live load's answers, one per offer, in order. The
+// controller answers with Mi3Live once every tile of every peer is bound,
+// or Refused.
+type Mi3Answers struct {
+	RunID   string   `json:"runId"`
+	Answers []string `json:"answers"`
+}
+
+// Mi3Live says that every live tile of a step is bound and receiving.
+type Mi3Live struct {
+	RunID string `json:"runId"`
+}
+
+// Mi3End ends a step; the controller closes its live peers and answers
+// with Mi3Result.
+type Mi3End struct {
+	RunID string `json:"runId"`
+}
+
+// Mi3Result is the controller's side of a step: its pacing (R07) from
+// Mi3Start to Mi3End, and the live tiles' added latency, p95 over
+// LatencySamples access units, from the SEI index on the controller's
+// clock (§4.8).
+type Mi3Result struct {
+	RunID          string  `json:"runId"`
+	PacingP99Ms    int64   `json:"pacingP99Ms"`
+	SkippedAUs     int     `json:"skippedAUs"`
+	LatencyP95Ms   float64 `json:"latencyP95Ms"`
+	LatencySamples int     `json:"latencySamples"`
+}
+
 // Bye ends a session.
 type Bye struct{}
 
@@ -192,6 +243,24 @@ func (PullResults) Type() string { return "pull_results" }
 // Type is "results_tar".
 func (ResultsTar) Type() string { return "results_tar" }
 
+// Type is "mi3_start".
+func (Mi3Start) Type() string { return "mi3_start" }
+
+// Type is "mi3_offers".
+func (Mi3Offers) Type() string { return "mi3_offers" }
+
+// Type is "mi3_answers".
+func (Mi3Answers) Type() string { return "mi3_answers" }
+
+// Type is "mi3_live".
+func (Mi3Live) Type() string { return "mi3_live" }
+
+// Type is "mi3_end".
+func (Mi3End) Type() string { return "mi3_end" }
+
+// Type is "mi3_result".
+func (Mi3Result) Type() string { return "mi3_result" }
+
 // Type is "bye".
 func (Bye) Type() string { return "bye" }
 
@@ -210,6 +279,12 @@ var decoders = map[string]func([]byte) (Message, error){
 	"results":      decodeAs[Results],
 	"pull_results": decodeAs[PullResults],
 	"results_tar":  decodeAs[ResultsTar],
+	"mi3_start":    decodeAs[Mi3Start],
+	"mi3_offers":   decodeAs[Mi3Offers],
+	"mi3_answers":  decodeAs[Mi3Answers],
+	"mi3_live":     decodeAs[Mi3Live],
+	"mi3_end":      decodeAs[Mi3End],
+	"mi3_result":   decodeAs[Mi3Result],
 	"bye":          decodeAs[Bye],
 }
 

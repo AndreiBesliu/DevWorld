@@ -58,6 +58,60 @@ type Envelope struct {
 	Runs  []Run `json:"runs"`
 	// MI2 is an MI2 envelope's 72 h run (G11), and only an MI2 envelope's.
 	MI2 *Mi2Data `json:"mi2,omitempty"`
+	// MI3 is an MI3 envelope's capacity run (G12), and only an MI3
+	// envelope's.
+	MI3 *Mi3Data `json:"mi3,omitempty"`
+}
+
+// Mi3Data is MI3's capacity run on a host (G12, HUB-32, G20): its tier
+// (H3, H1, H1b, H1c, or unknown for a Pi model that the table lacks), the
+// recommended camera count that it ran first, and that first valid hour's
+// figures: total CPU (% of the machine), RAM (MB), the §4.8 budgets of the
+// tier, disk ÷ bitrate per mode ("clear", "encrypted", R02), fsyncs per
+// second per file, the live tiles' added latency (p95, ms) and the
+// controller's pacing (R07). Steps are every run of the step-down, the
+// first hour and its invalid attempts included (G20); Sixteen is the extra
+// hour at 16 cameras of a PC with 6 cores or more (R07), information only.
+// Proxies say, in Romanian, which load stands for what (G20).
+// DiskQueuePeakBytes is the sum of the MediaMTX disk writers' peaks, per
+// recorder, in that hour (C1-R17): an upper bound, reported beside the RAM.
+type Mi3Data struct {
+	Tier               string             `json:"tier"`
+	Cameras            int                `json:"cameras"`
+	CPUPctTotal        float64            `json:"cpuPctTotal"`
+	RAMMb              float64            `json:"ramMb"`
+	Budgets            map[string]Budget  `json:"budgets"`
+	DiskRatio          map[string]float64 `json:"diskRatio"`
+	FsyncPerSecPerFile float64            `json:"fsyncPerSecPerFile"`
+	LatencyP95Ms       float64            `json:"latencyP95Ms"`
+	PacingP99Ms        int64              `json:"pacingP99Ms"`
+	SkippedAUs         int                `json:"skippedAUs"`
+	Steps              []Mi3Step          `json:"steps"`
+	Sixteen            *Mi3Step           `json:"sixteen,omitempty"`
+	Proxies            []string           `json:"proxies,omitempty"`
+	DiskQueuePeakBytes int64              `json:"diskQueuePeakBytes"`
+}
+
+// Budget is one §4.8 budget of a run: the value measured, its limit, and
+// whether the value is within it. The judge recomputes Limit and Pass.
+type Budget struct {
+	Value float64 `json:"value"`
+	Limit float64 `json:"limit"`
+	Pass  bool    `json:"pass"`
+}
+
+// Mi3Step is one run of MI3: its cameras, its length (60 or 15 min), its
+// attempt at that count and length, whether the controller sent evenly
+// (Valid, R07, with the pacing that says so), and, when valid, whether
+// every budget was met (Pass).
+type Mi3Step struct {
+	Cameras     int   `json:"cameras"`
+	Minutes     int   `json:"minutes"`
+	Attempt     int   `json:"attempt"`
+	Pass        bool  `json:"pass"`
+	Valid       bool  `json:"valid"`
+	PacingP99Ms int64 `json:"pacingP99Ms"`
+	SkippedAUs  int   `json:"skippedAUs"`
 }
 
 // Mi2Data is MI2's 72 h run on a host (G11, HUB-31, G19): the hours it
@@ -179,6 +233,8 @@ func (e Envelope) Validate() error {
 		return fmt.Errorf("results: part %d of %d", e.Part, e.Parts)
 	case (e.Code == "MI2") != (e.MI2 != nil):
 		return fmt.Errorf("results: an %s envelope with mi2 %v: only MI2's has it, always", e.Code, e.MI2 != nil)
+	case (e.Code == "MI3") != (e.MI3 != nil):
+		return fmt.Errorf("results: an %s envelope with mi3 %v: only MI3's has it, always", e.Code, e.MI3 != nil)
 	}
 	if !fileName(e.Set) {
 		return fmt.Errorf("results: set %q is not a file name", e.Set)

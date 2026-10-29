@@ -58,7 +58,7 @@ func TestLink_MessagesRoundTrip(t *testing.T) {
 	messages := []Message{
 		Hello{Role: "host", Host: "pi", Version: "c1"},
 		Session{RTSPBase: "rtsp://192.0.2.10:8554", User: "u", Pass: "p", Streams: []string{"cam01_main", "cam99_main"},
-			BeaconPort: 7082, Needles: [][]byte{[]byte("ftypmp42"), {0x67, 0x64, 0x00, 0x28}}},
+			BeaconPort: 7082, Needles: [][]byte{[]byte("ftypmp42"), {0x67, 0x64, 0x00, 0x28}}, SinkPort: 7083, SinkCert: []byte{0x30, 0x82, 0x01}},
 		RunStart{RunID: "pi-sysrq-7", Set: "pi-sysrq", Kind: "sysrq", Encrypted: true, PadLowBitrate: true, Streams: []string{"cam01_main"},
 			Host: "pi", OS: "linux", Storage: "sd", Attempt: 2,
 			PiModel:        &results.PiModelInfo{Raw: "Raspberry Pi 4 Model B Rev 1.5", Tier: "H1b", Supported: true, Known: true, RecommendedMin: 4, RecommendedMax: 4, Source: "cpuinfo"},
@@ -85,10 +85,17 @@ func TestLink_MessagesRoundTrip(t *testing.T) {
 		Results{Name: "MI2/pi/mi2.json", Data: []byte("{\"code\":\"MI2\"}\n")},
 		PullResults{},
 		ResultsTar{Data: []byte{0, 1, 2, 0xff}},
+		Mi3Start{RunID: "pc-mi3-1-8x60-1", Sessions: 3, Tiles: []string{"cam01_sub", "cam02_sub", "cam01_main"}},
+		Mi3Offers{RunID: "pc-mi3-1-8x60-1", Offers: []string{"v=0 a", "v=0 b", "v=0 c"}},
+		Mi3Answers{RunID: "pc-mi3-1-8x60-1", Answers: []string{"v=0 x", "v=0 y", "v=0 z"}},
+		Mi3Live{RunID: "pc-mi3-1-8x60-1"},
+		Mi3End{RunID: "pc-mi3-1-8x60-1"},
+		Mi3Result{RunID: "pc-mi3-1-8x60-1", PacingP99Ms: 9, SkippedAUs: 1, LatencyP95Ms: 61, LatencySamples: 702_000},
 		Bye{},
 	}
 	wantTypes := []string{"hello", "session", "run_start", "run_start", "run_start", "ready", "cut", "report",
-		"verdict", "refused", "beacon_check", "beacon_ack", "results", "pull_results", "results_tar", "bye"}
+		"verdict", "refused", "beacon_check", "beacon_ack", "results", "pull_results", "results_tar",
+		"mi3_start", "mi3_offers", "mi3_answers", "mi3_live", "mi3_end", "mi3_result", "bye"}
 	go func() {
 		for _, m := range messages {
 			if err := hostEnd.Send(m); err != nil {

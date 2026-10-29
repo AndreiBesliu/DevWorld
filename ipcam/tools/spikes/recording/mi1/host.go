@@ -84,7 +84,8 @@ func OwnerHost(ctx context.Context, hub, recDir, goos string, in *bufio.Reader, 
 	if err != nil {
 		return HostState{}, err
 	}
-	h := HostState{Pseudonym: hostPC, OS: goos, Storage: info.Storage, WriteCache: info.WriteCache, PiModel: info.PiModel, Cameras: info.RecommendedCameras}
+	h := HostState{Pseudonym: hostPC, OS: goos, Storage: info.Storage, WriteCache: info.WriteCache, PiModel: info.PiModel,
+		Cameras: info.RecommendedCameras, Cores6Plus: info.Cores6Plus}
 	if goos != "windows" {
 		h.Pseudonym = hostPi
 	}

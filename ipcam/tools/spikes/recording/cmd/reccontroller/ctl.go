@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pion/webrtc/v4"
+
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
@@ -61,6 +63,11 @@ type ctlConfig struct {
 	creds                controller.Credentials
 	streams              []controller.Stream
 	needles              [][]byte
+	// sinkPort and sinkCert are MI3's upload sink (G20); liveAPI makes its
+	// live peers, nil on a -local controller, which MI3 does not use.
+	sinkPort int
+	sinkCert []byte
+	liveAPI  *webrtc.API
 }
 
 // ctl is the controller's state across the host's connections: a run's
@@ -77,13 +84,14 @@ type ctl struct {
 	rnd    *rand.Rand
 	runs   map[string]*runState
 	judged map[string]link.Verdict // the verdicts sent, for a report sent again
+	steps  map[string]*mi3Step     // MI3's steps in progress (mi3.go)
 }
 
 func newCtl(ctx context.Context, cfg ctlConfig) *ctl {
 	return &ctl{
 		ctlConfig: cfg, ctx: ctx, beacons: controller.NewBeaconLog(),
 		rnd:  rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())), //nolint:gosec // schedules cuts, not secrets
-		runs: map[string]*runState{}, judged: map[string]link.Verdict{},
+		runs: map[string]*runState{}, judged: map[string]link.Verdict{}, steps: map[string]*mi3Step{},
 	}
 }
 
@@ -122,6 +130,7 @@ func (c *ctl) serve(ctx context.Context, conn *link.Conn, local net.Addr) {
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	defer func() { _ = conn.Close() }()
+	defer c.dropSteps(conn)
 	host := ""
 	for {
 		m, err := conn.Receive()
@@ -154,6 +163,12 @@ func (c *ctl) serve(ctx context.Context, conn *link.Conn, local net.Addr) {
 			} else {
 				c.say("Am trimis dosarul de rezultate.")
 			}
+		case link.Mi3Start:
+			c.mi3Start(conn, m)
+		case link.Mi3Answers:
+			go c.mi3Answers(conn, m)
+		case link.Mi3End:
+			c.mi3End(conn, m)
 		case link.Bye:
 			c.bye(conn, host)
 			return
@@ -207,6 +222,7 @@ func (c *ctl) session(local net.Addr) link.Session {
 	return link.Session{
 		RTSPBase: "rtsp://" + net.JoinHostPort(host, strconv.Itoa(c.rtspPort)),
 		User:     c.creds.User, Pass: c.creds.Pass, Streams: names, BeaconPort: c.beaconPort, Needles: c.needles,
+		SinkPort: c.sinkPort, SinkCert: c.sinkCert,
 	}
 }
 

@@ -201,3 +201,43 @@ func TestEnvelope_MI2(t *testing.T) {
 		t.Error("an MI1 envelope with mi2 is valid")
 	}
 }
+
+// TestEnvelope_MI3 (G12): an MI3 envelope carries its capacity run in mi3,
+// its steps and its 16-camera hour, and reads back the same; an MI3
+// envelope without it, or another code's with it, is refused.
+func TestEnvelope_MI3(t *testing.T) {
+	dir := t.TempDir()
+	want := Envelope{
+		Schema: Schema, Code: "MI3", RunID: "pc-mi3-1", Set: "pc-mi3", Host: "pc", OS: "windows", Storage: "ssd",
+		MI3: &Mi3Data{Tier: "H3", Cameras: 8, CPUPctTotal: 65.2, RAMMb: 412.5,
+			Budgets:   map[string]Budget{"cpuTotal": {Value: 65.2, Limit: 60}, "ram": {Value: 412.5, Limit: 455, Pass: true}},
+			DiskRatio: map[string]float64{"clear": 1.012, "encrypted": 1.041}, FsyncPerSecPerFile: 1, LatencyP95Ms: 61.5,
+			PacingP99Ms: 9, Steps: []Mi3Step{
+				{Cameras: 8, Minutes: 60, Attempt: 1, PacingP99Ms: 120},
+				{Cameras: 8, Minutes: 60, Attempt: 2, Valid: true, PacingP99Ms: 9},
+				{Cameras: 4, Minutes: 15, Attempt: 1, Valid: true, Pass: true, PacingP99Ms: 7},
+			},
+			Sixteen: &Mi3Step{Cameras: 16, Minutes: 60, Attempt: 1, Valid: true, SkippedAUs: 0},
+			Proxies: []string{"live: sesiuni WebRTC"}, DiskQueuePeakBytes: 6 << 20},
+	}
+	if err := Write(dir, want); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got, err := Read(filepath.Join(dir, "MI3", "pc-mi3", "pc-mi3-1.json"))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Read = %+v\nwant %+v", got, want)
+	}
+	without := want
+	without.MI3 = nil
+	if err := without.Validate(); err == nil {
+		t.Error("an MI3 envelope without mi3 is valid")
+	}
+	misplaced := sample()
+	misplaced.MI3 = want.MI3
+	if err := misplaced.Validate(); err == nil {
+		t.Error("an MI1 envelope with mi3 is valid")
+	}
+}

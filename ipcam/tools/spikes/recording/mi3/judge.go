@@ -1,0 +1,340 @@
+// SPIKE-ONLY: ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md
+
+package mi3
+
+import (
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
+)
+
+// SetFor is MI3's set on host: pc-mi3 or pi-mi3.
+func SetFor(host string) string { return host + "-mi3" }
+
+// piDeferral is why the Pi's part moves to Faza 0-bis (G31).
+const piDeferral = "Pi armv6"
+
+// The notes of every MI3 judgement: what §4.8 asks that MI3 does not
+// judge (R02, O17, the timeline row).
+const (
+	encryptedDiskNote = "Disc ÷ bitrate la camerele criptate se raportează, nu se judecă (R02): umplutura de la sfârșitul părților ține de format, iar " +
+		"PR-ul raportului propune formularea „≤ 1,03 × în clar; ≤ 1,05 × criptat”. La o cameră criptată sub 512 kbps, cu „Pierdere minimă la pană de " +
+		"curent” pornită (O17), fiecare parte ocupă o bucată age de 64 KiB: ≤ 5,7 GB pe zi la părți de 1 s."
+	timelineNote = "Rândul de timeline din §4.8 (24 h dintr-un catalog de 1 an × 16 camere, ≤ 50 ms) nu se judecă aici: cere part_index și un catalog " +
+		"de 1 an (HUB-20, Faza 1), iar catalogul minim din c1 are doar segmente și goluri pe câteva zile."
+)
+
+// The states of a part of G12.
+type hostState int
+
+const (
+	hostPass hostState = iota
+	hostFail
+	hostIncomplete
+)
+
+// rowNames are the budgets' rows in the report's Romanian (§4.8).
+var rowNames = map[string]string{
+	keyCPUTotal:        "CPU total",
+	keyTileSub:         "CPU per placă trimisă (sub)",
+	keyTileMain:        "CPU per placă trimisă (main)",
+	keyEncUpload:       "CPU criptare + upload, per 10 Mbps",
+	keyIngestPerCamera: "CPU ingest + înregistrare per cameră, dintr-un nucleu",
+	keyRAM:             "RAM",
+	keyDisk:            "disc ÷ bitrate, camere în clar",
+	keyFsyncPerFile:    "fsync pe secundă per fișier deschis",
+	keyLatencyP95:      "latența adăugată, p95",
+}
+
+// Judge is G12 (C17, HUB-32). On each owner device, its latest MI3
+// envelope: the first valid hour at the recommended count passes when every
+// budget of its tier (BudgetKeys) is met, each limit recomputed, never read;
+// when one is not, G12 fails and the number drops to the count that the
+// steps confirmed with a full hour, or to 1 (O16): "<host>: numărul
+// recomandat devine <n>", or, with the steps still open, "<host>: numărul
+// recomandat coboară". A first hour without a valid attempt (R07) leaves
+// the host without a verdict, as does a missing envelope; a missing Pi part
+// defers G12 to Faza 0-bis when the Pi is unsupported. The PC's cold boot
+// (coldboot.go) fails G12 above 20 s with its Technical Decision, the number
+// unchanged; the Pi's is information. A measured failure decides even with
+// other parts missing (G27). The steps, the 16-camera hour, the encrypted
+// disk ratio (R02), the pacing and the storage are information rows; the
+// disk writer's queue peak (C1-R17), the proxies (G20) and what §4.8 asks
+// that MI3 does not judge are Notes.
+func Judge(envs []results.Envelope) results.Judgement {
+	j := results.Judgement{Gate: "G12"}
+	piUnsupported := false
+	for _, e := range envs {
+		if e.Host == "pi" && e.PiModel != nil && e.PiModel.Known && !e.PiModel.Supported {
+			piUnsupported = true
+		}
+	}
+	var planB []string
+	var failed, incomplete, deferred bool
+	for _, host := range []string{"pc", "pi"} {
+		state, hostPlanB := judgeHost(&j, host, envs)
+		switch {
+		case state == hostFail:
+			failed = true
+			planB = append(planB, hostPlanB)
+		case state == hostIncomplete && host == "pi" && piUnsupported:
+			deferred = true
+			j.Reasons = append(j.Reasons, "pi: amânat ("+piDeferral+")")
+		case state == hostIncomplete:
+			incomplete = true
+		}
+	}
+	switch judgeColdBoot(&j, envs) {
+	case hostFail:
+		failed = true
+		planB = append(planB, ColdBootPlanB)
+	case hostIncomplete:
+		incomplete = true
+	}
+	coldBootInfo(&j, envs)
+	j.Notes = append(j.Notes, encryptedDiskNote, timelineNote)
+	switch {
+	case failed:
+		j.Verdict, j.PlanB = results.Fail, strings.Join(planB, "; ")
+	case incomplete:
+		j.Verdict = results.Incomplete
+	case deferred:
+		j.Verdict = results.Deferred(piDeferral)
+	default:
+		j.Verdict = results.Pass
+	}
+	return j
+}
+
+// latest is host's latest MI3 envelope, by its run id's number, or nil.
+func latest(envs []results.Envelope, host string) *results.Envelope {
+	var out *results.Envelope
+	best := -1
+	for i, e := range envs {
+		if e.Code != "MI3" || e.Host != host || e.MI3 == nil {
+			continue
+		}
+		n, _ := strconv.Atoi(e.RunID[strings.LastIndexByte(e.RunID, '-')+1:])
+		if n >= best {
+			best, out = n, &envs[i]
+		}
+	}
+	return out
+}
+
+// judgeHost judges host's MI3 envelope and adds its rows, reasons and
+// notes to j; a failure comes with its plan B.
+func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (hostState, string) {
+	prefix := "MI3 " + host + ": "
+	e := latest(envs, host)
+	if e == nil {
+		j.Rows = append(j.Rows, results.Row{Code: prefix + "rezultat", Value: "lipsește", Source: host})
+		j.Reasons = append(j.Reasons, host+": lipsește proba MI3")
+		return hostIncomplete, ""
+	}
+	d := e.MI3
+	j.Rows = append(j.Rows, results.Row{Code: prefix + "nivel și camere", Source: host,
+		Value: fmt.Sprintf("%s, %s, %d sesiuni live", d.Tier, camerasText(d.Cameras), Sessions(d.Tier))})
+	valid := d.PacingP99Ms <= mi1.MaxPacingP99Ms && d.SkippedAUs == 0
+	failed, missing := false, false
+	for _, key := range BudgetKeys(d.Tier) {
+		lim := limit(key, d.Tier, d.Cameras)
+		r := results.Row{Code: prefix + rowNames[key], Value: "lipsește", Limit: limitText(key, lim), Source: host}
+		b, ok := d.Budgets[key]
+		switch {
+		case ok:
+			r.Value = valueText(key, b.Value)
+			if valid {
+				r.Pass = new(b.Value <= lim)
+				if b.Value > lim {
+					failed = true
+					j.Reasons = append(j.Reasons, fmt.Sprintf("%s: %s %s la %s, peste %s", host, rowNames[key], r.Value, camerasText(d.Cameras), r.Limit))
+				}
+			}
+		case valid:
+			missing = true
+		}
+		j.Rows = append(j.Rows, r)
+	}
+	infoRows(j, prefix, host, e)
+	switch {
+	case !valid:
+		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: ora la %s nu are nicio rulare validă (%s)", host, camerasText(d.Cameras), invalidText(d)))
+		return hostIncomplete, ""
+	case failed:
+		n, settled := recommended(d.Steps)
+		if !settled {
+			j.Reasons = append(j.Reasons, host+": pașii de coborâre nu s-au încheiat")
+			return hostFail, host + ": numărul recomandat coboară; pașii nu s-au încheiat"
+		}
+		return hostFail, fmt.Sprintf("%s: numărul recomandat devine %d", host, n)
+	case missing:
+		j.Reasons = append(j.Reasons, host+": lipsesc bugete ale nivelului "+d.Tier)
+		return hostIncomplete, ""
+	}
+	return hostPass, ""
+}
+
+// recommended is the count that the steps after a failed first hour settled
+// on: the count of a valid hour that passed, or 1 when a run at 1 camera
+// failed; settled is false while the steps are open, as after a step's
+// last invalid attempt.
+func recommended(steps []results.Mi3Step) (n int, settled bool) {
+	if len(steps) == 0 {
+		return 0, false
+	}
+	last := steps[len(steps)-1]
+	switch {
+	case last.Valid && last.Pass && last.Minutes == FullMinutes:
+		return last.Cameras, true
+	case last.Valid && !last.Pass && last.Cameras == 1:
+		return 1, true
+	}
+	return 0, false
+}
+
+// invalidText lists the pacing of the first hour's invalid attempts.
+func invalidText(d *results.Mi3Data) string {
+	var parts []string
+	for _, s := range d.Steps {
+		if s.Valid || s.Cameras != d.Cameras || s.Minutes != FullMinutes {
+			break
+		}
+		parts = append(parts, fmt.Sprintf("încercarea %d: %s", s.Attempt, pacingText(s.PacingP99Ms, s.SkippedAUs)))
+	}
+	if len(parts) == 0 {
+		return pacingText(d.PacingP99Ms, d.SkippedAUs)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// infoRows adds the rows and notes of host's run that are no gate: the
+// steps, the 16-camera hour, the encrypted disk ratio, the pacing, the
+// storage, the disk writer's queue peak and the proxies.
+func infoRows(j *results.Judgement, prefix, host string, e *results.Envelope) {
+	d := e.MI3
+	steps := make([]string, len(d.Steps))
+	for i, s := range d.Steps {
+		steps[i] = stepText(s)
+	}
+	j.Rows = append(j.Rows, results.Row{Code: prefix + "pașii", Value: strings.Join(steps, "; "), Source: host})
+	if d.Sixteen != nil {
+		j.Rows = append(j.Rows, results.Row{Code: prefix + "16 camere (≥ 6 nuclee, informativ, R07)", Value: stepText(*d.Sixteen), Source: host})
+	}
+	if ratio, ok := d.DiskRatio["encrypted"]; ok {
+		j.Rows = append(j.Rows, results.Row{Code: prefix + "disc ÷ bitrate, camere criptate (R02, informativ)", Value: decimal(ratio, 3), Source: host})
+	}
+	j.Rows = append(j.Rows,
+		results.Row{Code: prefix + "ritmul controlorului (R07)", Value: pacingText(d.PacingP99Ms, d.SkippedAUs),
+			Limit: fmt.Sprintf("≤ %d ms, cadre sărite 0", mi1.MaxPacingP99Ms), Source: host},
+		results.Row{Code: prefix + "stocare", Value: storageText(e.Storage), Source: host})
+	if d.DiskQueuePeakBytes > 0 {
+		j.Notes = append(j.Notes, fmt.Sprintf("%s: coada de scriere pe disc a MediaMTX a ajuns la cel mult %s MiB (suma vârfurilor fiecărei înregistrări, "+
+			"o limită superioară), lângă bugetul de RAM (C1-R17); informativ.", host, decimal(float64(d.DiskQueuePeakBytes)/(1<<20), 1)))
+	}
+	for _, p := range d.Proxies {
+		if !slices.Contains(j.Notes, p) {
+			j.Notes = append(j.Notes, p)
+		}
+	}
+}
+
+// stepText is a step as the report shows it: "8 camere 1 h: pică".
+func stepText(s results.Mi3Step) string {
+	length := "1 h"
+	if s.Minutes != FullMinutes {
+		length = fmt.Sprintf("%d min", s.Minutes)
+	}
+	head := camerasText(s.Cameras) + " " + length
+	if s.Attempt > 1 {
+		head += fmt.Sprintf(", încercarea %d", s.Attempt)
+	}
+	switch {
+	case !s.Valid:
+		return head + ": nevalidă (" + pacingText(s.PacingP99Ms, s.SkippedAUs) + ")"
+	case s.Pass:
+		return head + ": trece"
+	}
+	return head + ": pică"
+}
+
+// pacingText is the controller's pacing of a run (R07).
+func pacingText(p99 int64, skipped int) string {
+	return fmt.Sprintf("ritmul controlorului p99 %d ms, cadre sărite %d", p99, skipped)
+}
+
+// storageText is the storage under rec/ in Romanian; on an SD card, the
+// owner confirmed its warning before the run (G16), as in MI1.
+func storageText(storage string) string {
+	switch storage {
+	case "ssd":
+		return "SSD"
+	case "hdd":
+		return "HDD"
+	case "sd":
+		return "card SD, cu avertismentul confirmat de proprietar (G16)"
+	}
+	return "necunoscută"
+}
+
+// camerasText is a camera count in Romanian: "1 cameră", "8 camere".
+func camerasText(n int) string {
+	if n == 1 {
+		return "1 cameră"
+	}
+	return fmt.Sprintf("%d camere", n)
+}
+
+// valueText is a budget's value as its row shows it.
+func valueText(key string, v float64) string {
+	switch key {
+	case keyCPUTotal:
+		return decimal(v, 1) + " %"
+	case keyTileSub, keyTileMain, keyEncUpload, keyIngestPerCamera:
+		return decimal(v, 2) + " %"
+	case keyRAM:
+		return decimal(v, 0) + " MB"
+	case keyDisk:
+		return decimal(v, 3)
+	case keyFsyncPerFile:
+		return decimal(v, 2)
+	case keyLatencyP95:
+		return decimal(v, 0) + " ms"
+	}
+	return decimal(v, -1)
+}
+
+// limitText is a budget's limit as its row shows it.
+func limitText(key string, lim float64) string {
+	switch key {
+	case keyCPUTotal, keyTileSub, keyTileMain, keyEncUpload, keyIngestPerCamera:
+		return "≤ " + decimal(lim, -1) + " %"
+	case keyRAM:
+		return "≤ " + decimal(lim, 0) + " MB"
+	case keyLatencyP95:
+		return "≤ " + decimal(lim, 0) + " ms"
+	}
+	return "≤ " + decimal(lim, -1)
+}
+
+// decimal renders f with prec decimals (-1: as few as it needs) and a
+// decimal comma.
+func decimal(f float64, prec int) string {
+	return strings.Replace(strconv.FormatFloat(f, 'f', prec, 64), ".", ",", 1)
+}
+
+// verdict is a row's pass value: false when ok fails, true when ok holds on
+// a complete part, and none while it is incomplete.
+func verdict(ok, complete bool) *bool {
+	switch {
+	case !ok:
+		return new(false)
+	case complete:
+		return new(true)
+	}
+	return nil
+}

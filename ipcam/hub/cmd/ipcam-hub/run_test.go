@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -295,7 +296,33 @@ func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 	if !stoppedGaps["cam1/main"] || !stoppedGaps["cam1/sub"] {
 		t.Errorf("hub_stopped gaps for %v, want both streams", stoppedGaps)
 	}
+	// C1-R17: each segment that the fork closed logged its disk writer's
+	// queue peak, which ipcam-hub forwards in the line that MI3 reads.
+	peak := regexp.MustCompile(diskQueuePeakPattern)
+	peaks := map[string]bool{}
+	for line := range strings.SplitSeq(h.stderr.String(), "\n") {
+		if !strings.Contains(line, "disk queue peak") {
+			continue
+		}
+		m := peak.FindStringSubmatch(strings.TrimSuffix(line, "\r"))
+		if m == nil {
+			t.Errorf("a disk queue peak line that MI3 cannot read: %q", line)
+			continue
+		}
+		peaks[m[1]] = true
+	}
+	if !peaks["cam1/main"] || !peaks["cam1/sub"] {
+		t.Errorf("disk queue peaks of %v, want both streams'", peaks)
+	}
 }
+
+// diskQueuePeakPattern is the line of the fork's disk writer at each
+// segment that it closes, as ipcam-hub forwards MediaMTX's log on its
+// stderr (C1-R17): the most bytes that the path's recorder held since its
+// last line. MI3 reads the hub's queue peaks from it
+// (tools/spikes/recording/mi3, whose test keeps its pattern equal to this
+// one).
+const diskQueuePeakPattern = `^mediamtx: \S+ \S+ INF \[path ([^\]]+)\] \[recorder\] disk queue peak: (\d+) bytes$`
 
 // TestRun_StopsCleanlyWhenStdinEnds: with --stop-on-stdin-eof, ipcam-hub
 // stops as on SIGTERM when its stdin ends, which is how recspike stops it: a

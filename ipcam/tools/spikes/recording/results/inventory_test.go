@@ -17,8 +17,11 @@ func envelope(code, set, host string) Envelope {
 	if host != "pi" {
 		e.PiModel, e.SdConfirmation, e.OS = nil, nil, "windows"
 	}
-	if code == "MI2" { // its 72 h run, not runs
+	switch code {
+	case "MI2": // its 72 h run, not runs
 		e.Runs, e.MI2 = nil, &Mi2Data{Hours: 72, Cameras: 8, WindowHours: 6}
+	case "MI3": // its capacity run, not runs
+		e.Runs, e.MI3 = nil, &Mi3Data{Tier: "H3", Cameras: 8, Steps: []Mi3Step{{Cameras: 8, Minutes: 60, Attempt: 1, Valid: true, Pass: true}}}
 	}
 	return e
 }
