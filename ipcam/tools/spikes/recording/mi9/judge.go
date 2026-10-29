@@ -38,38 +38,63 @@ const PlanB = "redare ca track WebRTC 1×, salt prin RPC"
 
 // JudgeBulk is G25's rule for one measurement: on the LAN the bulk channel
 // sustains at least 8 Mbps, through TURN-TLS/443 at least 5; the slowest of
-// the seeks brings its first IDR within 1.5 s, and on Chrome the slowest
-// shows its first frame within 1.5 s. A failure's reasons, in Romanian,
-// end with the plan B.
+// the 20 seeks brings its first IDR within 1.5 s, and on Chrome the slowest
+// shows its first frame within 1.5 s. A measured failure decides even when
+// other parts are missing (G27): its reasons, in Romanian, end with the
+// plan B. Without one, a missing part (no seek, fewer than 20 seeks all
+// within 1.5 s, as a measurement that its wait ended may have, or no frame
+// shown on Chrome) leaves no verdict: the reasons end with «fără verdict».
 func JudgeBulk(r BulkResult) (pass bool, reasons []string) {
+	var failed, missing bool
+	fail := func(format string, args ...any) {
+		reasons, failed = append(reasons, fmt.Sprintf(format, args...)), true
+	}
+	lack := func(reason string) { reasons, missing = append(reasons, reason), true }
 	switch r.Transport {
 	case LAN:
 		if r.ThroughputMbps < MinLANMbps {
-			reasons = append(reasons, fmt.Sprintf("canalul bulk a dus %s Mbps pe LAN (pragul ≥ %d Mbps)", mbps(r.ThroughputMbps), MinLANMbps))
+			fail("canalul bulk a dus %s Mbps pe LAN (pragul ≥ %d Mbps)", mbps(r.ThroughputMbps), MinLANMbps)
 		}
 	case TURNS443:
 		if r.ThroughputMbps < MinRelayMbps {
-			reasons = append(reasons, fmt.Sprintf("canalul bulk a dus %s Mbps prin TURN-TLS/443 (pragul ≥ %d Mbps)", mbps(r.ThroughputMbps), MinRelayMbps))
+			fail("canalul bulk a dus %s Mbps prin TURN-TLS/443 (pragul ≥ %d Mbps)", mbps(r.ThroughputMbps), MinRelayMbps)
 		}
 	}
-	switch {
-	case len(r.SeekMs) == 0:
-		reasons = append(reasons, "lipsesc salturile")
-	case slices.Max(r.SeekMs) > MaxSeekMs:
-		reasons = append(reasons, fmt.Sprintf("un salt a adus primul cadru întreg (IDR) în %s ms (limita ≤ %d ms)", ms(slices.Max(r.SeekMs)), MaxSeekMs))
+	if len(r.SeekMs) == 0 {
+		lack("lipsesc salturile")
+	} else {
+		switch worst, cut := slowest(r.SeekMs, r.Partial); {
+		case worst > MaxSeekMs && cut:
+			fail("un salt nu adusese primul cadru întreg (IDR) nici după %s ms, când proba s-a încheiat (limita ≤ %d ms)", ms(worst), MaxSeekMs)
+		case worst > MaxSeekMs:
+			fail("un salt a adus primul cadru întreg (IDR) în %s ms (limita ≤ %d ms)", ms(worst), MaxSeekMs)
+		case len(r.SeekMs) < Seeks:
+			lack(fmt.Sprintf("s-au măsurat doar %d din %d de salturi", len(r.SeekMs), Seeks))
+		}
 	}
 	if r.Transport == Chrome {
 		switch {
 		case len(r.DisplayMs) == 0:
-			reasons = append(reasons, "lipsește primul cadru afișat după salt")
+			lack("lipsește primul cadru afișat după salt")
 		case slices.Max(r.DisplayMs) > MaxSeekMs:
-			reasons = append(reasons, fmt.Sprintf("primul cadru după un salt s-a afișat în %s ms (limita ≤ %d ms)", ms(slices.Max(r.DisplayMs)), MaxSeekMs))
+			fail("primul cadru după un salt s-a afișat în %s ms (limita ≤ %d ms)", ms(slices.Max(r.DisplayMs)), MaxSeekMs)
 		}
 	}
-	if len(reasons) > 0 {
+	switch {
+	case failed:
 		return false, append(reasons, "pică → "+PlanB)
+	case missing:
+		return false, append(reasons, string(results.Incomplete))
 	}
 	return true, nil
+}
+
+// slowest is the slowest of seekMs, which must hold one, and whether it is
+// the seek that the measurement's wait cut (partial's LastSeekCut), timed
+// until then: a lower bound.
+func slowest(seekMs []float64, partial *results.Mi9Partial) (worst float64, cut bool) {
+	worst = slices.Max(seekMs)
+	return worst, partial != nil && partial.LastSeekCut && seekMs[len(seekMs)-1] == worst
 }
 
 // Leg is r as an envelope's leg from source.
@@ -100,9 +125,9 @@ func (v *verdict) row(code, value, limit, source string, pass *bool) {
 // every ci-relay leg; the seeks (the slowest first IDR within 1.5 s) by
 // every lan and ci-relay leg; the first frame shown after a seek (within
 // 1.5 s) by the ci-chrome legs' DisplayMs alone. CI's loopback leg is
-// information only. A part with no deciding leg, or a deciding leg that
-// its wait ended before its seeks, is incomplete; a measured failure
-// decides all the same (G27), with PlanB.
+// information only. A part with no deciding leg, or a deciding leg without
+// its 20 seeks and none over 1.5 s (one that its wait ended may have fewer),
+// is incomplete; a measured failure decides all the same (G27), with PlanB.
 func Judge(envs []results.Envelope) results.Judgement {
 	v := &verdict{j: results.Judgement{Gate: "G18"}}
 	var lan, relay, chrome, loop []leg
@@ -161,8 +186,10 @@ func (v *verdict) throughput(legs []leg, part string, limit int, missing string)
 	}
 }
 
-// seeks judges each deciding leg's slowest seek. A leg without seeks, one
-// that its wait ended (Partial), leaves the part missing.
+// seeks judges each deciding leg's slowest seek: one over 1.5 s decides,
+// even the seek that the leg's wait cut, timed until then (LastSeekCut). A
+// leg without seeks, or with fewer than Seeks all within 1.5 s, as one
+// that its wait ended (Partial) may have, leaves the part missing.
 func (v *verdict) seeks(legs []leg) {
 	const code, limit = "MI9 salt: primul cadru întreg (IDR) primit", "fiecare ≤ 1500 ms"
 	if len(legs) == 0 {
@@ -179,12 +206,23 @@ func (v *verdict) seeks(legs []leg) {
 			v.missing = true
 			continue
 		}
-		worst := slices.Max(l.SeekMs)
-		ok := worst <= MaxSeekMs
-		v.row(rowCode, fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, l.host, results.RowPass(ok, true))
-		if !ok {
+		worst, cut := slowest(l.SeekMs, l.Partial)
+		switch {
+		case worst > MaxSeekMs && cut:
+			v.row(rowCode, fmt.Sprintf("max ≥ %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, l.host, results.RowPass(false, true))
+			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s (%s): un salt nu adusese primul IDR nici după %s ms, când proba s-a încheiat (limita ≤ 1500 ms)",
+				l.host, l.Source, ms(worst)))
+			v.failed = true
+		case worst > MaxSeekMs:
+			v.row(rowCode, fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, l.host, results.RowPass(false, true))
 			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s (%s): un salt a adus primul IDR în %s ms (limita ≤ 1500 ms)", l.host, l.Source, ms(worst)))
 			v.failed = true
+		case len(l.SeekMs) < Seeks:
+			v.row(rowCode, fmt.Sprintf("max %s ms (%d din %d de salturi)", ms(worst), len(l.SeekMs), Seeks), limit, l.host, nil)
+			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s (%s): s-au măsurat doar %d din %d de salturi", l.host, l.Source, len(l.SeekMs), Seeks))
+			v.missing = true
+		default:
+			v.row(rowCode, fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, l.host, results.RowPass(true, true))
 		}
 	}
 }

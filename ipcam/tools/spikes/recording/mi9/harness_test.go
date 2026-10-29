@@ -180,10 +180,12 @@ func waitBulkIdle(t *testing.T, h *Hub) {
 	}
 }
 
-// checkMeasured checks the figures of a measurement: a throughput, 20
-// seeks, and the pair's round trip. Windows' monotonic clock moves at the
-// system timer's tick, so a single figure can time at 0 ms there; their sum
-// cannot.
+// checkMeasured checks the figures of a whole measurement, one that its
+// wait did not cut (Partial): a throughput, 20 seeks, and the pair's round
+// trip. A cut during the 20th seek may leave 20 figures, the last one cut,
+// so the count alone does not show it. Windows' monotonic clock moves at
+// the system timer's tick, so a single figure can time at 0 ms there;
+// their sum cannot.
 func checkMeasured(t *testing.T, r BulkResult, transport Transport) {
 	t.Helper()
 	var sum float64
@@ -193,8 +195,9 @@ func checkMeasured(t *testing.T, r BulkResult, transport Transport) {
 		}
 		sum += ms
 	}
-	if r.Transport != transport || r.ThroughputMbps <= 0 || len(r.SeekMs) != Seeks || sum <= 0 || r.RTTMs < 0 || (r.RTTMs == 0 && runtime.GOOS != "windows") {
-		t.Errorf("MeasureBulk = %+v, want %s with a throughput, %d timed seeks and a round trip", r, transport, Seeks)
+	if r.Transport != transport || r.Partial != nil || r.ThroughputMbps <= 0 || len(r.SeekMs) != Seeks || sum <= 0 || r.RTTMs < 0 ||
+		(r.RTTMs == 0 && runtime.GOOS != "windows") {
+		t.Errorf("MeasureBulk = %+v, want %s with a throughput, %d timed seeks and a round trip, not partial", r, transport, Seeks)
 	}
 }
 

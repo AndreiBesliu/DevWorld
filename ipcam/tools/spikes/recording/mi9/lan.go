@@ -116,15 +116,21 @@ func RunLAN(ctx context.Context, o LANOptions) (err error) {
 	if err := l.Send(link.Results{Name: strings.Join([]string{"MI9", LANSet, runID + ".json"}, "/"), Data: data}); err != nil {
 		o.say("Rezultatul nu a ajuns la controlor (%v): îl aduce colectarea de la final (recspike push sau reccontroller pull).", err)
 	}
-	if p := r.Partial; p != nil {
-		o.say("Redarea nu s-a încheiat în timpul probei: %s.", PartialText(p))
+	if r.Partial != nil {
+		o.say("Redarea nu s-a încheiat în timpul probei: %s.", PartialText(r))
 	}
 	verdict := "trece"
 	if pass, reasons := JudgeBulk(r); !pass {
 		verdict = strings.Join(reasons, "; ")
 	}
+	seekMax := maxOf(r.SeekMs)
+	if len(r.SeekMs) > 0 {
+		if _, cut := slowest(r.SeekMs, r.Partial); cut {
+			seekMax = "≥ " + seekMax
+		}
+	}
 	o.say("Proba MI9 s-a încheiat: rezultatul este %s. Debit %s Mbps; primul cadru întreg după salt: max %s ms; RTT %s ms. Pe LAN: %s.",
-		runID, mbps(r.ThroughputMbps), maxOf(r.SeekMs), ms(r.RTTMs), verdict)
+		runID, mbps(r.ThroughputMbps), seekMax, ms(r.RTTMs), verdict)
 	ended = true
 	if err := l.End(ctx, o.Results, o.Out); err != nil && host.Pseudonym == "pi" {
 		o.say("Rezultatul nu a ajuns la PC (%v): trimiteți-l la final cu recspike push.", err)
@@ -214,11 +220,26 @@ func (o LANOptions) play(ctx context.Context, l *mi1.HostLink, rec hubrec.Segmen
 	return BulkResult{}, fmt.Errorf("controlorul a trimis %s în loc de rezultat", m.Type())
 }
 
-// PartialText says, in Romanian, how far a measurement that its wait ended
-// got: the bytes of the segment's plaintext that had arrived, and when.
-func PartialText(p *results.Mi9Partial) string {
-	return fmt.Sprintf("au sosit %s MB din %s MB în %s s; salturile nu s-au măsurat",
-		results.Decimal(float64(p.ReceivedBytes)/1e6, 1), results.Decimal(float64(p.SizeBytes)/1e6, 1), results.Decimal(p.ElapsedMs/1000, 0))
+// PartialText says, in Romanian, how far r, a measurement that its wait
+// ended (Partial), got: during the transfer, the bytes of the segment's
+// plaintext that had arrived, and when; during the seeks, the whole
+// segment, how many of the seeks were measured, and the seek under way
+// when it had not brought its IDR by then (LastSeekCut).
+func PartialText(r BulkResult) string {
+	p := r.Partial
+	size, secs := results.Decimal(float64(p.SizeBytes)/1e6, 1), results.Decimal(p.ElapsedMs/1000, 0)
+	if p.ReceivedBytes < p.SizeBytes {
+		return fmt.Sprintf("au sosit %s MB din %s MB în %s s; salturile nu s-au măsurat", results.Decimal(float64(p.ReceivedBytes)/1e6, 1), size, secs)
+	}
+	measured := len(r.SeekMs)
+	if p.LastSeekCut {
+		measured--
+	}
+	text := fmt.Sprintf("tot segmentul a sosit (%s MB în %s s), dar s-au măsurat doar %d din %d de salturi", size, secs, measured, Seeks)
+	if p.LastSeekCut {
+		text += fmt.Sprintf("; următorul nu adusese primul cadru întreg (IDR) nici după %s ms", ms(r.SeekMs[len(r.SeekMs)-1]))
+	}
+	return text
 }
 
 // ofRun accepts the controller's offer, result or refusal of the run runID.

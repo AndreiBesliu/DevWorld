@@ -334,6 +334,78 @@ func TestRunLAN_SlowRunWritesAMeasuredFailure(t *testing.T) {
 	}
 }
 
+// TestRunLAN_CutDuringTheSeeksFails (G27, G25): a LAN run whose wait ends
+// during the seeks, its transfer passing, still decides. The hub side here
+// holds the third seek's part, so the controller's wait ends about 8 s into
+// it: the controller sends the whole transfer's throughput, the 2 seeks
+// timed, and the third's time so far, cut (LastSeekCut); RunLAN writes them
+// in the lan envelope, and the owner's screen, JudgeBulk and Judge all say
+// «pică», on that seek.
+func TestRunLAN_CutDuringTheSeeksFails(t *testing.T) {
+	holdCall(t, 4, func(int64) int64 { return 0 }, 0, nil)
+	dir := t.TempDir()
+	hub, _ := spiketest.InstallFakeHub(t, dir)
+	screen, err := lanRun(t, dir, hub, "pc", startLANController(t, &lanController{measureWait: 8 * time.Second}))
+	if err != nil {
+		t.Fatalf("RunLAN of a run cut during its seeks = %v, want its measured failure\n%s", err, screen)
+	}
+	e, err := results.Read(filepath.Join(dir, "results", "MI9", LANSet, "pc-mi9-1.json"))
+	if err != nil || e.MI9 == nil || len(e.MI9.Legs) != 1 || e.MI9.Legs[0].Partial == nil {
+		t.Fatalf("the envelope: %+v, %v; want one lan leg, partial", e, err)
+	}
+	leg := e.MI9.Legs[0]
+	p := leg.Partial
+	if p.ReceivedBytes != p.SizeBytes || p.SizeBytes <= 0 || !p.LastSeekCut || len(leg.SeekMs) != 3 || leg.SeekMs[2] <= MaxSeekMs || leg.ThroughputMbps < MinLANMbps {
+		t.Errorf("the leg: %+v, partial %+v; want the whole transfer passing, 2 seeks, then the third cut over %d ms", leg, *p, MaxSeekMs)
+	}
+	if j := Judge([]results.Envelope{e}); j.Verdict != results.Fail || j.PlanB != PlanB {
+		t.Errorf("Judge = %q → %q, reasons %q; want the measured failure: pică → %s", j.Verdict, j.PlanB, j.Reasons, PlanB)
+	}
+	for _, want := range []string{
+		"Redarea nu s-a încheiat în timpul probei: tot segmentul a sosit (",
+		"), dar s-au măsurat doar 2 din 20 de salturi; următorul nu adusese primul cadru întreg (IDR) nici după ",
+		"; primul cadru întreg după salt: max ≥ ",
+		"Pe LAN: un salt nu adusese primul cadru întreg (IDR) nici după ",
+		"; pică → " + PlanB + ".",
+	} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("the screen does not say «%s»:\n%s", want, screen)
+		}
+	}
+	if left := leftUnder(t, filepath.Join(dir, "work", "mi9")); len(left) != 0 {
+		t.Errorf("left under work/mi9: %q", left)
+	}
+}
+
+// TestPartialText (G27): the owner reads, in Romanian, how far a
+// measurement that its wait ended got: during the transfer, the bytes
+// that had arrived; during the seeks, the whole segment and how many of
+// the 20 seeks were measured, then the seek under way when it had not
+// brought its IDR by then (LastSeekCut).
+func TestPartialText(t *testing.T) {
+	seeks := func(lastSeekCut bool) *results.Mi9Partial {
+		return &results.Mi9Partial{ReceivedBytes: 150e6, SizeBytes: 150e6, ElapsedMs: 120e3, LastSeekCut: lastSeekCut}
+	}
+	for _, c := range []struct {
+		r    BulkResult
+		want string
+	}{
+		{BulkResult{Partial: &results.Mi9Partial{ReceivedBytes: 124e6, SizeBytes: 150e6, ElapsedMs: 900e3}},
+			"au sosit 124,0 MB din 150,0 MB în 900 s; salturile nu s-au măsurat"},
+		{BulkResult{SeekMs: []float64{300, 400, 36000}, Partial: seeks(true)},
+			"tot segmentul a sosit (150,0 MB în 120 s), dar s-au măsurat doar 2 din 20 de salturi; " +
+				"următorul nu adusese primul cadru întreg (IDR) nici după 36000 ms"},
+		{BulkResult{SeekMs: []float64{300, 400}, Partial: seeks(false)},
+			"tot segmentul a sosit (150,0 MB în 120 s), dar s-au măsurat doar 2 din 20 de salturi"},
+		{BulkResult{Partial: seeks(false)},
+			"tot segmentul a sosit (150,0 MB în 120 s), dar s-au măsurat doar 0 din 20 de salturi"},
+	} {
+		if got := PartialText(c.r); got != c.want {
+			t.Errorf("PartialText(%v, %+v) = «%s», want «%s»", c.r.SeekMs, *c.r.Partial, got, c.want)
+		}
+	}
+}
+
 // TestRunLAN_UnexpectedMessageIsAnError: a message of the run that the
 // controller should not send at that point, a result instead of its offer
 // or an offer instead of its result, stops RunLAN with a Romanian error,

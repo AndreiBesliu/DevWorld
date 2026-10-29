@@ -342,9 +342,9 @@ func (c *Client) rtt(ctx context.Context) (float64, error) {
 // whole segment's plaintext over one channel (throughput = bits ÷ time),
 // then Seeks seeks to uniform targets up to the last IDR. When ctx's
 // deadline, the measurement's wait, passes during the transfer or the
-// seeks, Measure stops the transfer and returns what it measured, without
-// error, since a measured failure decides (G27): the throughput of the
-// bytes received by then, as Partial, and no seek.
+// seeks, Measure stops the transfer and returns what it measured, as
+// Partial, without error, since a measured failure decides (G27); cut says
+// what it keeps.
 func (c *Client) Measure(ctx context.Context) (BulkResult, error) {
 	var r BulkResult
 	in, err := c.info(ctx)
@@ -358,31 +358,46 @@ func (c *Client) Measure(ctx context.Context) (BulkResult, error) {
 	got, err := c.read(ctx, 0, in.Size, io.Discard)
 	elapsed := time.Since(start)
 	if err != nil {
-		return cut(r, got, in.Size, elapsed, err)
+		return cut(r, got, in.Size, elapsed, nil, err)
 	}
 	r.ThroughputMbps = throughput(in.Size, elapsed)
 	for _, target := range seekTargets(in.LastIDRMs, Seeks) {
 		s, err := c.seek(ctx, target)
 		if err != nil {
-			return cut(r, in.Size, in.Size, elapsed, fmt.Errorf("mi9: seek to %d ms: %w", target, err))
+			return cut(r, in.Size, in.Size, elapsed, &s, fmt.Errorf("mi9: seek to %d ms: %w", target, err))
 		}
 		r.SeekMs = append(r.SeekMs, s.ms)
 	}
 	return r, nil
 }
 
-// cut ends a measurement that err stopped. When err is the measurement's
-// wait, ctx's deadline, r is a measurement all the same, without error:
-// received of the plaintext's size bytes arrived in elapsed, its
-// throughput, as Partial, and no seek, since fewer than Seeks would not
-// decide. Any other error stays the measurement's.
-func cut(r BulkResult, received, size int64, elapsed time.Duration, err error) (BulkResult, error) {
+// cut ends a measurement that err stopped: during the transfer, received
+// of the plaintext's size bytes having arrived in elapsed; or during the
+// seeks, the whole transfer done in elapsed, inFlight being the seek under
+// way. When err is the measurement's wait, ctx's deadline, r is a
+// measurement all the same, without error (G27), as Partial:
+//   - during the transfer, it has the throughput of the bytes received by
+//     then, and no seek;
+//   - during the seeks, it keeps the whole transfer's throughput and the
+//     seeks timed by then, then inFlight: its time to the IDR when the
+//     IDR had arrived; else its time so far, a lower bound, kept when it is
+//     over MaxSeekMs, a measured failure (LastSeekCut), and dropped
+//     otherwise, since it decides nothing.
+//
+// Any other error stays the measurement's.
+func cut(r BulkResult, received, size int64, elapsed time.Duration, inFlight *seekResult, err error) (BulkResult, error) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		return r, err
 	}
-	r.ThroughputMbps = throughput(received, elapsed)
-	r.SeekMs = nil
-	r.Partial = &results.Mi9Partial{ReceivedBytes: received, SizeBytes: size, ElapsedMs: float64(elapsed.Microseconds()) / 1000}
+	p := &results.Mi9Partial{ReceivedBytes: received, SizeBytes: size, ElapsedMs: float64(elapsed.Microseconds()) / 1000}
+	switch {
+	case inFlight == nil:
+		r.ThroughputMbps = throughput(received, elapsed)
+	case !inFlight.cut || inFlight.ms > MaxSeekMs:
+		r.SeekMs = append(r.SeekMs, inFlight.ms)
+		p.LastSeekCut = inFlight.cut
+	}
+	r.Partial = p
 	return r, nil
 }
 

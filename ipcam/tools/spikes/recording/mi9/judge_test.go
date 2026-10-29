@@ -139,23 +139,87 @@ func TestMI9_Judge_LoopbackNeverDecidesLAN(t *testing.T) {
 	}
 }
 
-// TestMI9_Judge_PartialLeg (G27): a lan leg that the measurement's wait
-// ended has the throughput of the bytes received by then and no seek. Its
-// throughput below 8 Mbps is a measured failure, which decides; its seeks
-// are missing, so a leg cut during the seeks, its throughput passing,
-// leaves G18 without a verdict instead of passing on the other legs'
-// seeks.
+// TestMI9_Judge_PartialLeg (G27, G25): a lan leg that the measurement's
+// wait ended is judged on what it measured. Cut during the transfer, its
+// throughput is that of the bytes received by then: below 8 Mbps, a
+// measured failure that decides. Cut during the seeks, it keeps the whole
+// transfer's throughput and the seeks timed by then: one over 1.5 s
+// decides, including the seek under way, timed until the wait ended (a
+// lower bound, LastSeekCut). Fewer than 20 seeks all within 1.5 s, or
+// none, measure nothing that decides, so the seeks part has no verdict,
+// whether or not the leg is partial.
 func TestMI9_Judge_PartialLeg(t *testing.T) {
-	cut := func(mbps float64, received int64) results.Envelope {
-		return mi9Env("pi", "lan", results.Mi9Leg{Transport: "lan", ThroughputMbps: mbps, RTTMs: 3, Source: SourceLAN,
-			Partial: &results.Mi9Partial{ReceivedBytes: received, SizeBytes: 150e6, ElapsedMs: 900e3}})
+	cut := func(mbps float64, received int64, seekMs []float64, lastSeekCut bool) results.Envelope {
+		return mi9Env("pi", "lan", results.Mi9Leg{Transport: "lan", ThroughputMbps: mbps, SeekMs: seekMs, RTTMs: 3, Source: SourceLAN,
+			Partial: &results.Mi9Partial{ReceivedBytes: received, SizeBytes: 150e6, ElapsedMs: 120e3, LastSeekCut: lastSeekCut}})
 	}
-	j := Judge([]results.Envelope{pcLAN, cut(1.1, 124e6), relay, chrome})
+	j := Judge([]results.Envelope{pcLAN, cut(1.1, 124e6, nil, false), relay, chrome})
 	if j.Verdict != results.Fail || j.PlanB != PlanB || !slices.Contains(j.Reasons, "pi: MI9 LAN: canalul bulk a dus 1,1 Mbps (pragul ≥ 8 Mbps)") {
 		t.Errorf("a Pi leg cut at 1,1 Mbps: Judge = %q → %q, reasons %q; want its measured failure", j.Verdict, j.PlanB, j.Reasons)
 	}
-	j = Judge([]results.Envelope{pcLAN, cut(50, 150e6), relay, chrome})
-	if j.Verdict != results.Incomplete || rowOf(t, j, "(lan, pi)").Value != "lipsește" {
-		t.Errorf("a Pi leg cut during its seeks: Judge = %q, reasons %q; want no verdict, the Pi's seeks missing", j.Verdict, j.Reasons)
+
+	j = Judge([]results.Envelope{pcLAN, cut(50, 150e6, []float64{300, 400, 36000}, true), relay, chrome})
+	if j.Verdict != results.Fail || j.PlanB != PlanB {
+		t.Errorf("a Pi leg cut 36 s into its third seek: Judge = %q → %q, reasons %q; want pică", j.Verdict, j.PlanB, j.Reasons)
+	}
+	if r := rowOf(t, j, "(lan, pi)"); r.Pass == nil || *r.Pass || r.Value != "max ≥ 36000 ms (3 salturi)" {
+		t.Errorf("the Pi's seek row: %+v, want «max ≥ 36000 ms (3 salturi)» failing", r)
+	}
+	if want := "pi (lan): un salt nu adusese primul IDR nici după 36000 ms, când proba s-a încheiat (limita ≤ 1500 ms)"; !slices.Contains(j.Reasons, want) {
+		t.Errorf("reasons %q, want «%s»", j.Reasons, want)
+	}
+
+	j = Judge([]results.Envelope{pcLAN, cut(50, 150e6, []float64{300, 1600}, false), relay, chrome})
+	if j.Verdict != results.Fail || !slices.Contains(j.Reasons, "pi (lan): un salt a adus primul IDR în 1600 ms (limita ≤ 1500 ms)") {
+		t.Errorf("a Pi leg cut after a seek of 1,6 s: Judge = %q, reasons %q; want pică on that seek", j.Verdict, j.Reasons)
+	}
+
+	for _, c := range []struct {
+		name  string
+		leg   results.Envelope
+		value string
+	}{
+		{"a Pi leg cut after 2 seeks within 1.5 s", cut(50, 150e6, []float64{300, 400}, false), "max 400 ms (2 din 20 de salturi)"},
+		{"a Pi leg cut before its first seek", cut(50, 150e6, nil, false), "lipsește"},
+		{"a Pi leg of 2 seeks within 1.5 s, not partial",
+			mi9Env("pi", "lan", results.Mi9Leg{Transport: "lan", ThroughputMbps: 50, SeekMs: []float64{300, 400}, Source: SourceLAN}), "max 400 ms (2 din 20 de salturi)"},
+	} {
+		j := Judge([]results.Envelope{pcLAN, c.leg, relay, chrome})
+		if r := rowOf(t, j, "(lan, pi)"); j.Verdict != results.Incomplete || r.Pass != nil || r.Value != c.value {
+			t.Errorf("%s: Judge = %q, reasons %q, the Pi's seek row %+v; want no verdict, the row «%s» undecided", c.name, j.Verdict, j.Reasons, r, c.value)
+		}
+	}
+}
+
+// TestJudgeBulk_MissingIsNoVerdict (G27, G25): JudgeBulk says «pică» only
+// on a measured failure, which decides even when other parts are missing;
+// with nothing failing, a missing part says «fără verdict»: no seek, fewer
+// than 20 seeks all within 1.5 s (a measurement that its wait cut), or, on
+// Chrome, no first frame shown. A seek under way when the wait ended, over
+// 1.5 s (LastSeekCut), fails, and its reason says it had not arrived by
+// then.
+func TestJudgeBulk_MissingIsNoVerdict(t *testing.T) {
+	partial := func(lastSeekCut bool) *results.Mi9Partial {
+		return &results.Mi9Partial{ReceivedBytes: 150e6, SizeBytes: 150e6, ElapsedMs: 120e3, LastSeekCut: lastSeekCut}
+	}
+	for _, c := range []struct {
+		name, reason, last string
+		r                  BulkResult
+	}{
+		{"the seek under way past 1.5 s", "un salt nu adusese primul cadru întreg (IDR) nici după 36000 ms, când proba s-a încheiat (limita ≤ 1500 ms)", "pică → " + PlanB,
+			BulkResult{Transport: LAN, ThroughputMbps: 50, SeekMs: []float64{300, 400, 36000}, Partial: partial(true)}},
+		{"2 seeks within 1.5 s", "s-au măsurat doar 2 din 20 de salturi", string(results.Incomplete),
+			BulkResult{Transport: LAN, ThroughputMbps: 50, SeekMs: []float64{300, 400}, Partial: partial(false)}},
+		{"no seek", "lipsesc salturile", string(results.Incomplete),
+			BulkResult{Transport: LAN, ThroughputMbps: 50, Partial: partial(false)}},
+		{"no seek at 7 Mbps", "canalul bulk a dus 7,0 Mbps pe LAN (pragul ≥ 8 Mbps)", "pică → " + PlanB,
+			BulkResult{Transport: LAN, ThroughputMbps: 7, Partial: &results.Mi9Partial{ReceivedBytes: 1e6, SizeBytes: 150e6, ElapsedMs: 900e3}}},
+		{"Chrome without a first frame shown", "lipsește primul cadru afișat după salt", string(results.Incomplete),
+			BulkResult{Transport: Chrome, SeekMs: seeks(200)}},
+	} {
+		pass, reasons := JudgeBulk(c.r)
+		if pass || len(reasons) < 2 || reasons[len(reasons)-1] != c.last || !slices.Contains(reasons, c.reason) {
+			t.Errorf("%s: JudgeBulk = %v %q, want «%s», then «%s»", c.name, pass, reasons, c.reason, c.last)
+		}
 	}
 }

@@ -46,8 +46,10 @@ const (
 // whole segment's plaintext over one channel, the 20 seeks' times to the
 // first IDR's bytes, the Chrome leg's times to the first frame shown after
 // each seek, and the selected candidate pair's round trip. Partial is set
-// when the measurement's wait ended it first (G27): the throughput is then
-// that of the bytes received by then, and there is no seek.
+// when the measurement's wait ended it first (G27), as results.Mi9Partial
+// says: during the transfer, the throughput is that of the bytes received
+// by then, and there is no seek; during the seeks, the seeks are those
+// timed by then, the last one perhaps cut (Mi9Partial.LastSeekCut).
 type BulkResult struct {
 	Transport      Transport
 	ThroughputMbps float64

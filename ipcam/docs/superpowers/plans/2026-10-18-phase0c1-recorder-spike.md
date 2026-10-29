@@ -1198,7 +1198,7 @@ func Judge(envs []results.Envelope) results.Judgement // G18; see "Judge" below 
 package results
 type Mi9Data struct{ Legs []Mi9Leg }
 type Mi9Leg struct{ Transport string; ThroughputMbps float64; SeekMs, DisplayMs []float64; RTTMs float64; Source string /* "ci-loopback" | "ci-relay" | "ci-chrome" | "lan" */; Partial *Mi9Partial }
-type Mi9Partial struct{ ReceivedBytes, SizeBytes int64; ElapsedMs float64 } // a measurement that its wait ended: ThroughputMbps is that of ReceivedBytes, and there is no seek
+type Mi9Partial struct{ ReceivedBytes, SizeBytes int64; ElapsedMs float64; LastSeekCut bool } // a measurement that its wait ended: during the transfer, ThroughputMbps is that of ReceivedBytes and there is no seek; during the seeks, SeekMs are those timed by then, the last one, with LastSeekCut, the seek under way timed until then (> 1500 ms, a lower bound)
 // Envelope gains: MI9 *Mi9Data
 ```
 
@@ -1206,7 +1206,9 @@ type Mi9Partial struct{ ReceivedBytes, SizeBytes int64; ElapsedMs float64 } // a
   - **Hub-side reader (§8.5 step 4, C01 exception).** The hub side opens the `.mp4.age` segment with `age.DecryptReaderAt` and the run's identity. It sends **plaintext** fMP4 byte ranges, as hubd does: the Chrome leg appends them to MSE, which needs plaintext.
   - **Relay.** `turns443` uses `ICEServers` + `ICETransportPolicyRelay`.
   - **Channels (§7.6).** `bulk/<call_id>` channels are reliable and ordered, with at most 4 open at once. Messages are ≤ min(64 KiB, the negotiated `max-message-size`). Sending pauses above 1 MiB `bufferedAmount` and resumes below 256 KiB (`SetBufferedAmountLowThreshold` + `OnBufferedAmountLow`).
-  - **Throughput.** One channel transfers the whole segment's plaintext; throughput = bits ÷ time. When the measurement's wait (reccontroller's 15 min) ends it first, the transfer stops and the leg keeps the throughput of the bytes received by then, as `Partial`, without seeks: a measured failure that decides (G27), its seeks missing.
+  - **Throughput.** One channel transfers the whole segment's plaintext; throughput = bits ÷ time. When the measurement's wait (reccontroller's 15 min) ends it first, the transfer stops and the leg keeps what was measured, as `Partial` (G27):
+    - during the transfer, the throughput of the bytes received by then, without seeks: a measured failure that decides, its seeks missing;
+    - during the seeks, the whole transfer's throughput and the seeks timed by then. The seek under way counts with its time to the IDR when its IDR had arrived; else, when it had already waited longer than 1.5 s, with that wait, a lower bound that fails it (`LastSeekCut`); else not at all. With a passing LAN transfer of a ≈ 150 MB segment (≤ 2.5 min), a wait that ends during the seeks leaves about 12.5 min for at most 20 seeks, so one of them took about 36 s or more, and the leg fails.
   - **Seek.** 20 timeline seeks. Each is timed from the request until the first IDR sample's bytes at or after the target are received.
   - **RTT.** `RTTMs` is the selected ICE candidate pair's `CurrentRoundTripTime` from Pion's stats.
 - **Legs (G26).**
@@ -1216,14 +1218,15 @@ type Mi9Partial struct{ ReceivedBytes, SizeBytes int64; ElapsedMs float64 } // a
 - **`JudgeBulk` (G25).**
   - LAN ≥ 8 Mbps; turns443 ≥ 5 Mbps.
   - max(SeekMs) ≤ 1500 and max(DisplayMs) ≤ 1500. Every seek goes to the CSV.
-  - On failure: `pică → redare ca track WebRTC 1×, salt prin RPC`.
+  - On failure: `pică → redare ca track WebRTC 1×, salt prin RPC`. A measured failure decides even when other parts are missing (G27).
+  - Missing, with nothing failing: no seek, fewer than 20 seeks all ≤ 1500 (a `Partial` leg), or no `DisplayMs` on Chrome. The reasons then end with `fără verdict: lipsesc măsurători`.
 - **`Judge` (G18), by Source.**
   - **LAN threshold.** Only legs with Source `lan`. Every such leg must pass, and at least one is needed.
   - **Relay threshold.** Only `ci-relay`.
   - **Seeks.** `SeekMs` from `lan` and `ci-relay`.
   - **Display.** `DisplayMs` only from `ci-chrome`.
   - **`ci-loopback`.** Never decides anything; it is information only.
-  - **Missing data.** A part with no deciding leg is `Incomplete`; a measured failure still decides (G27).
+  - **Missing data.** A part with no deciding leg is `Incomplete`, and so is the seeks part of a deciding leg with fewer than 20 seeks, all ≤ 1500 (a `Partial` leg); a measured failure still decides (G27), including a `Partial` leg's seek over 1500, cut or not.
 - **`mi9` job.**
   - **netem (R06).** It installs `linux-modules-extra-$(uname -r)` if needed, probes `tc qdisc add … netem delay 25ms` and annotates the result. The 25 ms goes on the **host-side veth's egress only**, the traffic from the runner into the coturn container. Each direction of the relayed peer-to-peer path crosses it once, so the RTT is 50 ms; on both veth ends it would be 100 ms. If netem is unavailable, the fallback is an in-process TCP delay proxy in front of TURN-TLS. Either way the job asserts 45 ms ≤ `RTTMs` ≤ 60 ms on the relay leg, annotates the measured value and fails outside that range.
   - **coturn (G36).** It starts the `coturn/coturn` image (≥ 4.14, the newest ≥ 14 days old) on 443 with a self-signed certificate and `--lt-cred-mech`. It is pinned by digest, with version, digest and date read from `https://hub.docker.com/v2/repositories/coturn/coturn/tags` (`digest`, `last_updated`); the GitHub API is refused here. It never uses apt's 4.6.1.

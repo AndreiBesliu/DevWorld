@@ -223,8 +223,9 @@ type Mi9Answer struct {
 
 // Mi9Result is the controller's measurement of the host's bulk channel:
 // the whole segment's throughput, the 20 seeks and the pair's round trip;
-// or, when the measurement's wait ended it first, Partial, the throughput
-// of the bytes received by then and no seek (G27).
+// or, when the measurement's wait ended it first, Partial (G27), with what
+// was measured by then: the throughput of the bytes received and no seek,
+// or the whole segment's throughput and the seeks timed (results.Mi9Partial).
 type Mi9Result struct {
 	RunID          string              `json:"runId"`
 	ThroughputMbps float64             `json:"throughputMbps"`

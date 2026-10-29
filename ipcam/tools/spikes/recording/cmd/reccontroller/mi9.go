@@ -99,8 +99,8 @@ func (c *ctl) mi9Start(conn *link.Conn, m link.Mi9Start, local, remote net.Addr)
 // whole segment, then the seeks. It runs on its own goroutine, under ctx,
 // the connection's: once the host is gone, the measurement ends with it.
 // A run too slow for mi9MeasureWait is answered with what was measured by
-// then (mi9.Client.Measure's Partial), a measured failure that decides
-// (G27), never refused.
+// then (mi9.Client.Measure's Partial), never refused: a measured failure
+// in it decides (G27).
 func (c *ctl) mi9Answer(ctx context.Context, conn *link.Conn, m link.Mi9Answer) {
 	c.mu.Lock()
 	run := c.mi9Runs[m.RunID]
@@ -133,7 +133,7 @@ func (c *ctl) mi9Answer(ctx context.Context, conn *link.Conn, m link.Mi9Answer) 
 	}
 	if r.Partial != nil {
 		c.say("Proba MI9 %s: redarea nu s-a încheiat în timpul probei: %s. Debit %s Mbps; RTT %s ms.",
-			m.RunID, mi9.PartialText(r.Partial), results.Decimal(r.ThroughputMbps, 1), results.Decimal(r.RTTMs, -1))
+			m.RunID, mi9.PartialText(r), results.Decimal(r.ThroughputMbps, 1), results.Decimal(r.RTTMs, -1))
 	} else {
 		c.say("Proba MI9 %s: debit %s Mbps; primul cadru întreg după salt: max %s ms (%d salturi); RTT %s ms.",
 			m.RunID, results.Decimal(r.ThroughputMbps, 1), results.Decimal(slices.Max(r.SeekMs), -1), len(r.SeekMs), results.Decimal(r.RTTMs, -1))
