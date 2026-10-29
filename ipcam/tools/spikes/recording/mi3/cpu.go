@@ -28,16 +28,24 @@ type usage struct {
 }
 
 // sampleUsage reads the CPU time of the machine and of each root's tree;
-// a root that has exited is an error: a load, or ipcam-hub, stopped.
+// a root that has exited is an error: a load, or ipcam-hub, stopped. It
+// lists the trees first, because that walks every process of the host and
+// can take a fraction of a second on a busy one. Then it reads the
+// machine's time and the processes' back to back, so that between two
+// samples both cover the same interval.
 func sampleUsage(roots map[string]int) (usage, error) {
+	trees := make(map[string][]int, len(roots))
+	for name, root := range roots {
+		trees[name] = tree(root)
+	}
 	u := usage{at: time.Now(), procs: map[string]map[int]time.Duration{}}
 	var err error
 	if u.busy, u.total, err = machineTimes(); err != nil {
 		return u, fmt.Errorf("mi3: the machine's CPU time: %w", err)
 	}
-	for name, root := range roots {
+	for name, pids := range trees {
 		u.procs[name] = map[int]time.Duration{}
-		for i, pid := range tree(root) {
+		for i, pid := range pids {
 			t, err := processTimes(pid)
 			switch {
 			case err != nil && i == 0:

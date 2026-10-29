@@ -95,7 +95,12 @@ func TestCPU_MeasuresAProcessTreeAndTheMachine(t *testing.T) {
 	if core < 30 || core > 105*float64(len(end.procs["load"])) {
 		t.Errorf("a spinning child used %.0f %% of a core, want most of one", core)
 	}
-	if machine <= 0 || machine > total+1 {
+	// The machine's busy time and a process's are different counters: on
+	// Linux /proc/stat counts ticks and /proc/<pid>/stat the time run. Over
+	// 1.5 s on a CI runner that also runs other tests, they can differ by a
+	// few percent of the machine, so the tree may exceed the machine's busy
+	// share by that much.
+	if machine <= 0 || machine > total+5 {
 		t.Errorf("the tree used %.1f %% of the machine, which was %.1f %% busy", machine, total)
 	}
 	if !slices.Contains(tree(pid), pid) || len(end.procs["load"]) < 2 {
