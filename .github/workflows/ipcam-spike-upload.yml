@@ -15,6 +15,9 @@ on:
       - 'ipcam/tools/spikes/upload/**'
       # uploadreport imports the video module's redact package.
       - 'ipcam/tools/spikes/video/**'
+      # The hub shares requirements with the recorder spike, so in the workspace that
+      # module's go.mod can select newer versions of the hub's dependencies.
+      - 'ipcam/tools/spikes/recording/go.mod'
       # The pinned tools (golangci-lint, govulncheck, go-licenses), the scripts the jobs
       # run, and the license allowlist that the license check reads.
       - 'ipcam/tools/go.mod'
@@ -32,6 +35,9 @@ on:
       - 'ipcam/tools/spikes/upload/**'
       # uploadreport imports the video module's redact package.
       - 'ipcam/tools/spikes/video/**'
+      # The hub shares requirements with the recorder spike, so in the workspace that
+      # module's go.mod can select newer versions of the hub's dependencies.
+      - 'ipcam/tools/spikes/recording/go.mod'
       # The pinned tools (golangci-lint, govulncheck, go-licenses), the scripts the jobs
       # run, and the license allowlist that the license check reads.
       - 'ipcam/tools/go.mod'
@@ -182,7 +188,9 @@ jobs:
           set -o pipefail
           go build ${TREES} 2>&1 | tee "${RUNNER_TEMP}/build.log"
       - name: S4U smoke
-        # The script must exit 0, and whoami must name the runner's user.
+        # The script must exit 0, and whoami must name the runner's user. Then two cheap
+        # checks of its exit code: the program's own (cmd.exe /c exit 7 gives 7), and 124
+        # when the program outlives -TimeoutSec (ping for about 29 s, with -TimeoutSec 2).
         id: s4u
         run: |
           set -o pipefail
@@ -192,10 +200,25 @@ jobs:
           pwsh -File tools/spikes/upload/ci/s4u-run.ps1 -Exe "$WINDIR/System32/whoami.exe" -Out "$RUNNER_TEMP/s4u.txt" 2>&1 |
             tee "${log}" || status=$?
           echo "s4u-run.ps1 exited ${status}; whoami in the S4U task printed: $(cat "${out}" 2> /dev/null)" | tee -a "${log}"
-          if [[ ${status} -ne 0 ]] || ! grep -qiF -- "${USERNAME}" "${out}"; then
-            echo "S4U smoke: want exit 0 and the runner's user ${USERNAME} in the output" | tee -a "${log}"
+          if [[ ${status} -ne 0 ]] || ! { [[ -n ${USERNAME} ]] && grep -qiF -- "${USERNAME}" "${out}"; }; then
+            echo "S4U smoke: want exit 0, a USERNAME, and that user '${USERNAME}' in the output" | tee -a "${log}"
             exit 1
           fi
+          # MSYS_NO_PATHCONV: Git Bash may rewrite an argument that starts with /c as a drive
+          # path (C:/).
+          status=0
+          MSYS_NO_PATHCONV=1 pwsh -File tools/spikes/upload/ci/s4u-run.ps1 -Exe "$WINDIR/System32/cmd.exe" \
+            -Arguments '/c exit 7' -Out "$RUNNER_TEMP/s4u-exit7.txt" 2>&1 | tee -a "${log}" || status=$?
+          echo "cmd.exe /c exit 7 in the S4U task: s4u-run.ps1 exited ${status}, want 7" | tee -a "${log}"
+          [[ ${status} -eq 7 ]] || exit 1
+          # The target goes first, so the -Arguments value does not start with '-', which
+          # pwsh -File may take for a parameter name.
+          status=0
+          pwsh -File tools/spikes/upload/ci/s4u-run.ps1 -Exe "$WINDIR/System32/PING.EXE" -Arguments '127.0.0.1 -n 30' \
+            -TimeoutSec 2 -Out "$RUNNER_TEMP/s4u-timeout.txt" 2>&1 | tee -a "${log}" || status=$?
+          echo "ping -n 30 127.0.0.1 with -TimeoutSec 2 in the S4U task: s4u-run.ps1 exited ${status}, want 124" |
+            tee -a "${log}"
+          [[ ${status} -eq 124 ]] || exit 1
       - name: Show failures as annotations
         if: failure()
         env:
