@@ -28,3 +28,13 @@ func TestCaps_ZeroValueIsConservative(t *testing.T) {
 		t.Errorf("Hashes = %v, want none", caps.Hashes)
 	}
 }
+
+// TestDeleteOutcome_ZeroValueIsConservative: an outcome that a driver leaves
+// unset claims that the object may still take quota, never that its space is
+// free.
+func TestDeleteOutcome_ZeroValueIsConservative(t *testing.T) {
+	var outcome storage.DeleteOutcome
+	if outcome != storage.DeletedRecycled {
+		t.Errorf("the zero DeleteOutcome = %d, want DeletedRecycled (%d)", outcome, storage.DeletedRecycled)
+	}
+}

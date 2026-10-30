@@ -16,8 +16,10 @@ on:
       # uploadreport imports the video module's redact package.
       - 'ipcam/tools/spikes/video/**'
       # The hub shares requirements with the recorder spike, so in the workspace that
-      # module's go.mod can select newer versions of the hub's dependencies.
+      # module's go.mod can select newer versions of the hub's dependencies, and its go.sum
+      # holds their checksums.
       - 'ipcam/tools/spikes/recording/go.mod'
+      - 'ipcam/tools/spikes/recording/go.sum'
       # The pinned tools (golangci-lint, govulncheck, go-licenses), the scripts the jobs
       # run, and the license allowlist that the license check reads.
       - 'ipcam/tools/go.mod'
@@ -36,8 +38,10 @@ on:
       # uploadreport imports the video module's redact package.
       - 'ipcam/tools/spikes/video/**'
       # The hub shares requirements with the recorder spike, so in the workspace that
-      # module's go.mod can select newer versions of the hub's dependencies.
+      # module's go.mod can select newer versions of the hub's dependencies, and its go.sum
+      # holds their checksums.
       - 'ipcam/tools/spikes/recording/go.mod'
+      - 'ipcam/tools/spikes/recording/go.sum'
       # The pinned tools (golangci-lint, govulncheck, go-licenses), the scripts the jobs
       # run, and the license allowlist that the license check reads.
       - 'ipcam/tools/go.mod'
@@ -75,7 +79,8 @@ jobs:
     env:
       # The packages that the jobs build, lint, test and check, one tree per word. Tasks 2,
       # 4, 7b, 9 and 10 each add theirs (P12). ./hub runs hub/spikeonly_test.go, which keeps
-      # the spike marker out of the production module.
+      # the spike marker out of the production module. The Lint and Cross steps lint the
+      # trees under ./hub with hub/.golangci.yml and the others with the upload spike's.
       TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/...
     defaults:
       run:
@@ -99,24 +104,39 @@ jobs:
           set -o pipefail
           go build ${TREES} 2>&1 | tee "${RUNNER_TEMP}/build.log"
       - name: Lint
+        # golangci-lint takes the config of the first path it analyses, so each module's
+        # trees get a run of their own, with that module's config.
         id: lint
         run: |
           set -o pipefail
-          go tool golangci-lint run ${TREES} 2>&1 | tee "${RUNNER_TEMP}/lint.log"
+          hub=() upload=()
+          for tree in ${TREES}; do
+            if [[ ${tree} == ./hub* ]]; then hub+=("${tree}"); else upload+=("${tree}"); fi
+          done
+          {
+            go tool golangci-lint run --config tools/spikes/upload/.golangci.yml "${upload[@]}" &&
+              go tool golangci-lint run --config hub/.golangci.yml "${hub[@]}"
+          } 2>&1 | tee "${RUNNER_TEMP}/lint.log"
       - name: Cross
         # c1's release ships ipcam-hub for linux/arm/7 and linux/arm64, and no other push
         # workflow cross-compiles the hub or lints its Windows-only files. go tool would build
         # golangci-lint itself for GOOS=windows, which this runner cannot run; go tool -n
-        # builds it for the runner and prints its path.
+        # builds it for the runner and prints its path. Each module's trees are linted with
+        # that module's config, as in the Lint step.
         id: cross
         run: |
           set -o pipefail
+          hub=() upload=()
+          for tree in ${TREES}; do
+            if [[ ${tree} == ./hub* ]]; then hub+=("${tree}"); else upload+=("${tree}"); fi
+          done
           {
             lint="$(go tool -n golangci-lint)" &&
               GOOS=linux GOARCH=arm GOARM=7 go build ${TREES} &&
               GOOS=linux GOARCH=arm64 go build ${TREES} &&
               GOOS=windows GOARCH=amd64 go vet ${TREES} &&
-              GOOS=windows "${lint}" run ${TREES}
+              GOOS=windows "${lint}" run --config tools/spikes/upload/.golangci.yml "${upload[@]}" &&
+              GOOS=windows "${lint}" run --config hub/.golangci.yml "${hub[@]}"
           } 2>&1 | tee "${RUNNER_TEMP}/cross.log"
       - name: Test
         # -count=1: a result restored from the Go build cache would hide a flaky test.

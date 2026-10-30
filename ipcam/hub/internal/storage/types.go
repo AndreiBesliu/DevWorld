@@ -1,5 +1,10 @@
 package storage
 
+import (
+	"fmt"
+	"log/slog"
+)
+
 // ObjectKey is an object's path under the destination's root, with "/".
 type ObjectKey string
 
@@ -25,6 +30,38 @@ type UploadState struct {
 	Session string
 	Offset  int64      // the bytes that the provider confirmed
 	Calls   CallCounts // this upload's API calls
+}
+
+// String formats st as %+v would, with Session redacted. fmt calls it for %v,
+// %+v and %s, of st and of a pointer to it. Encoding st as JSON, for the
+// catalog, keeps Session.
+func (st UploadState) String() string {
+	return fmt.Sprintf("{Key:%s Size:%d Session:%s Offset:%d Calls:%v}", st.Key, st.Size, redactSession(st.Session), st.Offset, st.Calls)
+}
+
+// GoString is %#v's form of st, with Session redacted.
+func (st UploadState) GoString() string {
+	return fmt.Sprintf("storage.UploadState{Key:%q, Size:%d, Session:%q, Offset:%d, Calls:%#v}", st.Key, st.Size, redactSession(st.Session), st.Offset, st.Calls)
+}
+
+// LogValue is st for log/slog, with Session redacted.
+func (st UploadState) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("key", string(st.Key)),
+		slog.Int64("size", st.Size),
+		slog.String("session", redactSession(st.Session)),
+		slog.Int64("offset", st.Offset),
+		slog.Any("calls", st.Calls),
+	)
+}
+
+// redactSession stands for a session in printed text: it says whether there
+// is one, never what it is.
+func redactSession(session string) string {
+	if session == "" {
+		return ""
+	}
+	return "[redacted]"
 }
 
 // ObjectRef identifies a stored object: Commit returns the provider's id for
@@ -54,10 +91,11 @@ type ProbeReport struct {
 // DeleteOutcome is what Delete did with an object.
 type DeleteOutcome int
 
-// The delete outcomes.
+// The delete outcomes. The zero value, DeletedRecycled, is the conservative
+// claim: an outcome that a driver leaves unset frees no quota.
 const (
-	DeletedPermanent DeleteOutcome = iota // the object and its bytes are gone
-	DeletedRecycled                       // the object is in a recycle bin, which may still take quota
+	DeletedRecycled  DeleteOutcome = iota // the object is in a recycle bin, which may still take quota
+	DeletedPermanent                      // the object and its bytes are gone
 )
 
 // Quota is a destination's storage, in bytes. InBin is what the recycle bin

@@ -32,8 +32,8 @@ var (
 )
 
 // ErrRateLimited means the provider asked to wait RetryAfter before the next
-// call. Drivers return it as a value, without sleeping (P26); the outbox
-// waits.
+// call. Drivers return it without sleeping (P26); the outbox waits. Reason
+// finds it as a value and as a pointer.
 type ErrRateLimited struct{ RetryAfter time.Duration }
 
 func (e ErrRateLimited) Error() string {
@@ -42,7 +42,7 @@ func (e ErrRateLimited) Error() string {
 
 // ErrDailyCap means the account reached the provider's daily upload cap,
 // which resets after ResetAfter (Drive: 750 GiB a day, a 24 h pause).
-// Drivers return it as a value.
+// Reason finds it as a value and as a pointer.
 type ErrDailyCap struct{ ResetAfter time.Duration }
 
 func (e ErrDailyCap) Error() string {
@@ -68,12 +68,15 @@ type ReasonInfo struct {
 
 // Reason maps a driver error, wrapped or not, to its §7.7 reason (P24).
 // ErrAuthExpired is 2100 and ErrQuotaFull 2101. ErrRateLimited and
-// ErrDailyCap are 2102, retryable after their wait. Every other error,
-// nil included, is ReasonUnspecified, and of those only ErrTransient is
-// retryable, as Faza 1's Connect mapping makes it `unavailable` (CTR-14).
+// ErrDailyCap, as values or as non-nil pointers, are 2102, retryable after
+// their wait. Every other error, nil included, is ReasonUnspecified, and of
+// those only ErrTransient is retryable, as Faza 1's Connect mapping makes it
+// `unavailable` (CTR-14).
 func Reason(err error) ReasonInfo {
 	var rateLimited ErrRateLimited
+	var rateLimitedPtr *ErrRateLimited
 	var dailyCap ErrDailyCap
+	var dailyCapPtr *ErrDailyCap
 	switch {
 	case errors.Is(err, ErrAuthExpired):
 		return ReasonInfo{Code: ReasonAuthExpired}
@@ -81,8 +84,12 @@ func Reason(err error) ReasonInfo {
 		return ReasonInfo{Code: ReasonQuotaFull}
 	case errors.As(err, &rateLimited):
 		return ReasonInfo{Code: ReasonRateLimited, RetryAfter: rateLimited.RetryAfter, Retryable: true}
+	case errors.As(err, &rateLimitedPtr) && rateLimitedPtr != nil:
+		return ReasonInfo{Code: ReasonRateLimited, RetryAfter: rateLimitedPtr.RetryAfter, Retryable: true}
 	case errors.As(err, &dailyCap):
 		return ReasonInfo{Code: ReasonRateLimited, RetryAfter: dailyCap.ResetAfter, Retryable: true}
+	case errors.As(err, &dailyCapPtr) && dailyCapPtr != nil:
+		return ReasonInfo{Code: ReasonRateLimited, RetryAfter: dailyCapPtr.ResetAfter, Retryable: true}
 	case errors.Is(err, ErrTransient):
 		return ReasonInfo{Code: ReasonUnspecified, Retryable: true}
 	}

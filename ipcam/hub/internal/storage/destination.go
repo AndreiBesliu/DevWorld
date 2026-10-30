@@ -7,16 +7,20 @@ import (
 	"time"
 )
 
-// Kind is a destination's provider type (§9.1). The spec also names
-// "NAS_SMB", "ONEDRIVE_BUSINESS", "S3", "WEBDAV" and "SFTP", which have no
-// driver yet.
+// Kind is a destination's provider type (§9.1).
 type Kind string
 
-// The kinds that have a driver.
+// The provider types, in §9.1's order. Phase 0 writes the drivers of LOCAL,
+// GOOGLE_DRIVE and ONEDRIVE_PERSONAL.
 const (
 	KindLocal            Kind = "LOCAL"
+	KindNASSMB           Kind = "NAS_SMB"
 	KindGoogleDrive      Kind = "GOOGLE_DRIVE"
 	KindOneDrivePersonal Kind = "ONEDRIVE_PERSONAL"
+	KindOneDriveBusiness Kind = "ONEDRIVE_BUSINESS"
+	KindS3               Kind = "S3"
+	KindWebDAV           Kind = "WEBDAV"
+	KindSFTP             Kind = "SFTP"
 )
 
 // Destination is one provider's driver (§9.1). A new provider is a new

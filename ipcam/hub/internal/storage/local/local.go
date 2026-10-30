@@ -308,17 +308,18 @@ func (l *Local) PlaybackURL(ctx context.Context, ref storage.ObjectRef, _ time.D
 	return (&url.URL{Scheme: "file", Path: p}).String(), nil
 }
 
-// Delete removes ref's object; its bytes are gone (DeletePermanent).
+// Delete removes ref's object; its bytes are gone (DeletePermanent). A failed
+// Delete claims no freed space.
 func (l *Local) Delete(ctx context.Context, ref storage.ObjectRef) (storage.DeleteOutcome, error) {
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return storage.DeletedRecycled, err
 	}
 	file, err := l.file(ref.Key)
 	if err != nil {
-		return 0, err
+		return storage.DeletedRecycled, err
 	}
 	if err := os.Remove(file); err != nil {
-		return 0, fmt.Errorf("local: delete of %s: %w", ref.Key, notFound(err))
+		return storage.DeletedRecycled, fmt.Errorf("local: delete of %s: %w", ref.Key, notFound(err))
 	}
 	return storage.DeletedPermanent, nil
 }
