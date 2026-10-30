@@ -415,7 +415,7 @@ func TestStability_StaleRecordingsDoNotShrinkTheWindow(t *testing.T) {
 		dir := t.TempDir()
 		work := filepath.Join(dir, "work")
 		// The reboot: pi-72h-1 is still open, and its recordings hold 10 GB.
-		if _, err := beginRun(filepath.Join(dir, "results", "state", "mi2-pi-72h.json"), "pi-72h", mi1.Boot{ID: "boot-1"}, true); err != nil {
+		if _, _, err := beginRun(filepath.Join(dir, "results", "state", "mi2-pi-72h.json"), "pi-72h", mi1.Boot{ID: "boot-1"}, true, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		record(t, work, "pi-72h-1", 10)
@@ -613,7 +613,7 @@ func TestStability_KeepsTheLastLogUntilTheRunStarts(t *testing.T) {
 	prior := func(t *testing.T, dir string) string {
 		t.Helper()
 		state := filepath.Join(dir, "results", "state", "mi2-pc-72h.json")
-		st, err := beginRun(state, "pc-72h", mi1.Boot{ID: "boot-1"}, true)
+		st, _, err := beginRun(state, "pc-72h", mi1.Boot{ID: "boot-1"}, true, time.Now())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -896,6 +896,47 @@ func TestStability_InterruptedRunKeepsItsCrashes(t *testing.T) {
 	third.finish()
 	if d := third.envelope("pc-72h-3").MI2; d.CrashesInvalidated != 0 || len(d.Invalidated) != 0 {
 		t.Errorf("the run after the redo: %d crashes of redone runs, invalidated %q; want none", d.CrashesInvalidated, d.Invalidated)
+	}
+}
+
+// TestStability_CrashesOfALostRunFailG11 (Final fix B review, M5; G27):
+// a run that measured a crash and then did not end (the host rebooted),
+// once a later recspike mi2 invalidates it, has a crash-only envelope of
+// its own: its crash and the hours until it, public-safe. With no redo
+// that ends, G11 reads «pică», not «fără verdict»: a measured failure
+// decides. A redo that ends still carries the crash, judged once.
+func TestStability_CrashesOfALostRunFailG11(t *testing.T) {
+	dir := t.TempDir()
+	h := newHarness(t, dir, pcHost, "boot-1")
+	h.start()
+	first := h.nextHub()
+	h.clock.advance(t, 5*time.Hour)
+	first.exit() // a crash, 5 h into the run
+	h.nextHub()
+	h.cancel() // the host reboots
+	if err := h.wait(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the interrupted run: %v, want context.Canceled", err)
+	}
+
+	redo := newHarness(t, dir, pcHost, "boot-2")
+	redo.start()
+	redo.nextHub()
+	redo.cancel() // the redo never ends either
+	if err := redo.wait(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the redo: %v, want context.Canceled", err)
+	}
+	lost := redo.envelope("pc-72h-1")
+	if d := lost.MI2; d.Crashes72h != 1 || d.Hours != 5 || len(d.Invalidated) != 1 ||
+		d.Invalidated[0] != "pc-72h-1: gazda a repornit în timpul probei, după 1 crash" {
+		t.Errorf("the lost run's envelope: %d crashes in %v h, invalidated %q; want 1 in 5 h, and why it did not end", d.Crashes72h, d.Hours, d.Invalidated)
+	}
+	if !strings.Contains(redo.out.String(), "Proba MI2 pc-72h-1 s-a întrerupt după 1 crash ipcam-hub") {
+		t.Errorf("the redo printed:\n%s\nwant the lost run's crash named", redo.out)
+	}
+	envs := passing(t)
+	envs[len(envs)-2] = lost
+	if j := Judge(envs); j.Verdict != results.Fail || j.PlanB != PlanB {
+		t.Errorf("Judge = %q, plan B %q, reasons %q; want pică with the plan B", j.Verdict, j.PlanB, j.Reasons)
 	}
 }
 

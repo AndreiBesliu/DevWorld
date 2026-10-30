@@ -161,9 +161,12 @@ func Run(ctx context.Context, o Options) error {
 
 	statePath := filepath.Join(o.Results, "state", "mi2-"+set+".json")
 	boot, bootErr := o.thisBoot()
-	st, err := beginRun(statePath, set, boot, bootErr == nil)
+	st, lost, err := beginRun(statePath, set, boot, bootErr == nil, o.clock().Now())
 	if err != nil {
 		return err
+	}
+	if lost != nil {
+		o.writeLost(set, cameras, *lost)
 	}
 	runID := runIDOf(set, st.Attempt)
 	if n := len(st.Invalidated); n > 0 {
@@ -200,7 +203,7 @@ func Run(ctx context.Context, o Options) error {
 	// Each crash goes into the run's state as it happens: a reboot or an
 	// interruption after it must not lose it (mis-3, G27).
 	crashed := func(crashes int) {
-		st.Crashes = crashes
+		st.Crashes, st.CrashAtMs = crashes, o.clock().Now().UnixMilli()
 		if err := saveState(statePath, st); err != nil {
 			o.say("Crash-ul nu s-a putut salva în starea probei: %v", err)
 		}
@@ -567,47 +570,90 @@ func (o Options) startHub(config string, stderr io.Writer, onEvent func(hubproc.
 
 // runState is where the host's 72 h runs stand, in
 // results/state/mi2-<set>.json: the last run started, whether it is still
-// open, the boot it started in, its crashes so far, and the runs before it
-// that did not end, with the crashes that they measured (mis-3). The file
-// lives in the published results folder, so it names no address and no
-// path (PH0-22).
+// open, the boot it started in, when it started, its crashes so far and
+// when the last one came, and the runs before it that did not end, with
+// the crashes that they measured (mis-3). The file lives in the published
+// results folder, so it names no address and no path (PH0-22).
 type runState struct {
 	Attempt            int      `json:"attempt"`
 	Open               bool     `json:"open"`
 	Boot               mi1.Boot `json:"boot"`
+	StartedMs          int64    `json:"startedMs,omitempty"`
 	Crashes            int      `json:"crashes,omitempty"`
+	CrashAtMs          int64    `json:"crashAtMs,omitempty"`
 	Invalidated        []string `json:"invalidated,omitempty"`
 	CrashesInvalidated int      `json:"crashesInvalidated,omitempty"`
+}
+
+// lostRun is a run that did not end but measured crashes (G27): its id,
+// why it did not end, its crashes and the hours from its start to the
+// last one.
+type lostRun struct {
+	id, reason string
+	crashes    int
+	hours      float64
 }
 
 // runIDOf is the id of the attempt-th run of set.
 func runIDOf(set string, attempt int) string { return fmt.Sprintf("%s-%d", set, attempt) }
 
-// beginRun starts the next run of set in the state at path. A run that is
-// still open did not end: it is invalid, because the host rebooted since it
-// began (another boot, when both are known), or because recspike stopped.
-// So is one that abandonRun closed; a run that finishRun closed is not.
-func beginRun(path, set string, boot mi1.Boot, bootKnown bool) (runState, error) {
+// beginRun starts the next run of set in the state at path, at now. A run
+// that is still open did not end: it is invalid, because the host rebooted
+// since it began (another boot, when both are known), or because recspike
+// stopped. So is one that abandonRun closed; a run that finishRun closed
+// is not. An open run that measured crashes is returned as lost, for its
+// crash-only envelope (writeLost).
+func beginRun(path, set string, boot mi1.Boot, bootKnown bool, now time.Time) (runState, *lostRun, error) {
 	var st runState
 	data, err := os.ReadFile(path) //nolint:gosec // recspike's own state
 	switch {
 	case err == nil:
 		if err := json.Unmarshal(data, &st); err != nil {
-			return st, fmt.Errorf("nu pot citi starea probei din %s: %w", filepath.Base(path), err)
+			return st, nil, fmt.Errorf("nu pot citi starea probei din %s: %w", filepath.Base(path), err)
 		}
 	case !errors.Is(err, os.ErrNotExist):
-		return st, fmt.Errorf("nu pot citi starea probei: %w", err)
+		return st, nil, fmt.Errorf("nu pot citi starea probei: %w", err)
 	}
+	var lost *lostRun
 	if st.Open {
 		reason := "proba s-a întrerupt înainte de final (recspike s-a oprit)"
 		if bootKnown && !boot.Same(st.Boot) {
 			reason = "gazda a repornit în timpul probei"
 		}
-		st = invalidate(st, runIDOf(set, st.Attempt)+": "+reason)
+		id := runIDOf(set, st.Attempt)
+		if st.Crashes > 0 {
+			lost = &lostRun{id: id, crashes: st.Crashes}
+			if st.StartedMs > 0 && st.CrashAtMs > st.StartedMs {
+				lost.hours = float64(st.CrashAtMs-st.StartedMs) / float64(time.Hour/time.Millisecond)
+			}
+		}
+		st = invalidate(st, id+": "+reason)
+		if lost != nil {
+			lost.reason = st.Invalidated[len(st.Invalidated)-1]
+		}
 	}
 	st.Attempt++
-	st.Open, st.Boot, st.Crashes = true, boot, 0
-	return st, saveState(path, st)
+	st.Open, st.Boot, st.StartedMs, st.Crashes, st.CrashAtMs = true, boot, now.UnixMilli(), 0, 0
+	return st, lost, saveState(path, st)
+}
+
+// writeLost writes the crash-only envelope of a run of set that did not
+// end but measured crashes (Final fix B review, M5): its crashes in the
+// hours until the last one, with why it did not end, and no error text.
+// mi2.Judge reads it as a measured failure of G11 (G27) even when no redo
+// ends; a redo that ends carries the same crashes, and G11 judges one run.
+// A write that fails is said and does not stop the redo, whose envelope
+// carries the crashes too.
+func (o Options) writeLost(set string, cameras int, lost lostRun) {
+	e := results.Envelope{Schema: results.Schema, Code: "MI2", RunID: lost.id, AtMs: o.clock().Now().UnixMilli(), Set: set, Host: o.Host.Pseudonym,
+		OS: o.Host.OS, PiModel: o.Host.PiModel, Storage: o.Host.Storage, SdConfirmation: o.Host.SdConfirmation,
+		MI2: &results.Mi2Data{Hours: math.Round(lost.hours*100) / 100, Cameras: cameras, OnSdCard: o.Host.Storage == "sd",
+			Crashes72h: lost.crashes, Invalidated: []string{lost.reason}}}
+	if err := results.Create(o.Results, e); err != nil {
+		o.say("Rezultatul cu crash-ul probei %s nu s-a putut scrie: %v; crash-ul rămâne în rezultatul rulării care o reface.", lost.id, err)
+		return
+	}
+	o.say("Proba MI2 %s s-a întrerupt după %s ipcam-hub; crash-ul rămâne în rezultate.", lost.id, CrashText(lost.crashes))
 }
 
 // abandonRun records that the run of st ended without a result, invalid
@@ -642,7 +688,7 @@ func CrashText(n int) string {
 // finishRun records that the run of st ended: its envelope carries its
 // crashes and the redone runs'.
 func finishRun(path string, st runState) error {
-	st.Open, st.Crashes, st.Invalidated, st.CrashesInvalidated = false, 0, nil, 0
+	st.Open, st.Crashes, st.CrashAtMs, st.Invalidated, st.CrashesInvalidated = false, 0, 0, nil, 0
 	return saveState(path, st)
 }
 

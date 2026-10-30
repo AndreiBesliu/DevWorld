@@ -868,13 +868,16 @@ func TestResume_StopSaveLost_ColdBootStillMeasured(t *testing.T) {
 	}
 }
 
-// TestResume_ElevatedHubRunsTheReleasesMediaMTX (Final fix A review,
-// Minor 1): the resume after a reboot runs elevated on the PC (the boot
-// task, the shortcut), and a run's run.json lies in work/, which the
-// owner's own token may change. A run.json that names another MediaMTX,
-// changed before the resume or while a run is announced, is not obeyed:
-// every start of ipcam-hub runs the release's own, the one next to it.
-func TestResume_ElevatedHubRunsTheReleasesMediaMTX(t *testing.T) {
+// TestResume_ElevatedHubStartsFromTrustedValues (Final fix A review,
+// Minor 1; Final fix B review, M2): the resume after a reboot runs
+// elevated on the PC (the boot task, the shortcut), and a run's run.json
+// lies in work/, which the owner's own token may change. A run.json that
+// names another MediaMTX, data directory or RI_g file, changed before the
+// resume or while a run is announced, is not obeyed: every start of
+// ipcam-hub reads a config written into the driver's protected ConfigDir,
+// with the release's own MediaMTX, the run's own data directory, and the
+// run's own RI_g file when the run is encrypted, none when it is clear.
+func TestResume_ElevatedHubStartsFromTrustedValues(t *testing.T) {
 	r := newRig(t, "pi")
 	r.cutPower(t, SetOptions{Set: SetPiSysrq, Mode: ModeAutomated, Kind: "sysrq", Window: windowAroundNow(t)},
 		func(d *Driver, down func()) {
@@ -883,7 +886,7 @@ func TestResume_ElevatedHubRunsTheReleasesMediaMTX(t *testing.T) {
 				return nil
 			}
 		})
-	planted := filepath.Join(t.TempDir(), "planted", "mediamtx")
+	elsewhere := t.TempDir()
 	plant := func() error {
 		configs, err := filepath.Glob(filepath.Join(r.work, "*", "run.json"))
 		for _, config := range configs {
@@ -891,7 +894,9 @@ func TestResume_ElevatedHubRunsTheReleasesMediaMTX(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			cfg.MediaMTX = planted
+			cfg.MediaMTX = filepath.Join(elsewhere, "mediamtx")
+			cfg.DataDir = filepath.Join(elsewhere, "data")
+			cfg.IdentityFile = filepath.Join(elsewhere, "ri_g.key")
 			if err := hubproc.WriteConfig(config, cfg); err != nil {
 				return err
 			}
@@ -917,6 +922,8 @@ func TestResume_ElevatedHubRunsTheReleasesMediaMTX(t *testing.T) {
 	t.Setenv(fakeMediaMTXLogEnv, started)
 
 	d := r.driver(t)
+	d.ConfigDir = filepath.Join(t.TempDir(), "ProgramData", "ipcam-recspike")
+	d.protectDir = func(dir string) error { return os.MkdirAll(dir, 0o700) } // icacls is the PC's (TestProtectConfigDir_RootsAlone)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	next := cancelAt(r.f, "ready pi-sysrq-02-1", cancel)
@@ -930,9 +937,29 @@ func TestResume_ElevatedHubRunsTheReleasesMediaMTX(t *testing.T) {
 	if len(lines) < 2 {
 		t.Fatalf("ipcam-hub ran %d times, want after the reboot and for run 2: %q", len(lines), lines)
 	}
-	for _, l := range lines {
-		if l != "mediamtx="+d.MediaMTX {
-			t.Errorf("ipcam-hub ran with %q, want the release's own MediaMTX (%q)", l, "mediamtx="+d.MediaMTX)
+	st, err := d.State()
+	if err != nil || st == nil {
+		t.Fatalf("the run state: %v", err)
+	}
+	encrypted := map[string]bool{}
+	for _, done := range st.Done {
+		encrypted[done.Run.RunID] = done.Run.Encrypted
+	}
+	if st.Current != nil {
+		encrypted[st.Current.RunID] = st.Current.Encrypted
+	}
+	for i, l := range lines {
+		id := "pi-sysrq-01-1"
+		if i > 0 {
+			id = "pi-sysrq-02-1"
+		}
+		identity := ""
+		if encrypted[id] {
+			identity = filepath.Join(r.work, id, "ri_g.key")
+		}
+		want := fmt.Sprintf("config=%s mediamtx=%s dataDir=%s identityFile=%s", d.ConfigDir, d.MediaMTX, filepath.Join(r.work, id, "data"), identity)
+		if l != want {
+			t.Errorf("start %d of ipcam-hub ran\n%s\nwant\n%s", i+1, l, want)
 		}
 	}
 }

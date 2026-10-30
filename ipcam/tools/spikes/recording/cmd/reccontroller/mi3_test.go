@@ -93,7 +93,14 @@ func TestMI3_SmokeEndToEnd(t *testing.T) {
 			t.Logf("CPU %.1f %%, RAM %.0f MB, budgets %v, disk %v, fsync/s %.3f, latency p95 %v ms, pacing p99 %d ms, skipped %d, disk queue peak %d, load CPU %v",
 				d.CPUPctTotal, d.RAMMb, d.Budgets, d.DiskRatio, d.FsyncPerSecPerFile, d.LatencyP95Ms, d.PacingP99Ms, d.SkippedAUs, d.DiskQueuePeakBytes, d.LoadCPUPct)
 			if d.Tier != c.tier || d.Cameras != 2 || len(d.Steps) == 0 || d.Steps[0].Cameras != 2 || d.Steps[0].Minutes != mi3.FullMinutes {
-				t.Errorf("tier %s, %d cameras, steps %+v; want %s at 2 cameras for its hour first", d.Tier, d.Cameras, d.Steps, c.tier)
+				t.Fatalf("tier %s, %d cameras, steps %+v; want %s at 2 cameras for its hour first", d.Tier, d.Cameras, d.Steps, c.tier)
+			}
+			// The hour counts: its loads ran their whole window, by mis-2's
+			// 95 % checks (the live frames, each camera's recorded seconds,
+			// no MediaMTX restart), and the controller sent evenly (Final
+			// fix B review, M4).
+			if s := d.Steps[0]; !s.Valid || s.InvalidReason != "" {
+				t.Errorf("the hour at 2 cameras does not count: valid %v, pacing p99 %d ms, %d skipped, %q", s.Valid, s.PacingP99Ms, s.SkippedAUs, s.InvalidReason)
 			}
 			if d.CPUPctTotal <= 0 || d.CPUPctTotal > 100 || d.RAMMb < 10 {
 				t.Errorf("CPU %v %%, RAM %v MB: not measured", d.CPUPctTotal, d.RAMMb)

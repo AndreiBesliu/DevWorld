@@ -138,6 +138,7 @@ func mi1Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	if err != nil {
 		return err
 	}
+	d.ConfigDir = protectedDir() // the owner's runs start ipcam-hub elevated
 	// A new set reads the host with diag host, with the owner's answers for
 	// an unknown Pi model and an SD card (C24, G16), once it is sure to
 	// start.
@@ -160,7 +161,8 @@ func resumeCommand(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	d := &mi1.Driver{Hub: f.hub, Results: f.results, Work: f.work, Out: out}
+	// The boot task and the boot service resume as administrator, or root.
+	d := &mi1.Driver{Hub: f.hub, Results: f.results, Work: f.work, Out: out, ConfigDir: protectedDir()}
 	if d.Controller, err = f.savedController(); err != nil {
 		if st, _ := d.State(); st == nil {
 			_, _ = fmt.Fprintln(out, "Nicio probă MI1 de continuat.")

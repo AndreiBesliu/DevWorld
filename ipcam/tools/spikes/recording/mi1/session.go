@@ -85,6 +85,11 @@ type Driver struct {
 	Host HostState
 	// Out is the owner's screen.
 	Out io.Writer
+	// ConfigDir is where the owner's runs write the config that each start
+	// of ipcam-hub reads (hubConfig): a folder that only Administrators and
+	// SYSTEM, or root, may write. "" keeps it in the run's folder in Work,
+	// as the lab's runs do.
+	ConfigDir string
 	// GOOS is the host's OS; "" is runtime.GOOS.
 	GOOS string
 
@@ -105,6 +110,9 @@ type Driver struct {
 	// tests, so that the folders they get are checked on every OS.
 	deviceChecks func(binDir, dataDir string, cameras int) []Check
 	osStopIn     func(ctx context.Context, kind controller.ShutdownKind, binDir string) error
+	// protectDir makes ConfigDir writable by Administrators and SYSTEM, or
+	// root, alone; nil is protectConfigDir.
+	protectDir func(dir string) error
 	// linkDown, when set, runs each time a link to the controller has
 	// failed and its session reports it down: tests wait for it instead of
 	// sleeping.

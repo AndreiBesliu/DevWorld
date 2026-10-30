@@ -158,6 +158,7 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 		savedStart:  filepath.Join(dir, "ProgramData", "ipcam-recspike", "w32time-start.json"),
 		savedModes:  filepath.Join(dir, "var", "lib", "ipcam-recspike", "release-modes.json"),
 		memoryDump:  filepath.Join(dir, "Windows", "MEMORY.DMP"),
+		hubConfig:   filepath.Join(dir, "ProgramData", "ipcam-recspike", mi1.HubConfigName),
 		ownerSID:    func(string) (string, error) { return f.owner, nil },
 		mkdirAll: func(path string) error {
 			f.dirs = append(f.dirs, path)
@@ -324,14 +325,33 @@ func TestInstall_SystemdUnit(t *testing.T) {
 // PC's boot task and its desktop shortcut, or the Pi's service, and is
 // content when they are already gone.
 func TestUninstall_RemovesTaskUnitAndShortcut(t *testing.T) {
+	// The config that the owner's MI1 runs started ipcam-hub with, which
+	// names the session's camera addresses, goes too.
+	hubConfigLeft := func(t *testing.T, a autostart) {
+		t.Helper()
+		if _, err := os.Stat(a.hubConfig); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("ipcam-hub's config is still there (%v)", err)
+		}
+	}
+	writeHubConfig := func(t *testing.T, a autostart) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(a.hubConfig), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(a.hubConfig, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	a, f, desktop := newAutostart(t, "windows", true)
 	if err := a.install(`C:\proba\recspike.exe`); err != nil {
 		t.Fatal(err)
 	}
+	writeHubConfig(t, a)
 	f.commands = nil
 	if err := a.uninstall(`C:\proba\recspike.exe`); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
+	hubConfigLeft(t, a)
 	if want := [][]string{{"schtasks", "/Query", "/TN", "ipcam-recspike"}, {"schtasks", "/Delete", "/TN", "ipcam-recspike", "/F"},
 		{"icacls", `C:\proba`, "/reset", "/T", "/C", "/Q"}, {"sc", "query", "MyFault"}}; !slices.EqualFunc(f.commands, want, slices.Equal) {
 		t.Errorf("commands = %q, want %q", f.commands, want)
@@ -347,10 +367,12 @@ func TestUninstall_RemovesTaskUnitAndShortcut(t *testing.T) {
 	if err := a.install("/home/pi/proba/recspike"); err != nil {
 		t.Fatal(err)
 	}
+	writeHubConfig(t, a)
 	f.commands = nil
 	if err := a.uninstall("/home/pi/proba/recspike"); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
+	hubConfigLeft(t, a)
 	if want := [][]string{{"systemctl", "disable", "ipcam-recspike.service"}, {"systemctl", "daemon-reload"}}; !slices.EqualFunc(f.commands, want, slices.Equal) {
 		t.Errorf("commands = %q, want %q", f.commands, want)
 	}
@@ -862,6 +884,13 @@ func TestUninstall_PiRestoresTheModesOfBefore(t *testing.T) {
 	if err := a.install(exe); err != nil {
 		t.Fatalf("install: %v", err)
 	}
+	// What the fake chmod recorded, for real: the release's modes are now
+	// the probe's, which an install again must not keep as those of before.
+	for _, p := range []string{release, exe, filepath.Join(release, "ipcam-hub")} {
+		if err := os.Chmod(p, 0o755); err != nil { //nolint:gosec // the mode that install gives the release
+			t.Fatal(err)
+		}
+	}
 	if err := a.install(exe); err != nil { // again: the modes of before stay those of the first
 		t.Fatalf("install again: %v", err)
 	}
@@ -918,5 +947,42 @@ func TestUninstall_CrashDumpsAndNotMyFaultsService(t *testing.T) {
 				t.Errorf("left %v: uninstall printed:\n%s\nwant %q only when NotMyFault left it", left, text, line)
 			}
 		}
+	}
+}
+
+// TestUninstall_PiAfterAFailedInstallGivesTheFolderBack (Final fix B,
+// concern on item 15): an install that gave the release folder to root
+// and then could not write the boot service leaves no unit, but its saved
+// record of the modes of before: uninstall restores the folder to the
+// owner's account whenever that record exists, with or without a unit.
+func TestUninstall_PiAfterAFailedInstallGivesTheFolderBack(t *testing.T) {
+	release := filepath.Join(t.TempDir(), "proba")
+	if err := os.MkdirAll(release, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(release, "recspike")
+	if err := os.WriteFile(exe, []byte("ELF"), 0o755); err != nil { //nolint:gosec // a program of the release
+		t.Fatal(err)
+	}
+	t.Setenv("SUDO_UID", "1000")
+	t.Setenv("SUDO_GID", "1001")
+	a, f, _ := newAutostart(t, "linux", true)
+	a.unitPath = filepath.Join(t.TempDir(), "no-such-folder", "ipcam-recspike.service")
+	if err := a.install(exe); err == nil {
+		t.Fatal("install wrote a unit where it cannot")
+	}
+	if !slices.Contains(f.owners, release+" 0:0") {
+		t.Fatalf("install changed %q, want the folder given to root before the unit", f.owners)
+	}
+	var out strings.Builder
+	a.out, f.owners = &out, nil
+	if err := a.uninstall(exe); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !slices.Contains(f.owners, release+" 1000:1001") || !strings.Contains(out.String(), "Folderul probei și programele din el sunt din nou ale contului dvs.") {
+		t.Errorf("uninstall changed %q and printed\n%s\nwant the folder given back to 1000:1001", f.owners, out.String())
+	}
+	if _, err := os.Stat(a.savedModes); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the record of the modes of before is still there (%v)", err)
 	}
 }

@@ -40,8 +40,9 @@ const (
 	fakeHubEnv        = "MI1_FAKE_HUB"
 	fakeLogEnv        = "MI1_FAKE_LOG"
 	fakeReadyAfterEnv = "MI1_FAKE_READY_AFTER"
-	// fakeMediaMTXLogEnv names a file to which the fake appends the
-	// mediamtx of each run.json that it runs, as "mediamtx=<path>".
+	// fakeMediaMTXLogEnv names a file to which the fake appends, for each
+	// config that it runs, its folder and the paths that it names, as
+	// "config=<folder> mediamtx=<path> dataDir=<path> identityFile=<path>".
 	fakeMediaMTXLogEnv = "MI1_FAKE_MEDIAMTX_LOG"
 )
 
@@ -74,7 +75,7 @@ func fakeHub(args []string) int {
 	logLine(fmt.Sprintf("hub %d", os.Getpid()))
 	if path := os.Getenv(fakeMediaMTXLogEnv); path != "" {
 		if f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil { //nolint:gosec // the test's log
-			_, _ = f.WriteString("mediamtx=" + cfg.MediaMTX + "\n")
+			_, _ = fmt.Fprintf(f, "config=%s mediamtx=%s dataDir=%s identityFile=%s\n", filepath.Dir(args[2]), cfg.MediaMTX, cfg.DataDir, cfg.IdentityFile)
 			_ = f.Close()
 		}
 	}

@@ -160,12 +160,25 @@ type autostart struct {
 	savedModes string
 	// memoryDump is Windows' kernel dump, which every bugcheck rewrites.
 	memoryDump string
+	// hubConfig is the config that the owner's MI1 runs start ipcam-hub
+	// with, in protectedDir; uninstall removes it.
+	hubConfig string
 	// mkdirAll makes the PC's data folders; chown and chmod change the
 	// owner and the mode of the Pi's release (security-1).
 	mkdirAll func(path string) error
 	chown    func(path string, uid, gid int) error
 	chmod    func(path string, mode os.FileMode) error
 	out      io.Writer
+}
+
+// protectedDir is recspike's folder that only Administrators and SYSTEM, or
+// root, may write: the saved settings of install, and the config that the
+// owner's MI1 runs start ipcam-hub with (mi1.Driver.ConfigDir).
+func protectedDir() string {
+	if runtime.GOOS == "windows" {
+		return filepath.Dir(timeServiceFile())
+	}
+	return filepath.Dir(piModesPath)
 }
 
 // timeServiceFile is where install keeps the time service's settings from
@@ -203,6 +216,7 @@ func systemAutostart(out io.Writer) autostart {
 		ownerSID:    mi1.FileOwnerSID,
 		savedModes:  piModesPath,
 		memoryDump:  filepath.Join(cmp.Or(os.Getenv("SystemRoot"), `C:\Windows`), "MEMORY.DMP"),
+		hubConfig:   filepath.Join(protectedDir(), mi1.HubConfigName),
 		mkdirAll:    func(path string) error { return os.MkdirAll(path, 0o700) },
 		chown:       os.Lchown,
 		chmod:       os.Chmod,
@@ -315,21 +329,30 @@ func (a autostart) install(exe string) error {
 
 // uninstall removes the autostart and the shortcut, and gives the release
 // folder back as it was before install (security-1); what is already gone
-// is no error. On the Pi, with no boot service installed, nothing changes.
+// is no error. On the Pi the folder goes back to the owner's account
+// whenever install's record of its modes of before is there, with or
+// without a boot service: an install that failed after giving the folder
+// to root leaves the record and no unit.
 func (a autostart) uninstall(exe string) error {
 	if a.goos != "windows" {
 		if !a.privileged() {
 			return errors.New("dezinstalarea scrie în /etc/systemd: porniți-o cu sudo ./recspike uninstall")
 		}
-		if _, err := os.Stat(a.unitPath); errors.Is(err, os.ErrNotExist) {
-			_, _ = fmt.Fprintln(a.out, "Pornirea automată nu este instalată.")
-			return nil
+		if err := a.removeHubConfig(); err != nil {
+			return err
 		}
-		if uid, gid, ok := sudoUser(); ok {
+		noUnit := !exists(a.unitPath)
+		// The record of the modes of before tells that an install gave
+		// the folder to root, also one that failed before the unit.
+		if uid, gid, ok := sudoUser(); ok && (!noUnit || exists(a.savedModes)) {
 			if err := a.giveRelease(exe, uid, gid); err != nil {
 				return fmt.Errorf("nu pot da folderul probei înapoi contului dvs.: %w", err)
 			}
 			_, _ = fmt.Fprintln(a.out, "Folderul probei și programele din el sunt din nou ale contului dvs.")
+		}
+		if noUnit {
+			_, _ = fmt.Fprintln(a.out, "Pornirea automată nu este instalată.")
+			return nil
 		}
 		if err := a.run("systemctl", "disable", autostartName+".service"); err != nil {
 			return err
@@ -358,6 +381,10 @@ func (a autostart) uninstall(exe string) error {
 	if err := os.Remove(link); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// Before the time service's settings, whose folder goes once empty.
+	if err := a.removeHubConfig(); err != nil {
+		return err
+	}
 	if err := a.restoreTimeService(); err != nil {
 		return err
 	}
@@ -366,6 +393,22 @@ func (a autostart) uninstall(exe string) error {
 		return err
 	}
 	return a.removeBugcheckLeftovers()
+}
+
+// exists reports whether there is a file at path; one that cannot be read
+// counts as there.
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// removeHubConfig removes the config that the owner's MI1 runs started
+// ipcam-hub with: it names the session's camera addresses.
+func (a autostart) removeHubConfig() error {
+	if err := os.Remove(a.hubConfig); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("nu pot șterge %s: %w", a.hubConfig, err)
+	}
+	return nil
 }
 
 // myFault is the service of NotMyFault's driver, which stays registered

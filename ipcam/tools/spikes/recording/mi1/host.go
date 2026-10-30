@@ -140,7 +140,7 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 		return err
 	}
 	defer func() { _ = log.Close() }()
-	config, err := d.ownMediaMTX(cur)
+	config, err := d.hubConfig(st, cur, vol)
 	if err != nil {
 		return err
 	}
@@ -328,7 +328,7 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 		if err := SaveRunState(d.statePath(), st); err != nil {
 			return err
 		}
-		if _, err := d.ownMediaMTX(cur); err != nil {
+		if _, err := d.hubConfig(st, cur, vol); err != nil {
 			return err
 		}
 		again, err := hub.Restart()
@@ -431,7 +431,7 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 		return err
 	}
 	defer func() { _ = log.Close() }()
-	config, err := d.ownMediaMTX(cur)
+	config, err := d.hubConfig(st, cur, vol)
 	if err != nil {
 		return err
 	}
@@ -486,7 +486,7 @@ func (d *Driver) afterStop(ctx context.Context, s *session, st *RunState, cur *C
 	if err := SaveRunState(d.statePath(), st); err != nil {
 		return err
 	}
-	if _, err := d.ownMediaMTX(cur); err != nil {
+	if _, err := d.hubConfig(st, cur, vol); err != nil {
 		return err
 	}
 	again, err := hub.Restart()
@@ -708,26 +708,47 @@ func (d *Driver) writeRun(cur *CurrentRun, vol Volume, s *session) (string, erro
 	return config, errors.Join(syncPath(config), syncDir(dir), syncDir(d.Work))
 }
 
-// ownMediaMTX returns the run's run.json once it names the release's own
-// MediaMTX, d.MediaMTX ("" for the one next to ipcam-hub), before every
-// start of ipcam-hub: the first, the resume after a reboot and the
-// restarts after a stop run elevated on the PC (the boot task, the
-// shortcut), while run.json lies in work/, which the owner's own token may
-// change, and ipcam-hub runs the binary that it names (Final fix A review,
-// Minor 1).
-func (d *Driver) ownMediaMTX(cur *CurrentRun) (string, error) {
-	config := filepath.Join(d.runDir(cur.RunID), "run.json")
-	cfg, err := hubproc.ReadConfig(config)
+// HubConfigName is the file, in Driver.ConfigDir, that the owner's runs
+// start ipcam-hub with.
+const HubConfigName = "ipcam-hub-run.json"
+
+// hubConfig writes the config that ipcam-hub starts with, before each of
+// its starts (the first, the resume after a reboot, the restarts after a
+// stop), and returns its path. On the owner's devices these starts run
+// elevated (the boot task, the shortcut, root on the Pi), while the run's
+// run.json lies in work/, which the owner's own token may change (Final
+// fix A review, Minor 1; Final fix B review, M2). So only the
+// controller's camera jobs and the SD card's confirmation come from it;
+// the MediaMTX binary is the release's own (d.MediaMTX), the data
+// directory the run's volume's, and RI_g's file the one in the run's
+// folder when the run state says that the run is encrypted. The owner's
+// runs write the config into d.ConfigDir, which only Administrators and
+// SYSTEM, or root, may write; the lab's, and a driver without one, back
+// into run.json.
+func (d *Driver) hubConfig(st *RunState, cur *CurrentRun, vol Volume) (string, error) {
+	path := filepath.Join(d.runDir(cur.RunID), "run.json")
+	saved, err := hubproc.ReadConfig(path)
 	if err != nil {
 		return "", err
 	}
-	if cfg.MediaMTX != d.MediaMTX {
-		cfg.MediaMTX = d.MediaMTX
-		if err := hubproc.WriteConfig(config, cfg); err != nil {
-			return "", err
-		}
+	cfg := hubproc.Config{DataDir: vol.DataDir(), MediaMTX: d.MediaMTX, SDCardConfirmed: saved.SDCardConfirmed, Jobs: saved.Jobs}
+	if cur.Encrypted {
+		cfg.IdentityFile = filepath.Join(d.runDir(cur.RunID), "ri_g.key")
 	}
-	return config, nil
+	if d.ConfigDir != "" && st.Mode != ModeLab {
+		protect := d.protectDir
+		if protect == nil {
+			protect = protectConfigDir
+		}
+		if err := protect(d.ConfigDir); err != nil {
+			return "", fmt.Errorf("nu pot proteja folderul %s, din care pornește ipcam-hub: %w", d.ConfigDir, err)
+		}
+		path = filepath.Join(d.ConfigDir, HubConfigName)
+	}
+	if err := hubproc.WriteConfig(path, cfg); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // identity reads the run's RI_g; nil for a clear run.

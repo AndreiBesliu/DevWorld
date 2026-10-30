@@ -173,7 +173,7 @@ func loadRunStates(path string) (*runStates, error) {
 func (s *runStates) validRunIDs() error {
 	for _, st := range s.Sets {
 		if st != nil && st.Current != nil && !results.FileName(st.Current.RunID) {
-			return fmt.Errorf("the run id %q is not a file name", st.Current.RunID)
+			return fmt.Errorf("identificatorul rulării %q nu este un nume de fișier", st.Current.RunID)
 		}
 	}
 	return nil
