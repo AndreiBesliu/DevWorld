@@ -181,6 +181,22 @@ func onRelease(cmds [][]string) [][]string {
 	return out
 }
 
+// modesOf is the permission bits of each path, as the fake chmod records
+// them: on Linux the modes that the test gave, on Windows, where the Pi's
+// tests run too, the ones that Go makes up.
+func modesOf(t *testing.T, paths ...string) map[string]string {
+	t.Helper()
+	modes := map[string]string{}
+	for _, p := range paths {
+		info, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		modes[p] = info.Mode().Perm().String()
+	}
+	return modes
+}
+
 // named is the commands of cmds that run name.
 func named(cmds [][]string, name string) [][]string {
 	var out [][]string
@@ -689,6 +705,7 @@ func TestInstall_PiReleaseBelongsToRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	before := modesOf(t, release, exe, filepath.Join(release, "reccontroller"), filepath.Join(release, "ipcam-hub"), filepath.Join(release, "mediamtx"))
 	a, f, _ := newAutostart(t, "linux", true)
 	var out strings.Builder
 	a.out = &out
@@ -717,11 +734,7 @@ func TestInstall_PiReleaseBelongsToRoot(t *testing.T) {
 	// owner.
 	want = nil
 	for _, p := range []string{release, exe, filepath.Join(release, "reccontroller"), filepath.Join(release, "ipcam-hub"), filepath.Join(release, "mediamtx")} {
-		mode := "-rwxr-xr-x"
-		if p == release {
-			mode = "-rwxr-x---"
-		}
-		want = append(want, p+" "+mode)
+		want = append(want, p+" "+before[p])
 	}
 	for _, p := range []string{release, exe, filepath.Join(release, "reccontroller"), filepath.Join(release, "ipcam-hub"), filepath.Join(release, "mediamtx")} {
 		want = append(want, p+" 1000:1001")
@@ -827,6 +840,7 @@ func TestUninstall_PiRestoresTheModesOfBefore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	before := modesOf(t, release, exe, filepath.Join(release, "ipcam-hub"))
 	t.Setenv("SUDO_UID", "1000")
 	t.Setenv("SUDO_GID", "1001")
 
@@ -848,7 +862,8 @@ func TestUninstall_PiRestoresTheModesOfBefore(t *testing.T) {
 	if err := a.uninstall(exe); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	for _, change := range []string{release + " -rwxr-x---", exe + " -rwxr-xr-x", filepath.Join(release, "ipcam-hub") + " -rwx------"} {
+	for _, p := range []string{release, exe, filepath.Join(release, "ipcam-hub")} {
+		change := p + " " + before[p]
 		if !slices.Contains(f.owners, change) {
 			t.Errorf("uninstall changed %q, want %q among them", f.owners, change)
 		}
