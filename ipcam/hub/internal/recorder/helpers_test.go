@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -91,10 +93,23 @@ type fakeChildDump struct {
 //   - "dump:<file>": it writes its arguments, environment and PID to file,
 //     then waits;
 //   - "stderr:<n>": it writes the lines "line 1" … "line <n>" to stderr,
-//     then waits.
+//     then waits;
+//   - "slowstop:<file>": it creates file once it catches the stop signal
+//     (SIGTERM, or Ctrl+Break on Windows), then waits; asked to stop, it
+//     exits slowStop later, as a MediaMTX that closes many segments on a
+//     slow card would.
 func runFakeChild(mode string, args []string) int {
 	switch {
 	case mode == "sleep":
+	case strings.HasPrefix(mode, "slowstop:"):
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+		if err := os.WriteFile(strings.TrimPrefix(mode, "slowstop:"), nil, 0o600); err != nil { //nolint:gosec // a file that the test named
+			return 2
+		}
+		<-stop
+		time.Sleep(slowStop)
+		return 0
 	case strings.HasPrefix(mode, "dump:"):
 		b, _ := json.Marshal(fakeChildDump{Args: args, Env: os.Environ(), PID: os.Getpid()})
 		tmp := strings.TrimPrefix(mode, "dump:") + ".tmp"
@@ -300,10 +315,37 @@ func (o *testObserver) snapshot() testObserver {
 	}
 }
 
+// waitFinalReport waits until the reconcile update with the highest Seq is a
+// final one after the startup's, and returns its report: the report once the
+// background work is done. The update that says repairs are queued is not
+// final and still carries the report from before them.
+func waitFinalReport(t *testing.T, obs *testObserver) ReconcileReport {
+	t.Helper()
+	var last ReconcileUpdate
+	waitFor(t, 10*time.Second, "no final reconcile update after the startup's", func() bool {
+		for _, u := range obs.snapshot().updates {
+			if u.Seq > last.Seq {
+				last = u
+			}
+		}
+		return last.Seq > 1 && last.Final
+	})
+	return last.ReconcileReport
+}
+
 // startFake runs New with this test binary as a fake MediaMTX in mode, in a
 // fresh data layout, and returns the recorder and its directories. The
 // recorder stops when the test ends.
 func startFake(t *testing.T, mode string, cfg Config) (*rec, Config) {
+	t.Helper()
+	r, cfg, _ := startFakeStoppable(t, mode, cfg)
+	return r, cfg
+}
+
+// startFakeStoppable is startFake, with stop, which stops the recorder, as
+// ipcam-hub's stop does, and returns once it has stopped; the test's end
+// calls it too.
+func startFakeStoppable(t *testing.T, mode string, cfg Config) (*rec, Config, func()) {
 	t.Helper()
 	t.Setenv(fakeChildEnv, mode)
 	self, err := os.Executable()
@@ -325,17 +367,21 @@ func startFake(t *testing.T, mode string, cfg Config) (*rec, Config) {
 		cfg.HookCommand = []string{self, "hook", "segment-complete"}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	r, report, err := New(ctx, cfg)
+	started, report, err := New(ctx, cfg)
 	if err != nil {
 		cancel()
 		t.Fatalf("New: %v (report %+v)", err, report)
 	}
-	t.Cleanup(func() {
-		cancel()
-		for range r.Closed(context.Background()) {
-		}
-	})
-	return r.(*rec), cfg
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			for range started.Closed(context.Background()) {
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return started.(*rec), cfg, stop
 }
 
 // The fMP4 recordings of the tests are written with mediacommon, as MediaMTX
@@ -652,6 +698,24 @@ func setSyncDir(f func(dir string) error) (restore func()) {
 	return func() { syncDir = previous }
 }
 
+// setReadDir replaces the listing of the directories under rec/ until
+// restore is called. A test that starts a recorder sets it before, and
+// restores it in a t.Cleanup registered before the recorder's, so that no
+// background loop reads it while it changes.
+func setReadDir(f func(dir string) ([]os.DirEntry, error)) (restore func()) {
+	previous := readDir
+	readDir = f
+	return func() { readDir = previous }
+}
+
+// setWriteConfigFile replaces the write of MediaMTX's configuration until
+// restore is called, under the same rule as setReadDir.
+func setWriteConfigFile(f func(path string, data []byte, perm os.FileMode) error) (restore func()) {
+	previous := writeConfigFile
+	writeConfigFile = f
+	return func() { writeConfigFile = previous }
+}
+
 // setVerifyOpenHook makes each verification call f with the path of each
 // segment it has opened, until restore is called.
 func setVerifyOpenHook(f func(path string)) (restore func()) {
@@ -666,6 +730,55 @@ func setRewriteHook(f func()) (restore func()) {
 	previous := rewriteHook
 	rewriteHook = f
 	return func() { rewriteHook = previous }
+}
+
+// slowStop is how long a "slowstop" fake MediaMTX takes to stop: more than
+// Windows' stop grace, less than Linux's.
+const slowStop = 7 * time.Second
+
+// setShutdownNoteTimeout bounds the notes of the failed writes queued at the
+// hub's stop by d, until restore is called.
+func setShutdownNoteTimeout(d time.Duration) (restore func()) {
+	previous := shutdownNoteTimeout
+	shutdownNoteTimeout = d
+	return func() { shutdownNoteTimeout = previous }
+}
+
+// setWalkRecDir makes every listing of the recordings directory walk with
+// f, until restore is called.
+func setWalkRecDir(f func(root string, fn fs.WalkDirFunc) error) (restore func()) {
+	previous := walkRecDir
+	walkRecDir = f
+	return func() { walkRecDir = previous }
+}
+
+// unreadableDir is a walk of the recordings directory in which dir cannot
+// be read, as filepath.WalkDir reports a directory whose ReadDir fails: it
+// visits dir, then visits it again with the error, and visits nothing under
+// it.
+func unreadableDir(dir string) func(root string, fn fs.WalkDirFunc) error {
+	return func(root string, fn fs.WalkDirFunc) error {
+		return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || path != dir {
+				return fn(path, d, err)
+			}
+			if err := fn(path, d, nil); err != nil {
+				return err
+			}
+			if err := fn(path, d, &fs.PathError{Op: "readdirent", Path: path, Err: errors.New("injected: input/output error")}); err != nil {
+				return err
+			}
+			return fs.SkipDir
+		})
+	}
+}
+
+// setStatSegment makes reconcile read the size of each final file for the
+// catalog with f, until restore is called.
+func setStatSegment(f func(path string) (os.FileInfo, error)) (restore func()) {
+	previous := statSegment
+	statSegment = f
+	return func() { statSegment = previous }
 }
 
 // setOpenSegment makes reconcile open each segment that it repairs with f,

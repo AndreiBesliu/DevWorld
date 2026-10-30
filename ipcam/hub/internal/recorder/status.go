@@ -37,17 +37,25 @@ type partState struct {
 	// created, and left those that poll reported as left behind.
 	seen map[string]uint64
 	left map[string]bool
+	// resumeAfter, when set, is a failed creation of a segment's file, to
+	// the microsecond of the names: the next new .part that starts at it or
+	// later is reported as recording resumed (expectResume).
+	resumeAfter time.Time
 }
 
 func newPartState(baseline map[string]bool) *partState {
 	return &partState{baseline: baseline, seen: map[string]uint64{}, left: map[string]bool{}}
 }
 
-// firstPart is the first growth of a new .part after the child started.
+// firstPart is the first growth of a new .part after the child started, or
+// after a failed creation of a segment's file (expectResume).
 type firstPart struct {
 	key          streamKey
 	at           time.Time // when the poll saw it
 	segmentStart time.Time // from the .part's name
+	// resumed is a part after a failed creation: not the stream's first
+	// since the child started.
+	resumed bool
 }
 
 func newPartWatcher(recDir string) *partWatcher {
@@ -86,6 +94,48 @@ func (w *partWatcher) childStarted(time.Time) {
 	}
 }
 
+// claimFirst marks the stream's first part since the child started as
+// reported, and reports whether no poll had reported it: a segment that
+// closed before a poll saw its .part grow.
+func (w *partWatcher) claimFirst(k streamKey) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s, ok := w.streams[k]
+	if !ok || s.reported {
+		return false
+	}
+	s.reported = true
+	return true
+}
+
+// expectResume makes poll report the stream's next .part that starts at at
+// or later, to the microsecond of its name (nameTime), and grows as a
+// firstPart, resumed: MediaMTX could not create the file of a segment at
+// at, and the stream's open gap ends where recording resumes, also when
+// that is not its first part since the child started.
+func (w *partWatcher) expectResume(k streamKey, at time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if s, ok := w.streams[k]; ok {
+		s.resumeAfter = nameTime(at)
+	}
+}
+
+// nameTime is t to the microsecond, the precision of a segment's name
+// (MTX-4): a segment whose name is t's microsecond or later started at t or
+// after it, whatever finer digits the hub's clock gave t; on Windows the
+// clock can give a failure and the next segment the same tick.
+func nameTime(t time.Time) time.Time { return t.Truncate(time.Microsecond) }
+
+// inBaseline reports whether path is one of the stream's .part files that
+// were there when the child started: one that no child writes.
+func (w *partWatcher) inBaseline(k streamKey, path string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s, ok := w.streams[k]
+	return ok && s.baseline[path]
+}
+
 func (w *partWatcher) segmentClosed(k streamKey, at time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -95,8 +145,9 @@ func (w *partWatcher) segmentClosed(k streamKey, at time.Time) {
 }
 
 // poll reads the size of each stream's newest .part and returns the
-// streams whose first part this is, and the .part files that a newer one
-// left behind (leftBehind).
+// streams whose first part this is, or whose recording resumed after a
+// failed creation (expectResume), and the .part files that a newer one left
+// behind (leftBehind).
 func (w *partWatcher) poll(now time.Time) (firsts []firstPart, left []string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -114,14 +165,21 @@ func (w *partWatcher) poll(now time.Time) (firsts []firstPart, left []string) {
 			continue
 		}
 		s.lastGrowth = now
-		if !s.reported {
-			s.reported = true
-			f := firstPart{key: k, at: now, segmentStart: now}
-			if seg, ok := parseSegment(w.recDir, filepath.Join(string(k.cam), string(k.profile), filepath.Base(filepath.Dir(path)), filepath.Base(path))); ok {
-				f.segmentStart = seg.start
-			}
-			firsts = append(firsts, f)
+		if s.reported && s.resumeAfter.IsZero() {
+			continue
 		}
+		f := firstPart{key: k, at: now, segmentStart: now}
+		if seg, ok := parseSegment(w.recDir, filepath.Join(string(k.cam), string(k.profile), filepath.Base(filepath.Dir(path)), filepath.Base(path))); ok {
+			f.segmentStart = seg.start
+		}
+		if s.reported {
+			if f.segmentStart.Before(s.resumeAfter) {
+				continue // a .part from before the failed creation
+			}
+			f.resumed = true
+		}
+		s.reported, s.resumeAfter = true, time.Time{}
+		firsts = append(firsts, f)
 	}
 	return firsts, left
 }
@@ -211,10 +269,13 @@ func partFiles(streamDir string) []string {
 	return parts
 }
 
+// readDir lists a directory under rec/; tests replace it.
+var readDir = os.ReadDir
+
 // recentFiles lists the entries of the three newest date directories of a
 // stream.
 func recentFiles(streamDir string) []string {
-	days, err := os.ReadDir(streamDir)
+	days, err := readDir(streamDir)
 	if err != nil {
 		return nil
 	}
@@ -223,7 +284,7 @@ func recentFiles(streamDir string) []string {
 		if !day.IsDir() {
 			continue
 		}
-		entries, err := os.ReadDir(filepath.Join(streamDir, day.Name()))
+		entries, err := readDir(filepath.Join(streamDir, day.Name()))
 		if err != nil {
 			continue
 		}

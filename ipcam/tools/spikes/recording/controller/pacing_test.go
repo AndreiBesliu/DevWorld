@@ -58,18 +58,28 @@ func TestPacing_P99AndSkipped(t *testing.T) {
 	p.skipped(markAt.Add(time.Second), 1)
 	p.skipped(markAt.Add(2*time.Second), 2)
 	stop := markAt.Add(3 * time.Second)
-	// After the stop, a host that lost power fills the write queue.
+	// The controller marks the end when the host's beacons have gone silent,
+	// shortly after the stop.
+	end := p.mark(stop.Add(BeaconSilence))
+	// After the stop, a host that lost power fills the write queue, and the
+	// controller, busy with the reboot's reconnect, sends cam02 five frames
+	// 1 s late each, over 1 % of its intervals: none of it belongs to the run.
 	p.skipped(stop.Add(4*time.Second), 40)
+	for range 5 {
+		atB = atB.Add(period + time.Second)
+		tick(clockB, simB, atB)
+	}
 
-	got := p.since(mark, stop)
+	got := p.between(mark, end, stop)
 	if got.P99 != 120*time.Millisecond {
-		t.Errorf("P99 = %v, want 120 ms (cam01's run, without cam02's earlier delay)", got.P99)
+		t.Errorf("P99 = %v, want 120 ms (cam01's run, without cam02's delays before the mark and after the end)", got.P99)
 	}
 	if got.SkippedAUs != 3 {
 		t.Errorf("SkippedAUs = %d, want 3 (between the mark and the stop)", got.SkippedAUs)
 	}
 
-	if quiet := p.since(p.mark(atA), atA.Add(time.Minute)); quiet.P99 != 0 || quiet.SkippedAUs != 40 {
+	now := p.mark(atA)
+	if quiet := p.between(now, p.mark(atA.Add(time.Minute)), atA.Add(time.Minute)); quiet.P99 != 0 || quiet.SkippedAUs != 40 {
 		t.Errorf("a run that starts now: %+v, want P99 0 and the 40 later skips", quiet)
 	}
 }

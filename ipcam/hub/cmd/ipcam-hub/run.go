@@ -19,12 +19,17 @@ import (
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/health"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/recorder"
 )
 
 // statusInterval is how often each job's status goes out as an event and
 // into the status file.
 const statusInterval = time.Second
+
+// mountInfoPath is the mount table that tells whether rec/ is on an SD card
+// (T40); tests replace it, and Windows has none.
+var mountInfoPath = health.SystemRoots.MountInfo
 
 // runConfig is run.json.
 type runConfig struct {
@@ -35,8 +40,8 @@ type runConfig struct {
 	// IdentityFile is RI_g's identity, a 0600 file, for reconcile and the
 	// verification of encrypted segments; empty when every job is clear.
 	IdentityFile string `json:"identityFile"`
-	// SDCardConfirmed is the owner's answer to the SD-card warning (T40);
-	// the card check that reads it comes with the SD-card detection (Task 7a).
+	// SDCardConfirmed is the owner's answer to the SD-card warning (T40):
+	// without it, ipcam-hub writes nothing while rec/ is on an SD card.
 	SDCardConfirmed bool        `json:"sdCardConfirmed"`
 	Jobs            []runJobDef `json:"jobs"`
 }
@@ -135,8 +140,10 @@ func loadIdentity(path string) (*age.X25519Identity, error) {
 }
 
 // runCommand is "ipcam-hub run": it reconciles, records the jobs of
-// run.json and reports, until SIGTERM, Ctrl-C or Ctrl-Break.
-func runCommand(args []string, stdout, stderr io.Writer) int {
+// run.json and reports, until SIGTERM, Ctrl-C or Ctrl-Break, or, with
+// --stop-on-stdin-eof, until its stdin ends: a stop that needs no console,
+// which recspike uses, also from a boot task that has none (G14).
+func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ev := &events{out: stdout}
 	fail := func(err error) int {
 		ev.emit("error", map[string]any{"message": err.Error()})
@@ -146,15 +153,25 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "the run configuration (run.json)")
+	stopOnEOF := flags.Bool("stop-on-stdin-eof", false, "stop cleanly, as on SIGTERM, when stdin ends")
 	if err := flags.Parse(args); err != nil {
 		return exitFatal
 	}
 	if *configPath == "" || flags.NArg() != 0 {
-		return fail(errors.New("usage: ipcam-hub run --config <run.json>"))
+		return fail(errors.New("usage: ipcam-hub run --config <run.json> [--stop-on-stdin-eof]"))
 	}
 	cfg, jobs, id, err := loadRunConfig(*configPath)
 	if err != nil {
 		return fail(err)
+	}
+	// HUB-17, T40: no segment goes to an SD card before the owner confirmed
+	// the wear warning, so nothing under the data directory changes first:
+	// no reconcile, no catalog, no MediaMTX.
+	onSdCard := health.IsSdCard(mountInfoPath, filepath.Join(cfg.DataDir, "rec"))
+	if !cfg.SDCardConfirmed && onSdCard {
+		ev.emit("sd_card_unconfirmed", nil)
+		_, _ = fmt.Fprintln(stderr, "ipcam-hub: rec/ is on an SD card, and run.json does not confirm the SD-card warning (sdCardConfirmed)")
+		return exitSdCardUnconfirmed
 	}
 
 	// <data>/state/catalog.db, <data>/state/run/, <data>/rec/, and <data>/tmp/,
@@ -188,13 +205,32 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if *stopOnEOF {
+		go func() {
+			_, _ = io.Copy(io.Discard, stdin)
+			stop()
+		}()
+		// MediaMTX's clean stop is a Ctrl+Break to its process group, which
+		// needs a console that it shares with the hub. Only recspike's
+		// console-less stop asks for one: a hub started otherwise never
+		// opens a console window in the owner's session.
+		ensureConsole()
+	}
 	cat, err := catalog.Open(ctx, filepath.Join(stateDir, "catalog.db"))
 	if err != nil {
 		return fail(err)
 	}
 	defer func() { _ = cat.Close() }()
 	rc.Catalog = cat
-	rc.Observer = &observer{ev: ev, stderr: stderr}
+	// While rec/ is on an SD card, the card monitor watches it (T40, G17).
+	var card *cardSampler
+	if onSdCard {
+		card = newCardSampler(rc.RecDir, mountInfoPath, ev)
+		card.begin()
+	}
+	obs := newObserver(ev, stderr, card)
+	defer obs.close()
+	rc.Observer = obs
 
 	// New gives the reconcile event out (observer.Reconciled), as later updates.
 	rec, _, err := recorder.New(ctx, rc)
@@ -204,6 +240,9 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		return fail(err)
+	}
+	if card != nil {
+		card.attach(rec)
 	}
 	if err := rec.Apply(ctx, jobs); err != nil {
 		stop()
@@ -216,6 +255,15 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 		ready = append(ready, map[string]any{"cam": j.Cam, "profile": j.Profile, "encrypted": j.Scope != nil, "padLowBitrate": j.PadLowBitrate})
 	}
 	ev.emit("ready", map[string]any{"jobs": ready})
+	sampled := make(chan struct{}) // closed once the card sampler has returned
+	if card != nil {
+		go func() {
+			defer close(sampled)
+			card.run(ctx, jobs)
+		}()
+	} else {
+		close(sampled)
+	}
 
 	tick := time.NewTicker(statusInterval)
 	defer tick.Stop()
@@ -224,7 +272,12 @@ func runCommand(args []string, stdout, stderr io.Writer) int {
 		select {
 		case s, ok := <-closed:
 			if !ok {
-				return exitOK // the recorder stopped after SIGTERM or Ctrl-C
+				// The recorder stopped after SIGTERM or Ctrl-C. The card sampler
+				// returns once its goroutines have ended (cardSampler.join), so
+				// that its stop of the jobs, which writes the catalog, ends before
+				// the catalog closes.
+				<-sampled
+				return exitOK
 			}
 			ev.emit("segment_closed", map[string]any{"cam": s.Cam, "profile": s.Profile, "path": s.Path,
 				"startMs": s.StartMs, "endMs": s.EndMs, "encrypted": s.Encrypted})

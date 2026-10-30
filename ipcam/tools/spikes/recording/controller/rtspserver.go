@@ -239,12 +239,15 @@ func (s *Server) Close() {
 	<-s.closed
 }
 
-// MarkPacing captures the pacing state at the start of a run.
+// MarkPacing captures the pacing state now: at the start of a run, and at
+// its end, when its beacons have gone silent.
 func (s *Server) MarkPacing() PacingMark { return s.pacing.mark(s.clock.Now()) }
 
-// Pacing returns the pacing of the run that started at m and whose host
-// stopped at until (its StopAt).
-func (s *Server) Pacing(m PacingMark, until time.Time) PacingStats { return s.pacing.since(m, until) }
+// Pacing returns the pacing of the run between the marks start and end,
+// with the skips up to stopAt, the run's StopAt.
+func (s *Server) Pacing(start, end PacingMark, stopAt time.Time) PacingStats {
+	return s.pacing.between(start, end, stopAt)
+}
 
 // parameterSets returns the first SPS and PPS of the access units.
 func parameterSets(aus []source.AccessUnit) (sps, pps []byte) {

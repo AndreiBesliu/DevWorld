@@ -80,45 +80,133 @@ func LastRecorded(ctx context.Context, files Before, id age.Identity) (uint64, e
 // lastInFile reads the index of the file's last complete sample; ok is false
 // when the file does not exist or holds no complete part.
 func lastInFile(path string, id age.Identity) (index uint64, ok bool, err error) {
-	f, err := os.Open(path) //nolint:gosec // a segment file that recspike listed
+	f, data, size, err := openPlaintext(path, id)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, false, nil
 	}
-	if err != nil {
+	if err != nil || f == nil {
 		return 0, false, err
 	}
 	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	if err != nil {
-		return 0, false, err
-	}
-	var data io.ReaderAt = f
-	size := info.Size()
-	if strings.HasSuffix(path, suffixAge) {
-		if id == nil {
-			return 0, false, errors.New("an encrypted segment and no identity")
-		}
-		if size == 0 {
-			return 0, false, nil
-		}
-		if data, size, err = age.DecryptReaderAt(f, size, id); err != nil {
-			return 0, false, err
-		}
-	}
-	moof, end, found, err := lastPart(data, size)
+	var moof, end int64
+	found := false
+	err = walkParts(data, size, func(m, e int64) error {
+		moof, end, found = m, e, true
+		return nil
+	})
 	if err != nil || !found {
 		return 0, false, err
 	}
+	parts, err := readPart(data, moof, end)
+	if err != nil {
+		return 0, false, err
+	}
+	return lastIndexIn(parts)
+}
+
+// openPlaintext opens a segment file and returns its plaintext, decrypted
+// with id for an .age file. f is nil, with no error, for an encrypted file
+// of no bytes, which has no plaintext.
+func openPlaintext(path string, id age.Identity) (f *os.File, data io.ReaderAt, size int64, err error) {
+	f, err = os.Open(path) //nolint:gosec // a segment file that recspike listed
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, 0, err
+	}
+	data, size = f, info.Size()
+	if strings.HasSuffix(path, suffixAge) {
+		if id == nil {
+			_ = f.Close()
+			return nil, nil, 0, errors.New("an encrypted segment and no identity")
+		}
+		if size == 0 {
+			_ = f.Close()
+			return nil, nil, 0, nil
+		}
+		if data, size, err = age.DecryptReaderAt(f, size, id); err != nil {
+			_ = f.Close()
+			return nil, nil, 0, err
+		}
+	}
+	return f, data, size, nil
+}
+
+// readPart reads the part, a moof and its mdat, at [moof, end) of data.
+func readPart(data io.ReaderAt, moof, end int64) (fmp4.Parts, error) {
 	if end-moof > maxPart {
-		return 0, false, fmt.Errorf("a part of %d bytes", end-moof)
+		return nil, fmt.Errorf("a part of %d bytes", end-moof)
 	}
 	buf := make([]byte, end-moof)
 	if _, err := data.ReadAt(buf, moof); err != nil && !errors.Is(err, io.EOF) {
-		return 0, false, err
+		return nil, err
 	}
 	var parts fmp4.Parts
 	if err := parts.Unmarshal(buf); err != nil {
-		return 0, false, err
+		return nil, err
+	}
+	return parts, nil
+}
+
+// Part is one complete part of a segment as the diagnostics of a loss show
+// it (Task 7.2d): its sequence number, its size (moof and mdat) and the SEI
+// indexes of its first and last samples.
+type Part struct {
+	Seq   uint32 `json:"seq"`
+	Bytes int64  `json:"bytes"`
+	First uint64 `json:"first"`
+	Last  uint64 `json:"last"`
+}
+
+// ReadParts reads every complete part of the segment file at path, an .age
+// one decrypted with id, and the file's size on disk. A torn part at the end
+// is not one of them.
+func ReadParts(path string, id age.Identity) (size int64, parts []Part, err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, nil, err
+	}
+	f, data, plain, err := openPlaintext(path, id)
+	if err != nil || f == nil {
+		return info.Size(), nil, err
+	}
+	defer func() { _ = f.Close() }()
+	err = walkParts(data, plain, func(moof, end int64) error {
+		decoded, err := readPart(data, moof, end)
+		if err != nil {
+			return err
+		}
+		for _, p := range decoded {
+			part := Part{Seq: p.SequenceNumber, Bytes: end - moof}
+			for _, track := range p.Tracks {
+				for i, sample := range track.Samples {
+					var au h264.AVCC
+					if err := au.Unmarshal(sample.Payload); err != nil {
+						return err
+					}
+					index, _ := controller.ReadIndex(au)
+					if i == 0 {
+						part.First = index
+					}
+					part.Last = index
+				}
+			}
+			parts = append(parts, part)
+		}
+		return nil
+	})
+	return info.Size(), parts, err
+}
+
+// lastIndexIn reads the index of the last sample of the last part; ok is
+// false when there is no part or the part has no sample, so that the file
+// reads as one without a complete sample.
+func lastIndexIn(parts fmp4.Parts) (index uint64, ok bool, err error) {
+	if len(parts) == 0 {
+		return 0, false, nil
 	}
 	for _, track := range parts[len(parts)-1].Tracks {
 		if len(track.Samples) == 0 {
@@ -136,16 +224,16 @@ func lastInFile(path string, id age.Identity) (index uint64, ok bool, err error)
 	return 0, false, nil
 }
 
-// lastPart walks the top-level boxes of a recording's plaintext (ftyp, moov,
-// then a moof and an mdat per part, with free boxes as MTX-2's padding) and
-// returns where the last complete part starts and ends. A box that runs
-// past the end, as a cut leaves, ends the walk.
-func lastPart(r io.ReaderAt, size int64) (moof, end int64, found bool, err error) {
+// walkParts walks the top-level boxes of a recording's plaintext (ftyp,
+// moov, then a moof and an mdat per part, with free boxes as MTX-2's
+// padding) and calls visit with where each complete part starts and ends,
+// in order. A box that runs past the end, as a cut leaves, ends the walk.
+func walkParts(r io.ReaderAt, size int64, visit func(moof, end int64) error) error {
 	var pendingMoof int64 = -1
 	for off := int64(0); size-off >= 8; {
 		var h [16]byte
 		if _, err := r.ReadAt(h[:8], off); err != nil {
-			return 0, 0, false, err
+			return err
 		}
 		boxSize, hdr := int64(binary.BigEndian.Uint32(h[:4])), int64(8)
 		if boxSize == 1 {
@@ -153,7 +241,7 @@ func lastPart(r io.ReaderAt, size int64) (moof, end int64, found bool, err error
 				break
 			}
 			if _, err := r.ReadAt(h[8:16], off+8); err != nil {
-				return 0, 0, false, err
+				return err
 			}
 			boxSize, hdr = int64(binary.BigEndian.Uint64(h[8:16])), 16 //nolint:gosec // checked below
 		}
@@ -165,7 +253,9 @@ func lastPart(r io.ReaderAt, size int64) (moof, end int64, found bool, err error
 			pendingMoof = off
 		case "mdat":
 			if pendingMoof >= 0 {
-				moof, end, found = pendingMoof, off+boxSize, true
+				if err := visit(pendingMoof, off+boxSize); err != nil {
+					return err
+				}
 			}
 			pendingMoof = -1
 		case "free", "skip":
@@ -174,5 +264,5 @@ func lastPart(r io.ReaderAt, size int64) (moof, end int64, found bool, err error
 		}
 		off += boxSize
 	}
-	return moof, end, found, nil
+	return nil
 }

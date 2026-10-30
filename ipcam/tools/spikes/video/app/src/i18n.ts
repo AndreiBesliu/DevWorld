@@ -67,6 +67,7 @@ const ro = {
   descS8: 'Argon2id, 10 rulări (MV15)',
   descS9: 'Matricea de codecuri: H.265 și H.264 High 5.1 (G9)',
   descS10: 'Perechea ICE și cererea de permisiune (MV12, MV13)',
+  descAGE: 'Viteză agerange (MI4)',
 } as const;
 
 export type MessageKey = keyof typeof ro;
@@ -132,6 +133,7 @@ const en: Record<MessageKey, string> = {
   descS8: 'Argon2id, 10 runs (MV15)',
   descS9: 'Codec matrix: H.265 and H.264 High 5.1 (G9)',
   descS10: 'ICE pair and permission prompt (MV12, MV13)',
+  descAGE: 'agerange speed (MI4)',
 };
 
 export const MESSAGES: Record<Lang, Record<MessageKey, string>> = { ro, en };

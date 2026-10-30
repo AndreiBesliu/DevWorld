@@ -1,0 +1,500 @@
+// SPIKE-ONLY: ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md
+
+package mi1
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"net"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"time"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
+)
+
+// answerPull serves the far side's pull_results with the results folder,
+// until it closes the link.
+func answerPull(ctx context.Context, s *session, dir string, out io.Writer) error {
+	timeout := time.NewTimer(verdictTimeout)
+	defer timeout.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout.C:
+			return nil
+		case r, ok := <-s.in:
+			if !ok || r.err != nil {
+				return nil // the controller closed the link
+			}
+			if _, ok := r.m.(link.PullResults); ok {
+				if err := s.c.SendResultsTar(dir); err != nil {
+					return err
+				}
+				if out != nil {
+					_, _ = fmt.Fprintln(out, "Am trimis rezultatele.")
+				}
+			}
+		}
+	}
+}
+
+// geteuid, fileOwner and dialLink are the system's; tests replace them.
+var (
+	geteuid   = os.Geteuid
+	fileOwner = ownerUID
+	dialLink  = link.Dial
+)
+
+// pushNeedsSudo is push's answer when root owns the results.
+const pushNeedsSudo = "rezultatele sunt ale lui root, fiindcă proba a rulat cu sudo: " +
+	"porniți și trimiterea cu sudo (sudo ./recspike push --controller <adresa PC-ului>)"
+
+// needsRoot reports whether recspike, run as a user other than root, cannot
+// read the results folder dir: on the Pi, MI1 runs as root, so root owns its
+// results, which only root may read. On Windows (no euid) it is false.
+func needsRoot(dir string) (bool, error) {
+	if geteuid() <= 0 {
+		return false, nil
+	}
+	root := false
+	err := filepath.WalkDir(dir, func(_ string, e fs.DirEntry, err error) error {
+		switch {
+		case errors.Is(err, fs.ErrPermission):
+			root = true
+			return filepath.SkipAll
+		case errors.Is(err, fs.ErrNotExist):
+			return nil
+		case err != nil:
+			return err
+		}
+		info, err := e.Info()
+		if err != nil {
+			return err
+		}
+		if fileOwner(info) == 0 {
+			root = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return root, err
+}
+
+// Push is `recspike push --controller <PC>` on the Pi, the final collection
+// (G15): it connects to the PC's reccontroller, which pulls the results
+// folder dir (link.Push), and returns when the PC has it. Started without
+// sudo on results that root owns, it says so in Romanian before it
+// connects.
+func Push(ctx context.Context, addr, dir, host string, out io.Writer) error {
+	if root, err := needsRoot(dir); err != nil {
+		return err
+	} else if root {
+		return errors.New(pushNeedsSudo)
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	c, err := dialLink(dialCtx, addr)
+	cancel()
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("nu mă pot conecta la controlor (portul %d): %w", link.Port, err)
+	}
+	defer func() { _ = c.Close() }()
+	var noPull *link.NoPullError
+	switch err := link.Push(ctx, c, host, dir); {
+	case errors.As(err, &noPull):
+		return fmt.Errorf("controlorul a închis legătura înainte să ceară rezultatele: %w", noPull.Err)
+	case err != nil:
+		return err
+	}
+	_, _ = fmt.Fprintln(out, "Am trimis rezultatele.")
+	return nil
+}
+
+// CameraURLs connects to the controller at addr as host, dialing again for
+// up to a minute, reads its session, says goodbye, and returns the RTSP
+// address of each of streams, with the session's credentials: MI2's 72 h
+// run records the cameras of a reccontroller on the same device (G18, G19).
+// The addresses hold the credentials: they go only to the private run.json.
+func CameraURLs(ctx context.Context, addr, host string, streams []string) (map[string]string, error) {
+	h, err := OpenHostLink(ctx, addr, host)
+	if err != nil {
+		return nil, err
+	}
+	defer h.s.close()
+	urls := map[string]string{}
+	for _, stream := range streams {
+		if urls[stream], err = h.CameraURL(stream); err != nil {
+			return nil, err
+		}
+	}
+	return urls, h.s.send(link.Bye{})
+}
+
+// HostLink is a host's link to the controller, held for a whole probe, as
+// MI4's: the cameras' addresses at its start, and at its end the goodbye,
+// at which the PC's controller pulls a Pi's results folder (G15). A
+// goodbye at the start would have the controller pull before there is
+// anything to pull, from a link that is closing.
+type HostLink struct{ s *session }
+
+// OpenHostLink connects to the controller at addr as host, dialing again
+// for up to a minute, and reads its session.
+func OpenHostLink(ctx context.Context, addr, host string) (*HostLink, error) {
+	d := &Driver{Controller: addr, Host: HostState{Pseudonym: host}}
+	s, err := d.connectWithin(ctx, time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	return &HostLink{s: s}, nil
+}
+
+// CameraURL is the RTSP address of stream, with the session's credentials,
+// which go only to the private run.json.
+func (h *HostLink) CameraURL(stream string) (string, error) {
+	if !slices.Contains(h.s.info.Streams, stream) {
+		return "", fmt.Errorf("controlorul nu servește camera %s", stream)
+	}
+	return h.s.cameraURL(stream)
+}
+
+// Send sends m to the controller.
+func (h *HostLink) Send(m link.Message) error { return h.s.send(m) }
+
+// Await returns the controller's next message that want accepts, dropping
+// the others, within d.
+func (h *HostLink) Await(ctx context.Context, d time.Duration, want func(link.Message) bool) (link.Message, error) {
+	timeout := time.NewTimer(d)
+	defer timeout.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timeout.C:
+			return nil, fmt.Errorf("controlorul nu a răspuns în %v", d)
+		case r, ok := <-h.s.in:
+			switch {
+			case !ok:
+				return nil, fmt.Errorf("%w: %w", errLinkDown, io.EOF)
+			case r.err != nil:
+				return nil, r.err
+			case want(r.m):
+				return r.m, nil
+			}
+		}
+	}
+}
+
+// End says goodbye and answers the controller's pull of the results folder
+// dir, if it asks (a Pi's link to the PC's controller), until the
+// controller closes the link, then closes it.
+func (h *HostLink) End(ctx context.Context, dir string, out io.Writer) error {
+	defer h.s.close()
+	if err := h.s.send(link.Bye{}); err != nil {
+		return err
+	}
+	return answerPull(ctx, h.s, dir, out)
+}
+
+// session is the host's link to the controller: one goroutine reads its
+// messages into in, and closes broken when the link fails.
+type session struct {
+	c          *link.Conn
+	in         chan received
+	closed     chan struct{}
+	broken     chan struct{}
+	info       link.Session
+	beaconAddr string
+	// controllerHost is the controller's host as recspike dialed it.
+	controllerHost string
+}
+
+type received struct {
+	m   link.Message
+	err error
+}
+
+// errLinkDown is a failed link to the controller, which an unattended set
+// connects again.
+var errLinkDown = errors.New("legătura cu controlorul s-a întrerupt")
+
+// connect connects to the controller, retrying for a while after a boot,
+// when the network may not be up yet, and receives the session.
+func (d *Driver) connect(ctx context.Context) (*session, error) {
+	return d.connectWithin(ctx, connectTimeout)
+}
+
+// reconnect replaces the dropped link of s with a new one, in an unattended
+// set (automated or lab): it dials again for up to reconnectWait. A real
+// set's owner is at the host, and a drop ends it, as before.
+func (d *Driver) reconnect(ctx context.Context, s *session, st *RunState, cause error) error {
+	if st.Mode == ModeReal {
+		return cause
+	}
+	d.say("%v; mă reconectez…", cause)
+	fresh, err := d.connectWithin(ctx, reconnectWait)
+	if err != nil {
+		return fmt.Errorf("%w, și nu s-a refăcut: %w", cause, err)
+	}
+	s.close()
+	*s = *fresh
+	d.say("Legătura cu controlorul s-a refăcut.")
+	return nil
+}
+
+// connectWithin connects to the controller, dialing again for up to retry,
+// and receives the session.
+func (d *Driver) connectWithin(ctx context.Context, retry time.Duration) (*session, error) {
+	s, err := dialSession(ctx, d.Controller, d.Host.Pseudonym, retry, d.linkDown)
+	if err != nil {
+		return nil, err
+	}
+	m, err := s.await(ctx, time.Minute, "session")
+	if err != nil {
+		s.close()
+		return nil, fmt.Errorf("controlorul nu a trimis sesiunea: %w", err)
+	}
+	s.info = m.(link.Session)
+	host, _, err := net.SplitHostPort(d.Controller)
+	if err != nil {
+		s.close()
+		return nil, err
+	}
+	port := s.info.BeaconPort
+	if port == 0 {
+		port = link.BeaconPort
+	}
+	s.beaconAddr = net.JoinHostPort(host, strconv.Itoa(port))
+	s.controllerHost = host
+	return s, nil
+}
+
+// cameraURL is the RTSP address of a stream, with the session's
+// credentials: the controller's RTSP port, at the controller's host as
+// recspike dialed it, as the beacon's address is. The session names the
+// address on which the controller saw the link arrive, which is not the
+// host's way to it through QEMU's user network: a lab guest dials 10.0.2.2,
+// and the runner's controller sees its own loopback address (R03).
+func (s *session) cameraURL(stream string) (string, error) {
+	base, err := url.Parse(s.info.RTSPBase)
+	if err != nil || base.Port() == "" {
+		return "", fmt.Errorf("controlorul a trimis o adresă RTSP greșită: %q", s.info.RTSPBase)
+	}
+	u := url.URL{Scheme: base.Scheme, User: url.UserPassword(s.info.User, s.info.Pass), Host: net.JoinHostPort(s.controllerHost, base.Port()), Path: "/" + stream}
+	return u.String(), nil
+}
+
+// dialSession dials the controller, retrying for up to retry, and says
+// hello as the host. down, when not nil, runs once the link has failed and
+// the session reports it down.
+func dialSession(ctx context.Context, addr, host string, retry time.Duration, down func()) (*session, error) {
+	deadline := time.Now().Add(retry)
+	for {
+		dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		c, err := dialLink(dialCtx, addr)
+		cancel()
+		if err == nil {
+			s := &session{c: c, in: make(chan received, 16), closed: make(chan struct{}), broken: make(chan struct{})}
+			go read(c, s.in, s.closed, s.broken, down)
+			if err := s.send(link.Hello{Role: "host", Host: host, Version: link.Version}); err != nil {
+				s.close()
+				return nil, err
+			}
+			return s, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("nu mă pot conecta la controlor (portul %d): %w", link.Port, err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// read delivers the controller's messages on c into in, then its error,
+// and closes in; it closes broken as soon as the link fails, then runs
+// down, if any. It holds its own channels: a reconnection gives the session
+// new ones.
+func read(c *link.Conn, in chan<- received, closed <-chan struct{}, broken chan<- struct{}, down func()) {
+	defer close(in)
+	for {
+		m, err := c.Receive()
+		if err != nil {
+			close(broken)
+			if down != nil {
+				down()
+			}
+			err = fmt.Errorf("%w: %w", errLinkDown, err)
+		}
+		select {
+		case in <- received{m, err}:
+		case <-closed:
+			return
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (s *session) send(m link.Message) error {
+	if err := s.c.Send(m); err != nil {
+		return fmt.Errorf("%w: %w", errLinkDown, err)
+	}
+	return nil
+}
+
+// sendAll sends msgs in order, until one fails.
+func (s *session) sendAll(msgs []link.Message) error {
+	for _, m := range msgs {
+		if err := s.send(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// up reports whether the link has not failed.
+func (s *session) up() bool {
+	select {
+	case <-s.broken:
+		return false
+	default:
+		return true
+	}
+}
+
+func (s *session) close() {
+	select {
+	case <-s.closed:
+	default:
+		close(s.closed)
+	}
+	_ = s.c.Close()
+}
+
+// await returns the next message of type typ, dropping others, within d.
+func (s *session) await(ctx context.Context, d time.Duration, typ string) (link.Message, error) {
+	timeout := time.NewTimer(d)
+	defer timeout.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timeout.C:
+			return nil, fmt.Errorf("controlorul nu a răspuns (%s) în %v", typ, d)
+		case r, ok := <-s.in:
+			if !ok {
+				return nil, fmt.Errorf("%w: %w", errLinkDown, io.EOF)
+			}
+			if r.err != nil {
+				return nil, r.err
+			}
+			if r.m.Type() == typ {
+				return r.m, nil
+			}
+		}
+	}
+}
+
+// report sends a run's report and returns the controller's verdict.
+func (s *session) report(ctx context.Context, r link.Report) (link.Verdict, error) {
+	if err := s.send(r); err != nil {
+		return link.Verdict{}, err
+	}
+	for {
+		m, err := s.await(ctx, verdictTimeout, "verdict")
+		if err != nil {
+			return link.Verdict{}, err
+		}
+		if v := m.(link.Verdict); v.Run.RunID == r.RunID {
+			return v, nil
+		}
+	}
+}
+
+// probes are the link's preflight probes (R08): the beacon acknowledged
+// over TCP, an RTSP pull of cam01_main, and the NTP check.
+func (s *session) probes(ntp NTPCheck) LinkProbes {
+	return LinkProbes{
+		Beacon: s.checkBeacon,
+		RTSP: func(ctx context.Context) error {
+			u, err := s.cameraURL(MainStream)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			src, err := source.NewRTSP(ctx, "preflight", u)
+			if err != nil {
+				return err
+			}
+			cached, live, stop := src.Subscribe()
+			defer stop()
+			if len(cached) > 0 {
+				return nil
+			}
+			select {
+			case _, ok := <-live:
+				if !ok {
+					return errors.New("the camera stopped")
+				}
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+		NTP: ntp,
+	}
+}
+
+// checkBeacon sends beacons of a check id while it asks the controller
+// whether they arrive.
+func (s *session) checkBeacon(ctx context.Context) error {
+	id := fmt.Sprintf("verificare-%d", time.Now().UnixNano())
+	conn, err := net.Dial("udp4", s.beaconAddr)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	if err := s.send(link.BeaconCheck{ID: id}); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	go func() {
+		tick := time.NewTicker(controller.BeaconEvery)
+		defer tick.Stop()
+		for seq := uint64(0); ctx.Err() == nil; seq++ {
+			_, _ = conn.Write(link.BeaconPacket(id, seq))
+			select {
+			case <-ctx.Done():
+			case <-tick.C:
+			}
+		}
+	}()
+	m, err := s.await(ctx, 10*time.Second, "beacon_ack")
+	if err != nil {
+		return err
+	}
+	if !m.(link.BeaconAck).Received {
+		return errors.New("no beacon arrived")
+	}
+	return nil
+}

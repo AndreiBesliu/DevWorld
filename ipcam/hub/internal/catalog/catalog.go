@@ -1,5 +1,6 @@
 // Package catalog is the hub's SQLite catalog (§4.6), in its Phase 0 subset:
-// the recorded segments and the gaps between them (ruling G07). The files
+// the recorded segments and the gaps between them (ruling G07), and the
+// reason of each lost tail that a .part's repair will write (T40). The files
 // under rec/ are the source of truth (§4.1 (5)); ReconcileFiles makes the
 // rows match them.
 //
@@ -12,6 +13,7 @@ package catalog
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -124,6 +126,12 @@ var migrations = []string{
 	DROP TABLE gaps;
 	ALTER TABLE gaps_v2 RENAME TO gaps;
 	CREATE INDEX gaps_stream ON gaps (camera_id, profile, start_ms);`,
+	// 3: the reason of the tail gap of a .part that MediaMTX could not write
+	// (T40), until the file's repair writes that gap.
+	`CREATE TABLE tail_reasons (
+		local_path TEXT PRIMARY KEY,
+		reason     TEXT NOT NULL CHECK (reason IN ('restart', 'hub_stopped', 'disk_full', 'card', 'camera_offline'))
+	);`,
 }
 
 // Open opens the catalog at path, creating it if needed, and migrates it.
@@ -244,6 +252,17 @@ func (db *DB) PutGap(ctx context.Context, g Gap) error {
 	return nil
 }
 
+// FindGap returns the start of the stream's earliest gap of reason that
+// starts in [fromMs, toMs], and whether there is one.
+func (db *DB) FindGap(ctx context.Context, cam, profile string, reason GapReason, fromMs, toMs int64) (startMs int64, found bool, err error) {
+	var start sql.NullInt64
+	if err := db.sql.QueryRowContext(ctx, "SELECT min(start_ms) FROM gaps WHERE camera_id = ? AND profile = ? AND reason = ? AND start_ms BETWEEN ? AND ?",
+		cam, profile, string(reason), fromMs, toMs).Scan(&start); err != nil {
+		return 0, false, fmt.Errorf("catalog: look for a gap of %s/%s: %w", cam, profile, err)
+	}
+	return start.Int64, start.Valid, nil
+}
+
 // CloseGap ends every open gap of the stream at endMs, or at its start if
 // that is later.
 func (db *DB) CloseGap(ctx context.Context, cam, profile string, endMs int64) error {
@@ -254,17 +273,77 @@ func (db *DB) CloseGap(ctx context.Context, cam, profile string, endMs int64) er
 	return nil
 }
 
-// MoveGapStart moves the start of the stream's gaps that start at fromMs to
-// toMs: reconcile's background rewrite recovers more of a lost tail than
-// its interim file kept (C1-R9). A closed gap ends no earlier than its new
-// start; an open gap stays open.
-func (db *DB) MoveGapStart(ctx context.Context, cam, profile string, fromMs, toMs int64) error {
+// MoveGapStart moves the start of the stream's gaps of reason that start
+// at fromMs to toMs: reconcile's tail gap moves between the file's start and
+// what the file keeps, and the background rewrite recovers more of a lost
+// tail than its interim file kept (C1-R9). A gap of another reason, such as
+// an SD card's (T40), stays where it is. A closed gap ends no earlier than
+// its new start; an open gap stays open.
+func (db *DB) MoveGapStart(ctx context.Context, cam, profile string, reason GapReason, fromMs, toMs int64) error {
 	if _, err := db.sql.ExecContext(ctx,
-		"UPDATE gaps SET start_ms = ?, end_ms = CASE WHEN end_ms = 0 THEN 0 ELSE max(end_ms, ?) END WHERE camera_id = ? AND profile = ? AND start_ms = ?",
-		toMs, toMs, cam, profile, fromMs); err != nil {
+		"UPDATE gaps SET start_ms = ?, end_ms = CASE WHEN end_ms = 0 THEN 0 ELSE max(end_ms, ?) END WHERE camera_id = ? AND profile = ? AND reason = ? AND start_ms = ?",
+		toMs, toMs, cam, profile, string(reason), fromMs); err != nil {
 		return fmt.Errorf("catalog: move a gap of %s/%s: %w", cam, profile, err)
 	}
 	return nil
+}
+
+// PutTailReason records reason for the tail gap of the .part at path,
+// relative to rec/ with "/": the repair of the file writes that gap with it
+// instead of restart, also after a start of the hub. A second call for the
+// same path replaces the reason.
+func (db *DB) PutTailReason(ctx context.Context, path string, reason GapReason) error {
+	if !reason.valid() {
+		return fmt.Errorf("catalog: unknown gap reason %q", reason)
+	}
+	if _, err := db.sql.ExecContext(ctx, "INSERT OR REPLACE INTO tail_reasons (local_path, reason) VALUES (?, ?)", path, string(reason)); err != nil {
+		return fmt.Errorf("catalog: put the tail reason of %s: %w", path, err)
+	}
+	return nil
+}
+
+// TailReason returns the reason recorded for the tail gap of the .part at
+// path, and whether there is one.
+func (db *DB) TailReason(ctx context.Context, path string) (GapReason, bool, error) {
+	var reason string
+	switch err := db.sql.QueryRowContext(ctx, "SELECT reason FROM tail_reasons WHERE local_path = ?", path).Scan(&reason); {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", false, nil
+	case err != nil:
+		return "", false, fmt.Errorf("catalog: read the tail reason of %s: %w", path, err)
+	}
+	return GapReason(reason), true, nil
+}
+
+// DeleteTailReason forgets the reason of the .part at path, once its repair
+// has written the gap and the file has gone.
+func (db *DB) DeleteTailReason(ctx context.Context, path string) error {
+	if _, err := db.sql.ExecContext(ctx, "DELETE FROM tail_reasons WHERE local_path = ?", path); err != nil {
+		return fmt.Errorf("catalog: delete the tail reason of %s: %w", path, err)
+	}
+	return nil
+}
+
+// TailReasonPaths returns the paths of the .part files that have a tail
+// reason, sorted.
+func (db *DB) TailReasonPaths(ctx context.Context) ([]string, error) {
+	rows, err := db.sql.QueryContext(ctx, "SELECT local_path FROM tail_reasons ORDER BY local_path")
+	if err != nil {
+		return nil, fmt.Errorf("catalog: list the tail reasons: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, fmt.Errorf("catalog: list the tail reasons: %w", err)
+		}
+		paths = append(paths, path)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("catalog: list the tail reasons: %w", err)
+	}
+	return paths, nil
 }
 
 // Gaps returns every gap, by stream and start.

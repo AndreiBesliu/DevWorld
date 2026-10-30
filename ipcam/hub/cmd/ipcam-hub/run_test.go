@@ -5,10 +5,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,19 +28,36 @@ import (
 
 // The test binary is ipcam-hub too: with mainEnv set, it runs main. The hook
 // command that MediaMTX runs inherits the variable, so it is this binary
-// with "hook segment-complete".
-const mainEnv = "IPCAM_HUB_TEST_MAIN"
+// with "hook segment-complete". As ipcam-hub, it reads the mount table that
+// mountInfoEnv names, none when it is unset, and never the host's, and its
+// card monitor probes every probeEveryEnv when that is set. Started on a
+// MediaMTX configuration with fakeMediaMTXEnv set, it is a fake MediaMTX
+// (cardsampler_test.go).
+const (
+	mainEnv       = "IPCAM_HUB_TEST_MAIN"
+	mountInfoEnv  = "IPCAM_HUB_TEST_MOUNTINFO"
+	probeEveryEnv = "IPCAM_HUB_TEST_PROBE_EVERY"
+)
 
 func TestMain(m *testing.M) {
+	if isFakeMediaMTX(os.Args[1:]) {
+		os.Exit(fakeMediaMTX(os.Getenv(fakeMediaMTXEnv), os.Args[1]))
+	}
 	if os.Getenv(mainEnv) == "1" {
-		os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+		mountInfoPath = os.Getenv(mountInfoEnv)
+		if d, err := time.ParseDuration(os.Getenv(probeEveryEnv)); err == nil {
+			probeEvery = d
+		}
+		os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
 	os.Exit(m.Run())
 }
 
-// hub is an ipcam-hub process that a test started.
+// hub is an ipcam-hub process that a test started, with its stdin, which
+// stays open until the test closes it.
 type hub struct {
 	cmd    *exec.Cmd
+	stdin  io.WriteCloser
 	events chan map[string]any
 	stderr *bytes.Buffer
 	done   chan struct{}
@@ -43,14 +65,24 @@ type hub struct {
 
 func startHub(t *testing.T, args ...string) *hub {
 	t.Helper()
+	return startHubWith(t, inOwnGroup, args...)
+}
+
+// startHubWith starts ipcam-hub with the process attributes that attrs sets.
+func startHubWith(t *testing.T, attrs func(*exec.Cmd), args ...string) *hub {
+	t.Helper()
 	cmd := exec.CommandContext(t.Context(), os.Args[0], args...) //nolint:gosec // the test binary itself
 	cmd.Env = append(os.Environ(), mainEnv+"=1")
-	inOwnGroup(cmd)
+	attrs(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &hub{cmd: cmd, events: make(chan map[string]any, 1024), stderr: &bytes.Buffer{}, done: make(chan struct{})}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &hub{cmd: cmd, stdin: stdin, events: make(chan map[string]any, 1024), stderr: &bytes.Buffer{}, done: make(chan struct{})}
 	cmd.Stderr = h.stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -123,9 +155,10 @@ func writeJSON(t *testing.T, path string, v any) {
 // real MediaMTX reconciles (one reconcile event, seq 1 and final), is
 // ready, reports the first part of each stream, then each 10 s segment as it
 // closes, and then each closed segment that the background verification
-// passed. Stopped, by SIGTERM on Linux and Ctrl+Break on Windows, it stops
-// MediaMTX gracefully, reports a hub_stopped gap for each stream, and
-// exits 0.
+// passed. Without --stop-on-stdin-eof, the end of its stdin changes nothing,
+// as under systemd. Stopped, by SIGTERM on Linux and Ctrl+Break on Windows,
+// it stops MediaMTX gracefully, reports a hub_stopped gap for each stream,
+// and exits 0.
 func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 	bin := rtsptest.MediaMTX(t)
 	srv := rtsptest.Start(t, rtsptest.MainH264(t))
@@ -155,6 +188,9 @@ func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 		},
 	})
 	h := startHub(t, "run", "--config", config)
+	if err := h.stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	reconcile := h.next(t, 30*time.Second, "reconcile event", ofType("reconcile"))
 	if reconcile["aborted"] != false || reconcile["seq"] != float64(1) || reconcile["final"] != true {
@@ -260,6 +296,73 @@ func TestRun_EmitsReadyThenRecordingThenSegmentClosed(t *testing.T) {
 	if !stoppedGaps["cam1/main"] || !stoppedGaps["cam1/sub"] {
 		t.Errorf("hub_stopped gaps for %v, want both streams", stoppedGaps)
 	}
+	// C1-R17: each segment that the fork closed logged its disk writer's
+	// queue peak, which ipcam-hub forwards in the line that MI3 reads.
+	peak := regexp.MustCompile(diskQueuePeakPattern)
+	peaks := map[string]bool{}
+	for line := range strings.SplitSeq(h.stderr.String(), "\n") {
+		if !strings.Contains(line, "disk queue peak") {
+			continue
+		}
+		m := peak.FindStringSubmatch(strings.TrimSuffix(line, "\r"))
+		if m == nil {
+			t.Errorf("a disk queue peak line that MI3 cannot read: %q", line)
+			continue
+		}
+		peaks[m[1]] = true
+	}
+	if !peaks["cam1/main"] || !peaks["cam1/sub"] {
+		t.Errorf("disk queue peaks of %v, want both streams'", peaks)
+	}
+}
+
+// diskQueuePeakPattern is the line of the fork's disk writer at each
+// segment that it closes, as ipcam-hub forwards MediaMTX's log on its
+// stderr (C1-R17): the most bytes that the path's recorder held since its
+// last line. MI3 reads the hub's queue peaks from it
+// (tools/spikes/recording/mi3, whose test keeps its pattern equal to this
+// one).
+const diskQueuePeakPattern = `^mediamtx: \S+ \S+ INF \[path ([^\]]+)\] \[recorder\] disk queue peak: (\d+) bytes$`
+
+// TestRun_StopsCleanlyWhenStdinEnds: with --stop-on-stdin-eof, ipcam-hub
+// stops as on SIGTERM when its stdin ends, which is how recspike stops it: a
+// stop that needs no console, so that it also works from the boot task
+// (C07, G14). Started without a console (DETACHED_PROCESS on Windows), it
+// still stops MediaMTX gracefully: it reports a hub_stopped gap for its
+// stream, no error, and exits 0.
+func TestRun_StopsCleanlyWhenStdinEnds(t *testing.T) {
+	bin := rtsptest.MediaMTX(t)
+	srv := rtsptest.Start(t, rtsptest.MainH264(t))
+	dir := t.TempDir()
+	config := filepath.Join(dir, "run.json")
+	writeJSON(t, config, map[string]any{
+		"dataDir":  filepath.Join(dir, "data"),
+		"mediamtx": bin,
+		"jobs": []map[string]any{
+			{"cam": "cam1", "profile": "main", "restreamUrl": srv.URL("cam1/main"), "segmentSecs": 10, "recipients": nil},
+		},
+	})
+	h := startHubWith(t, withoutConsole, "run", "--config", config, "--stop-on-stdin-eof")
+	h.next(t, 40*time.Second, "recording event", ofType("recording"))
+	if err := h.stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	for e := range h.events {
+		switch {
+		case e["type"] == "gap" && e["reason"] == "hub_stopped":
+			stopped = true
+		case e["type"] == "error":
+			t.Errorf("an error after the end of stdin: %v", e["message"])
+		}
+	}
+	<-h.done
+	if err := h.cmd.Wait(); err != nil {
+		t.Errorf("ipcam-hub after the end of its stdin: %v, want exit 0", err)
+	}
+	if !stopped {
+		t.Error("no hub_stopped gap: MediaMTX was not stopped gracefully")
+	}
 }
 
 // minimalFMP4 is an fMP4 recording with one part of one sample, cut short
@@ -349,6 +452,107 @@ func TestRun_ExitCode1OnBadConfig(t *testing.T) {
 	}
 }
 
+// mountInfoLine is a line of /proc/self/mountinfo that mounts the device
+// devnum ("major:minor") from source at mountPoint, with the mount point
+// escaped as the kernel escapes it.
+func mountInfoLine(id int, devnum, mountPoint, source string) string {
+	escaped := strings.NewReplacer("\\", `\134`, " ", `\040`, "\t", `\011`, "\n", `\012`).Replace(mountPoint)
+	return fmt.Sprintf("%d 1 %s / %s rw,noatime shared:%d - ext4 %s rw\n", id, devnum, escaped, id, source)
+}
+
+// countFiles counts the regular files under dir, 0 when dir is absent.
+func countFiles(t *testing.T, dir string) int {
+	t.Helper()
+	n := 0
+	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type().IsRegular() {
+			n++
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestRun_RefusesSdCardUntilConfirmed (HUB-17, T40, G16): while rec/ is on
+// an SD card and run.json has no sdCardConfirmed, ipcam-hub reports
+// sd_card_unconfirmed and exits 4 before it changes anything under its data
+// directory: rec/ holds no file, and no reconcile or MediaMTX ran. With
+// sdCardConfirmed true, it records.
+func TestRun_RefusesSdCardUntilConfirmed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the SD-card check reads Linux's mount table (T40); Windows has none, and its gate never closes")
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(dir, "hub data")
+	mountinfo := filepath.Join(dir, "mountinfo")
+	table := mountInfoLine(21, "259:2", "/", "/dev/nvme0n1p2") + mountInfoLine(22, "179:2", dataDir, "/dev/mmcblk0p2")
+	if err := os.WriteFile(mountinfo, []byte(table), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(mountInfoEnv, mountinfo)
+	job := map[string]any{"cam": "cam1", "profile": "main", "segmentSecs": 10, "recipients": nil}
+
+	t.Run("unconfirmed", func(t *testing.T) {
+		config := filepath.Join(dir, "run-unconfirmed.json")
+		job["restreamUrl"] = "rtsp://127.0.0.1:1/cam1/main"
+		writeJSON(t, config, map[string]any{"dataDir": dataDir, "mediamtx": filepath.Join(dir, "no-mediamtx"), "jobs": []any{job}})
+		h := startHub(t, "run", "--config", config)
+		var types []any
+		for e := range h.events {
+			types = append(types, e["type"])
+		}
+		<-h.done
+		err := h.cmd.Wait()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 4 {
+			t.Errorf("ipcam-hub ended with %v, want exit code 4", err)
+		}
+		if !slices.Equal(types, []any{"sd_card_unconfirmed"}) {
+			t.Errorf("events %v, want sd_card_unconfirmed alone", types)
+		}
+		if n := countFiles(t, filepath.Join(dataDir, "rec")); n != 0 {
+			t.Errorf("rec/ holds %d files", n)
+		}
+		if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the data directory is there (%v): ipcam-hub changed it before the check", err)
+		}
+	})
+
+	t.Run("confirmed", func(t *testing.T) {
+		bin := rtsptest.MediaMTX(t)
+		srv := rtsptest.Start(t, rtsptest.MainH264(t))
+		config := filepath.Join(dir, "run-confirmed.json")
+		job["restreamUrl"] = srv.URL("cam1/main")
+		writeJSON(t, config, map[string]any{"dataDir": dataDir, "mediamtx": bin, "sdCardConfirmed": true, "jobs": []any{job}})
+		h := startHub(t, "run", "--config", config)
+		h.next(t, 40*time.Second, "recording event", ofType("recording"))
+		if n := countFiles(t, filepath.Join(dataDir, "rec")); n == 0 {
+			t.Error("rec/ holds no file after the recording event")
+		}
+		if err := stopHub(h); err != nil {
+			t.Fatalf("stop ipcam-hub: %v", err)
+		}
+		for e := range h.events {
+			if e["type"] == "sd_card_unconfirmed" || e["type"] == "error" {
+				t.Errorf("event %v", e)
+			}
+		}
+		<-h.done
+		if err := h.cmd.Wait(); err != nil {
+			t.Errorf("ipcam-hub after the stop: %v, want exit 0", err)
+		}
+	})
+}
+
 // TestLoadRunConfig_EncryptedJobsNeedTheirRIg: a run.json with an encrypted
 // job is refused without an identityFile, and with one whose recipient is
 // not the job's RI_g: reconcile and the verification could read none of its
@@ -410,5 +614,45 @@ func TestLoadRunConfig_EncryptedJobsNeedTheirRIg(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRun_ConsoleOnlyForTheStdinStop: ipcam-hub gives itself a console
+// (ensureConsole, AllocConsole on Windows) only when it runs with
+// --stop-on-stdin-eof, as recspike starts it, where MediaMTX's clean stop
+// needs one; a hub started otherwise, for instance DETACHED_PROCESS in the
+// owner's session, never opens a console window.
+func TestRun_ConsoleOnlyForTheStdinStop(t *testing.T) {
+	realEnsure, realMountInfo := ensureConsole, mountInfoPath
+	t.Cleanup(func() { ensureConsole, mountInfoPath = realEnsure, realMountInfo })
+	mountInfoPath = "" // no SD-card check of the host's mounts
+	calls := 0
+	ensureConsole = func() { calls++ }
+	for _, tc := range []struct {
+		args []string
+		want int
+	}{{nil, 0}, {[]string{"--stop-on-stdin-eof"}, 1}} {
+		calls = 0
+		// A data directory whose reconcile aborts (HUB-09): run returns 3
+		// after the point where it would give itself a console, and starts
+		// no MediaMTX.
+		dir := t.TempDir()
+		for _, cam := range []string{"cam1", "cam2", "cam3"} {
+			path := filepath.Join(dir, "data", "rec", cam, "main", "2026-10-20", "100000_000000.mp4.part")
+			if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, bytes.Repeat([]byte("not an fMP4 file "), 300), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		config := filepath.Join(dir, "run.json")
+		writeJSON(t, config, map[string]any{"dataDir": filepath.Join(dir, "data"), "mediamtx": filepath.Join(dir, "no-mediamtx"), "jobs": []any{}})
+		stdin, stdinW := io.Pipe()
+		code := runCommand(append([]string{"--config", config}, tc.args...), stdin, io.Discard, io.Discard)
+		_ = stdinW.Close()
+		if code != exitAborted || calls != tc.want {
+			t.Errorf("run %v: exit %d, %d consoles; want exit %d and %d", tc.args, code, calls, exitAborted, tc.want)
+		}
 	}
 }

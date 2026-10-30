@@ -6,13 +6,18 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// The Windows parts: the MediaMTX child dies with the hub, the directory
-// sync and the rename.
+// The Windows parts: the MediaMTX child dies with the hub, the stop, the
+// directory sync and the rename.
+
+// stopGrace is how long MediaMTX gets to close its segments when the hub
+// stops, after the Ctrl+Break, before it is killed.
+const stopGrace = 5 * time.Second
 
 // childProc is a started MediaMTX child and the Job Object that holds it.
 type childProc struct {
@@ -37,7 +42,7 @@ func startChild(cmd *exec.Cmd) (*childProc, error) {
 		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE},
 	}
 	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil { //nolint:gosec // G103: the limits' address and size, as SetInformationJobObject takes them
 		_ = windows.CloseHandle(job)
 		return nil, fmt.Errorf("recorder: set up the Job Object: %w", err)
 	}

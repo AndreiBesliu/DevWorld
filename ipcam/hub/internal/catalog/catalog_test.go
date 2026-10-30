@@ -195,7 +195,7 @@ func TestCatalog_GapsOpenAndClose(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := db.MoveGapStart(ctx, "c1", "main", 100, 120); err != nil {
+	if err := db.MoveGapStart(ctx, "c1", "main", GapRestart, 100, 120); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.CloseGap(ctx, "c1", "main", 900); err != nil {
@@ -214,10 +214,10 @@ func TestCatalog_GapsOpenAndClose(t *testing.T) {
 	}
 	// Moving the start of a closed gap past its end ends it there too; an
 	// open gap stays open.
-	if err := db.MoveGapStart(ctx, "c1", "main", 120, 950); err != nil {
+	if err := db.MoveGapStart(ctx, "c1", "main", GapRestart, 120, 950); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.MoveGapStart(ctx, "c1", "sub", 150, 160); err != nil {
+	if err := db.MoveGapStart(ctx, "c1", "sub", GapCard, 150, 160); err != nil {
 		t.Fatal(err)
 	}
 	if gaps, err = db.Gaps(ctx); err != nil {
@@ -232,6 +232,61 @@ func TestCatalog_GapsOpenAndClose(t *testing.T) {
 	}
 	if err := db.PutGap(ctx, Gap{Cam: "c1", Profile: "main", StartMs: 1, Reason: "power"}); err == nil {
 		t.Error("PutGap accepted an unknown reason")
+	}
+}
+
+// TestCatalog_GapsOfOneReason (Task 8, 8a M1): FindGap finds a stream's gap
+// of one reason that starts in a range, the earliest, and MoveGapStart
+// moves only the gaps of its reason: a card gap (T40) that starts where a
+// restart gap does is never found or moved for it.
+func TestCatalog_GapsOfOneReason(t *testing.T) {
+	db := openTest(t)
+	ctx := t.Context()
+	for _, g := range []Gap{
+		{Cam: "c1", Profile: "main", StartMs: 100, Reason: GapCard},
+		{Cam: "c1", Profile: "main", StartMs: 100, Reason: GapRestart},
+		{Cam: "c1", Profile: "main", StartMs: 300, Reason: GapRestart},
+		{Cam: "c1", Profile: "sub", StartMs: 200, Reason: GapRestart},
+	} {
+		if err := db.PutGap(ctx, g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		profile  string
+		reason   GapReason
+		from, to int64
+		start    int64
+		found    bool
+	}{
+		{"main", GapRestart, 100, 300, 100, true},
+		{"main", GapRestart, 101, 300, 300, true},
+		{"main", GapRestart, 101, 299, 0, false},
+		{"main", GapCard, 0, 1000, 100, true},
+		{"main", GapHubStopped, 0, 1000, 0, false},
+		{"sub", GapRestart, 200, 200, 200, true},
+		{"sub", GapCard, 0, 1000, 0, false},
+	} {
+		start, found, err := db.FindGap(ctx, "c1", tc.profile, tc.reason, tc.from, tc.to)
+		if err != nil || start != tc.start || found != tc.found {
+			t.Errorf("FindGap(c1/%s, %s, [%d, %d]) = %d, %v, %v; want %d, %v", tc.profile, tc.reason, tc.from, tc.to, start, found, err, tc.start, tc.found)
+		}
+	}
+	if err := db.MoveGapStart(ctx, "c1", "main", GapRestart, 100, 150); err != nil {
+		t.Fatal(err)
+	}
+	gaps, err := db.Gaps(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Gap{
+		{Cam: "c1", Profile: "main", StartMs: 100, Reason: GapCard},
+		{Cam: "c1", Profile: "main", StartMs: 150, Reason: GapRestart},
+		{Cam: "c1", Profile: "main", StartMs: 300, Reason: GapRestart},
+		{Cam: "c1", Profile: "sub", StartMs: 200, Reason: GapRestart},
+	}
+	if !slices.Equal(gaps, want) {
+		t.Errorf("after moving the restart gap, Gaps = %+v, want %+v: the card gap stays", gaps, want)
 	}
 }
 
@@ -277,5 +332,58 @@ func TestCatalog_GapReasonCheckedBySQLite(t *testing.T) {
 	_, err = db.sql.ExecContext(ctx, "INSERT INTO gaps (camera_id, profile, start_ms, end_ms, reason) VALUES ('c1', 'main', 1, 0, 'power')")
 	if err == nil || !strings.Contains(err.Error(), "CHECK constraint failed") {
 		t.Errorf("an unknown reason written past PutGap: %v, want SQLite's CHECK constraint failure", err)
+	}
+}
+
+// TestCatalog_TailReasons (T40; Task 8 review M3): the reason of the tail
+// gap of a .part that MediaMTX could not write is kept by the file's path,
+// so that a start of the hub before the file's repair still knows it; a
+// path has one reason, the last put, until it is deleted; an unknown reason
+// is refused, by the catalog and by SQLite.
+func TestCatalog_TailReasons(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "catalog.db")
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := "c1/main/2026-10-28/120000_000000.mp4.part"
+	if reason, found, err := db.TailReason(ctx, part); err != nil || found {
+		t.Errorf("TailReason before any = %q, %v, %v; want none", reason, found, err)
+	}
+	for _, reason := range []GapReason{GapRestart, GapCard} {
+		if err := db.PutTailReason(ctx, part, reason); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if reason, found, err := db.TailReason(ctx, part); err != nil || !found || reason != GapCard {
+		t.Errorf("TailReason after a new Open = %q, %v, %v; want card, the last put", reason, found, err)
+	}
+	other := "c1/main/2026-10-28/115500_000000.mp4.part"
+	if err := db.PutTailReason(ctx, other, GapCard); err != nil {
+		t.Fatal(err)
+	}
+	if paths, err := db.TailReasonPaths(ctx); err != nil || !slices.Equal(paths, []string{other, part}) {
+		t.Errorf("TailReasonPaths = %q, %v; want both paths, sorted", paths, err)
+	}
+	if err := db.PutTailReason(ctx, part, "power"); err == nil {
+		t.Error("PutTailReason accepted an unknown reason")
+	}
+	if _, err := db.sql.ExecContext(ctx, "INSERT INTO tail_reasons (local_path, reason) VALUES ('x.mp4.part', 'power')"); err == nil ||
+		!strings.Contains(err.Error(), "CHECK constraint failed") {
+		t.Errorf("an unknown reason written past PutTailReason: %v, want SQLite's CHECK constraint failure", err)
+	}
+	if err := db.DeleteTailReason(ctx, part); err != nil {
+		t.Fatal(err)
+	}
+	if reason, found, err := db.TailReason(ctx, part); err != nil || found {
+		t.Errorf("TailReason after DeleteTailReason = %q, %v, %v; want none", reason, found, err)
 	}
 }

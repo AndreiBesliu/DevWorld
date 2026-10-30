@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -28,7 +27,9 @@ import (
 //   - recording: cam, profile; the first part of a stream after a (re)start.
 //   - segment_closed: cam, profile, path, startMs, endMs, encrypted.
 //   - gap: cam, profile, startMs, endMs (0 while open), reason; for each gap
-//     written, closed or moved.
+//     written, closed or moved, and for the gap of a job that the card's
+//     failure stopped also when the card did not let it be written (an
+//     error event says so).
 //   - child_restart: MediaMTX was started again.
 //   - verify: unreadable, tornParts, catalogMismatches of a background
 //     verification pass.
@@ -36,6 +37,14 @@ import (
 //   - status: cam, profile, lastPartAgoMs, lastSegmentAgoMs, running; every
 //     1 s per job.
 //   - error: message.
+//   - card: state ("ok", "degraded" or "failed"), only while rec/ is on an
+//     SD card (T40, §13.1): the card's state as ipcam-hub starts, then each
+//     change. At failed, every job stops with a card gap.
+//   - alert: kind ("card"), when the card's state leaves ok (§13.3); once,
+//     until the card has been ok for 2 min.
+//   - sd_card_unconfirmed: rec/ is on an SD card and run.json does not
+//     confirm the wear warning (HUB-17, T40); ipcam-hub has changed nothing
+//     and exits 4.
 type events struct {
 	mu  sync.Mutex
 	out io.Writer
@@ -68,19 +77,34 @@ func statusFields(cam recorder.CameraID, p recorder.Profile, s recorder.RecStatu
 }
 
 // observer turns what the recorder reports into events; the child's log
-// goes to stderr, never to the events.
+// goes to stderr, never to the events. The child's log and the errors go
+// to the card monitor too, while rec/ is on an SD card.
 type observer struct {
-	ev     *events
-	stderr io.Writer
-	logMu  sync.Mutex
+	ev   *events
+	log  *logQueue    // the child's log, on its way to stderr
+	card *cardSampler // nil when rec/ is not on an SD card
 }
+
+func newObserver(ev *events, stderr io.Writer, card *cardSampler) *observer {
+	return &observer{ev: ev, log: newLogQueue(stderr, logQueueLen), card: card}
+}
+
+// close writes the child's log lines that still wait for stderr, for at
+// most shutdownWait: a stderr that the card holds does not hold ipcam-hub's
+// stop.
+func (o *observer) close() { o.log.close(shutdownWait) }
 
 func (o *observer) ChildRestarted(time.Time) { o.ev.emit("child_restart", nil) }
 
+// ChildLog gives line to the card monitor first, then queues it for stderr:
+// the goroutine that reads MediaMTX's log never waits for stderr, which in
+// MI2 is a file on the same SD card (T40), so a write that the card holds
+// delays neither the card's I/O errors nor the failed write's time.
 func (o *observer) ChildLog(line string) {
-	o.logMu.Lock()
-	defer o.logMu.Unlock()
-	_, _ = fmt.Fprintln(o.stderr, "mediamtx:", line)
+	if o.card != nil {
+		o.card.childLog(line)
+	}
+	o.log.add("mediamtx: " + line)
 }
 
 func (o *observer) FirstPart(cam recorder.CameraID, p recorder.Profile, _ time.Time) {
@@ -105,4 +129,9 @@ func (o *observer) Gap(g catalog.Gap) {
 	o.ev.emit("gap", map[string]any{"cam": g.Cam, "profile": g.Profile, "startMs": g.StartMs, "endMs": g.EndMs, "reason": g.Reason})
 }
 
-func (o *observer) Error(err error) { o.ev.emit("error", map[string]any{"message": err.Error()}) }
+func (o *observer) Error(err error) {
+	o.ev.emit("error", map[string]any{"message": err.Error()})
+	if o.card != nil {
+		o.card.hubError(err)
+	}
+}

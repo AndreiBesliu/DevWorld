@@ -4,10 +4,17 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
-// The Linux parts: the MediaMTX child dies with the hub, the directory sync
-// and the rename.
+// The Linux parts: the MediaMTX child dies with the hub, the stop, the
+// directory sync and the rename.
+
+// stopGrace is how long MediaMTX gets to close its segments when the hub
+// stops, before it is killed: on a Pi that records its recommended cameras
+// on an SD card, each segment's close is a file fsync, a rename, a directory
+// fsync, a hook and a catalog write.
+const stopGrace = 10 * time.Second
 
 // childProc is a started MediaMTX child.
 type childProc struct{ cmd *exec.Cmd }

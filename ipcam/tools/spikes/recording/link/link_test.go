@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
 // pair returns the two ends of a link over loopback TCP: the controller's,
@@ -55,8 +57,16 @@ func TestLink_MessagesRoundTrip(t *testing.T) {
 	resume, coldBoot := int64(812), int64(41250)
 	messages := []Message{
 		Hello{Role: "host", Host: "pi", Version: "c1"},
-		Session{RTSPBase: "rtsp://192.0.2.10:8554", User: "u", Pass: "p", Streams: []string{"cam01_main", "cam99_main"}},
-		RunStart{RunID: "pi-sysrq-7", Set: "pi-sysrq", Kind: "sysrq", Encrypted: true, PadLowBitrate: true, Streams: []string{"cam01_main"}},
+		Session{RTSPBase: "rtsp://192.0.2.10:8554", User: "u", Pass: "p", Streams: []string{"cam01_main", "cam99_main"},
+			BeaconPort: 7082, Needles: [][]byte{[]byte("ftypmp42"), {0x67, 0x64, 0x00, 0x28}}, SinkPort: 7083, SinkCert: []byte{0x30, 0x82, 0x01}},
+		RunStart{RunID: "pi-sysrq-7", Set: "pi-sysrq", Kind: "sysrq", Encrypted: true, PadLowBitrate: true, Streams: []string{"cam01_main"},
+			Host: "pi", OS: "linux", Storage: "sd", Attempt: 2,
+			PiModel:        &results.PiModelInfo{Raw: "Raspberry Pi 4 Model B Rev 1.5", Tier: "H1b", Supported: true, Known: true, RecommendedMin: 4, RecommendedMax: 4, Source: "cpuinfo"},
+			SdConfirmation: &results.SdConfirmation{Text: "DA", AtMs: 1792584000000}},
+		RunStart{RunID: "real-pc-03-4", Set: "real-pc", Kind: "power", Encrypted: true, PadLowBitrate: true, Streams: []string{"cam01_main"},
+			Host: "pc", OS: "windows", Storage: "ssd", Slot: 3, Attempt: 4},
+		RunStart{RunID: "lab-linux-kill9-01-1", Set: "lab-linux-kill9", Kind: "kill9", Encrypted: true, PadLowBitrate: true, Streams: []string{"cam01_main"},
+			Host: "lab-linux", OS: "linux", Storage: "unknown", Attempt: 1, Smoke: true},
 		Ready{RunID: "pi-sysrq-7"},
 		Cut{RunID: "pi-sysrq-7", Kind: "sysrq", PromptAt: time.Date(2026, 10, 21, 12, 7, 3, 250e6, time.UTC)},
 		Report{
@@ -66,12 +76,26 @@ func TestLink_MessagesRoundTrip(t *testing.T) {
 			Verify:     json.RawMessage(`{"type":"verify","catalogMismatches":0}`),
 			Hub04Clear: true, ResumeMs: &resume, ColdBootMs: &coldBoot, NtpWaitMs: 4100, NtpSynced: true, WriteCache: "on",
 		},
+		Verdict{Run: results.Run{RunID: "pi-sysrq-7", Valid: true, Attempt: 2, ShutdownKind: "sysrq", Encrypted: true, PadLowBitrate: true,
+			Streams: []results.StreamLoss{{Stream: "cam01_main", BitrateKbps: 4000, Encrypted: true, PadLowBitrate: true, LossMs: 812, LimitMs: 2000}},
+			LossMs:  812, ErrBoundMs: 53, Reconciled: true, Hub04Clear: true, PacingP99Ms: 4, Cameras: 1, ColdBootMs: &coldBoot, NtpWaitMs: 4100, NtpSynced: true}},
+		Refused{RunID: "pc-kill9-01-1", Reason: "tipul de oprire „restart” nu este cunoscut"},
+		BeaconCheck{ID: "verificare-1"},
+		BeaconAck{ID: "verificare-1", Received: true},
 		Results{Name: "MI2/pi/mi2.json", Data: []byte("{\"code\":\"MI2\"}\n")},
 		PullResults{},
 		ResultsTar{Data: []byte{0, 1, 2, 0xff}},
+		Mi3Start{RunID: "pc-mi3-1-8x60-1", Sessions: 3, Tiles: []string{"cam01_sub", "cam02_sub", "cam01_main"}},
+		Mi3Offers{RunID: "pc-mi3-1-8x60-1", Offers: []string{"v=0 a", "v=0 b", "v=0 c"}},
+		Mi3Answers{RunID: "pc-mi3-1-8x60-1", Answers: []string{"v=0 x", "v=0 y", "v=0 z"}},
+		Mi3Live{RunID: "pc-mi3-1-8x60-1"},
+		Mi3End{RunID: "pc-mi3-1-8x60-1"},
+		Mi3Result{RunID: "pc-mi3-1-8x60-1", PacingP99Ms: 9, SkippedAUs: 1, LatencyP95Ms: 61, LatencySamples: 702_000},
 		Bye{},
 	}
-	wantTypes := []string{"hello", "session", "run_start", "ready", "cut", "report", "results", "pull_results", "results_tar", "bye"}
+	wantTypes := []string{"hello", "session", "run_start", "run_start", "run_start", "ready", "cut", "report",
+		"verdict", "refused", "beacon_check", "beacon_ack", "results", "pull_results", "results_tar",
+		"mi3_start", "mi3_offers", "mi3_answers", "mi3_live", "mi3_end", "mi3_result", "bye"}
 	go func() {
 		for _, m := range messages {
 			if err := hostEnd.Send(m); err != nil {
@@ -168,7 +192,8 @@ func readTree(t *testing.T, dir string) map[string][]byte {
 }
 
 // TestLink_PullResultsTar (G15): the far side's results folder arrives
-// byte-equal, nested folders and binary files included.
+// byte-equal, nested folders and binary files included, without its lock
+// files.
 func TestLink_PullResultsTar(t *testing.T) {
 	controllerEnd, hostEnd := pair(t)
 	results := t.TempDir()
@@ -181,6 +206,9 @@ func TestLink_PullResultsTar(t *testing.T) {
 		"empty.txt":                    {},
 	}
 	writeTree(t, results, files)
+	// The run state's lock is no result, and Windows keeps a locked file
+	// unreadable: it stays behind.
+	writeTree(t, results, map[string][]byte{"state/run-state.lock": {}})
 
 	served := make(chan error, 1)
 	go func() {

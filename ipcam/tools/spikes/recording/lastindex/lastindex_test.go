@@ -218,3 +218,68 @@ func TestLastIndex_IgnoresSegmentsAfterRestart(t *testing.T) {
 		t.Errorf("LastRecorded = %d, want 73 from the reconciled .part", got)
 	}
 }
+
+// TestLastIndex_NoParts: a decoded part list with no part, or with parts
+// and tracks but no sample, gives no index instead of panicking, so the
+// file reads as one without a complete sample (ErrNoSample when no file
+// has one).
+func TestLastIndex_NoParts(t *testing.T) {
+	for name, parts := range map[string]fmp4.Parts{
+		"no parts":                nil,
+		"an empty list":           {},
+		"a part without track":    {{SequenceNumber: 1}},
+		"a track without samples": {{SequenceNumber: 1, Tracks: []*fmp4.PartTrack{{ID: 1}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			index, ok, err := lastIndexIn(parts)
+			if ok || err != nil {
+				t.Errorf("lastIndexIn = %d, %v, %v; want no index and no error", index, ok, err)
+			}
+		})
+	}
+}
+
+// TestReadParts_EachPartsIndexes (Task 7.2d): the diagnostics of a loss read
+// every complete part of a segment, clear or encrypted: its sequence number,
+// its size, and the SEI indexes of its first and last samples; a torn part
+// at the end is not one of them.
+func TestReadParts_EachPartsIndexes(t *testing.T) {
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := recording(t, span(20, 39), span(40, 59), span(60, 65))
+	next := recording(t, span(66, 85))
+	init := len(recording(t))
+	torn := append(bytes.Clone(data), next[init:init+(len(next)-init)/2]...)
+	dir := t.TempDir()
+	for name, tc := range map[string]struct {
+		path string
+		id   age.Identity
+	}{
+		"clear":     {write(t, dir, "2026-10-25/225510_000001.mp4", torn, nil), nil},
+		"encrypted": {write(t, dir, "2026-10-25/225510_000002.mp4.age", torn, id.Recipient()), id},
+	} {
+		t.Run(name, func(t *testing.T) {
+			size, parts, err := ReadParts(tc.path, tc.id)
+			if err != nil {
+				t.Fatalf("ReadParts: %v", err)
+			}
+			if info, err := os.Stat(tc.path); err != nil || size != info.Size() {
+				t.Errorf("size %d, want the file's %v (%v)", size, info.Size(), err)
+			}
+			want := []Part{{Seq: 1, First: 20, Last: 39}, {Seq: 2, First: 40, Last: 59}, {Seq: 3, First: 60, Last: 65}}
+			if len(parts) != len(want) {
+				t.Fatalf("parts %+v, want %d complete parts", parts, len(want))
+			}
+			for i, p := range parts {
+				if p.Seq != want[i].Seq || p.First != want[i].First || p.Last != want[i].Last || p.Bytes <= 0 {
+					t.Errorf("part %d = %+v, want %+v with its size", i, p, want[i])
+				}
+			}
+		})
+	}
+	if _, _, err := ReadParts(filepath.Join(dir, "missing.mp4"), nil); err == nil {
+		t.Error("ReadParts of a missing file: no error")
+	}
+}

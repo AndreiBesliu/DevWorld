@@ -26,7 +26,9 @@ func SchedulePrompt(bootAt time.Time, kind ShutdownKind, rnd *rand.Rand) time.Ti
 }
 
 // SchedulePromptWithin draws the moment uniformly in [lo, hi] after bootAt,
-// to the nanosecond. The smoke runs use [20 s, 40 s].
+// to the nanosecond. The smoke runs use [20 s, 40 s]. A window with hi below
+// lo is clamped to lo: the moment is bootAt + lo.
 func SchedulePromptWithin(bootAt time.Time, lo, hi time.Duration, rnd *rand.Rand) time.Time {
+	hi = max(hi, lo)
 	return bootAt.Add(lo + time.Duration(rnd.Int64N(int64(hi-lo)+1)))
 }

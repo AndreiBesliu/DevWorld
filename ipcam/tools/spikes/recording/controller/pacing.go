@@ -20,7 +20,8 @@ type PacingStats struct {
 	SkippedAUs int
 }
 
-// PacingMark is the pacing state at the start of a run.
+// PacingMark is the pacing state at one moment: the start or the end of a
+// run.
 type PacingMark struct {
 	at     time.Time
 	jitter map[string]source.JitterSnapshot
@@ -69,19 +70,22 @@ func (p *pacing) skipped(at time.Time, n int) {
 	}
 }
 
-// since returns the pacing of the run that started at m and stopped at
-// until: the jitter of every send since m, and the skips in [m, until].
-// After the stop, a host that lost power leaves its session's writes to
-// fail until the connection times out; those belong to no run.
-func (p *pacing) since(m PacingMark, until time.Time) PacingStats {
+// between returns the pacing of the run that started at start and stopped
+// at stopAt: the jitter of every send between the marks start and end, which
+// the controller takes when the run's beacons have gone silent, shortly
+// after the stop, and the skips in [start, stopAt]. After the stop, a host
+// that lost power leaves its session's writes to fail until the connection
+// times out, and the controller may serve the reboot's reconnect late; none
+// of that belongs to the run.
+func (p *pacing) between(start, end PacingMark, stopAt time.Time) PacingStats {
 	var stats PacingStats
-	for name, sim := range p.sims {
-		stats.P99 = max(stats.P99, sim.JitterSnapshot().P99Since(m.jitter[name]))
+	for name := range p.sims {
+		stats.P99 = max(stats.P99, end.jitter[name].P99Since(start.jitter[name]))
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, s := range p.skips {
-		if !s.at.Before(m.at) && !s.at.After(until) {
+		if !s.at.Before(start.at) && !s.at.After(stopAt) {
 			stats.SkippedAUs += s.n
 		}
 	}

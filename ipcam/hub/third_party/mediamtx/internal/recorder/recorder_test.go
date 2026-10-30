@@ -449,6 +449,18 @@ func TestRecorderFMP4NegativeInitialDTS(t *testing.T) {
 
 	dir := t.TempDir()
 
+	// ipcam (hub/third_party/PATCHES.md, upstream tests changed): the disk
+	// writer's fsync requests (MTX-1) show how far the recorder has come.
+	partsAsked := make(chan struct{}, 3)
+	realSyncAsked := syncAsked
+	syncAsked = func(segmentFile) {
+		select {
+		case partsAsked <- struct{}{}:
+		default:
+		}
+	}
+	defer func() { syncAsked = realSyncAsked }()
+
 	recordPath := filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f")
 
 	w := &Recorder{
@@ -480,7 +492,20 @@ func TestRecorderFMP4NegativeInitialDTS(t *testing.T) {
 		})
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	// A track writes a sample once its next one comes: the last unit, the
+	// third audio one, puts the second into a new part and hands the part
+	// before it to the disk writer, whose fsync request is the second. Close
+	// waits for the unit in progress, but drops those still queued, so it
+	// comes only once the recorder has taken the last one; a fixed 50 ms
+	// sleep flaked on a loaded runner.
+	deadline := time.After(10 * time.Second)
+	for range 2 {
+		select {
+		case <-partsAsked:
+		case <-deadline:
+			t.Fatal("the recorder has not taken every unit after 10 s")
+		}
+	}
 
 	w.Close()
 

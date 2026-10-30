@@ -186,3 +186,26 @@ func TestStatus_RunningOnceApplied(t *testing.T) {
 		t.Error("a stream that Apply did not get runs")
 	}
 }
+
+// TestPartWatcher_ResumesAtTheFailuresMicrosecond (T40; Task 8b): a segment
+// name holds its start to the microsecond (MTX-4), and the hub's clock has
+// finer digits: a .part whose name is the microsecond of a failed creation,
+// or later, is where recording resumed, as on Windows, whose clock can give
+// the failure and the next segment the same tick.
+func TestPartWatcher_ResumesAtTheFailuresMicrosecond(t *testing.T) {
+	recDir := t.TempDir()
+	key := streamKey{"cam1", "main"}
+	w := newPartWatcher(recDir)
+	w.setStreams([]streamKey{key})
+	writeFile(t, segPath(recDir, "cam1", "main", t0, ".part"), make([]byte, 10))
+	if firsts, _ := w.poll(t0.Add(pollInterval)); len(firsts) != 1 || firsts[0].resumed {
+		t.Fatalf("firsts %+v, want the stream's first part", firsts)
+	}
+	failedAt := t0.Add(10*time.Second + 500*time.Nanosecond)
+	w.expectResume(key, failedAt)
+	writeFile(t, segPath(recDir, "cam1", "main", failedAt, ".part"), make([]byte, 10))
+	firsts, _ := w.poll(t0.Add(11 * time.Second))
+	if want := failedAt.Truncate(time.Microsecond); len(firsts) != 1 || !firsts[0].resumed || !firsts[0].segmentStart.Equal(want) {
+		t.Errorf("firsts %+v, want the part that resumed at %v", firsts, want)
+	}
+}

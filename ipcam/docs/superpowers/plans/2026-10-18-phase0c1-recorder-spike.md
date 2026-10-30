@@ -142,7 +142,7 @@ Proba verifică ambele variante: varianta pornită în rulările obișnuite, iar
 - **MediaMTX recording shape (§4.2, §4.5, C13, C14, O17).**
   - **Segments and parts.** fMP4 segments of **5 min** with **1 s parts**. A segment closes at the first keyframe after 300 s or on a codec or resolution change.
   - **Naming.** A segment is written as `<name>.mp4.part` (clear) or `<name>.mp4.age.part` (encrypted) and renamed after `Close` to `.mp4` or `.mp4.age`.
-  - **Fsync.** The segment file at every part close. At segment close, in this order: the last writes (the clear `mvhd` duration, or the final age chunk with its `free` box), one more file fsync, `Close`, the rename, then the directory fsync. So a durable final name always points at durable final bytes. The directory is also synced once after the `.part` is created. On Windows the directory sync is a no-op and the rename uses `MoveFileEx(MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)`.
+  - **Fsync.** The segment file at every part close, requested when the part is written and run in order on the segment's own part syncer beside the recording, never on MediaMTX's recording goroutine (C1-R17: an inline fsync that waits on a busy disk stalls the recorder and MediaMTX's ~1.5 s reader queue discards frames). The disk writer holds at most 8 MiB of written-but-unsynced parts per recorder (C1-R17). At segment close, on the disk writer and in this order: the last writes (the clear `mvhd` duration, or the final age chunk with its `free` box), one more file fsync, `Close`, the rename, then the directory fsync. So a durable final name always points at durable final bytes. The directory is also synced once after the `.part` is created. On Windows the directory sync is a no-op and the rename uses `MoveFileEx(MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)`.
   - **Encrypted segments.** Written strictly sequentially through `crypto.Writer`, never in clear (HUB-04), with `Flush` at every part fsync.
   - **Padding.** A part end is padded to the 64 KiB chunk boundary with an fMP4 `free` box when the padding is ≤ 10 % of the part. When the camera's `PadLowBitrate` setting is on (default), every part **smaller than 64 KiB** is padded, however large the padding; parts of at least 64 KiB follow the 10 % rule. The rule is per part (§4.5 as amended by O17, 8d7ff23): it also catches night VBR and smart codec, and it costs nothing on a large stream. In the spec, "stream below 512 kbps" means exactly parts smaller than 64 KiB (≈ 524 kbps at 1 s parts).
   - **Final chunk.** It is never empty.
@@ -394,7 +394,7 @@ Rulings: C13, C14, G05 (fork side), C31 (re-vendor).
 
 - [ ] **Step 1: Re-vendor if due (C31).** If today is on or after 2026-10-22 and the fork is v1.21.1, run `tools/scripts/vendor-mediamtx.sh v1.21.2` and the MTX-0 tests first, and commit `ipcam: re-vendor MediaMTX v1.21.2`.
 - [ ] **Step 2: Write the failing tests** (fork, internal package tests):
-  - `TestMTX1_FsyncOnEachPartClose`: writing 3 parts and closing the segment gives 4 `syncFile` calls: one per part, each before the next part's first write, and one after the last write of the close (the `mvhd` duration) and before `Close`.
+  - `TestMTX1_FsyncOnEachPartClose`: writing 3 parts and closing the segment gives 4 `syncFile` calls: one per part, in part order, each requested once that part is written (C1-R17), and one after the last write of the close (the `mvhd` duration) and before `Close`. `TestMTX1_SlowPartFsyncKeepsRecording`: a part fsync held for seconds does not stop the next parts from reaching the file.
   - `TestMTX1_DirSyncAtCreateAndRenameOnly` (non-Windows): exactly 2 `syncDir` calls per segment, one after the `.part` is created and one after the rename.
   - `TestMTX1_RenameAfterCloseWithFinalName`: during writing only `<name>.mp4.part` exists; after close only `<name>.mp4` exists. The recorded order of the close is last write → `syncFile` → `Close` → `renameFinal` → `syncDir`.
   - `TestMTX1_ClearDurationWrittenBeforeRename`: `mvhd` of the final file has the segment duration.
@@ -438,7 +438,7 @@ Rulings: C04, C13, C22, R01, O17 (C1-R1).
   - `TestMTX2_LowBitratePadding_Off`: `recordAgePadLowBitrate: false` makes 256 kbps parts follow the 10 % rule only: a part is padded only when its padding is ≤ 10 % of the part.
   - `TestMTX2_LowBitrateDecidedPerPart`: with the setting on, a 63 KiB part is aligned and a 65 KiB part follows the 10 % rule (spec HUB-07's boundary test); in a 450 kbps ±30 % stream, exactly the parts under 64 KiB are aligned; a 4 Mbps stream follows only the 10 % rule. With the setting off, the 63 KiB part follows the 10 % rule.
   - `TestMTX2_FinalChunkSyncedBeforeRename`: the final age chunk (and the 8-byte `free` box when needed) is written before the segment's last `syncFile`, which comes before `Close` and `renameFinal`.
-  - `TestMTX2_FlushAtEachPartFsync`: right after each part's fsync, the file size is `len(header) + 16 + n·65552` with `n = ⌊plaintext ÷ 65536⌋`.
+  - `TestMTX2_FlushAtEachPartFsync`: at the moment each part's fsync is requested, the file size is `len(header) + 16 + n·65552` with `n = ⌊plaintext ÷ 65536⌋` (C1-R17: the fsync then runs beside the next part's writes).
   - `TestMTX2_NoSeekBack` (C13, HUB-30 "strict secvențial"): an append-only file wrapper fails on any `Seek`, `WriteAt` or `Truncate`; recording and closing an encrypted segment pass through it.
   - `TestMTX2_FinalChunkNeverEmpty`: a segment whose last part ends on a chunk boundary closes with an 8-byte `free` box and decrypts with `age.Decrypt`.
   - `TestMTX2_EncryptedNamingPartThenRename`: `.mp4.age.part` exists while writing and `.mp4.age` after close.
@@ -762,6 +762,7 @@ package results // SPIKE-ONLY
 const Schema = "ipcam.phase0c1.result/1"
 type Envelope struct {
     Schema, Code, RunID, Set string // Code: "MI1".."MI4", "MI9", "ENC-06"; Set: "lab-linux-kill9", "lab-linux-qemu-reset", "lab-windows-kill9", "pc-kill9", "pc-bugcheck", "pi-kill9", "pi-sysrq", "real-pc", "real-pi", …
+    AtMs int64 `json:"atMs,omitempty"` // C1-R22: when the run was stored (Unix ms, writer's clock, 0 = none); the judges' second tie-break key after the run number, then a stable key
     Host string // "pc" | "pi" | "lab-linux" | "lab-windows" | "lab-qemu"
     OS string; PiModel *PiModelInfo; Storage string /* "ssd"|"sd"|"hdd"|"unknown" */
     SdConfirmation *SdConfirmation // G16: the typed text and time, the audit stand-in
@@ -787,8 +788,8 @@ func Inventory(dir string, piSupported bool) (present, missing []string) // G15:
 type Verdict string
 const (Pass Verdict = "trece"; Fail Verdict = "pică"; Incomplete Verdict = "fără verdict: lipsesc măsurători")
 func Deferred(reason string) Verdict // "amânat în Faza 0-bis: <reason>"
-type Row struct{ Code, Value, Limit, Source string; Pass *bool }
-type Judgement struct{ Gate string; Verdict Verdict; PlanB string; Reasons []string; Rows []Row }
+type Row struct{ Code, Value, Limit, Source string; Host string /* the host whose table shows the row when Source does not name it: MI9's legs (Task 12) */; Pass *bool }
+type Judgement struct{ Gate string; Verdict Verdict; PlanB string; Reasons, Notes []string; Rows []Row; O17OffOverLimit bool /* G10: an O17-off loss over §4.5's bound, a proposal for the report's PR (Task 12b) */; Recommended map[string]int /* G12, G13: per host, the recommended count that the measurements leave (Task 12b) */ }
 func Write(dir string, e Envelope) error // results/<code>/<set>/<runId>.json
 
 package mi1 // SPIKE-ONLY
@@ -1016,7 +1017,7 @@ Rulings: C24 (consumption), G20, R02, R07.
 
 ```go
 package results
-type Mi3Data struct{ Tier string; Cameras int; CpuPctTotal float64; RamMb float64; Budgets map[string]Budget; DiskRatio map[string]float64 /* "clear","encrypted" */; FsyncPerSecPerFile float64; LatencyP95Ms float64; PacingP99Ms int64; SkippedAUs int; Steps []Mi3Step; Sixteen *Mi3Step; Proxies []string }
+type Mi3Data struct{ Tier string; Cameras int; CPUPctTotal float64 /* json "cpuPctTotal" */; RAMMb float64 /* json "ramMb" */; Budgets map[string]Budget; DiskRatio map[string]float64 /* "clear","encrypted" */; FsyncPerSecPerFile float64; LatencyP95Ms float64; PacingP99Ms int64; SkippedAUs int; Steps []Mi3Step; Sixteen *Mi3Step; Proxies []string; DiskQueuePeakBytes int64; StepsStopped, SixteenStopped string /* Romanian, why a step could not be measured */; LoadCPUPct map[string]float64 /* json "loadCpuPct": "live","playback","export","upload", % of the machine (C1-R19) */ }
 type Budget struct{ Value, Limit float64; Pass bool }
 type Mi3Step struct{ Cameras, Minutes, Attempt int; Pass, Valid bool; PacingP99Ms int64; SkippedAUs int }
 // Envelope gains: MI3 *Mi3Data
@@ -1029,6 +1030,7 @@ func Judge(envs []results.Envelope) results.Judgement // G12; reads the MI3 enve
   - **Live.** The tier's session count: H3 3, H1 2, H1b 1, H1c 1. Each session is a grid of every camera's sub stream plus one main stream, answered by the video `session` package over `source.NewRTSP` from the controller. Its consumer is a receive-only Pion peer in reccontroller (`controller/livepeer.go`). This ingests main twice, so the CPU figure is conservative. recspike's answerer binds Pion UDP sockets on the host (the R08 exception in Global Constraints).
   - **Playback.** A 1× (4 Mbps) decrypt-read of a closed segment.
   - **Export.** A full-speed decrypt and re-encrypt of one 5-min segment.
+    - It runs continuously for the whole step, so one export is always in progress (C1-R19). `LoadCPUPct` carries each load's CPU, and Judge adds a Note when `cpuTotal` fails only through the export's share.
   - **Upload.** age encryption plus an HTTPS PUT paced to 10 Mbps (on H1b and H1c: the cameras' total throughput) into the discard sink (`controller/sink.go`). This costs nothing and needs no account.
 - **Budgets per tier (§4.8, G20).** The keys of `Budgets`:
   - **H3:** `cpuTotal` (total CPU ≤ 60 %), `tileSub` (CPU per tile sent ≤ 1 %), `tileMain` (≤ 3 %), `encUpload` (encryption + upload ≤ 5 % per 10 Mbps), `ram` (≤ 250 MB + 20 MB per camera + 15 MB per session), `disk` (≤ 1.03 × bitrate, clear cameras only, R02), `fsyncPerFile` (≤ 1 fsync/s per open file) and `latencyP95` (added latency ≤ 150 ms p95: controller send time to receive time of the SEI index on the live peer, both on the controller's clock).
@@ -1041,7 +1043,8 @@ func Judge(envs []results.Envelope) results.Judgement // G12; reads the MI3 enve
   - **Camera count.** MI3 runs at `recommendedCameras` (C24: `RecommendedMax`; an unknown model uses the owner's number, default 1).
   - **Pacing (R07).** reccontroller records `PacingStats` for every MI3 run and step, as for MI1. While the PC is measured, the Pi controller serves about 70 Mbps: 8 × (4 + 0.5) Mbps of RTSP, the live peers and the 10 Mbps sink. A run or step with p99 > 100 ms or a skipped AU is invalid and redone, so the controller's own delay never counts against the host's latency or CPU. There are at most 3 attempts per step; after that, the host's MI3 is `Incomplete` and the report shows the pacing figures.
   - **On failure (G20).** It steps down by halving with 15-min runs until a count passes, then confirms that count with a full 1 h run (halving again if the confirmation fails). The minimum is 1. The steps go into `Steps[]`.
-  - **16 cameras (R07).** With `cores6Plus`, one extra hour at 16 cameras goes into `Sixteen`, as information.
+  - **16 cameras (R07).** With `cores6Plus`, one extra hour at 16 cameras follows the steps, whatever count they settled on, and goes into `Sixteen`, as information. After steps that stopped (3 invalid attempts, or an error), no hour at 16 cameras runs (C1-R20): the owner runs the probe again, and the re-run measures it.
+  - **A step that cannot be measured.** An error before the first valid hour ends the run without an envelope. After it, the envelope keeps the steps measured so far, `StepsStopped` says which step stopped them, and the run then reports the error: the first hour decides G12 (G27). An error of the hour at 16 cameras is information: `SixteenStopped`, no `Sixteen`. Neither field carries an error's own text (PH0-22).
 - **`Judge`.** It gives `trece`, or `pică → numărul recomandat devine <n>` (for the cold-boot row: `pică → pornirea la rece: Decizie tehnică în PR`).
 
 - [ ] **Step 1: Write the failing tests.**
@@ -1173,7 +1176,7 @@ func Judge(envs []results.Envelope) results.Judgement // G13; reads Enc06 from t
 Rulings: C01 (hub-side reader), C19, C20, G25, G26, G36, R06, R08 (exception).
 
 **Files:**
-- Create: `ipcam/tools/spikes/recording/mi9/{harness.go,bulk.go,seek.go,reader.go,judge.go}` + tests
+- Create: `ipcam/tools/spikes/recording/mi9/{harness.go,rpc.go,hub.go,client.go,bulk.go,seek.go,reader.go,lan.go,judge.go}` + tests
 - Create: `ipcam/tools/spikes/recording/cmd/recspike/mi9.go` (`recspike mi9 --lan --controller <addr>`); Create: `ipcam/tools/spikes/recording/cmd/mi9page/{main.go,web/index.html}` (serves the page and the hub-side harness for the Chrome leg); Modify: `ipcam/tools/spikes/recording/cmd/reccontroller/main.go` (MI9 Pion peer, the playback side)
 - Create: `ipcam/tools/spikes/video/e2e/mi9.spec.ts` (SPIKE-ONLY; skipped unless `MI9_PAGE` is set)
 - Modify: `ipcam/tools/spikes/recording/markers_test.go` (adds `../video/e2e/mi9.spec.ts` and `cmd/mi9page/web/index.html` to `TestMarkedNonGoFiles`)
@@ -1187,14 +1190,15 @@ Rulings: C01 (hub-side reader), C19, C20, G25, G26, G36, R06, R08 (exception).
 ```go
 package mi9 // SPIKE-ONLY
 type Transport string // "lan" | "turns443" | "chrome"
-type BulkResult struct{ Transport Transport; ThroughputMbps float64; SeekMs []float64 /* 20 seeks */; DisplayMs []float64 /* chrome leg */; RTTMs float64 }
+type BulkResult struct{ Transport Transport; ThroughputMbps float64; SeekMs []float64 /* 20 seeks */; DisplayMs []float64 /* chrome leg */; RTTMs float64; Partial *results.Mi9Partial /* set when the wait ended it (G27) */ }
 func MeasureBulk(ctx context.Context, recPath string, id age.Identity, t Transport, ice []webrtc.ICEServer) (BulkResult, error)
 func JudgeBulk(r BulkResult) (pass bool, reasons []string)
 func Judge(envs []results.Envelope) results.Judgement // G18; see "Judge" below for which Source decides which threshold
 
 package results
 type Mi9Data struct{ Legs []Mi9Leg }
-type Mi9Leg struct{ Transport string; ThroughputMbps float64; SeekMs, DisplayMs []float64; RTTMs float64; Source string /* "ci-loopback" | "ci-relay" | "ci-chrome" | "lan" */ }
+type Mi9Leg struct{ Transport string; ThroughputMbps float64; SeekMs, DisplayMs []float64; RTTMs float64; Source string /* "ci-loopback" | "ci-relay" | "ci-chrome" | "lan" */; Partial *Mi9Partial }
+type Mi9Partial struct{ ReceivedBytes, SizeBytes int64; ElapsedMs float64; LastSeekCut bool } // a measurement that its wait ended: during the transfer, ThroughputMbps is that of ReceivedBytes and there is no seek; during the seeks, SeekMs are those timed by then, the last one, with LastSeekCut, the seek under way timed until then (> 1500 ms, a lower bound)
 // Envelope gains: MI9 *Mi9Data
 ```
 
@@ -1202,7 +1206,9 @@ type Mi9Leg struct{ Transport string; ThroughputMbps float64; SeekMs, DisplayMs 
   - **Hub-side reader (§8.5 step 4, C01 exception).** The hub side opens the `.mp4.age` segment with `age.DecryptReaderAt` and the run's identity. It sends **plaintext** fMP4 byte ranges, as hubd does: the Chrome leg appends them to MSE, which needs plaintext.
   - **Relay.** `turns443` uses `ICEServers` + `ICETransportPolicyRelay`.
   - **Channels (§7.6).** `bulk/<call_id>` channels are reliable and ordered, with at most 4 open at once. Messages are ≤ min(64 KiB, the negotiated `max-message-size`). Sending pauses above 1 MiB `bufferedAmount` and resumes below 256 KiB (`SetBufferedAmountLowThreshold` + `OnBufferedAmountLow`).
-  - **Throughput.** One channel transfers the whole segment's plaintext; throughput = bits ÷ time.
+  - **Throughput.** One channel transfers the whole segment's plaintext; throughput = bits ÷ time. When the measurement's wait (reccontroller's 15 min) ends it first, the transfer stops and the leg keeps what was measured, as `Partial` (G27):
+    - during the transfer, the throughput of the bytes received by then, without seeks: a measured failure that decides, its seeks missing;
+    - during the seeks, the whole transfer's throughput and the seeks timed by then. The seek under way counts with its time to the IDR when its IDR had arrived; else, when it had already waited longer than 1.5 s, with that wait, a lower bound that fails it (`LastSeekCut`); else not at all. With a passing LAN transfer of a ≈ 150 MB segment (≤ 2.5 min), a wait that ends during the seeks leaves about 12.5 min for at most 20 seeks, so one of them took about 36 s or more. The leg fails when that time passed before the seek's IDR arrived; a stall after a seek's IDR leaves the timed seeks within 1.5 s, and the leg then reads Incomplete.
   - **Seek.** 20 timeline seeks. Each is timed from the request until the first IDR sample's bytes at or after the target are received.
   - **RTT.** `RTTMs` is the selected ICE candidate pair's `CurrentRoundTripTime` from Pion's stats.
 - **Legs (G26).**
@@ -1212,14 +1218,15 @@ type Mi9Leg struct{ Transport string; ThroughputMbps float64; SeekMs, DisplayMs 
 - **`JudgeBulk` (G25).**
   - LAN ≥ 8 Mbps; turns443 ≥ 5 Mbps.
   - max(SeekMs) ≤ 1500 and max(DisplayMs) ≤ 1500. Every seek goes to the CSV.
-  - On failure: `pică → redare ca track WebRTC 1×, salt prin RPC`.
+  - On failure: `pică → redare ca track WebRTC 1×, salt prin RPC`. A measured failure decides even when other parts are missing (G27).
+  - Missing, with nothing failing: no seek, fewer than 20 seeks all ≤ 1500 (a `Partial` leg), or no `DisplayMs` on Chrome. The reasons then end with `fără verdict: lipsesc măsurători`.
 - **`Judge` (G18), by Source.**
   - **LAN threshold.** Only legs with Source `lan`. Every such leg must pass, and at least one is needed.
   - **Relay threshold.** Only `ci-relay`.
   - **Seeks.** `SeekMs` from `lan` and `ci-relay`.
   - **Display.** `DisplayMs` only from `ci-chrome`.
   - **`ci-loopback`.** Never decides anything; it is information only.
-  - **Missing data.** A part with no deciding leg is `Incomplete`; a measured failure still decides (G27).
+  - **Missing data.** A part with no deciding leg is `Incomplete`, and so is the seeks part of a deciding leg with fewer than 20 seeks, all ≤ 1500 (a `Partial` leg); a measured failure still decides (G27), including a `Partial` leg's seek over 1500, cut or not.
 - **`mi9` job.**
   - **netem (R06).** It installs `linux-modules-extra-$(uname -r)` if needed, probes `tc qdisc add … netem delay 25ms` and annotates the result. The 25 ms goes on the **host-side veth's egress only**, the traffic from the runner into the coturn container. Each direction of the relayed peer-to-peer path crosses it once, so the RTT is 50 ms; on both veth ends it would be 100 ms. If netem is unavailable, the fallback is an in-process TCP delay proxy in front of TURN-TLS. Either way the job asserts 45 ms ≤ `RTTMs` ≤ 60 ms on the relay leg, annotates the measured value and fails outside that range.
   - **coturn (G36).** It starts the `coturn/coturn` image (≥ 4.14, the newest ≥ 14 days old) on 443 with a self-signed certificate and `--lt-cred-mech`. It is pinned by digest, with version, digest and date read from `https://hub.docker.com/v2/repositories/coturn/coturn/tags` (`digest`, `last_updated`); the GitHub API is refused here. It never uses apt's 4.6.1.
