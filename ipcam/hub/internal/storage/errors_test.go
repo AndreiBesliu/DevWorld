@@ -11,10 +11,11 @@ import (
 
 // TestErrors_MapToReasons (P24, §7.7): each driver error maps to its storage
 // reason, as returned and wrapped once with %w, and the two struct errors as
-// values and as pointers. A nil pointer is no reason, and does not panic. Only AuthExpired, QuotaFull,
-// RateLimited and DailyCap have a storage reason (2100–2102); the others are
-// ERROR_REASON_UNSPECIFIED (0), and of those only Transient is retryable,
-// because a Faza 1 Connect mapping gives it `unavailable` (CTR-14).
+// values and as pointers. A nil pointer is no reason, and does not panic.
+// Only AuthExpired, QuotaFull, RateLimited and DailyCap have a storage reason
+// (2100–2102); the others are ERROR_REASON_UNSPECIFIED (0), and of those only
+// Transient is retryable, because a Faza 1 Connect mapping gives it
+// `unavailable` (CTR-14).
 func TestErrors_MapToReasons(t *testing.T) {
 	tests := []struct {
 		name string

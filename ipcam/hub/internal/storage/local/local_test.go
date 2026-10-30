@@ -140,6 +140,30 @@ func TestLocal_ResumeDetectsComplete(t *testing.T) {
 	}
 }
 
+// TestLocal_ResumePrefersOpenPart: a key that is uploaded again with the
+// same size resumes at its open .part, not at the size of the object that
+// the earlier upload committed, which says nothing of the new bytes.
+func TestLocal_ResumePrefersOpenPart(t *testing.T) {
+	ctx := t.Context()
+	dst := newLocal(t, t.TempDir())
+	const key = "cam-1/seg.mp4"
+	upload(t, dst, key, randomBytes(mib+9, 5))
+
+	again := randomBytes(mib+9, 6)
+	st, err := dst.BeginUpload(ctx, key, int64(len(again)), storage.Meta{})
+	if err != nil {
+		t.Fatalf("BeginUpload again: %v", err)
+	}
+	const partial = 4096 + 3
+	if err := dst.PutChunk(ctx, &st, 0, bytes.NewReader(again[:partial]), partial); err != nil {
+		t.Fatalf("PutChunk: %v", err)
+	}
+	resumed := storage.UploadState{Key: key, Size: st.Size}
+	if next, err := dst.Resume(ctx, &resumed); err != nil || next != partial || resumed.Offset != partial {
+		t.Errorf("Resume = %d, %v (Offset %d); want the .part's %d bytes, not Size %d", next, err, resumed.Offset, partial, st.Size)
+	}
+}
+
 // TestLocal_Quota (P32): Free and Total agree with an independent reading of
 // the same filesystem, and Free drops when 64 MiB reach the disk. Other tests,
 // c1's among them, write and delete files on the same disk meanwhile, hence
@@ -149,15 +173,13 @@ func TestLocal_Quota(t *testing.T) {
 	root := t.TempDir()
 	dst := newLocal(t, root)
 
+	var q storage.Quota
 	for attempt := 1; ; attempt++ {
-		q, err := dst.Quota(ctx)
-		if err != nil {
+		var err error
+		if q, err = dst.Quota(ctx); err != nil {
 			t.Fatalf("Quota: %v", err)
 		}
 		free, total := independentQuota(t, root)
-		if q.Used != q.Total-q.Free || q.InBin != 0 || q.Unknown {
-			t.Errorf("Quota() = %+v; want Used = Total - Free, no InBin, not Unknown", q)
-		}
 		if within(q.Free, free, 0.01) && within(q.Total, total, 0.01) {
 			break
 		}
@@ -166,6 +188,9 @@ func TestLocal_Quota(t *testing.T) {
 			t.Errorf("Quota()'s Free and Total are not within 1 %% of the independent reading")
 			break
 		}
+	}
+	if q.Used != q.Total-q.Free || q.InBin != 0 || q.Unknown {
+		t.Errorf("Quota() = %+v; want Used = Total - Free, no InBin, not Unknown", q)
 	}
 
 	const written = 64 * mib
@@ -233,7 +258,7 @@ func TestLocal_PutSmallReplaces(t *testing.T) {
 
 // TestLocal_RejectsKeysOutsideRoot: a key that is not a clean relative path
 // with '/', or that ends in the driver's own suffixes, is refused, and
-// nothing is written.
+// nothing is written: no file and no directory, under the root or beside it.
 func TestLocal_RejectsKeysOutsideRoot(t *testing.T) {
 	ctx := t.Context()
 	parent := t.TempDir()
@@ -251,8 +276,8 @@ func TestLocal_RejectsKeysOutsideRoot(t *testing.T) {
 			t.Errorf("PutSmall(%q) = %v; want ErrPermanent", key, err)
 		}
 	}
-	if got := filesUnder(t, parent); len(got) != 0 {
-		t.Errorf("files written: %v", slices.Sorted(maps.Keys(got)))
+	if got := entriesUnder(t, parent); !slices.Equal(got, []string{"root"}) {
+		t.Errorf("entries under the root's parent: %q; want only the empty root", got)
 	}
 }
 
@@ -400,6 +425,72 @@ func TestLocal_ProbeLeavesNoObject(t *testing.T) {
 	}
 }
 
+// TestLocal_ProbeFailureLeavesNoObject: when the probe's range read fails,
+// or returns other bytes, after its object was written, Probe fails and
+// deletes the object, so List never shows it.
+func TestLocal_ProbeFailureLeavesNoObject(t *testing.T) {
+	other := filepath.Join(t.TempDir(), "other")
+	writeSynced(t, other, []byte("bytes that are not the probe's at all"))
+	for name, open := range map[string]func(string) (*os.File, error){
+		"the read fails": func(string) (*os.File, error) { return nil, errors.New("an injected read failure") },
+		"other bytes":    func(string) (*os.File, error) { return os.Open(other) }, //nolint:gosec // G304: the test's own file
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			dst := newLocal(t, root)
+			t.Cleanup(local.SetOpen(open))
+			report, err := dst.Probe(t.Context())
+			if err == nil || !report.Writable || report.RangeRead {
+				t.Errorf("Probe = %+v, %v; want written, no range read, and an error", report, err)
+			}
+			if got := entriesUnder(t, root); len(got) != 0 {
+				t.Errorf("the root after a failed Probe holds %q; want it empty", got)
+			}
+		})
+	}
+}
+
+// TestLocal_DiskFullIsQuotaFull (P24): a write that the disk refuses as full
+// (ENOSPC; on Windows ERROR_DISK_FULL or ERROR_HANDLE_DISK_FULL) is
+// ErrQuotaFull, STORAGE_QUOTA_FULL, in BeginUpload, PutChunk, Commit and
+// PutSmall, and still says what failed. Another write error is not.
+func TestLocal_DiskFullIsQuotaFull(t *testing.T) {
+	for _, fault := range append(diskFullErrors(), errors.New("an injected input/output error")) {
+		full := !strings.HasPrefix(fault.Error(), "an injected")
+		t.Run(fault.Error(), func(t *testing.T) {
+			ctx := t.Context()
+			dst := newLocal(t, t.TempDir())
+			failing := func(f *os.File) error { return &os.PathError{Op: "sync", Path: f.Name(), Err: fault} }
+			check := func(call string, err error) {
+				t.Helper()
+				if !errors.Is(err, fault) || errors.Is(err, storage.ErrQuotaFull) != full ||
+					(storage.Reason(err).Code == storage.ReasonQuotaFull) != full {
+					t.Errorf("%s with a failing sync = %v (reason %+v); want the fault, and ErrQuotaFull: %v", call, err, storage.Reason(err), full)
+				}
+			}
+			data := randomBytes(1000, 7)
+			restore := local.SetSync(failing)
+			_, err := dst.BeginUpload(ctx, "cam-1/seg.mp4", int64(len(data)), storage.Meta{})
+			check("BeginUpload", err)
+			restore()
+			st, err := dst.BeginUpload(ctx, "cam-1/seg.mp4", int64(len(data)), storage.Meta{})
+			if err != nil {
+				t.Fatalf("BeginUpload: %v", err)
+			}
+			restore = local.SetSync(failing)
+			check("PutChunk", dst.PutChunk(ctx, &st, 0, bytes.NewReader(data), int64(len(data))))
+			restore()
+			putChunks(t, dst, &st, data, 0)
+			restore = local.SetSync(failing)
+			defer restore()
+			_, err = dst.Commit(ctx, &st)
+			check("Commit", err)
+			_, err = dst.PutSmall(ctx, "meta/catalog.json", data)
+			check("PutSmall", err)
+		})
+	}
+}
+
 // newLocal returns the driver on root.
 func newLocal(t *testing.T, root string) storage.Destination {
 	t.Helper()
@@ -502,6 +593,25 @@ func filesUnder(t *testing.T, dir string) map[string][]byte {
 		t.Fatalf("walk %s: %v", dir, err)
 	}
 	return files
+}
+
+// entriesUnder returns every file and directory under dir, by its slash path
+// relative to dir, in lexical order.
+func entriesUnder(t *testing.T, dir string) []string {
+	t.Helper()
+	var entries []string
+	err := filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
+		if err != nil || path == dir {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		entries = append(entries, filepath.ToSlash(rel))
+		return err
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	return entries
 }
 
 // within reports whether got is within frac of want.

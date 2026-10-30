@@ -32,16 +32,15 @@ type UploadState struct {
 	Calls   CallCounts // this upload's API calls
 }
 
-// String formats st as %+v would, with Session redacted. fmt calls it for %v,
-// %+v and %s, of st and of a pointer to it. Encoding st as JSON, for the
-// catalog, keeps Session.
-func (st UploadState) String() string {
-	return fmt.Sprintf("{Key:%s Size:%d Session:%s Offset:%d Calls:%v}", st.Key, st.Size, redactSession(st.Session), st.Offset, st.Calls)
-}
-
-// GoString is %#v's form of st, with Session redacted.
-func (st UploadState) GoString() string {
-	return fmt.Sprintf("storage.UploadState{Key:%q, Size:%d, Session:%q, Offset:%d, Calls:%#v}", st.Key, st.Size, redactSession(st.Session), st.Offset, st.Calls)
+// Format prints st with Session redacted, whatever the verb, as a value or
+// through a pointer: %#v in Go syntax, every other verb as %+v would print
+// st's fields. Encoding st as JSON, for the catalog, keeps Session.
+func (st UploadState) Format(f fmt.State, verb rune) {
+	format := "{Key:%s Size:%d Session:%s Offset:%d Calls:%v}"
+	if verb == 'v' && f.Flag('#') {
+		format = "storage.UploadState{Key:%q, Size:%d, Session:%q, Offset:%d, Calls:%#v}"
+	}
+	_, _ = fmt.Fprintf(f, format, st.Key, st.Size, redactSession(st.Session), st.Offset, st.Calls)
 }
 
 // LogValue is st for log/slog, with Session redacted.

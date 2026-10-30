@@ -7,7 +7,6 @@
 package local
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -82,41 +81,6 @@ func (*Local) Capabilities() storage.Caps {
 	}
 }
 
-// Probe writes a small object, reads a range of it back, deletes it and reads
-// the quota. The report holds the steps that passed, and the error is the
-// first step that failed.
-func (l *Local) Probe(ctx context.Context) (storage.ProbeReport, error) {
-	var report storage.ProbeReport
-	data := []byte("ipcam: a probe of the destination\n")
-	ref, err := l.PutSmall(ctx, probeKey, data)
-	if err != nil {
-		return report, err
-	}
-	report.Writable = true
-	const off, n = 7, 5
-	r, err := l.OpenRange(ctx, ref, off, n)
-	if err != nil {
-		return report, err
-	}
-	got, err := io.ReadAll(r)
-	if cerr := r.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return report, fmt.Errorf("local: probe: %w", err)
-	}
-	if !bytes.Equal(got, data[off:off+n]) {
-		return report, fmt.Errorf("local: probe: a range read returned %q, want %q: %w", got, data[off:off+n], storage.ErrPermanent)
-	}
-	report.RangeRead = true
-	if _, err := l.Delete(ctx, ref); err != nil {
-		return report, err
-	}
-	report.Deletable = true
-	report.Quota, err = l.Quota(ctx)
-	return report, err
-}
-
 // BeginUpload creates key's directories and an empty <key>.part, the
 // upload's session, truncating a .part left by an earlier upload of key. It
 // syncs the directory, so that the session survives a power cut.
@@ -132,10 +96,10 @@ func (l *Local) BeginUpload(ctx context.Context, key storage.ObjectKey, size int
 		return storage.UploadState{}, fmt.Errorf("local: upload of %s: size %d: %w", key, size, storage.ErrPermanent)
 	}
 	if err := l.makeKeyDirs(key); err != nil {
-		return storage.UploadState{}, fmt.Errorf("local: upload of %s: %w", key, err)
+		return storage.UploadState{}, fmt.Errorf("local: upload of %s: %w", key, quotaFull(err))
 	}
 	if err := writeSynced(file+partSuffix, nil); err != nil {
-		return storage.UploadState{}, fmt.Errorf("local: upload of %s: %w", key, err)
+		return storage.UploadState{}, fmt.Errorf("local: upload of %s: %w", key, quotaFull(err))
 	}
 	if err := platformSyncDir(filepath.Dir(file)); err != nil {
 		return storage.UploadState{}, fmt.Errorf("local: upload of %s: %w", key, err)
@@ -166,7 +130,7 @@ func (l *Local) PutChunk(ctx context.Context, st *storage.UploadState, off int64
 		err = cerr
 	}
 	if err != nil {
-		return fmt.Errorf("local: upload of %s: %w", st.Key, err)
+		return fmt.Errorf("local: upload of %s: %w", st.Key, quotaFull(err))
 	}
 	st.Offset = off + n
 	return nil
@@ -215,10 +179,10 @@ func (l *Local) Commit(ctx context.Context, st *storage.UploadState) (storage.Ob
 	switch err := syncPart(part, st.Size); {
 	case err == nil:
 		if err := renameReplace(part, file); err != nil {
-			return storage.ObjectRef{}, fmt.Errorf("local: commit of %s: %w", st.Key, err)
+			return storage.ObjectRef{}, fmt.Errorf("local: commit of %s: %w", st.Key, quotaFull(err))
 		}
 	case !errors.Is(err, fs.ErrNotExist):
-		return storage.ObjectRef{}, fmt.Errorf("local: commit of %s: %w", st.Key, err)
+		return storage.ObjectRef{}, fmt.Errorf("local: commit of %s: %w", st.Key, quotaFull(err))
 	case !committed(file, st.Size):
 		return storage.ObjectRef{}, fmt.Errorf("local: commit of %s: no %s and no object of %d bytes: %w", st.Key, partSuffix, st.Size, storage.ErrSessionExpired)
 	}
@@ -278,7 +242,7 @@ func (l *Local) OpenRange(ctx context.Context, ref storage.ObjectRef, off, n int
 	if off < 0 || n < 0 {
 		return nil, fmt.Errorf("local: read of %s: range %d+%d: %w", ref.Key, off, n, storage.ErrPermanent)
 	}
-	f, err := os.Open(file) //nolint:gosec // G304: a file under the root, from a checked key
+	f, err := openFile(file)
 	if err != nil {
 		return nil, fmt.Errorf("local: read of %s: %w", ref.Key, notFound(err))
 	}
@@ -349,7 +313,7 @@ func (l *Local) PutSmall(ctx context.Context, key storage.ObjectKey, data []byte
 		return storage.ObjectRef{}, err
 	}
 	if err := l.makeKeyDirs(key); err != nil {
-		return storage.ObjectRef{}, fmt.Errorf("local: write of %s: %w", key, err)
+		return storage.ObjectRef{}, fmt.Errorf("local: write of %s: %w", key, quotaFull(err))
 	}
 	tmp := file + tmpSuffix
 	err = writeSynced(tmp, data)
@@ -358,7 +322,7 @@ func (l *Local) PutSmall(ctx context.Context, key storage.ObjectKey, data []byte
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
-		return storage.ObjectRef{}, fmt.Errorf("local: write of %s: %w", key, err)
+		return storage.ObjectRef{}, fmt.Errorf("local: write of %s: %w", key, quotaFull(err))
 	}
 	if err := platformSyncDir(filepath.Dir(file)); err != nil {
 		return storage.ObjectRef{}, fmt.Errorf("local: write of %s: %w", key, err)
@@ -502,7 +466,7 @@ func writeChunk(f *os.File, off int64, r io.Reader, n int64) error {
 	if _, err := io.CopyN(io.NewOffsetWriter(f, off), r, n); err != nil {
 		return err
 	}
-	return f.Sync()
+	return syncFile(f)
 }
 
 // syncPart fsyncs the .part at file once it holds size bytes.
@@ -516,7 +480,7 @@ func syncPart(file string, size int64) error {
 		err = fmt.Errorf("%s holds %d of %d bytes: %w", filepath.Base(file), fi.Size(), size, storage.ErrPermanent)
 	}
 	if err == nil {
-		err = f.Sync()
+		err = syncFile(f)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
@@ -532,7 +496,7 @@ func writeSynced(file string, data []byte) error {
 	}
 	_, err = f.Write(data)
 	if err == nil {
-		err = f.Sync()
+		err = syncFile(f)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
