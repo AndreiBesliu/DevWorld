@@ -100,6 +100,10 @@ type Event struct {
 	// LastPartAgoMs is a status event's time since the stream's open part
 	// last grew, -1 before its first part since ipcam-hub started.
 	LastPartAgoMs int64 `json:"lastPartAgoMs"`
+	// StartMs and EndMs are a segment_closed's segment's start and end, or
+	// a gap's, on the host's wall clock (Unix ms).
+	StartMs int64 `json:"startMs"`
+	EndMs   int64 `json:"endMs"`
 
 	Line json.RawMessage `json:"-"`
 	At   time.Time       `json:"-"`
