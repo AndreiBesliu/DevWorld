@@ -89,15 +89,22 @@ type upload struct {
 
 // work runs one upload of p on a goroutine of its own.
 func (q *Queue) work(ctx context.Context, d *destination, p catalog.Placement) {
+	u := &upload{q: q, d: d, p: p}
 	defer func() {
 		q.mu.Lock()
 		delete(q.inflight, p.ID)
 		d.busy--
-		q.resetDue = true // the upload may have left its row uploading
+		if u.p.State == catalog.PlacementUploading {
+			// The row is uploading as the upload last wrote it (a stop, or a
+			// catalog error that the reset to pending hit too): the polls
+			// reset it.
+			q.stranded[p.ID] = u.p
+		} else {
+			delete(q.stranded, p.ID)
+		}
 		q.mu.Unlock()
 		q.done()
 	}()
-	u := &upload{q: q, d: d, p: p}
 	if err := u.run(ctx); err != nil {
 		u.fail(ctx, err)
 	}
@@ -323,7 +330,7 @@ func (q *Queue) paused(d *destination) bool {
 // fail takes the error that ended the upload.
 func (u *upload) fail(ctx context.Context, err error) {
 	if ctx.Err() != nil {
-		return // a stop is no failure (g2-02): the row stays uploading, and Run's reset makes it due again
+		return // a stop is no failure (g2-02): the row stays uploading, and a poll's reset makes it due again
 	}
 	var local *localErr
 	switch {

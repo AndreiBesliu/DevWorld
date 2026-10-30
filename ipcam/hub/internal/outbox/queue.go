@@ -15,6 +15,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -115,11 +116,17 @@ type Queue struct {
 	// it before its worker marks it uploading, so the reset of uploading
 	// rows never takes an upload in flight.
 	inflight map[string]bool
-	// resetDue: Run has not reset the uploading rows yet, or a worker ended
-	// since, which may have left its row uploading. Only then can a row be
-	// uploading with no worker, so only then does a poll read every
-	// placement to reset them (about 80 ms at 16k rows).
-	resetDue bool
+	// stranded holds the placements of the queue's destinations whose rows
+	// are uploading with no worker, each as its row was last read or written:
+	// those Run's start read finds (an earlier run of the hub left them so),
+	// and those an upload hands over as it ends with its row uploading (a
+	// stop, or a catalog error that its reset to pending hit too). Only an
+	// upload of this queue writes uploading, and hub.lock keeps any other hub
+	// off the catalog, so these are all such rows. Every poll resets them
+	// (resetUploading) by their IDs, with no read of every placement; a row
+	// leaves once it is reset, or once it is no longer uploading with its
+	// bytes.
+	stranded map[string]catalog.Placement
 	// seen holds the placements reported Queued, each with its bytes then,
 	// and mismatches each placement's hash mismatches (P34). A placement
 	// leaves both once it is verified or failed for good, and when its
@@ -154,7 +161,8 @@ func New(cat *catalog.DB, dests map[string]storage.Destination, opts Options) *Q
 	}
 	q := &Queue{
 		cat: cat, opts: opts, dests: map[string]*destination{}, wake: make(chan struct{}, 1),
-		inflight: map[string]bool{}, resetDue: true, seen: map[string]int64{}, mismatches: map[string]int{}, failing: map[localKey]bool{},
+		inflight: map[string]bool{}, stranded: map[string]catalog.Placement{},
+		seen: map[string]int64{}, mismatches: map[string]int{}, failing: map[localKey]bool{},
 	}
 	for id, d := range dests {
 		q.dests[id] = newDestination(id, d)
@@ -179,12 +187,18 @@ func (q *Queue) Enqueue(ctx context.Context, tx *sql.Tx, p catalog.Placement) er
 // returns nil. It polls the due placements every second, on Enqueue and when
 // an upload ends. Each poll first resets every uploading placement of its
 // destinations that no worker holds to pending, keeping its attempts and its
-// session: a row that a kill left uploading, or that an upload could not
-// settle (a full card fails both writes), is due again and resumes. A poll
-// skips that reset when no upload ended since the last one: no row can have
-// been left uploading.
+// session: a row that a kill or a stop left uploading, or that an upload
+// could not settle (a full card fails both writes), is due again and
+// resumes. Run finds the rows that an earlier run left so in one read of
+// every placement before its first poll, repeated before each poll until it
+// succeeds; an upload of this queue that ends with its row uploading hands
+// that row to the polls (Queue.stranded).
 func (q *Queue) Run(ctx context.Context) error {
+	found := false // the start read of the uploading rows succeeded
 	for ctx.Err() == nil {
+		if !found {
+			found = q.findUploading(ctx)
+		}
 		q.poll(ctx)
 		tick := q.opts.Clock.After(pollEvery)
 		if q.idle != nil && q.quiet() {
@@ -227,39 +241,49 @@ func (q *Queue) State(destID string) DestState {
 	return d.state
 }
 
-// resetUploading sets every uploading placement of the queue's destinations
-// that no worker holds back to pending, keeping its attempts and its
-// session, when a reset is due (resetDue). Only this goroutine starts
-// workers, so none takes such a row meanwhile; a row that its worker settled
-// since the read is no longer uploading, and the write leaves it as it is.
-func (q *Queue) resetUploading(ctx context.Context) {
-	q.mu.Lock()
-	due := q.resetDue
-	q.resetDue = false
-	q.mu.Unlock()
-	if !due {
-		return
-	}
-	again := func() { // a catalog error: the next poll resets again
-		q.mu.Lock()
-		q.resetDue = true
-		q.mu.Unlock()
-	}
+// findUploading is Run's start read: it reads every placement and adds each
+// uploading one of the queue's destinations that no worker holds to
+// stranded, for the polls to reset. It reports whether the read succeeded.
+func (q *Queue) findUploading(ctx context.Context) bool {
 	all, err := q.cat.Placements(ctx)
 	if q.catalogFailed(ctx, opPlacements, err) {
-		again()
-		return
+		return false
 	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	for _, p := range all {
-		if p.State != catalog.PlacementUploading || q.dests[p.DestinationID] == nil || q.held(p.ID) {
-			continue
+		if p.State == catalog.PlacementUploading && q.dests[p.DestinationID] != nil && !q.inflight[p.ID] {
+			q.stranded[p.ID] = p
 		}
+	}
+	return true
+}
+
+// resetUploading sets every uploading placement of the queue's destinations
+// that no worker holds, the rows in stranded, back to pending, keeping its
+// attempts and its session. Each write names the row's uploading state and
+// bytes, so a row that changed since (settled, or superseded) is left as it
+// is. A catalog error keeps the rows for the next poll. Only this goroutine
+// starts workers, so none takes such a row meanwhile.
+func (q *Queue) resetUploading(ctx context.Context) {
+	q.mu.Lock()
+	var rows []catalog.Placement
+	for id, p := range q.stranded {
+		if !q.inflight[id] {
+			rows = append(rows, p)
+		}
+	}
+	q.mu.Unlock()
+	slices.SortFunc(rows, func(a, b catalog.Placement) int { return strings.Compare(a.ID, b.ID) })
+	for _, p := range rows {
 		reset := p
 		reset.State = catalog.PlacementPending
 		if q.catalogFailed(ctx, opUpdatePlacement, q.cat.UpdatePlacement(ctx, reset, p.State, p.Bytes)) {
-			again()
 			return
 		}
+		q.mu.Lock()
+		delete(q.stranded, p.ID)
+		q.mu.Unlock()
 	}
 }
 

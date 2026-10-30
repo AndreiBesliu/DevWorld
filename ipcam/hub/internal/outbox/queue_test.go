@@ -856,7 +856,17 @@ func (o *localHook) LocalError(err error) {
 // row uploading with no worker. Once the catalog recovers, the next poll
 // resets it to pending, keeping its attempts and its session, and the
 // placement is verified without a new Run.
+//
+// In the second case, a row that cannot be scanned also makes every read of
+// all the placements fail from the moment the card fills, as a bad page of
+// the table on a card would, while the writes of single rows work. Each poll
+// resets the stuck row by its ID, so the reset needs no such read.
 func TestOutbox_StuckUploadingRowDueAgain(t *testing.T) {
+	t.Run("the catalog recovers", func(t *testing.T) { testStuckUploadingRow(t, false) })
+	t.Run("no read of all the placements", func(t *testing.T) { testStuckUploadingRow(t, true) })
+}
+
+func testStuckUploadingRow(t *testing.T, unreadable bool) {
 	h := newHarness(t)
 	f := newFakeDest(storage.KindLocal, h.clk.Now)
 	data := randomBytes(3*fakePart, 1)
@@ -883,20 +893,49 @@ func TestOutbox_StuckUploadingRowDueAgain(t *testing.T) {
 	var fill sync.Once
 	// The card fills once the first chunk is stored, before its session is
 	// written, and has room again once the reset to pending failed too.
-	f.stored = func(fakeCall) { fill.Do(func() { hookExec("INSERT INTO test_full VALUES (1)") }) }
+	f.stored = func(fakeCall) {
+		fill.Do(func() {
+			hookExec("INSERT INTO test_full VALUES (1)")
+			if unreadable {
+				// Another destination's row whose bytes are no number: every
+				// read of all the placements fails at its scan.
+				hookExec(`INSERT INTO placements (id, object_kind, object_id, destination_id, class, encrypt, state, bytes)
+					VALUES ('test-unreadable', 'segment', 'none', 'dst-gone', 'CONTINUOUS', 0, 'pending', 'no number')`)
+			}
+		})
+	}
 	obs := &localHook{recObserver: h.obs, hook: func(n int32) {
 		if n == 2 {
 			hookExec("DELETE FROM test_full")
 		}
 	}}
 	q := h.newQueue(map[string]storage.Destination{"dst-a": f}, func(o *Options) { o.Observer = obs })
-	h.run(q, time.Second, 5*time.Minute, h.verified(p))
+	// The Verified call, not the catalog: in the second case the placements
+	// cannot be read whole.
+	h.run(q, time.Second, 5*time.Minute, func() bool { return len(h.obs.of("Verified")) > 0 })
 
 	mu.Lock()
 	err := errors.Join(hookErrs...)
 	mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if unreadable {
+		if _, err := h.cat.Placements(t.Context()); err == nil {
+			t.Error("the placements were read whole despite the unreadable row: the case tests nothing")
+		}
+		if err := h.exec("DELETE FROM placements WHERE id = 'test-unreadable'"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !h.verified(p)() {
+		t.Errorf("the placement is %+v, want verified", h.placementOf(p.ObjectID, "dst-a"))
+	}
+	q.mu.Lock()
+	stranded := len(q.stranded)
+	q.mu.Unlock()
+	if stranded != 0 {
+		t.Errorf("the queue still holds %d stranded rows after the reset, want none", stranded)
 	}
 	if local := h.obs.of("LocalError"); len(local) != 2 {
 		t.Errorf("LocalError calls %+v, want 2: the session's write and the reset's", local)
@@ -1057,7 +1096,7 @@ func TestOutbox_DonePlacementsLeaveNoState(t *testing.T) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.seen) != 0 || len(q.mismatches) != 0 {
-		t.Errorf("after every placement is done the queue keeps %v and %v, want nothing", q.seen, q.mismatches)
+	if len(q.seen) != 0 || len(q.mismatches) != 0 || len(q.stranded) != 0 {
+		t.Errorf("after every placement is done the queue keeps %v, %v and %v, want nothing", q.seen, q.mismatches, q.stranded)
 	}
 }
