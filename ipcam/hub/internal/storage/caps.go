@@ -8,7 +8,7 @@ type Caps struct {
 	ChunkAlign int64      // every chunk but the last is a multiple of it: 256 KiB Drive, 320 KiB OneDrive; 0 = any
 	PartSize   int64      // the fixed chunk size that the driver chose (§9.2)
 	MaxRequest int64      // the largest request body: < 60 MiB OneDrive; 0 = no limit
-	EqualParts bool       // every part but the last has the same size (R2)
+	EqualParts bool       // every part but the last has the same size (Cloudflare R2 requires it)
 	MaxObject  int64      // the largest object; 0 = no limit
 	Playback   LinkKind   // how a client plays an object
 	RangeRead  bool       // OpenRange reads a byte range without the rest
@@ -52,7 +52,7 @@ type DeleteKind int
 // The delete kinds. The zero value, DeleteRecycleBin, assumes that a deleted
 // object may still take quota until the bin empties.
 const (
-	DeleteRecycleBin DeleteKind = iota // the object goes to a recycle bin that occupies quota (OneDrive personal)
+	DeleteRecycleBin DeleteKind = iota // the object goes to a recycle bin, which may still take quota (OneDrive personal)
 	DeletePermanent                    // the object and its bytes are gone
 )
 

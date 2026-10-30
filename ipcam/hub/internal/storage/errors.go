@@ -32,7 +32,8 @@ var (
 )
 
 // ErrRateLimited means the provider asked to wait RetryAfter before the next
-// call. Drivers return it without sleeping (P26); the outbox waits.
+// call. Drivers return it as a value, without sleeping (P26); the outbox
+// waits.
 type ErrRateLimited struct{ RetryAfter time.Duration }
 
 func (e ErrRateLimited) Error() string {
@@ -41,6 +42,7 @@ func (e ErrRateLimited) Error() string {
 
 // ErrDailyCap means the account reached the provider's daily upload cap,
 // which resets after ResetAfter (Drive: 750 GiB a day, a 24 h pause).
+// Drivers return it as a value.
 type ErrDailyCap struct{ ResetAfter time.Duration }
 
 func (e ErrDailyCap) Error() string {
