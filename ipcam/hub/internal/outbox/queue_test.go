@@ -676,6 +676,11 @@ func TestOutbox_SpoolReadErrorDueAgain(t *testing.T) {
 	if len(local) != 1 || !errors.Is(local[0].Err, syscall.EIO) || strings.Contains(local[0].Err.Error(), h.recDir) {
 		t.Errorf("LocalError calls %+v, want one EIO without the spool's directory", local)
 	}
+	// Read from DuePlacements four times, the placement is reported queued
+	// once, at its first read.
+	if queued := h.obs.of("Queued"); len(queued) != 1 || queued[0].P.ID != p.ID || queued[0].P.State != catalog.PlacementPending {
+		t.Errorf("Queued calls %+v, want one, of the pending placement", queued)
+	}
 }
 
 // TestOutbox_NoSpoolHandleAcrossPutChunk (g2-10): the worker holds no
