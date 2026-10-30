@@ -146,6 +146,40 @@ func TestMI3_SmokeEndToEnd(t *testing.T) {
 	}
 }
 
+// TestMI3_EndSaysTheLeastCoveredLiveTile (mis-2, Final fix C): each live
+// peer's access units count for its own session's tiles, and the step's
+// result names the tile that received frames for the least time since the
+// binds, with its session and seconds, which the host compares with its
+// window; the frames' count does not decide.
+func TestMI3_EndSaysTheLeastCoveredLiveTile(t *testing.T) {
+	r := newRig(t)
+	conn := r.connect("pc")
+	tiles := []string{"cam01_sub", "cam01_main"}
+	st := newMi3Step(conn, r.c.sendLog, 2, tiles)
+	r.c.mu.Lock()
+	r.c.steps["pc-mi3-03"] = st
+	r.c.mu.Unlock()
+	t0 := r.clock.Now()
+	st.coverage.Start(t0)
+	first, second := st.onAU(1), st.onAU(2)
+	for i := range 121 { // a frame every 500 ms for 60 s
+		at := t0.Add(time.Duration(i) * 500 * time.Millisecond)
+		for _, tile := range tiles {
+			first(tile, nil, at)
+		}
+		second("cam01_sub", nil, at)
+		if i <= 20 { // the second session's main stops after 10 s
+			second("cam01_main", nil, at)
+		}
+	}
+	r.clock.set(t0.Add(time.Minute))
+	r.send(conn, link.Mi3End{RunID: "pc-mi3-03"})
+	res, ok := r.receive(conn).(link.Mi3Result)
+	if !ok || res.LiveLeastTile != "cam01_main" || res.LiveLeastSession != 2 || res.LiveLeastS != 10 {
+		t.Errorf("got %#v, want cam01_main of session 2 covered for 10 s", res)
+	}
+}
+
 // TestMI3_LocalControllerRefusesAStep: a -local controller has no live
 // peers: MI3's step is refused, in Romanian, since its cameras would load
 // the host that MI3 measures.

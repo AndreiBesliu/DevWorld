@@ -190,15 +190,21 @@ type Mi3End struct {
 }
 
 // Mi3Result is the controller's side of a step: its pacing (R07) from
-// Mi3Start to Mi3End, and the live tiles' added latency, p95 over
+// Mi3Start to Mi3End; the live tiles' added latency, p95 over
 // LatencySamples access units, from the SEI index on the controller's
-// clock (§4.8).
+// clock (§4.8); and the live tile that received frames for the least time
+// from Mi3Live to Mi3End without a pause longer than 2 s (mi3.Coverage,
+// mis-2): LiveLeastS seconds, of LiveLeastTile ("cam01_sub") in the live
+// session LiveLeastSession, counted from 1.
 type Mi3Result struct {
-	RunID          string  `json:"runId"`
-	PacingP99Ms    int64   `json:"pacingP99Ms"`
-	SkippedAUs     int     `json:"skippedAUs"`
-	LatencyP95Ms   float64 `json:"latencyP95Ms"`
-	LatencySamples int     `json:"latencySamples"`
+	RunID            string  `json:"runId"`
+	PacingP99Ms      int64   `json:"pacingP99Ms"`
+	SkippedAUs       int     `json:"skippedAUs"`
+	LatencyP95Ms     float64 `json:"latencyP95Ms"`
+	LatencySamples   int     `json:"latencySamples"`
+	LiveLeastS       float64 `json:"liveLeastS"`
+	LiveLeastTile    string  `json:"liveLeastTile"`
+	LiveLeastSession int     `json:"liveLeastSession"`
 }
 
 // Mi9Start starts MI9's LAN run on the host (G26 leg 3), whose recspike

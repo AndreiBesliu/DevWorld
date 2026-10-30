@@ -15,10 +15,9 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
-// loadStep is a step of 2 cameras on H1b (one live session of the tiles
-// cam01_sub, cam02_sub and cam01_main: 12 + 12 + 20 fps) whose window is
-// minutes seconds, an hour scaled down: its recordings hold each camera's
-// parts of 1 s, and its log is empty.
+// loadStep is a step of 2 cameras on H1b whose window is minutes seconds,
+// an hour scaled down: its recordings hold each camera's parts of 1 s, and
+// its log is empty.
 func loadStep(t *testing.T, parts map[string]int) *stepRun {
 	t.Helper()
 	dir := t.TempDir()
@@ -30,33 +29,42 @@ func loadStep(t *testing.T, parts map[string]int) *stepRun {
 	return &stepRun{r: r, dir: dir, cameras: 2, minutes: FullMinutes}
 }
 
-// fullLive is what the step's live session receives over its whole window
-// of 60 s: (12 + 12 + 20) fps × 60 s.
-const fullLive = 44 * 60
+// fullLive is what the controller says of the step's live tiles when they
+// received frames over the whole window of 60 s (Coverage): its least
+// covered tile covered all of it, and its frames gave latency samples.
+var fullLive = link.Mi3Result{LiveLeastS: 60.1, LiveLeastTile: "cam01_sub", LiveLeastSession: 1, LatencySamples: 44 * 60, PacingP99Ms: 8}
 
 // TestMI3_StepCountsOnlyAFullLoad (mis-2): a step counts only when its
-// load ran for its whole window: the live session received at least 95 %
-// of the tiles' frames over the window, each recorded camera's parts cover
-// at least 95 % of it, and MediaMTX did not restart. A tile that stops at
-// minute 10, a camera that stops recording, a camera that recorded
-// nothing, or a restart of MediaMTX makes the step invalid with a Romanian
-// reason, so that it is redone and never judged.
+// load ran for its whole window: every live tile of every session received
+// frames, without a pause longer than 2 s, for at least 95 % of the window
+// (the controller's Coverage), each recorded camera's parts cover at least
+// 95 % of it, and MediaMTX did not restart. A tile that stops at minute 10,
+// a camera that stops recording, a camera that recorded nothing, or a
+// restart of MediaMTX makes the step invalid with a Romanian reason, so
+// that it is redone and never judged. The live frames' count does not
+// decide (Final fix C): the frames that a healthy load's tiles lose, at
+// the start or on the LAN, leave it valid.
 func TestMI3_StepCountsOnlyAFullLoad(t *testing.T) {
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
 	upload := LoadReport{Seconds: 60, Bytes: 1}
+	stopped := fullLive
+	stopped.LiveLeastS, stopped.LiveLeastTile, stopped.LiveLeastSession = 10, "cam02_sub", 2
+	lossy := fullLive
+	lossy.LiveLeastS, lossy.LatencySamples = 57.5, 44*60*80/100
 	for _, tc := range []struct {
 		name     string
 		parts    map[string]int
-		received int
+		live     link.Mi3Result
 		restarts int32
 		why      string
 	}{
-		{"the whole load", map[string]int{"cam01": 60, "cam02": 58}, fullLive * 96 / 100, 0, ""},
-		{"a tile that stops at minute 10", map[string]int{"cam01": 60, "cam02": 60}, fullLive - 12*50, 0,
-			"sesiunile live au primit 2040 de cadre din cele 2640 ale ferestrei pasului"},
+		{"the whole load", map[string]int{"cam01": 60, "cam02": 58}, fullLive, 0, ""},
+		{"a whole load that lost frames", map[string]int{"cam01": 60, "cam02": 60}, lossy, 0, ""},
+		{"a tile that stops at minute 10", map[string]int{"cam01": 60, "cam02": 60}, stopped, 0,
+			"placa live cam02_sub din sesiunea live 2 a primit cadre timp de 10 s din cele 60 s ale ferestrei pasului (sub 95 %)"},
 		{"a camera that stops recording", map[string]int{"cam01": 60, "cam02": 30}, fullLive, 0,
 			"camera cam02_main a înregistrat 30 s din cele 60 s ale ferestrei pasului"},
 		{"a camera that recorded nothing", map[string]int{"cam01": 60}, fullLive, 0,
@@ -67,7 +75,7 @@ func TestMI3_StepCountsOnlyAFullLoad(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := loadStep(t, tc.parts)
 			s.childRestarts.Store(tc.restarts)
-			f, err := s.figures(usage{}, usage{}, 0, link.Mi3Result{LatencySamples: tc.received, PacingP99Ms: 8}, upload, id)
+			f, err := s.figures(usage{}, usage{}, 0, tc.live, upload, id)
 			if err != nil {
 				t.Fatal(err)
 			}
