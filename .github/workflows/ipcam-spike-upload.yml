@@ -68,8 +68,9 @@ jobs:
     timeout-minutes: 30
     env:
       # The packages that the jobs build, lint, test and check, one tree per word. Tasks 2,
-      # 4, 7b, 9 and 10 each add theirs (P12).
-      TREES: ./tools/spikes/upload/...
+      # 4, 7b, 9 and 10 each add theirs (P12). ./hub runs hub/spikeonly_test.go, which keeps
+      # the spike marker out of the production module.
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/...
     defaults:
       run:
         working-directory: ipcam
@@ -115,6 +116,12 @@ jobs:
         run: |
           set -o pipefail
           go tool govulncheck ./... 2>&1 | tee "${RUNNER_TEMP}/vuln-upload.log"
+      - name: Vulnerabilities of the hub
+        id: vuln-hub
+        working-directory: ipcam/hub
+        run: |
+          set -o pipefail
+          go tool govulncheck ./... 2>&1 | tee "${RUNNER_TEMP}/vuln-hub.log"
       - name: Licenses
         id: licenses
         run: |
@@ -146,7 +153,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     env:
-      TREES: ./tools/spikes/upload/...
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/...
     defaults:
       run:
         working-directory: ipcam
