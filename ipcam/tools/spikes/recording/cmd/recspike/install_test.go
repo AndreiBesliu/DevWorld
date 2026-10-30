@@ -56,6 +56,9 @@ type fakeOS struct {
 	failICacls bool
 	// owner is the owner's SID of every file, as ownerSID reads it.
 	owner string
+	// myFault makes `sc query MyFault` succeed: NotMyFault's driver
+	// service is registered.
+	myFault bool
 }
 
 // serviceDemandStart is SERVICE_DEMAND_START: W32Time's start type on a PC
@@ -131,6 +134,9 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 			if name == "schtasks" && slices.Contains(args, "/Query") && f.noTask {
 				return errors.New("schtasks: exit status 1: the task does not exist")
 			}
+			if name == "sc" && args[0] == "query" && !f.myFault {
+				return errors.New("sc: exit status 1060: the service does not exist")
+			}
 			if name == "schtasks" && slices.Contains(args, "/XML") {
 				data, err := os.ReadFile(args[slices.Index(args, "/XML")+1])
 				if err != nil {
@@ -151,6 +157,7 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 		timeService: f.time,
 		savedStart:  filepath.Join(dir, "ProgramData", "ipcam-recspike", "w32time-start.json"),
 		savedModes:  filepath.Join(dir, "var", "lib", "ipcam-recspike", "release-modes.json"),
+		memoryDump:  filepath.Join(dir, "Windows", "MEMORY.DMP"),
 		ownerSID:    func(string) (string, error) { return f.owner, nil },
 		mkdirAll: func(path string) error {
 			f.dirs = append(f.dirs, path)
@@ -326,7 +333,7 @@ func TestUninstall_RemovesTaskUnitAndShortcut(t *testing.T) {
 		t.Fatalf("uninstall: %v", err)
 	}
 	if want := [][]string{{"schtasks", "/Query", "/TN", "ipcam-recspike"}, {"schtasks", "/Delete", "/TN", "ipcam-recspike", "/F"},
-		{"icacls", `C:\proba`, "/reset", "/T", "/C", "/Q"}}; !slices.EqualFunc(f.commands, want, slices.Equal) {
+		{"icacls", `C:\proba`, "/reset", "/T", "/C", "/Q"}, {"sc", "query", "MyFault"}}; !slices.EqualFunc(f.commands, want, slices.Equal) {
 		t.Errorf("commands = %q, want %q", f.commands, want)
 	}
 	if _, err := os.Stat(filepath.Join(desktop, "Proba înregistrare – tăieri reale.lnk")); !errors.Is(err, os.ErrNotExist) {
@@ -870,5 +877,46 @@ func TestUninstall_PiRestoresTheModesOfBefore(t *testing.T) {
 	}
 	if _, err := os.Stat(a.savedModes); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the modes of before are still kept after uninstall (%v)", err)
+	}
+}
+
+// TestUninstall_CrashDumpsAndNotMyFaultsService (mi1-7, security-3): the
+// bugchecks leave a kernel dump, MEMORY.DMP, often of several GB, and
+// NotMyFault registers its MyFault driver as a service. Uninstall removes
+// that service when it is there, and when MEMORY.DMP is there it says so
+// and points to the guide's step that deletes it.
+func TestUninstall_CrashDumpsAndNotMyFaultsService(t *testing.T) {
+	for _, left := range []bool{true, false} {
+		a, f, _ := newAutostart(t, "windows", true)
+		if err := a.install(`C:\proba\recspike.exe`); err != nil {
+			t.Fatal(err)
+		}
+		var out strings.Builder
+		a.out, f.commands, f.myFault = &out, nil, left
+		if left {
+			if err := os.MkdirAll(filepath.Dir(a.memoryDump), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(a.memoryDump, []byte("PAGEDU64"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := a.uninstall(`C:\proba\recspike.exe`); err != nil {
+			t.Fatalf("left %v: uninstall: %v", left, err)
+		}
+		sc := named(f.commands, "sc")
+		want := [][]string{{"sc", "query", "MyFault"}}
+		if left {
+			want = append(want, []string{"sc", "stop", "MyFault"}, []string{"sc", "delete", "MyFault"})
+		}
+		if !slices.EqualFunc(sc, want, slices.Equal) {
+			t.Errorf("left %v: sc commands = %q, want %q", left, sc, want)
+		}
+		text := out.String()
+		for _, line := range []string{"Am șters serviciul MyFault", "MEMORY.DMP", "pasul 14.3"} {
+			if strings.Contains(text, line) != left {
+				t.Errorf("left %v: uninstall printed:\n%s\nwant %q only when NotMyFault left it", left, text, line)
+			}
+		}
 	}
 }

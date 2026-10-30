@@ -453,8 +453,9 @@ func limits(b *strings.Builder) {
 		"Rândul de pornire la rece e măsurat pe rulările MI1 cu repornire (pc-bugcheck pe PC, pi-sysrq pe Pi), cu camera lor, una singură " +
 			"(cam01_main), și include pornirea sistemului de operare.",
 		"Legătura dintre recspike și reccontroller nu are cod de asociere: se bazează pe rețeaua de acasă. Un alt dispozitiv din aceeași rețea " +
-			"s-ar putea da drept una dintre gazde; controlorul primește de la o gazdă doar rezultatul MI9 pe LAN și nu înlocuiește niciun " +
-			"rezultat pe care îl are (C1-R25).",
+			"s-ar putea da drept una dintre gazde. De la o gazdă, controlorul primește rezultatul MI9 pe LAN, fără să înlocuiască vreun rezultat " +
+			"pe care îl are, iar de la dispozitivul care spune că e Pi-ul, folderul cu rezultatele Pi-ului: la finalul fiecărei sesiuni și la " +
+			"colectarea finală, îl despachetează în `results/pi`, peste fișierele cu același nume primite înainte (C1-R25).",
 	} {
 		fmt.Fprintf(b, "- %s\n", l)
 	}

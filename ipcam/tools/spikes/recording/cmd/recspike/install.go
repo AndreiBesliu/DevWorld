@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
@@ -157,6 +158,8 @@ type autostart struct {
 	// savedModes keeps the modes of the Pi's release folder and programs
 	// from before install (piModesPath).
 	savedModes string
+	// memoryDump is Windows' kernel dump, which every bugcheck rewrites.
+	memoryDump string
 	// mkdirAll makes the PC's data folders; chown and chmod change the
 	// owner and the mode of the Pi's release (security-1).
 	mkdirAll func(path string) error
@@ -199,6 +202,7 @@ func systemAutostart(out io.Writer) autostart {
 		savedStart:  timeServiceFile(),
 		ownerSID:    mi1.FileOwnerSID,
 		savedModes:  piModesPath,
+		memoryDump:  filepath.Join(cmp.Or(os.Getenv("SystemRoot"), `C:\Windows`), "MEMORY.DMP"),
 		mkdirAll:    func(path string) error { return os.MkdirAll(path, 0o700) },
 		chown:       os.Lchown,
 		chmod:       os.Chmod,
@@ -358,7 +362,33 @@ func (a autostart) uninstall(exe string) error {
 		return err
 	}
 	_, _ = fmt.Fprintln(a.out, "Pornirea automată și scurtătura de pe desktop au fost șterse.")
-	return a.unprotectFolder(a.folderOf(exe))
+	if err := a.unprotectFolder(a.folderOf(exe)); err != nil {
+		return err
+	}
+	return a.removeBugcheckLeftovers()
+}
+
+// myFault is the service of NotMyFault's driver, which stays registered
+// after the bugchecks.
+const myFault = "MyFault"
+
+// removeBugcheckLeftovers deals with what the bugchecks leave on the PC
+// (mi1-7, security-3): it removes NotMyFault's driver service when it is
+// there, and when Windows' kernel dump is there, often of several GB, it
+// points to the guide's step that deletes the crash dumps.
+func (a autostart) removeBugcheckLeftovers() error {
+	if a.run("sc", "query", myFault) == nil {
+		_ = a.run("sc", "stop", myFault) // a stopped driver is no error
+		if err := a.run("sc", "delete", myFault); err != nil {
+			return fmt.Errorf("nu pot șterge serviciul %s, lăsat de NotMyFault: %w", myFault, err)
+		}
+		_, _ = fmt.Fprintln(a.out, "Am șters serviciul MyFault, lăsat în Windows de NotMyFault.")
+	}
+	if _, err := os.Stat(a.memoryDump); err == nil {
+		_, _ = fmt.Fprintf(a.out, "Ecranele albastre ale probei au lăsat pe PC %s, de obicei de câțiva GB, și alte fișiere de eroare: "+
+			"ștergeți-le cu „Curățare disc”, ca la pasul 14.3 din ghid.\n", a.memoryDump)
+	}
+	return nil
 }
 
 // startTimeService sets Windows' time service to start automatically,

@@ -722,10 +722,10 @@ type beaconsSeen struct {
 
 // judge is the run as its envelope holds it, with the send times of sent.
 // A stream that the host could not read, or whose index has no send time,
-// lost everything since the run's first beacon. A run whose beacons came back after a silence
-// (interrupted) is invalid for that reason: its stop is not its last kept
-// beacon; so is a run whose start the controller missed (late), whose
-// timing is partial.
+// lost everything since the run's first beacon. A run whose beacons came
+// back after a silence (interrupted) is invalid for that reason: its stop
+// is not its last kept beacon; so is a run whose start the controller
+// missed (late), whose timing is partial.
 func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons beaconsSeen, errBound time.Duration,
 	pacing controller.PacingStats, sent controller.SendTimer) results.Run {
 	valid := controller.Valid(cut)

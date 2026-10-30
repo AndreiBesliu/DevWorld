@@ -20,7 +20,7 @@ Proba are mai multe părți. Fiecare dispozitiv le face pe rând; un dispozitiv 
 | Partea | Ce face | Cât durează |
 |---|---|---|
 | Pregătirea (pașii 2–5) | descărcarea, pornirea automată, copia cardului | 45 min, o singură dată |
-| Fereastra automată (MI1, pasul 6) | 42 de opriri bruște ale înregistrării, pe fiecare dispozitiv: două seturi de câte 20 de rulări, plus o rulare în plus pentru fiecare set. Pe PC, jumătate dintre opriri sunt ecrane albastre (o eroare de sistem provocată intenționat), după care PC-ul repornește singur. | ≈ 6 h și 30 min pe dispozitiv, nesupravegheat, în orele alese de dvs. |
+| Fereastra automată (MI1, pasul 6) | 42 de opriri bruște ale înregistrării, pe fiecare dispozitiv: două seturi de câte 20 de rulări, plus o rulare în plus pentru fiecare set. Pe PC, jumătate dintre opriri sunt ecrane albastre (o eroare de sistem provocată intenționat), după care PC-ul repornește singur. | pe fiecare dispozitiv, ≈ 3 h setul `kill9` și ≈ 3 h și 30 min setul `bugcheck` (PC) sau `sysrq` (Pi), nesupravegheat, în orele alese de dvs.; al doilea set îl porniți dvs. după primul, așa că de obicei faceți un set pe noapte: ≈ 4 nopți pentru ambele dispozitive |
 | Tăierile reale (pasul 7) | 5 tăieri ale alimentării pe fiecare dispozitiv, făcute de dvs. când programul vă cere | ≈ 2 h și 30 min în total |
 | MI2 (pasul 8) | înregistrare fără oprire, pe ambele dispozitive deodată, fiecare pornit tot timpul | 72 h |
 | MI3 (pasul 9) | numărul de camere pe care îl duce fiecare dispozitiv | 1 h pe dispozitiv, plus pașii (dacă ora nu trece), plus încă 1 h la 16 camere pe un PC cu 6 nuclee sau mai multe |
@@ -37,7 +37,7 @@ Spațiul liber pentru MI2: de cel puțin 2 × N × camere × 4 Mbps, unde N e nu
 
 Pentru fereastra întreagă de 6 h: ≈ 173, 87 și 44 GB. recspike scrie cifra exactă pentru dispozitivul dvs. când pornește MI2 (pasul 8).
 
-Ordinea recomandată: pregătirea, ferestrele automate (de exemplu noaptea), tăierile reale, MI3, MI4, MI9, telefonul, apoi MI2 (72 h), rezultatele și, la final, ștergerea pornirii automate. Le puteți împărți în mai multe zile.
+Ordinea recomandată: pregătirea, ferestrele automate (de exemplu noaptea), tăierile reale, MI3, MI4, MI9, telefonul, apoi MI2 (72 h), rezultatele și, la final, ștergerea pornirii automate. Le puteți împărți în mai multe zile: doar ferestrele automate cer în jur de 4 nopți (pasul 6).
 
 Dacă Pi-ul dvs. este armv6 (pasul 3 vă spune), el nu poate fi măsurat: e doar controlorul probelor PC-ului, iar toate părțile cu Pi-ul ca gazdă se sar.
 
@@ -97,10 +97,10 @@ De fiecare dată când deschideți un terminal nou pe Pi, scrieți întâi `cd ~
 
 ### Pe PC
 
-1. Descărcați NotMyFault de pe pagina Microsoft Sysinternals: <https://learn.microsoft.com/sysinternals/downloads/notmyfault>. Despachetați arhiva și copiați `notmyfault64.exe` în `C:\proba-inregistrare`, lângă `recspike.exe`. E programul Microsoft care provoacă ecranul albastru din fereastra automată; nu avem voie să-l punem noi în arhivă.
+1. Descărcați NotMyFault de pe pagina Microsoft Sysinternals: <https://learn.microsoft.com/sysinternals/downloads/notmyfault>. Despachetați arhiva și copiați `notmyfault64.exe` în `C:\proba-inregistrare`, lângă `recspike.exe`. E programul Microsoft care provoacă ecranul albastru din fereastra automată; nu avem voie să-l punem noi în arhivă. Fiecare ecran albastru lasă pe PC date despre eroare: fișierul `C:\Windows\MEMORY.DMP` (de obicei câțiva GB, rescris la fiecare ecran albastru), câte un fișier mic în `C:\Windows\Minidump` și un raport de eroare Windows, pe care Windows îl poate trimite la Microsoft după setările dvs. de date de diagnosticare, ca la orice ecran albastru. Pasul 14 vă arată cum le ștergeți.
 2. Întrerupeți actualizările Windows pe durata probei: „Setări” → „Windows Update” → „Întrerupeți actualizările” (alegeți cea mai lungă perioadă). O actualizare care repornește PC-ul în timpul probei ar strica rulările.
 3. În fereastra de administrator, scrieți `recspike.exe install`. Dacă ați pornit-o dintr-o fereastră obișnuită, apare «Windows cere acum permisiunea de administrator»<!--recspike-->: răspundeți „Da”. Programul instalează pornirea automată: după fiecare repornire din fereastra automată și după fiecare tăiere reală, proba continuă singură. Pe desktop apare scurtătura «Proba înregistrare – tăieri reale»<!--recspike-->, folosită la pasul 7. Tot acum, recspike protejează folderul probei, din care pornirea automată rulează programele ca administrator: «Folderul probei poate fi schimbat acum doar de un administrator»<!--recspike-->. Programele probei scriu doar în `results` și `work`. Dacă mai puneți ceva în folder (de exemplu `notmyfault64.exe`, pasul 4.1), Windows cere permisiunea de administrator: apăsați „Continuare”.
-4. Tot la instalare, recspike schimbă o setare a Windows și o spune: «Serviciul de timp Windows pornește acum automat»<!--recspike-->. Serviciul de timp Windows pornește automat, iar declanșatoarele care îl pot opri sunt scoase, ca ceasul PC-ului să se sincronizeze după fiecare repornire. La pasul 14, `recspike.exe uninstall` pune la loc ambele setări, exact cum erau.
+4. Tot la instalare, recspike schimbă o setare a Windows și o spune: «Serviciul de timp Windows pornește acum automat»<!--recspike-->. Serviciul de timp Windows pornește automat, iar declanșatoarele care îl pot opri sunt scoase, ca ceasul PC-ului să se sincronizeze după fiecare repornire. La pasul 14, `recspike.exe uninstall` pune la loc ambele setări, exact cum erau. Excepție: dacă instalarea scrie un rând cu «nu le salvez pe acestea în locul lor»<!--recspike--> (de exemplu, când instalați din nou după ce ați șters folderul probei), setările de dinainte nu mai sunt salvate. Fotografiați sau copiați rândul: el conține cele două comenzi `sc` cu care le puneți la loc la pasul 14.
 5. Cât timp PC-ul e controlorul (pasul 5), `reccontroller.exe` nu-l lasă să intre în repaus. Dacă PC-ul intră totuși în repaus în timpul probei, sau dacă controlorul scrie «Atenție: reccontroller nu poate împiedica intrarea PC-ului în repaus»<!--reccontroller-->, opriți repausul pe durata probei: „Setări” → „Sistem” → „Alimentare” → „Ecran și repaus” → la repaus alegeți „Niciodată”. După probă, readuceți setarea cum era (pasul 14).
 
 ### Pe Pi (nu și pe un Pi armv6)
@@ -147,6 +147,8 @@ Adresele se pot schimba după o repornire a routerului. Dacă un program nu se m
 
 Fereastra automată oprește brusc înregistrarea de 42 de ori pe fiecare dispozitiv și măsoară ce se pierde. Rulează doar în fereastra de ore aleasă de dvs., de exemplu noaptea, când nu folosiți dispozitivele. Ora se scrie ca `HH:MM-HH:MM`, de exemplu `22:00-06:00`. Fiecare dispozitiv are două seturi, pe rând: întâi `kill9` (oprește doar programul de înregistrare), apoi `bugcheck` pe PC (ecran albastru) sau `sysrq` pe Pi (repornire bruscă).
 
+Setul `kill9` durează în jur de 3 ore, iar `bugcheck` sau `sysrq` în jur de 3 ore și 30 de minute. Al doilea set nu pornește singur: îl porniți dvs., cu comanda lui, după ce primul scrie «Proba … are toate rulările.»<!--recspike-->. Așa că de obicei faceți un set pe noapte, iar cele patru seturi ale ambelor dispozitive cer în jur de 4 nopți. Dacă fereastra se încheie înaintea setului, el continuă în noaptea următoare (vedeți mai jos).
+
 ### PC-ul ca gazdă
 
 1. Pe Pi, porniți controlorul de pe ecranul Pi-ului sau desprins de `ssh`, ca la pasul 5, nu într-o fereastră `ssh` de pe PC: `sudo ./reccontroller` (pe un Pi armv6: `./reccontroller-linux-armv6`).
@@ -169,7 +171,7 @@ Fereastra automată oprește brusc înregistrarea de 42 de ori pe fiecare dispoz
 
 ## 7. Cele 5 tăieri reale pe fiecare dispozitiv
 
-Aici dvs. tăiați alimentarea, când programul vă cere. Cererea apare la un moment ales la întâmplare, între 3 și 12 minute după ce înregistrarea a pornit: «Scoateți acum alimentarea»<!--reccontroller-->. Apare în fereastra controlorului și, când PC-ul e gazda, și în fereastra recspike de pe PC.
+Aici dvs. tăiați alimentarea, când programul vă cere. Cererea apare la un moment ales la întâmplare, între 3 și 10 minute după ce înregistrarea a pornit: «Scoateți acum alimentarea»<!--reccontroller-->. Apare în fereastra controlorului și, când PC-ul e gazda, și în fereastra recspike de pe PC.
 
 Când apare cererea, în cel mult 2 minute:
 
@@ -299,13 +301,14 @@ Rezultatele numesc dispozitivele doar `pc` și `pi` și conțin modelul Pi-ului,
 
 După ce v-am confirmat în chat că rezultatele sunt complete, ștergeți pornirea automată și folderele probei, ca mai jos. Până la confirmare, păstrați folderele `C:\proba-inregistrare` și, pe Pi, `~/proba-inregistrare`, cu pornirea automată instalată: dacă trebuie refăcută o parte, ea continuă din aceste foldere, fără o instalare nouă.
 
-1. Pe PC, în fereastra de administrator: `recspike.exe uninstall`. Trebuie să apară «Pornirea automată și scurtătura de pe desktop au fost șterse.»<!--recspike-->, «Serviciul de timp Windows are din nou setările de dinainte.»<!--recspike--> și «Folderul probei are din nou permisiunile de dinainte; îl puteți șterge.»<!--recspike-->: serviciul de timp are din nou pornirea și declanșatoarele de dinainte de pasul 4. Dacă în locul rândului despre serviciul de timp apare «Setările de dinainte ale serviciului de timp Windows nu sunt salvate»<!--recspike-->, scrieți în aceeași fereastră, pe rând, cele două comenzi `sc` din acel rând.
+1. Pe PC, în fereastra de administrator: `recspike.exe uninstall`. Trebuie să apară «Pornirea automată și scurtătura de pe desktop au fost șterse.»<!--recspike-->, «Serviciul de timp Windows are din nou setările de dinainte.»<!--recspike--> și «Folderul probei are din nou permisiunile de dinainte; îl puteți șterge.»<!--recspike-->: serviciul de timp are din nou pornirea și declanșatoarele de dinainte de pasul 4. Dacă în locul rândului despre serviciul de timp apare «Setările de dinainte ale serviciului de timp Windows nu sunt salvate»<!--recspike-->, scrieți în aceeași fereastră, pe rând, cele două comenzi `sc` din acel rând (sau din rândul cu «nu le salvez pe acestea în locul lor»<!--recspike--> de la pasul 4.4). Dacă NotMyFault a lăsat în Windows driverul lui, recspike îl șterge și scrie «Am șters serviciul MyFault, lăsat în Windows de NotMyFault.»<!--recspike-->. Dacă scrie «Ecranele albastre ale probei au lăsat pe PC …»<!--recspike-->, faceți și pasul 14.3.
 2. Pe Pi (nu și pe un Pi armv6): `sudo ./recspike uninstall`. Trebuie să apară «Folderul probei și programele din el sunt din nou ale contului dvs.»<!--recspike--> și «Pornirea automată a fost ștearsă.»<!--recspike-->. Dacă pe Pi rulează încă un controlor pornit desprins de `ssh` (pasul 5), opriți-l: `sudo pkill -x reccontroller` (pe un Pi armv6: `pkill -f reccontroller-linux-armv6`).
-3. Reluați actualizările Windows: „Setări” → „Windows Update” → „Reluați actualizările”.
-4. Scoateți regulile de firewall ale probei: în Start căutați „Permiteți o aplicație prin Paravanul de protecție Windows”, apăsați „Modificare setări”, selectați `reccontroller` și apăsați „Eliminare”; la fel pentru `recspike`, dacă apare. Dacă un program apare pe mai multe rânduri, eliminați-le pe toate.
-5. Ștergeți folderele `C:\proba-inregistrare` și, pe Pi, `~/proba-inregistrare` (`sudo rm -r ~/proba-inregistrare`). Pe desktopul PC-ului, ștergeți și copia folderului `results` și arhiva, după ce ne-ați trimis-o.
-6. Pe telefon, dezinstalați «Proba ipcam»<!--android--> și luați înapoi permisiunea Chrome de a instala aplicații: „Setări” → „Aplicații” → Chrome → „Instalați aplicații necunoscute” → dezactivați „Permiteți din această sursă”. Dacă ați dezactivat „Blocare automată” și nu ați reactivat-o, reactivați-o.
-7. Dacă ați trecut rețeaua PC-ului pe „Rețea privată” doar pentru probă, sau ați oprit repausul PC-ului (pasul 4.5), readuceți-le cum erau.
+3. Ștergeți datele lăsate de ecranele albastre (pasul 4.1): în Start scrieți „Curățare disc” și deschideți programul. Alegeți discul `C:`, apăsați „Curățare fișiere de sistem”, răspundeți „Da” la cererea de administrator și alegeți din nou `C:`. În listă, bifați fișierele imagine de memorie pentru erorile de sistem și fișierele de raportare a erorilor Windows, apoi apăsați „OK” și „Ștergere fișiere”. Dacă nu le găsiți în listă, scrieți în fereastra de administrator: `del /f /q %SystemRoot%\MEMORY.DMP %SystemRoot%\Minidump\*.dmp`.
+4. Reluați actualizările Windows: „Setări” → „Windows Update” → „Reluați actualizările”.
+5. Scoateți regulile de firewall ale probei: în Start căutați „Permiteți o aplicație prin Paravanul de protecție Windows”, apăsați „Modificare setări”, selectați `reccontroller` și apăsați „Eliminare”; la fel pentru `recspike`, dacă apare. Dacă un program apare pe mai multe rânduri, eliminați-le pe toate.
+6. Ștergeți folderele `C:\proba-inregistrare` și, pe Pi, `~/proba-inregistrare` (`sudo rm -r ~/proba-inregistrare`). Pe desktopul PC-ului, ștergeți și copia folderului `results` și arhiva, după ce ne-ați trimis-o.
+7. Pe telefon, dezinstalați «Proba ipcam»<!--android--> și luați înapoi permisiunea Chrome de a instala aplicații: „Setări” → „Aplicații” → Chrome → „Instalați aplicații necunoscute” → dezactivați „Permiteți din această sursă”. Dacă ați dezactivat „Blocare automată” și nu ați reactivat-o, reactivați-o.
+8. Dacă ați trecut rețeaua PC-ului pe „Rețea privată” doar pentru probă, sau ați oprit repausul PC-ului (pasul 4.5), readuceți-le cum erau.
 
 ## 15. Ce faceți dacă ceva nu merge
 
@@ -330,6 +333,8 @@ Cazuri pe care le puteți rezolva singur:
 - **Pi-ul înregistrează pe un card SD, iar în MI2 cardul dă erori sau devine doar-citire.** ipcam-hub oprește înregistrarea și notează golul; acesta e un rezultat al probei, nu o greșeală a dvs. Lăsați proba să ruleze până la final și scrieți-ne în chat. Un SSD pe USB evită problema.
 - **Un dispozitiv a repornit singur** (o pană de curent, o actualizare). În fereastra automată, proba continuă singură după repornire. În MI2, porniți din nou ambele comenzi (pasul 8). În MI3, MI4 sau MI9, porniți din nou comanda.
 - **«nu pot proteja folderul probei»<!--recspike-->** la `recspike.exe install`: porniți-l din fereastra de administrator (pasul 2.5). Dacă refuză din nou, scrieți-ne în chat rândul întreg.
+- **«instalarea scrie în /etc/systemd: porniți-o cu sudo ./recspike install»<!--recspike-->** pe Pi: porniți comanda cu `sudo`, ca la pasul 4. La fel pentru «dezinstalarea scrie în /etc/systemd: porniți-o cu sudo ./recspike uninstall»<!--recspike--> la pasul 14.
+- **«nu pot da folderul probei lui root, așa că nu instalez pornirea automată»<!--recspike-->** la `sudo ./recspike install`, pe Pi: motivul e la sfârșitul rândului. Dacă scrie «nu este un fișier obișnuit»<!--recspike-->, în folderul probei se află altceva (de exemplu, o scurtătură) în locul unui program: ștergeți folderul, descărcați și despachetați din nou arhiva (pasul 3), apoi reluați pasul 4. Altfel, scrieți-ne în chat rândul întreg.
 - **«notmyfault64.exe nu mai e semnat de Microsoft»<!--recspike-->** în fereastra automată: fișierul s-a schimbat după pornirea setului. Reluați pasul 4.1, apoi porniți din nou aceeași comandă.
 - **«nu pot asculta pe porturile probei (rulează deja un reccontroller?)»<!--reccontroller-->** Pe același dispozitiv rulează deja un controlor, poate într-o fereastră uitată. Închideți-l și porniți din nou.
 - **«Transferul nu a reușit: …»<!--reccontroller-->** la pasul 13: porniți din nou comanda `push` pe Pi.
