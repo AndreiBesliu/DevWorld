@@ -24,12 +24,16 @@ type SendLog struct {
 	mu      sync.Mutex
 	base    time.Time // the first record's time; entries are offsets from it
 	streams map[string]*sendRing
+	// fed is closed and dropped at the next record, for WaitFed; nil while
+	// nobody waits.
+	fed chan struct{}
 }
 
 // sendRing holds the newest sendLogKeep entries of one stream, at index mod
-// sendLogKeep.
+// sendLogKeep, and the latest send recorded: the feed's high-water mark.
 type sendRing struct {
 	entries []sendEntry
+	newest  time.Duration // since SendLog.base
 }
 
 type sendEntry struct {
@@ -52,17 +56,50 @@ func (l *SendLog) Record(stream string, index uint64, at time.Time) {
 	if l.base.IsZero() {
 		l.base = at
 	}
+	entry := sendEntry{tag: index + 1, off: at.Sub(l.base)}
 	ring := l.streams[stream]
 	if ring == nil {
-		ring = &sendRing{}
+		ring = &sendRing{newest: entry.off}
 		l.streams[stream] = ring
 	}
-	entry := sendEntry{tag: index + 1, off: at.Sub(l.base)}
 	slot := int(index % sendLogKeep)
 	for len(ring.entries) <= slot && len(ring.entries) < sendLogKeep {
 		ring.entries = append(ring.entries, sendEntry{})
 	}
 	ring.entries[slot] = entry
+	ring.newest = max(ring.newest, entry.off)
+	if l.fed != nil {
+		close(l.fed)
+		l.fed = nil
+	}
+}
+
+// WaitFed waits until the log has recorded, for each of streams, a send at
+// or after t: its feed is asynchronous (each simulator buffers about 12 s
+// of sends, source.SentLog), so a frame sent before t can reach the log
+// after t. It reports false when ctx ends first.
+func (l *SendLog) WaitFed(ctx context.Context, streams []string, t time.Time) bool {
+	for {
+		l.mu.Lock()
+		fedPast := !l.base.IsZero()
+		for _, stream := range streams {
+			ring := l.streams[stream]
+			fedPast = fedPast && ring != nil && !l.base.Add(ring.newest).Before(t)
+		}
+		if !fedPast && l.fed == nil {
+			l.fed = make(chan struct{})
+		}
+		fed := l.fed
+		l.mu.Unlock()
+		if fedPast {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-fed:
+		}
+	}
 }
 
 // SendTime returns when index of stream was sent; ok is false when it was
@@ -85,6 +122,21 @@ func (l *SendLog) SendTime(stream string, index uint64) (time.Time, bool) {
 // or a run's copy of it (SendTimes).
 type SendTimer interface {
 	SendTime(stream string, index uint64) (time.Time, bool)
+}
+
+// SendTimers asks each of its timers in turn and gives the first send time
+// found: a run's copy, then the live log, which also holds the frames that
+// reached it after the copy.
+type SendTimers []SendTimer
+
+// SendTime returns the first of the timers' send times of index of stream.
+func (ts SendTimers) SendTime(stream string, index uint64) (time.Time, bool) {
+	for _, t := range ts {
+		if at, ok := t.SendTime(stream, index); ok {
+			return at, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // SendTimes is a copy of the send log's times of some streams within a

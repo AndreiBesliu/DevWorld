@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -122,5 +123,54 @@ func TestSendTimes_KeepARunsWindow(t *testing.T) {
 	}
 	if loss, ok := Loss(at(1500), "cam01_main", 1200, times); !ok || loss != 15*time.Second {
 		t.Errorf("Loss from the copy = %v, %v; want 15 s", loss, ok)
+	}
+}
+
+// TestSendLog_WaitFedWaitsForTheFeed (Final fix B, item 0): WaitFed
+// returns once every stream asked for has a send at or after the moment,
+// and false when its context ends first; SendTimers takes the first timer
+// that has the index, so the live log covers what a copy missed.
+func TestSendLog_WaitFedWaitsForTheFeed(t *testing.T) {
+	l := NewSendLog()
+	start := time.Date(2026, 10, 30, 3, 0, 0, 0, time.UTC)
+	l.Record("cam01_main", 0, start)
+	l.Record("cam02_main", 0, start.Add(time.Second))
+	streams := []string{"cam01_main", "cam02_main"}
+	until := start.Add(2 * time.Second)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if l.WaitFed(ctx, streams, until) {
+		t.Fatal("WaitFed = true before any stream was fed past the moment")
+	}
+	done := make(chan bool, 1)
+	go func() { done <- l.WaitFed(t.Context(), streams, until) }()
+	l.Record("cam01_main", 1, until)
+	select {
+	case <-done:
+		t.Fatal("WaitFed returned while cam02_main was still behind")
+	case <-time.After(20 * time.Millisecond):
+	}
+	l.Record("cam02_main", 1, until.Add(time.Millisecond))
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("WaitFed = false once both streams were fed past the moment")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("WaitFed did not return once both streams were fed past the moment")
+	}
+
+	copied := l.Times([]string{"cam01_main"}, start, start)
+	l.Record("cam01_main", 2, until.Add(time.Second)) // after the copy
+	both := SendTimers{copied, l}
+	if at, ok := both.SendTime("cam01_main", 0); !ok || !at.Equal(start) {
+		t.Errorf("SendTimers: index 0 = %v, %v; want the copy's %v", at, ok, start)
+	}
+	if at, ok := both.SendTime("cam01_main", 2); !ok || !at.Equal(until.Add(time.Second)) {
+		t.Errorf("SendTimers: index 2 = %v, %v; want the live log's", at, ok)
+	}
+	if _, ok := both.SendTime("cam01_main", 3); ok {
+		t.Error("SendTimers found an index that neither timer has")
 	}
 }

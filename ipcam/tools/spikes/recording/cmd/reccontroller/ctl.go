@@ -111,8 +111,9 @@ type runState struct {
 	startMark controller.PacingMark
 	endMark   *controller.PacingMark // when its beacons went silent, near the stop
 	// sent is the send times of the run's streams from its first beacon to
-	// just after its stop, copied when its beacons went silent: the send
-	// log may have dropped them when a late report comes (mi1-1).
+	// just after its stop, copied after its beacons went silent, once the
+	// send log's feed had caught up: the send log may have dropped them
+	// when a late report comes (mi1-1).
 	sent      *controller.SendTimes
 	cut       controller.Cut
 	scheduled bool       // its cut is scheduled: a repeated ready changes nothing
@@ -306,26 +307,62 @@ func (c *ctl) startRun(conn *link.Conn, m link.RunStart) {
 // long.
 const sentAfterStop = controller.BeaconSilence
 
+// feedCatchUp bounds the wait for the send log's feed to pass the end of a
+// run's copy: each simulator buffers about 12 s of its sends
+// (source.SentLog), so a feed further behind has dropped some of them
+// already.
+const feedCatchUp = 15 * time.Second
+
 // markEnd marks the end of the run's pacing when its beacons go silent,
 // shortly after the stop (R07), and copies the send times that the run's
 // judgement needs, from its first beacon to sentAfterStop after its last
-// (mi1-1).
+// (mi1-1). The send log's feed is asynchronous, so the copy waits until
+// the feed has passed the copy's end, at most feedCatchUp after it; a feed
+// that has not caught up by then is named on the screen, and the copy
+// holds what it has.
 func (c *ctl) markEnd(r *runState) {
-	last, err := c.beacons.WaitSilence(r.ctx, r.start.RunID, c.clock)
+	runID := r.start.RunID
+	last, err := c.beacons.WaitSilence(r.ctx, runID, c.clock)
 	if err != nil {
 		return // the run ended first
 	}
 	mark := c.pacer.MarkPacing()
-	from := last.At
-	if first, ok := c.beacons.First(r.start.RunID); ok {
+	c.mu.Lock()
+	if c.runs[runID] == r {
+		r.endMark = &mark
+	}
+	c.mu.Unlock()
+	from, to := last.At, last.At.Add(sentAfterStop)
+	if first, ok := c.beacons.First(runID); ok {
 		from = first.At
 	}
-	sent := c.sendLog.Times(r.start.Streams, from, last.At.Add(sentAfterStop))
+	caughtUp := c.waitFed(r, to)
+	if r.ctx.Err() != nil {
+		return // the run ended first, judged from the live log
+	}
+	if !caughtUp {
+		c.say("Rularea %s: jurnalul trimiterilor a rămas în urmă la oprire; orele de trimitere copiate pentru raport pot fi incomplete.", runID)
+	}
+	sent := c.sendLog.Times(r.start.Streams, from, to)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.runs[r.start.RunID] == r {
-		r.endMark, r.sent = &mark, sent
+	if c.runs[runID] == r {
+		r.sent = sent
 	}
+}
+
+// waitFed waits until the send log has every frame of the run's streams
+// sent up to to, at most until the clock passes to + feedCatchUp, and
+// reports whether it got them.
+func (c *ctl) waitFed(r *runState, to time.Time) bool {
+	ctx, cancel := context.WithCancel(r.ctx)
+	defer cancel()
+	go func() {
+		if sleepUntil(ctx, c.clock, to.Add(feedCatchUp)) == nil {
+			cancel()
+		}
+	}()
+	return c.sendLog.WaitFed(ctx, r.start.Streams, to)
 }
 
 // ready schedules the run's cut once; a repeated ready, on any connection,
@@ -578,9 +615,11 @@ func (c *ctl) judgeReport(r *runState, m link.Report) link.Verdict {
 		r.cut.BootAt = beacons[0].At // no cut was sent: the run's first beacon
 	}
 	cut, end := r.cut, r.endMark
-	var sent controller.SendTimer = c.sendLog // the report came before the silence was seen
+	// The run's copy, then the live log: the frames that reached the log
+	// after the copy are there, and a report before the copy has only it.
+	var sent controller.SendTimer = c.sendLog
 	if r.sent != nil {
-		sent = r.sent
+		sent = controller.SendTimers{r.sent, c.sendLog}
 	}
 	c.mu.Unlock()
 	if end == nil {
