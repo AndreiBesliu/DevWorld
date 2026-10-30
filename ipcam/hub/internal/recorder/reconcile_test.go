@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -531,6 +532,68 @@ func damageMoof(t *testing.T, f fmp4File, p int) []byte {
 	}
 	binary.BigEndian.PutUint32(data[f.partStart[p]+int64(at)+8:], 0x00ffffff)
 	return data
+}
+
+// hugeTrun returns f's bytes with part p's trun saying that it holds count
+// samples and carrying no per-sample field (only the data offset): its
+// entries then take no byte, so only the count itself bounds what a walker
+// allocates (hub-1).
+func hugeTrun(t *testing.T, f fmp4File, p int, count uint32) []byte {
+	t.Helper()
+	data := bytes.Clone(f.data)
+	at := bytes.Index(data[f.partStart[p]:], []byte("trun"))
+	if at < 0 {
+		t.Fatalf("no trun in part %d", p)
+	}
+	trun := data[f.partStart[p]+int64(at):]
+	binary.BigEndian.PutUint32(trun[4:], 0x000001) // version 0, data offset only
+	binary.BigEndian.PutUint32(trun[8:], count)
+	return data
+}
+
+// TestReconcile_HugeTrunCountIsDamage (hub-1): a trun whose entries carry
+// no per-sample field, with a huge sample count, is a corrupt box, as a
+// worn SD card can leave: the walker refuses it before it allocates a
+// sample for each counted entry, so the file reads as a damaged tail when
+// it is the last part, and as unreadable before another part, with a
+// bounded allocation, never ipcam-hub's death by out of memory at every
+// start.
+func TestReconcile_HugeTrunCountIsDamage(t *testing.T) {
+	f := makeFMP4(t, fmp4Spec{samples: 20, sizes: []int{1000, 1000, 1000}, align: true})
+	for _, count := range []uint32{maxTrunSamples + 1, 25_000_000, 0xffffffff} {
+		t.Run(strconv.Itoa(int(count))+"/last part", func(t *testing.T) {
+			recDir, cat := t.TempDir(), openCatalog(t)
+			part := segPath(recDir, "cam1", "main", t0, ".part")
+			writeFile(t, part, hugeTrun(t, f, 2, count))
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			report, err := Reconcile(t.Context(), recDir, nil, cat)
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 32<<20 {
+				t.Errorf("reconcile allocated %d MiB for a trun of %d samples, want a bounded allocation", alloc>>20, count)
+			}
+			if report != (ReconcileReport{Finalized: 1, Truncated: 1, LostTails: 1, GapsWritten: 1}) {
+				t.Errorf("report %+v, want the damaged last part cut as a torn tail", report)
+			}
+			requireParts(t, parseRecording(t, readFile(t, strings.TrimSuffix(part, ".part"))), f, []int{20, 20})
+		})
+		t.Run(strconv.Itoa(int(count))+"/before the last part", func(t *testing.T) {
+			recDir, cat := t.TempDir(), openCatalog(t)
+			writeFile(t, segPath(recDir, "cam1", "main", t0.Add(-5*time.Minute), ""), f.data) // so that it is not HUB-09's abort
+			part := segPath(recDir, "cam1", "main", t0, ".part")
+			writeFile(t, part, hugeTrun(t, f, 1, count))
+			report, err := Reconcile(t.Context(), recDir, nil, cat)
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if report.Unreadable != 1 || report.Truncated != 0 || report.Finalized != 0 {
+				t.Errorf("report %+v, want the file unreadable, not cut", report)
+			}
+		})
+	}
 }
 
 // TestReconcile_DamagedLastPartIsTail (M4): bytes that cannot be parsed at
