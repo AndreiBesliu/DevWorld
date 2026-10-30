@@ -4,5 +4,6 @@ use (
 	./hub
 	./tools
 	./tools/spikes/recording
+	./tools/spikes/upload
 	./tools/spikes/video
 )

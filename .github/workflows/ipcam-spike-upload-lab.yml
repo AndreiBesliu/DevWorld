@@ -1,0 +1,129 @@
+name: ipcam-spike-upload-lab
+
+# The lab of the Phase 0 (c2) upload spike (ipcam/docs/superpowers/plans/2026-10-18-phase0c2-upload-spike.md,
+# P09): MI5's 15-min variant of TST-07 on GitHub's runners (Task 8). Its measurements go out
+# as notices (C32), which uploadreport reads with
+# gh api repos/<owner>/<repo>/check-runs/<job id>/annotations. The jobs run only on a
+# dispatch, or when the head commit's subject (its first line) holds [upload-lab]; the push
+# trigger registers the workflow on its first push. The token is never [lab]: that one
+# starts the recorder spike's lab (ipcam-spike-recording-lab.yml), and [upload-lab] does
+# not contain it.
+
+on:
+  workflow_dispatch:
+  push:
+    # Branch pushes only, as in the other ipcam workflows: a tag push ignores path filters.
+    branches: ['**']
+    # ipcam-spike-upload.yml's list, plus the recorder spike's tree: the build job compiles
+    # reccontroller from it, and mi5-lab (Task 8) runs its recmediagen (P13: the paths
+    # cover every file that a job builds).
+    paths:
+      - 'ipcam/hub/**'
+      - 'ipcam/tools/spikes/upload/**'
+      - 'ipcam/tools/spikes/video/**'
+      - 'ipcam/tools/spikes/recording/**'
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      - 'ipcam/tools/scripts/**'
+      - 'ipcam/tools/licenses/**'
+      - 'ipcam/go.work'
+      - 'ipcam/go.work.sum'
+      - 'ipcam/.gitattributes'
+      - '.github/workflows/ipcam-spike-upload-lab.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipcam-spike-upload-lab-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The Go version comes from go.work alone; never switch toolchains silently.
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+# Every step that runs a command writes its output to ${RUNNER_TEMP}/<step id>.log; the last
+# step of each job turns the log of each failed step into one error annotation, since job
+# logs cannot be read from everywhere and annotations can.
+
+jobs:
+  gate:
+    # Whether the lab runs: on a dispatch, or when the head commit's subject holds
+    # [upload-lab]. A commit body that mentions it does not count: a squash merge joins the
+    # bodies of the branch's commits into the head commit's message on main.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      lab: ${{ steps.subject.outputs.lab }}
+    steps:
+      - name: Read the subject
+        id: subject
+        env:
+          EVENT: ${{ github.event_name }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          subject="${MESSAGE%%$'\n'*}"
+          lab=false
+          if [[ "${EVENT}" == workflow_dispatch || "${subject}" == *'[upload-lab]'* ]]; then
+            lab=true
+          fi
+          echo "lab=${lab}" | tee -a "${GITHUB_OUTPUT}"
+      - name: Show failures as annotations
+        # This job has no checkout, so no annotate.sh: one line names the failed step.
+        if: failure()
+        run: echo "::error title=gate::Reading the head commit's subject failed; the lab jobs did not run."
+
+  build:
+    # ipcam-hub, the MediaMTX fork and reccontroller for linux/amd64, for the lab jobs of the
+    # same run. Task 7 adds fakeproviders, Task 8 uploadspike.
+    needs: gate
+    if: needs.gate.outputs.lab == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/hub/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
+      - name: Build
+        id: build
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          set -o pipefail
+          {
+            go build -o "${RUNNER_TEMP}/bin/" ./hub/cmd/ipcam-hub ./tools/spikes/recording/cmd/reccontroller &&
+              (cd hub/third_party/mediamtx && GOWORK=off go build -o "${RUNNER_TEMP}/bin/mediamtx" .) &&
+              ls -l "${RUNNER_TEMP}/bin"
+          } 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: Upload the binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upload-lab-bin
+          path: ${{ runner.temp }}/bin
+          if-no-files-found: error
+          retention-days: 1
+      - name: Show failures as annotations
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+          done
