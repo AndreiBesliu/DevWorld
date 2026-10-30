@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -205,5 +206,44 @@ func TestMI3_LiveAnswersEndWithTheirConnection(t *testing.T) {
 	}
 	if strings.Contains(screen, "nu a pornit") {
 		t.Errorf("the controller refused the step on the closed connection:\n%s", screen)
+	}
+}
+
+// TestMI3_AnswersOfAHostThatLeftAtOnce (Windows CI, d4bd2ab): a host that
+// disconnects right after it sent its answers, before the controller
+// applied them, is a host that disconnected, whichever comes first, the
+// controller's wait or the closing of the connection's live peers: the
+// controller says so, and refuses nothing.
+func TestMI3_AnswersOfAHostThatLeftAtOnce(t *testing.T) {
+	waitFor(t, "the answers of earlier tests to end", func() bool { return running(t, "(*ctl).mi3Answers") == 0 })
+	r := newRig(t)
+	api, err := controller.NewLiveAPI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.c.liveAPI, r.c.streams = api, []controller.Stream{{Path: "cam01_sub"}}
+	const steps = 20
+	for i := range steps {
+		runID := fmt.Sprintf("pc-mi3-%02d", i+1)
+		conn := r.connect("pc")
+		r.send(conn, link.Mi3Start{RunID: runID, Sessions: 1, Tiles: []string{"cam01_sub"}})
+		offers, ok := r.receive(conn).(link.Mi3Offers)
+		if !ok || len(offers.Offers) != 1 {
+			t.Fatalf("got %#v, want one offer", offers)
+		}
+		r.send(conn, link.Mi3Answers{RunID: runID, Answers: []string{deadAnswer(t, api, offers.Offers[0])}})
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
+		left := "Pasul MI3 " + runID + ": gazda s-a deconectat înainte ca sesiunile live să pornească."
+		for deadline := time.Now().Add(10 * time.Second); !strings.Contains(r.screen.String(), left); time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("the screen does not say that the host of %s disconnected:\n%s", runID, r.screen.String())
+			}
+		}
+	}
+	waitFor(t, "the answers to end", func() bool { return running(t, "(*ctl).mi3Answers") == 0 })
+	if screen := r.screen.String(); strings.Contains(screen, "nu a pornit") || strings.Contains(screen, "nu a fost anunțat") {
+		t.Errorf("the controller refused a step of a host that left:\n%s", screen)
 	}
 }

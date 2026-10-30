@@ -144,12 +144,17 @@ func (c *ctl) say(format string, args ...any) {
 // hello (validHello) is closed with nothing done (security-2).
 func (c *ctl) serve(ctx context.Context, conn *link.Conn, local, remote net.Addr) {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-	defer func() { _ = conn.Close() }()
-	defer c.dropSteps(conn)
-	defer c.dropMI9(conn)
+	defer func() {
+		stop()
+		// The connection's context ends before its MI3 steps and MI9 runs
+		// are dropped: a wait under it (mi3Answers, mi9Answer) that fails
+		// on a closed peer, or finds its step gone, knows that the host left.
+		cancel()
+		c.dropMI9(conn)
+		c.dropSteps(conn)
+		_ = conn.Close()
+	}()
 	host := ""
 	for {
 		m, err := conn.Receive()

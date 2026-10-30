@@ -97,7 +97,9 @@ func (c *ctl) mi9Start(conn *link.Conn, m link.Mi9Start, local, remote net.Addr)
 
 // mi9Answer applies the host's answer and measures the bulk channel: the
 // whole segment, then the seeks. It runs on its own goroutine, under ctx,
-// the connection's: once the host is gone, the measurement ends with it.
+// the connection's: once the host is gone, ctx ends, then the run's
+// playback peer is closed (dropMI9), and the measurement ends with them;
+// a run that is gone then is the host's leaving, never a refusal.
 // A run too slow for mi9MeasureWait is answered with what was measured by
 // then (mi9.Client.Measure's Partial), never refused: a measured failure
 // in it decides (G27).
@@ -106,7 +108,11 @@ func (c *ctl) mi9Answer(ctx context.Context, conn *link.Conn, m link.Mi9Answer) 
 	run := c.mi9Runs[m.RunID]
 	delete(c.mi9Runs, m.RunID)
 	c.mu.Unlock()
-	if run == nil {
+	switch {
+	case run == nil && ctx.Err() != nil:
+		c.say("Proba MI9 %s: gazda s-a deconectat înainte de final.", m.RunID)
+		return
+	case run == nil:
 		c.say("Proba MI9 %s: proba nu a fost anunțată controlorului.", m.RunID)
 		c.reply(conn, link.Refused{RunID: m.RunID, Reason: "proba nu a fost anunțată controlorului"})
 		return
