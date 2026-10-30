@@ -32,9 +32,48 @@ const (
 	BeaconPort = 7082
 )
 
-// maxLine bounds one message. The largest is results_tar, a whole results
-// folder in base64.
-const maxLine = 256 << 20
+// The bounds of one message's line (security-2). The link takes any peer
+// on the LAN, so a line is read only as far as its type allows: a results
+// folder (results_tar) is a few MiB of envelopes in base64; a results file
+// is what MI9 sends, at most 64 KiB of data in base64; the messages that
+// carry WebRTC descriptions or ipcam-hub's events stay under 1 MiB; every
+// other message is small.
+const (
+	maxTarLine     = 8 << 20
+	maxResultsLine = 128 << 10
+	maxLargeLine   = 1 << 20
+	maxSmallLine   = 64 << 10
+)
+
+// maxLine is the bound of a line of the message type typ.
+func maxLine(typ string) int {
+	switch typ {
+	case "results_tar":
+		return maxTarLine
+	case "results":
+		return maxResultsLine
+	case "session", "report", "mi3_offers", "mi3_answers", "mi9_offer", "mi9_answer":
+		return maxLargeLine
+	}
+	return maxSmallLine
+}
+
+// linePrefix starts every line that Send writes: its type comes first.
+var linePrefix = []byte(`{"type":"`)
+
+// lineType is the message type that the start of line names, as Send
+// writes it; ok is false while the start does not name one.
+func lineType(line []byte) (typ string, ok bool) {
+	rest, ok := bytes.CutPrefix(line, linePrefix)
+	if !ok {
+		return "", false
+	}
+	end := bytes.IndexByte(rest, '"')
+	if end < 0 {
+		return "", false
+	}
+	return string(rest[:end]), true
+}
 
 // Conn is one end of a link. Send may be called from several goroutines;
 // Receive from one at a time.
@@ -103,6 +142,9 @@ func (c *Conn) Receive() (Message, error) {
 	if head.Type == nil {
 		return nil, errors.New(`link: a message without "type"`)
 	}
+	if typ, _ := lineType(line); typ != *head.Type || len(line) > maxLine(typ) {
+		return nil, fmt.Errorf("link: a %q message that does not start with its type, or over its %d bytes", *head.Type, maxLine(*head.Type))
+	}
 	decode, ok := decoders[*head.Type]
 	if !ok {
 		return nil, fmt.Errorf("link: unknown message type %q", *head.Type)
@@ -114,14 +156,20 @@ func (c *Conn) Receive() (Message, error) {
 	return m, nil
 }
 
-// readLine reads up to and including the next newline, at most maxLine bytes.
+// readLine reads up to and including the next newline, at most the bound
+// of the type that the line's start names (maxLine), or of the small
+// messages until it names one.
 func (c *Conn) readLine() ([]byte, error) {
 	var line []byte
 	for {
 		chunk, err := c.r.ReadSlice('\n')
 		line = append(line, chunk...)
-		if len(line) > maxLine {
-			return nil, fmt.Errorf("link: a message longer than %d bytes", maxLine)
+		limit := maxSmallLine
+		if typ, ok := lineType(line); ok {
+			limit = maxLine(typ)
+		}
+		if len(line) > limit {
+			return nil, fmt.Errorf("link: a message longer than %d bytes", limit)
 		}
 		switch {
 		case err == nil:

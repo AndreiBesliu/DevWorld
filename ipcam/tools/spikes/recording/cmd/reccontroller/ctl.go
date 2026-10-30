@@ -11,7 +11,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
-	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,6 +23,7 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi9"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
 )
@@ -132,7 +133,9 @@ func (c *ctl) say(format string, args ...any) {
 }
 
 // serve handles one connection of a host until it ends: local is the
-// address that the host reached, remote the host's own.
+// address that the host reached, remote the host's own. The link takes any
+// peer on the LAN, so a connection whose first message is not a valid
+// hello (validHello) is closed with nothing done (security-2).
 func (c *ctl) serve(ctx context.Context, conn *link.Conn, local, remote net.Addr) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -148,6 +151,10 @@ func (c *ctl) serve(ctx context.Context, conn *link.Conn, local, remote net.Addr
 			if ctx.Err() == nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				slog.Warn("link ended", "err", err)
 			}
+			return
+		}
+		if hello, ok := m.(link.Hello); host == "" && (!ok || !validHello(hello)) {
+			slog.Warn("link closed: its first message is not a valid hello", "type", m.Type())
 			return
 		}
 		switch m := m.(type) {
@@ -211,6 +218,12 @@ func (c *ctl) bye(conn *link.Conn, host string) {
 		return
 	}
 	c.say("Am adus rezultatele Pi-ului în %s. Gazda s-a deconectat.", filepath.Join(c.results, "pi"))
+}
+
+// validHello reports whether m is a host's hello of this protocol, from
+// one of the probe's devices.
+func validHello(m link.Hello) bool {
+	return m.Role == "host" && m.Version == link.Version && pseudonym(m.Host) == m.Host
 }
 
 // pseudonym keeps a host name off the screen and the log (PH0-22).
@@ -719,35 +732,37 @@ func seconds(d time.Duration) string {
 	return strings.Replace(strconv.FormatFloat(d.Seconds(), 'f', 2, 64), ".", ",", 1)
 }
 
-// saveResult writes a results file that the host sent, under results/.
-func (c *ctl) saveResult(m link.Results) {
-	name := filepath.FromSlash(m.Name)
-	if !filepath.IsLocal(name) {
-		c.say("Am refuzat rezultatul cu numele nepermis %q.", m.Name)
-		return
-	}
-	if err := writeUnder(c.results, name, m.Data); err != nil {
-		c.say("Eroare la salvarea rezultatului %s: %v", m.Name, err)
-		return
-	}
-	c.say("Am primit %s.", m.Name)
-}
+// maxResultBytes bounds the one results file that a host sends: MI9's
+// LAN envelope, a few KiB.
+const maxResultBytes = 64 << 10
 
-// writeUnder writes data to dir/name through an os.Root, so that nothing
-// lands outside dir.
-func writeUnder(dir, name string, data []byte) error {
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
+// saveResult keeps a results file that the host sent, under results/: the
+// only one that a host sends, MI9's LAN envelope (mi9.LANSet), named
+// MI9/lan/<its run id>.json, at most maxResultBytes, and only when no
+// envelope of that name is there yet (security-2). Anything else is
+// refused: the link takes any peer on the LAN, and the counted envelopes
+// stay as they are.
+func (c *ctl) saveResult(m link.Results) {
+	refuse := func(why string) { c.say("Am refuzat un rezultat primit pe legătură: %s.", why) }
+	if len(m.Data) > maxResultBytes {
+		refuse("este mai mare de 64 KiB")
+		return
 	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return err
+	e, err := results.Parse(m.Data)
+	switch {
+	case err != nil:
+		refuse("nu este un rezultat al probei")
+		return
+	case e.Code != "MI9" || e.Set != mi9.LANSet || m.Name != path.Join("MI9", mi9.LANSet, e.RunID+".json"):
+		refuse("o gazdă trimite doar rezultatul MI9 pe LAN, cu numele lui")
+		return
 	}
-	defer func() { _ = root.Close() }()
-	if parent := filepath.Dir(name); parent != "." {
-		if err := root.MkdirAll(parent, 0o750); err != nil {
-			return err
-		}
+	switch err := results.Create(c.results, e); {
+	case errors.Is(err, results.ErrExists):
+		refuse("există deja un rezultat cu numele " + m.Name + ", care rămâne")
+	case err != nil:
+		c.say("Eroare la salvarea rezultatului %s: %v", m.Name, err)
+	default:
+		c.say("Am primit %s.", m.Name)
 	}
-	return root.WriteFile(name, data, 0o600)
 }

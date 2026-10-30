@@ -378,6 +378,10 @@ func TestRender_ColdBootAndTimelineRows(t *testing.T) {
 	if !strings.Contains(section(t, md, "## Limitări ale măsurătorilor"), "pornire la rece") {
 		t.Error("the limits do not say where the cold-boot row comes from")
 	}
+	// C1-R25: the link has no pairing code and trusts the home LAN.
+	if !strings.Contains(section(t, md, "## Limitări ale măsurătorilor"), "nu are cod de asociere: se bazează pe rețeaua de acasă") {
+		t.Error("the limits do not say that the link trusts the home LAN")
+	}
 }
 
 // TestRender_SdSetsSeparate (G16, T40; Task 8): the Pi's results on an SD

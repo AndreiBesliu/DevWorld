@@ -452,6 +452,9 @@ func limits(b *strings.Builder) {
 			"ea, pe calea de citire a hub-ului; în Chrome se adaugă primul cadru afișat (requestVideoFrameCallback) (G21, G26).",
 		"Rândul de pornire la rece e măsurat pe rulările MI1 cu repornire (pc-bugcheck pe PC, pi-sysrq pe Pi), cu camera lor, una singură " +
 			"(cam01_main), și include pornirea sistemului de operare.",
+		"Legătura dintre recspike și reccontroller nu are cod de asociere: se bazează pe rețeaua de acasă. Un alt dispozitiv din aceeași rețea " +
+			"s-ar putea da drept una dintre gazde; controlorul primește de la o gazdă doar rezultatul MI9 pe LAN și nu înlocuiește niciun " +
+			"rezultat pe care îl are (C1-R25).",
 	} {
 		fmt.Fprintf(b, "- %s\n", l)
 	}

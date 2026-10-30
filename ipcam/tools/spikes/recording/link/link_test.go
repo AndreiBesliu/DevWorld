@@ -298,3 +298,42 @@ func TestBeaconPacket(t *testing.T) {
 		}
 	}
 }
+
+// TestReceive_CapsEachMessageType (security-2): the link takes any LAN
+// peer, so a line is read only as far as its type allows, from the type
+// that its start names: a results folder a few MiB, one results file what
+// MI9 sends (64 KiB in base64), most messages far less. A line that does
+// not start as a message is cut at the bound of the small ones.
+func TestReceive_CapsEachMessageType(t *testing.T) {
+	big := func(n int) []byte { return bytes.Repeat([]byte{'a'}, n) }
+	line := func(m Message) string {
+		body, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return `{"type":"` + m.Type() + `",` + string(body[1:])
+	}
+	for _, tc := range []struct {
+		name string
+		line string
+		ok   bool
+	}{
+		{"a results folder of 5 MiB", line(ResultsTar{Data: big(5 << 20)}), true},
+		{"a results folder of 7 MiB", line(ResultsTar{Data: big(7 << 20)}), false},
+		{"a results file of 64 KiB", line(Results{Name: "MI9/lan/pc-mi9-1.json", Data: big(64 << 10)}), true},
+		{"a results file of 200 KiB", line(Results{Name: "MI9/lan/pc-mi9-1.json", Data: big(200 << 10)}), false},
+		{"an offer of 200 KiB", line(Mi9Offer{RunID: "r", Offer: string(big(200 << 10))}), true},
+		{"a hello of 100 KiB", line(Hello{Role: "host", Host: string(big(100 << 10)), Version: Version}), false},
+		{"a hello whose later type says results_tar", `{"type":"hello","type":"results_tar","data":"` + string(big(100<<10)) + `"}`, false},
+		{"no message, 1 MiB", string(big(1 << 20)), false},
+	} {
+		x, y := net.Pipe()
+		go func() { _, _ = x.Write([]byte(tc.line + "\n")) }()
+		m, err := NewConn(y).Receive()
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: Receive = %T, %v; want ok %v", tc.name, m, err, tc.ok)
+		}
+		_ = x.Close()
+		_ = y.Close()
+	}
+}
