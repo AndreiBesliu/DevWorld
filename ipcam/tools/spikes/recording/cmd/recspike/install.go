@@ -423,7 +423,7 @@ func (a autostart) saveTimeService() error {
 	if err == nil {
 		err = os.WriteFile(a.savedStart, append(data, '\n'), 0o600)
 	}
-	if err == nil { // whatever owner Windows gives the files of an administrator
+	if err == nil { // Windows may give it to the administrator's own account
 		own := mi1.AdministratorsOwnCommand(a.savedStart)
 		err = a.run(own[0], own[1:]...)
 	}
@@ -484,8 +484,8 @@ func (a autostart) loadSavedTimeService() (saved savedTimeService, found bool, e
 // triggers that install saved, and removes the file and its folder.
 // Without a saved file, install changed nothing, or found the probe's
 // settings with nothing saved: then the owner reads again how to restore
-// Windows' usual ones by hand. A file saved before C1-R16b leaves the
-// triggers as they are.
+// Windows' usual ones by hand, and the empty folder goes. A file saved
+// before C1-R16b leaves the triggers as they are.
 func (a autostart) restoreTimeService() error {
 	saved, found, err := a.loadSavedTimeService()
 	if err != nil {
@@ -499,6 +499,7 @@ func (a autostart) restoreTimeService() error {
 		if err == nil && now.StartType == serviceAutoStart && len(now.Triggers) == 0 {
 			_, _ = fmt.Fprintf(a.out, "Setările de dinainte ale serviciului de timp Windows nu sunt salvate; ca să-i puneți la loc setările obișnuite: %s.\n", restoreByHand)
 		}
+		_ = os.Remove(filepath.Dir(a.savedStart)) // the folder that install made, once empty
 		return nil
 	}
 	if err := a.timeService.SetStartType(saved.StartType); err != nil {

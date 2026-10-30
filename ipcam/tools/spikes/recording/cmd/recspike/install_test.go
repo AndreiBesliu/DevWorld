@@ -543,6 +543,9 @@ func TestInstall_ProbesSettingsAreNeverSavedAsTheOriginal(t *testing.T) {
 	if len(f.time.asked) != 0 || !strings.Contains(out.String(), restore) || strings.Contains(out.String(), "din nou setările de dinainte") {
 		t.Errorf("uninstall asked %q of the time service and printed:\n%s\nwant nothing changed, and %q", f.time.asked, out.String(), restore)
 	}
+	if _, err := os.Stat(filepath.Dir(a.savedStart)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the empty folder of the settings is still there after uninstall (%v)", err)
+	}
 
 	a, f, _ = newAutostart(t, "windows", true)
 	f.time.startType, f.time.triggers, f.noTask = serviceAutoStart, nil, true
