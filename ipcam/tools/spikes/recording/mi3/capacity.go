@@ -36,7 +36,7 @@ const (
 )
 
 // maxAttempts bounds the attempts of one step that the controller's pacing
-// invalidates (R07).
+// (R07), or a load that did not run its whole window (mis-2), invalidates.
 const maxAttempts = 3
 
 // sixteenCameras is §4.8's H3 count with 6 cores or more (R07).
@@ -84,7 +84,8 @@ func runSteps(ctx context.Context, tier string, cameras int, sixteen bool, measu
 			if f, err = measure(ctx, n, minutes, attempt); err != nil {
 				return results.Mi3Step{Cameras: n, Minutes: minutes, Attempt: attempt}, f, err
 			}
-			s = results.Mi3Step{Cameras: n, Minutes: minutes, Attempt: attempt, Valid: Valid(f), PacingP99Ms: f.PacingP99Ms, SkippedAUs: f.SkippedAUs}
+			s = results.Mi3Step{Cameras: n, Minutes: minutes, Attempt: attempt, Valid: Valid(f), PacingP99Ms: f.PacingP99Ms, SkippedAUs: f.SkippedAUs,
+				InvalidReason: f.Invalid}
 			s.Pass = s.Valid && passes(tier, n, f)
 			if record {
 				steps = append(steps, s)
@@ -291,7 +292,8 @@ func openingText(tier string, cameras int, sixteen bool) string {
 	if sixteen {
 		text += "Fiindcă acest PC are 6 nuclee sau mai multe, la final urmează încă o oră la 16 camere, informativă. "
 	}
-	return text + fmt.Sprintf("Un pas pe care controlorul l-a trimis neuniform se reface, în cel mult %d încercări, deci proba poate dura mai mult. "+
+	return text + fmt.Sprintf("Un pas pe care controlorul l-a trimis neuniform, sau în care o încărcare nu a rulat tot timpul, se reface, "+
+		"în cel mult %d încercări, deci proba poate dura mai mult. "+
 		"Lăsați dispozitivul pornit și nefolosit până la final.", maxAttempts)
 }
 
@@ -327,7 +329,11 @@ func (o Options) finish(d results.Mi3Data, sixteenErr, stepErr error) error {
 			stepErr, camerasText(d.Cameras), o.logsMove())
 	}
 	o.say("Proba MI3 s-a încheiat: rezultatul este %s. Pașii: %s.", e.RunID, stepsSummary(d.Steps))
-	if last := d.Steps[len(d.Steps)-1]; !last.Valid {
+	switch last := d.Steps[len(d.Steps)-1]; {
+	case !last.Valid && last.InvalidReason != "":
+		o.say("Încărcarea pasului nu a rulat toată fereastra de %d ori la rând (ultima dată: %s), deci pasul nu are rezultat: "+
+			"verificați controlorul și rețeaua, apoi porniți din nou proba.", maxAttempts, last.InvalidReason)
+	case !last.Valid:
 		o.say("Controlorul a trimis neuniform de %d ori la rând, deci pasul nu are rezultat: verificați controlorul și rețeaua, apoi porniți din nou proba.", maxAttempts)
 	}
 	if sixteenErr != nil {

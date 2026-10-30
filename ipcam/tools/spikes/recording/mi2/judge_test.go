@@ -258,3 +258,80 @@ func TestMI2_CardFailedNotesIdleHub(t *testing.T) {
 		})
 	}
 }
+
+// TestMI2_UnrecordedRunHasNoVerdict (mis-1): a 72 h run in which a camera
+// went unrecorded for more than 1 % of the run measured an ipcam-hub that
+// did not record, so G11 gets no verdict from it, with the reason; up to
+// 1 % passes, and the row shows the worst camera's minutes. A redo that
+// recorded is judged instead; a crash still decides (G27).
+func TestMI2_UnrecordedRunHasNoVerdict(t *testing.T) {
+	unrecorded := func(minutes float64, crashes int) results.Envelope {
+		e := mi2Envelope("pc", 72, crashes)
+		e.MI2.NotRecordingMinutes = minutes
+		return e
+	}
+	t.Run("under 1 %", func(t *testing.T) {
+		envs := passing(t)
+		envs[len(envs)-2] = unrecorded(43.2, 0)
+		j := Judge(envs)
+		if j.Verdict != results.Pass {
+			t.Errorf("Judge = %q, reasons %q; want trece: 43,2 min are 1 %% of 72 h", j.Verdict, j.Reasons)
+		}
+		if row := rowOf(t, j, "MI2 pc: timp fără înregistrare (camera cea mai afectată)"); row.Value != "43,2 min" ||
+			row.Limit != "≤ 1 % din rulare (43,2 min)" || row.Pass == nil || !*row.Pass {
+			t.Errorf("row %+v, want 43,2 min within ≤ 1 %% din rulare (43,2 min), passed", row)
+		}
+	})
+	t.Run("over 1 %", func(t *testing.T) {
+		envs := passing(t)
+		envs[len(envs)-2] = unrecorded(43.3, 0)
+		j := Judge(envs)
+		if j.Verdict != results.Incomplete || j.PlanB != "" {
+			t.Errorf("Judge = %q, plan B %q; want fără verdict", j.Verdict, j.PlanB)
+		}
+		if !slices.ContainsFunc(j.Reasons, func(r string) bool {
+			return strings.HasPrefix(r, "pc-72h: rularea pc-72h-1: o cameră nu s-a înregistrat 43,3 min din 72,0 h") &&
+				strings.Contains(r, "reccontroller -local")
+		}) {
+			t.Errorf("reasons %q, want the unrecorded minutes and what to check", j.Reasons)
+		}
+	})
+	t.Run("a redo that recorded", func(t *testing.T) {
+		envs := passing(t)
+		envs[len(envs)-2] = unrecorded(4000, 0)
+		redo := mi2Envelope("pc", 72, 0)
+		redo.RunID = "pc-72h-2"
+		if j := Judge(append(envs, redo)); j.Verdict != results.Pass {
+			t.Errorf("Judge = %q, reasons %q; want trece from the redo", j.Verdict, j.Reasons)
+		}
+	})
+	t.Run("a crash in a run that did not record", func(t *testing.T) {
+		envs := passing(t)
+		envs[len(envs)-2] = unrecorded(4000, 1)
+		if j := Judge(envs); j.Verdict != results.Fail || j.PlanB != PlanB {
+			t.Errorf("Judge = %q, plan B %q; want pică: the crash was measured", j.Verdict, j.PlanB)
+		}
+	})
+}
+
+// TestMI2_CrashesOfRedoneRunsFail (mis-3, G27): the crashes that an
+// interrupted run measured before it was redone fail G11, with the plan B,
+// although the redo ran 72 h without one; the row and the reason say where
+// they came from.
+func TestMI2_CrashesOfRedoneRunsFail(t *testing.T) {
+	envs := passing(t)
+	redo := mi2Envelope("pc", 72, 0)
+	redo.RunID, redo.MI2.CrashesInvalidated = "pc-72h-2", 1
+	redo.MI2.Invalidated = []string{"pc-72h-1: gazda a repornit în timpul probei, după 1 crash"}
+	envs[len(envs)-2] = redo
+	j := Judge(envs)
+	if j.Verdict != results.Fail || j.PlanB != PlanB {
+		t.Errorf("Judge = %q, plan B %q; want pică with the plan B", j.Verdict, j.PlanB)
+	}
+	if row := rowOf(t, j, "MI2 pc: crash-uri ipcam-hub în 72 h"); row.Value != "0 (în 72,0 h), plus 1 crash în rulările refăcute" || row.Pass == nil || *row.Pass {
+		t.Errorf("crash row %+v, want 0 (în 72,0 h), plus 1 crash în rulările refăcute, failed", row)
+	}
+	if !slices.ContainsFunc(j.Reasons, func(r string) bool { return r == "pc-72h: 1 crash ipcam-hub în rulările refăcute înainte de pc-72h-2" }) {
+		t.Errorf("reasons %q, want the crash of the redone runs", j.Reasons)
+	}
+}

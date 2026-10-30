@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -72,10 +74,17 @@ type fakeHub struct {
 	stopped  atomic.Bool
 	stopWait atomic.Int64 // how long Stop's context gave it, in ns
 	stopErr  error        // what Stop returns
+	code     int          // its exit code, set before it exits; 0 reads as -1
 }
 
 func (h *fakeHub) Exited() <-chan struct{} { return h.exited }
-func (h *fakeHub) ExitCode() int           { return -1 }
+
+func (h *fakeHub) ExitCode() int {
+	if h.code == 0 {
+		return -1
+	}
+	return h.code
+}
 
 func (h *fakeHub) Stop(ctx context.Context) error {
 	if deadline, ok := ctx.Deadline(); ok {
@@ -92,6 +101,14 @@ func (h *fakeHub) exit() { h.once.Do(func() { close(h.exited) }) }
 func (h *fakeHub) emit(events ...hubproc.Event) {
 	for _, e := range events {
 		h.onEvent(e)
+	}
+}
+
+// status sends ipcam-hub's status event of the main stream of each of the
+// first cameras: its last part grew ago before now.
+func (h *fakeHub) status(cameras int, ago time.Duration) {
+	for i := range cameras {
+		h.emit(hubproc.Event{Type: "status", Cam: fmt.Sprintf("cam%02d", i+1), Profile: "main", LastPartAgoMs: ago.Milliseconds()})
 	}
 }
 
@@ -711,4 +728,216 @@ func TestStability_OwnerLinesAreRomanian(t *testing.T) {
 			t.Errorf("the run printed an English error of its own:\n%s", h.out)
 		}
 	})
+}
+
+// notRecording is the warning that MI2 prints once every camera has gone
+// more than a minute without a new part (mis-1).
+const notRecording = "Camerele nu se mai înregistrează: verificați că reccontroller -local rulează."
+
+// TestStability_MeasuresTheTimeNothingWasRecorded (mis-1): MI2 measures how
+// long each camera went without a new part, from ipcam-hub's status
+// events, beyond 10 s at a time, and its envelope carries the worst
+// camera's minutes. A hub that stays up while reccontroller -local is gone
+// records nothing: its 72 h run gets no verdict, and the owner sees one
+// warning while it runs, printed again only after the recording resumed
+// and stopped again. The time after the SD card's monitor stopped the
+// recording (T40) does not count: the card's own note covers it.
+func TestStability_MeasuresTheTimeNothingWasRecorded(t *testing.T) {
+	t.Run("the parts stop at hour 3", func(t *testing.T) {
+		h := newHarness(t, t.TempDir(), pcHost, "boot-1")
+		h.start()
+		hub := h.nextHub()
+		start := h.clock.Now()
+		hub.status(8, 500*time.Millisecond)
+		for range 3 {
+			h.clock.advance(t, time.Hour)
+			hub.status(8, 500*time.Millisecond)
+		}
+		stoppedAt := h.clock.Now().Add(-500 * time.Millisecond)
+		for h.clock.Now().Before(start.Add(71 * time.Hour)) {
+			h.clock.advance(t, time.Hour)
+			hub.status(8, h.clock.Now().Sub(stoppedAt))
+		}
+		h.clock.advance(t, time.Hour) // the 72nd hour: the run ends
+		if err := h.wait(); err != nil {
+			t.Fatalf("Run: %v; it printed:\n%s", err, h.out)
+		}
+		e := h.envelope("pc-72h-1")
+		// From 10 s after the last part to the last status, at 71 h.
+		want := math.Round((71*time.Hour-stoppedAt.Sub(start)-10*time.Second).Minutes()*10) / 10
+		if e.MI2.NotRecordingMinutes != want {
+			t.Errorf("not recording %v min, want %v", e.MI2.NotRecordingMinutes, want)
+		}
+		if n := strings.Count(h.out.String(), notRecording); n != 1 {
+			t.Errorf("the warning was printed %d times, want once:\n%s", n, h.out)
+		}
+		envs := passing(t)
+		envs[len(envs)-2] = e
+		j := Judge(envs)
+		if j.Verdict != results.Incomplete {
+			t.Errorf("Judge = %q, reasons %q; want fără verdict", j.Verdict, j.Reasons)
+		}
+		if !slices.ContainsFunc(j.Reasons, func(r string) bool {
+			return strings.HasPrefix(r, "pc-72h: rularea pc-72h-1: o cameră nu s-a înregistrat 4079,8 min din 72,0 h")
+		}) {
+			t.Errorf("reasons %q, want the minutes that pc-72h-1 did not record", j.Reasons)
+		}
+	})
+
+	t.Run("the recording resumes and stops again", func(t *testing.T) {
+		h := newHarness(t, t.TempDir(), pcHost, "boot-1")
+		h.start()
+		hub := h.nextHub()
+		hub.status(8, 500*time.Millisecond)
+		h.clock.advance(t, time.Hour)
+		hub.status(8, time.Hour) // nothing since the start
+		h.clock.advance(t, time.Minute)
+		h.clock.advance(t, time.Minute)
+		if n := strings.Count(h.out.String(), notRecording); n != 1 {
+			t.Fatalf("after the first stop, the warning was printed %d times, want once:\n%s", n, h.out)
+		}
+		hub.status(8, 500*time.Millisecond) // it records again
+		h.clock.advance(t, time.Minute)
+		hub.status(8, time.Minute+500*time.Millisecond) // and stops again
+		h.clock.advance(t, time.Minute)
+		h.clock.advance(t, time.Minute)
+		if n := strings.Count(h.out.String(), notRecording); n != 2 {
+			t.Errorf("after the second stop, the warning was printed %d times, want twice:\n%s", n, h.out)
+		}
+		h.finish()
+	})
+
+	t.Run("one camera keeps recording", func(t *testing.T) {
+		h := newHarness(t, t.TempDir(), pcHost, "boot-1")
+		h.start()
+		hub := h.nextHub()
+		hub.status(8, 500*time.Millisecond)
+		h.clock.advance(t, time.Hour)
+		hub.status(7, time.Hour)
+		hub.emit(hubproc.Event{Type: "status", Cam: "cam08", Profile: "main", LastPartAgoMs: 500})
+		h.clock.advance(t, time.Minute)
+		if strings.Contains(h.out.String(), notRecording) {
+			t.Errorf("the run warned although cam08 records:\n%s", h.out)
+		}
+		h.finish()
+		if d := h.envelope("pc-72h-1").MI2; d.NotRecordingMinutes < 59 {
+			t.Errorf("not recording %v min, want the worst camera's 59,8 min", d.NotRecordingMinutes)
+		}
+	})
+
+	t.Run("the SD card failed", func(t *testing.T) {
+		pi := mi1.HostState{Pseudonym: "pi", OS: "linux", Storage: "sd", WriteCache: "unknown", Cameras: 4,
+			SdConfirmation: &results.SdConfirmation{Text: "da", AtMs: 1}}
+		h := newHarness(t, t.TempDir(), pi, "boot-1")
+		h.start()
+		hub := h.nextHub()
+		hub.status(4, 500*time.Millisecond)
+		h.clock.advance(t, time.Hour)
+		hub.status(4, 500*time.Millisecond)
+		hub.emit(hubproc.Event{Type: "card", State: "failed", AtMs: 3000})
+		failedAt := h.clock.Now()
+		for range 3 {
+			h.clock.advance(t, time.Hour)
+			hub.status(4, h.clock.Now().Sub(failedAt))
+		}
+		h.finish()
+		if d := h.envelope("pi-72h-1").MI2; d.NotRecordingMinutes != 0 {
+			t.Errorf("not recording %v min, want 0: the card stopped the recording", d.NotRecordingMinutes)
+		}
+		if strings.Contains(h.out.String(), notRecording) {
+			t.Errorf("the run warned about the cameras after the card failed:\n%s", h.out)
+		}
+	})
+}
+
+// TestStability_InterruptedRunKeepsItsCrashes (mis-3, G27): a crash is
+// saved in the run's state as it happens, so a run that a reboot then
+// interrupted passes it to the redo: the redo lists the run «după 1
+// crash», its envelope carries the crash, and G11 fails although the redo
+// itself ran 72 h without one.
+func TestStability_InterruptedRunKeepsItsCrashes(t *testing.T) {
+	dir := t.TempDir()
+	h := newHarness(t, dir, pcHost, "boot-1")
+	h.start()
+	h.nextHub().exit() // a crash
+	h.nextHub()
+	state := filepath.Join(dir, "results", "state", "mi2-pc-72h.json")
+	if b, err := os.ReadFile(state); err != nil || !strings.Contains(string(b), `"crashes": 1`) { //nolint:gosec // the test's own file
+		t.Errorf("the run's state after the crash: %s (%v), want the crash saved", b, err)
+	}
+	h.cancel() // the host reboots
+	if err := h.wait(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the interrupted run: %v, want context.Canceled", err)
+	}
+
+	redo := newHarness(t, dir, pcHost, "boot-2")
+	redo.start()
+	redo.nextHub()
+	redo.finish()
+	e := redo.envelope("pc-72h-2")
+	if d := e.MI2; d.Crashes72h != 0 || d.CrashesInvalidated != 1 ||
+		len(d.Invalidated) != 1 || d.Invalidated[0] != "pc-72h-1: gazda a repornit în timpul probei, după 1 crash" {
+		t.Errorf("the redo: %d crashes, %d in the redone runs, invalidated %q; want 0, 1, «pc-72h-1: gazda a repornit în timpul probei, după 1 crash»",
+			d.Crashes72h, d.CrashesInvalidated, d.Invalidated)
+	}
+	envs := passing(t)
+	envs[len(envs)-2] = e
+	if j := Judge(envs); j.Verdict != results.Fail || j.PlanB != PlanB {
+		t.Errorf("Judge = %q, plan B %q, reasons %q; want pică with the plan B", j.Verdict, j.PlanB, j.Reasons)
+	}
+
+	// The next run starts clean: the crash was reported once.
+	third := newHarness(t, dir, pcHost, "boot-2")
+	third.start()
+	third.nextHub()
+	third.finish()
+	if d := third.envelope("pc-72h-3").MI2; d.CrashesInvalidated != 0 || len(d.Invalidated) != 0 {
+		t.Errorf("the run after the redo: %d crashes of redone runs, invalidated %q; want none", d.CrashesInvalidated, d.Invalidated)
+	}
+}
+
+// TestStability_RestartRefusedAfterACrashNamesTheCrash (hub-2): MI2's
+// pruner deletes segments behind ipcam-hub's catalog, so after a crash
+// late in the run the restarted ipcam-hub may refuse its reconcile
+// (HUB-09: exit 3, or a reconcile event with aborted). The run then ends
+// at once as the measured failure that the crash is: its envelope keeps
+// the crash, and the owner reads why the restart failed, not a setup
+// failure.
+func TestStability_RestartRefusedAfterACrashNamesTheCrash(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		abort func(*fakeHub)
+	}{
+		{"exit 3", func(hub *fakeHub) { hub.code = 3 }},
+		{"an aborted reconcile", func(hub *fakeHub) { hub.emit(hubproc.Event{Type: "reconcile", Seq: 1, Aborted: true}) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, t.TempDir(), pcHost, "boot-1")
+			h.start()
+			first := h.nextHub()
+			h.clock.advance(t, 30*time.Hour) // the pruner has deleted hours of segments
+			first.exit()                     // a crash
+			restart := h.unreadyHub()
+			tc.abort(restart)
+			restart.exit()
+			if err := h.wait(); err != nil {
+				t.Fatalf("Run: %v; it printed:\n%s", err, h.out)
+			}
+			if d := h.envelope("pc-72h-1").MI2; d.Crashes72h != 1 {
+				t.Errorf("%d crashes, want the 1 measured", d.Crashes72h)
+			}
+			out := h.out.String()
+			if !strings.Contains(out, "repornirea după crash a refuzat reconcilierea") || !strings.Contains(out, "rânduri șterse de proba MI2") {
+				t.Errorf("the run printed:\n%s\nwant the restart after the crash refused because of the rows that MI2 deleted", out)
+			}
+			if strings.Contains(out, "înainte să fie gata") {
+				t.Errorf("the run printed a setup failure:\n%s", out)
+			}
+			select {
+			case hub := <-h.hubs:
+				t.Errorf("the run started ipcam-hub again after the refused restart (%p)", hub)
+			default:
+			}
+		})
+	}
 }

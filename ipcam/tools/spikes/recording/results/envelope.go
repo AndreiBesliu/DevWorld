@@ -208,6 +208,9 @@ type Mi3Data struct {
 	StepsStopped       string             `json:"stepsStopped,omitempty"`
 	SixteenStopped     string             `json:"sixteenStopped,omitempty"`
 	LoadCPUPct         map[string]float64 `json:"loadCpuPct"`
+	// InvalidReason is why the first hour's figures do not count beside
+	// the pacing (mis-2): a load that did not run its whole window.
+	InvalidReason string `json:"invalidReason,omitempty"`
 }
 
 // Budget is one §4.8 budget of a run: the value measured, its limit, and
@@ -219,17 +222,19 @@ type Budget struct {
 }
 
 // Mi3Step is one run of MI3: its cameras, its length (60 or 15 min), its
-// attempt at that count and length, whether the controller sent evenly
-// (Valid, R07, with the pacing that says so), and, when valid, whether
-// every budget was met (Pass).
+// attempt at that count and length, whether it counts (Valid: the
+// controller sent evenly, R07, with the pacing that says so, and its load
+// ran for its whole window, mis-2, else InvalidReason says why), and,
+// when valid, whether every budget was met (Pass).
 type Mi3Step struct {
-	Cameras     int   `json:"cameras"`
-	Minutes     int   `json:"minutes"`
-	Attempt     int   `json:"attempt"`
-	Pass        bool  `json:"pass"`
-	Valid       bool  `json:"valid"`
-	PacingP99Ms int64 `json:"pacingP99Ms"`
-	SkippedAUs  int   `json:"skippedAUs"`
+	Cameras       int    `json:"cameras"`
+	Minutes       int    `json:"minutes"`
+	Attempt       int    `json:"attempt"`
+	Pass          bool   `json:"pass"`
+	Valid         bool   `json:"valid"`
+	PacingP99Ms   int64  `json:"pacingP99Ms"`
+	SkippedAUs    int    `json:"skippedAUs"`
+	InvalidReason string `json:"invalidReason,omitempty"`
 }
 
 // Mi2Data is MI2's 72 h run on a host (G11, HUB-31, G19): the hours it
@@ -237,16 +242,21 @@ type Mi3Step struct {
 // ipcam-hub (crashes) and MediaMTX's restarts (HUB-13), the card monitor's
 // states when rec/ was on an SD card (T40), the rolling window's hours, and
 // the runs before it that a reboot or an interruption invalidated, each as
-// "<run id>: <why>", in Romanian.
+// "<run id>: <why>", in Romanian, with the crashes that they measured
+// first (CrashesInvalidated, G27). NotRecordingMinutes is the time that
+// the worst camera went without a new part, beyond 10 s at a time, apart
+// from the time after the card monitor stopped the recording (mis-1).
 type Mi2Data struct {
-	Hours         float64     `json:"hours"`
-	Cameras       int         `json:"cameras"`
-	Crashes72h    int         `json:"crashes72h"`
-	ChildRestarts int         `json:"childRestarts"`
-	OnSdCard      bool        `json:"onSdCard"`
-	CardStates    []CardState `json:"cardStates,omitempty"`
-	WindowHours   float64     `json:"windowHours"`
-	Invalidated   []string    `json:"invalidated,omitempty"`
+	Hours               float64     `json:"hours"`
+	Cameras             int         `json:"cameras"`
+	Crashes72h          int         `json:"crashes72h"`
+	ChildRestarts       int         `json:"childRestarts"`
+	OnSdCard            bool        `json:"onSdCard"`
+	CardStates          []CardState `json:"cardStates,omitempty"`
+	WindowHours         float64     `json:"windowHours"`
+	Invalidated         []string    `json:"invalidated,omitempty"`
+	CrashesInvalidated  int         `json:"crashesInvalidated,omitempty"`
+	NotRecordingMinutes float64     `json:"notRecordingMinutes"`
 }
 
 // CardState is one state of the card monitor, as ipcam-hub's card event

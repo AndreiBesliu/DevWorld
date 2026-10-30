@@ -97,6 +97,9 @@ type Event struct {
 	Path  string `json:"path"`
 	State string `json:"state"`
 	Kind  string `json:"kind"`
+	// LastPartAgoMs is a status event's time since the stream's open part
+	// last grew, -1 before its first part since ipcam-hub started.
+	LastPartAgoMs int64 `json:"lastPartAgoMs"`
 
 	Line json.RawMessage `json:"-"`
 	At   time.Time       `json:"-"`

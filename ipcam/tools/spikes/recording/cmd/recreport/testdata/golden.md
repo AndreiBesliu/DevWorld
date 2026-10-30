@@ -115,6 +115,7 @@ Fiecare rând vine din judecata porții lui; „Sursa” spune unde s-a măsurat
 | MI1 real-pc: rulări eșuate | 0 din 5 | 0 | ✓ | pc |
 | MI2 pc: reluarea după kill -9 | 3,00 s (20 din 20) | ≤ 10 s | ✓ | pc |
 | MI2 pc: crash-uri ipcam-hub în 72 h | 0 (în 72,3 h) | 0 | ✓ | pc |
+| MI2 pc: timp fără înregistrare (camera cea mai afectată) | 0,0 min | ≤ 1 % din rulare (43,4 min) | ✓ | pc |
 | MI2 pc: reporniri MediaMTX (HUB-13) | 0 |  | – | pc |
 | MI2 pc: fereastra păstrată | 6,00 h |  | – | pc |
 | MI3 pc: nivel și camere | H3, 8 camere, 3 sesiuni live |  | – | pc |
@@ -163,6 +164,7 @@ Rezultatele Pi-ului de pe card SD, separat de celelalte (G16): avertismentul car
 | MI2 pi: reluarea după kill -9 | 3,00 s (20 din 20) | ≤ 10 s | ✓ | pi |
 | MI2 pi: starea cardului SD | OK → DEGRADAT |  | – | pi |
 | MI2 pi: crash-uri ipcam-hub în 72 h | 0 (în 72,3 h) | 0 | ✓ | pi |
+| MI2 pi: timp fără înregistrare (camera cea mai afectată) | 0,0 min | ≤ 1 % din rulare (43,4 min) | ✓ | pi |
 | MI2 pi: reporniri MediaMTX (HUB-13) | 0 |  | – | pi |
 | MI2 pi: fereastra păstrată | 6,00 h |  | – | pi |
 | MI3 pi: nivel și camere | H1b, 4 camere, 1 sesiune live |  | – | pi |

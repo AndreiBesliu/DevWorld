@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,6 +73,24 @@ const (
 	// a row before its ready: it cannot record, and restarting it for 72 h
 	// would measure nothing more.
 	maxStartsUnready = 3
+	// recordingGrace is how long a camera may go without a new part before
+	// the time counts as not recorded (mis-1): a part closes every second,
+	// and ipcam-hub looks at the parts every 250 ms.
+	recordingGrace = 10 * time.Second
+	// stallWarning is how long every camera must have gone without a new
+	// part before the owner is warned.
+	stallWarning = time.Minute
+	// exitReconcileAborted is ipcam-hub's exit code when its startup
+	// reconcile aborts (HUB-09, hub/cmd/ipcam-hub).
+	exitReconcileAborted = 3
+)
+
+// The owner's lines about the recording (mis-1, hub-2).
+const (
+	notRecordingWarning = "Camerele nu se mai înregistrează: verificați că reccontroller -local rulează. " +
+		"Dacă l-ați pornit din nou, opriți recspike mi2 (Ctrl+C) și porniți-l din nou: proba se reface."
+	restartRefused = "ipcam-hub nu a mai pornit: repornirea după crash a refuzat reconcilierea (rânduri șterse de proba MI2: " +
+		"segmentele mai vechi decât fereastra). Proba se oprește aici; crash-ul este măsurat."
 )
 
 // errNeverReady is record's error when no ipcam-hub of the run got ready:
@@ -178,7 +197,15 @@ func Run(ctx context.Context, o Options) error {
 	}()
 
 	o.say("Proba MI2 %s începe: %s h, %d camere. Lăsați dispozitivul pornit, cu reccontroller -local pornit tot timpul.", runID, results.Decimal(o.Hours, -1), cameras)
-	data, err := o.record(ctx, config, log, window)
+	// Each crash goes into the run's state as it happens: a reboot or an
+	// interruption after it must not lose it (mis-3, G27).
+	crashed := func(crashes int) {
+		st.Crashes = crashes
+		if err := saveState(statePath, st); err != nil {
+			o.say("Crash-ul nu s-a putut salva în starea probei: %v", err)
+		}
+	}
+	data, err := o.record(ctx, config, log, window, streams, crashed)
 	switch {
 	case errors.Is(err, errNeverReady):
 		if serr := abandonRun(statePath, st, runID+": "+errNeverReady.Error()); serr != nil {
@@ -193,6 +220,7 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	data.Cameras, data.OnSdCard, data.WindowHours, data.Invalidated = cameras, o.Host.Storage == "sd", window.Hours(), st.Invalidated
+	data.CrashesInvalidated = st.CrashesInvalidated
 	e := results.Envelope{Schema: results.Schema, Code: "MI2", RunID: runID, AtMs: o.clock().Now().UnixMilli(), Set: set, Host: o.Host.Pseudonym,
 		OS: o.Host.OS, PiModel: o.Host.PiModel, Storage: o.Host.Storage, SdConfirmation: o.Host.SdConfirmation, MI2: &data}
 	if err := results.Create(o.Results, e); err != nil {
@@ -205,29 +233,36 @@ func Run(ctx context.Context, o Options) error {
 	return nil
 }
 
-// record runs ipcam-hub on config for the run's hours and supervises it
-// (C07): an exit that recspike did not ask for is a crash when that
-// ipcam-hub was ready, a setup failure before, and ipcam-hub starts again
-// at once. After maxStartsUnready setup failures in a row, the run ends:
-// with errNeverReady when no ipcam-hub of the run ever got ready, else
-// with the crashes measured. Every pruneEvery it deletes the verified
-// segments older than window. At the end, or when ctx is done, it stops
-// ipcam-hub cleanly, waiting mi1.StopTimeout, long enough for an SD card
-// (Task 7.2d): that stop is no crash, even when it ends in a kill.
-func (o Options) record(ctx context.Context, config string, stderr io.Writer, window time.Duration) (results.Mi2Data, error) {
+// record runs ipcam-hub on config, which records streams, for the run's
+// hours and supervises it (C07): an exit that recspike did not ask for is
+// a crash when that ipcam-hub was ready, which crashed reports, a setup
+// failure before, and ipcam-hub starts again at once. After
+// maxStartsUnready setup failures in a row, the run ends: with
+// errNeverReady when no ipcam-hub of the run ever got ready, else with the
+// crashes measured. A restart after a crash that refuses its reconcile
+// ends the run at once, with the crash (hub-2): MI2's pruner deleted
+// segments behind ipcam-hub's catalog, so every restart would refuse it.
+// Every pruneEvery it deletes the verified segments older than window, and
+// warns the owner, once until the recording resumes, when every camera
+// has gone stallWarning without a new part (mis-1). At the end, or when
+// ctx is done, it stops ipcam-hub cleanly, waiting mi1.StopTimeout, long
+// enough for an SD card (Task 7.2d): that stop is no crash, even when it
+// ends in a kill.
+func (o Options) record(ctx context.Context, config string, stderr io.Writer, window time.Duration, streams []string,
+	crashed func(crashes int)) (results.Mi2Data, error) {
 	clock := o.clock()
 	start := clock.Now()
 	end := start.Add(time.Duration(o.Hours * float64(time.Hour)))
 	tick := clock.NewTicker(pruneEvery)
 	defer tick.Stop()
 	pruner := NewPruner(window)
-	var t tally
+	t := newTally(streams, start)
 	onEvent := func(e hubproc.Event) {
 		if e.Type == "segment_verified" {
 			pruner.Verified(e.Path)
 			return
 		}
-		t.event(e)
+		t.event(e, clock.Now())
 	}
 	hub, err := o.startHub(config, stderr, onEvent)
 	if err != nil {
@@ -240,17 +275,24 @@ func (o Options) record(ctx context.Context, config string, stderr io.Writer, wi
 			o.say("ipcam-hub nu s-a oprit curat: %v", err)
 		}
 	}
-	unready := 0 // the setup failures in a row
+	unready := 0   // the setup failures in a row
+	warned := false // the owner was warned that nothing records
 	for {
 		select {
 		case <-ctx.Done():
 			stop()
 			return results.Mi2Data{}, ctx.Err()
 		case <-hub.Exited():
-			if crashes, crashed := t.exit(); crashed {
+			crashes, crash, aborted := t.exit()
+			switch {
+			case crash:
 				unready = 0
+				crashed(crashes)
 				o.say("ipcam-hub s-a oprit neașteptat (codul %d): crash-ul %d. Îl pornesc din nou.", hub.ExitCode(), crashes)
-			} else {
+			case crashes > 0 && (aborted || hub.ExitCode() == exitReconcileAborted):
+				o.say("%s", restartRefused)
+				return t.data(clock.Now().Sub(start)), nil
+			default:
 				unready++
 				if unready >= maxStartsUnready {
 					if !t.everReady() {
@@ -269,6 +311,11 @@ func (o Options) record(ctx context.Context, config string, stderr io.Writer, wi
 			// which MI2 does not judge: the deletes are the spike's.
 			if _, err := pruner.Prune(now); err != nil {
 				o.say("Segmentele mai vechi decât fereastra nu s-au putut șterge toate; se reîncearcă peste un minut: %v", err)
+			}
+			if stalled := t.stalled(stallWarning); stalled != warned {
+				if warned = stalled; stalled {
+					o.say("%s", notRecordingWarning)
+				}
 			}
 			if !now.Before(end) {
 				stop()
@@ -324,36 +371,106 @@ type tally struct {
 	mu            sync.Mutex
 	ready         bool // the running ipcam-hub sent ready
 	anyReady      bool // an ipcam-hub of the run sent ready
+	aborted       bool // the running ipcam-hub's reconcile aborted (HUB-09)
 	crashes       int
 	childRestarts int
 	cardStates    []results.CardState
+	cardFailed    bool // the card monitor stopped the recording (T40)
+	jobs          map[string]*coverage
 }
 
-// event counts one of ipcam-hub's events.
-func (t *tally) event(e hubproc.Event) {
+// coverage is what the run knows of one job's recording from ipcam-hub's
+// status events: when its last part grew, when a status last came, up to
+// when its time is counted, and the time counted as not recorded.
+type coverage struct {
+	lastPart, seen, counted time.Time
+	notRecorded             time.Duration
+}
+
+// newTally is the tally of a run that records streams, from start.
+func newTally(streams []string, start time.Time) *tally {
+	t := &tally{jobs: map[string]*coverage{}}
+	for _, s := range streams {
+		t.jobs[s] = &coverage{lastPart: start, counted: start}
+	}
+	return t
+}
+
+// event counts one of ipcam-hub's events, read at now.
+func (t *tally) event(e hubproc.Event, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	switch e.Type {
 	case "ready":
 		t.ready, t.anyReady = true, true
+	case "reconcile":
+		t.aborted = t.aborted || e.Aborted
 	case "child_restart":
 		t.childRestarts++
 	case "card":
 		t.cardStates = append(t.cardStates, results.CardState{State: e.State, AtMs: e.AtMs})
+		t.cardFailed = e.State == "failed"
+	case "status":
+		t.status(e, now)
 	}
 }
 
-// exit takes an unexpected exit of ipcam-hub: a crash when that ipcam-hub
-// was ready (C07), a setup failure before. It returns the crashes so far
-// and whether this was one; the next ipcam-hub starts unready.
-func (t *tally) exit() (crashes int, crashed bool) {
+// status counts a job's status event read at now (mis-1): the job had no
+// new part since now − LastPartAgoMs, so the time from recordingGrace
+// after that part up to now was not recorded, except while the card
+// monitor holds the recording stopped. A status of -1 (no part since this
+// ipcam-hub started) keeps the last part known.
+func (t *tally) status(e hubproc.Event, now time.Time) {
+	j := t.jobs[e.Cam+"_"+e.Profile]
+	if j == nil {
+		return
+	}
+	if e.LastPartAgoMs >= 0 {
+		if at := now.Add(-time.Duration(e.LastPartAgoMs) * time.Millisecond); at.After(j.lastPart) {
+			j.lastPart = at
+		}
+	}
+	j.seen = now
+	if from := j.lastPart.Add(recordingGrace); !t.cardFailed && now.After(from) {
+		if j.counted.After(from) {
+			from = j.counted
+		}
+		j.notRecorded += now.Sub(from)
+	}
+	if now.After(j.counted) {
+		j.counted = now
+	}
+}
+
+// stalled reports whether every job's latest status says that it has gone
+// longer than d without a new part, while the card monitor does not hold
+// the recording stopped.
+func (t *tally) stalled(d time.Duration) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	crashed, t.ready = t.ready, false
+	if t.cardFailed || len(t.jobs) == 0 {
+		return false
+	}
+	for _, j := range t.jobs {
+		if j.seen.IsZero() || j.seen.Sub(j.lastPart) <= d {
+			return false
+		}
+	}
+	return true
+}
+
+// exit takes an unexpected exit of ipcam-hub: a crash when that ipcam-hub
+// was ready (C07), a setup failure before. It returns the crashes so far,
+// whether this was one, and whether that ipcam-hub's reconcile aborted;
+// the next ipcam-hub starts unready.
+func (t *tally) exit() (crashes int, crashed, aborted bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	crashed, aborted, t.ready, t.aborted = t.ready, t.aborted, false, false
 	if crashed {
 		t.crashes++
 	}
-	return t.crashes, crashed
+	return t.crashes, crashed, aborted
 }
 
 // everReady reports whether an ipcam-hub of the run sent ready.
@@ -367,7 +484,12 @@ func (t *tally) everReady() bool {
 func (t *tally) data(d time.Duration) results.Mi2Data {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return results.Mi2Data{Hours: d.Hours(), Crashes72h: t.crashes, ChildRestarts: t.childRestarts, CardStates: t.cardStates}
+	var worst time.Duration
+	for _, j := range t.jobs {
+		worst = max(worst, j.notRecorded)
+	}
+	return results.Mi2Data{Hours: d.Hours(), Crashes72h: t.crashes, ChildRestarts: t.childRestarts, CardStates: t.cardStates,
+		NotRecordingMinutes: math.Round(worst.Minutes()*10) / 10}
 }
 
 // writeRun writes the run's run.json in dir: each stream a job that pulls
@@ -445,14 +567,17 @@ func (o Options) startHub(config string, stderr io.Writer, onEvent func(hubproc.
 
 // runState is where the host's 72 h runs stand, in
 // results/state/mi2-<set>.json: the last run started, whether it is still
-// open, the boot it started in, and the runs before it that did not end.
-// The file lives in the published results folder, so it names no address
-// and no path (PH0-22).
+// open, the boot it started in, its crashes so far, and the runs before it
+// that did not end, with the crashes that they measured (mis-3). The file
+// lives in the published results folder, so it names no address and no
+// path (PH0-22).
 type runState struct {
-	Attempt     int      `json:"attempt"`
-	Open        bool     `json:"open"`
-	Boot        mi1.Boot `json:"boot"`
-	Invalidated []string `json:"invalidated,omitempty"`
+	Attempt            int      `json:"attempt"`
+	Open               bool     `json:"open"`
+	Boot               mi1.Boot `json:"boot"`
+	Crashes            int      `json:"crashes,omitempty"`
+	Invalidated        []string `json:"invalidated,omitempty"`
+	CrashesInvalidated int      `json:"crashesInvalidated,omitempty"`
 }
 
 // runIDOf is the id of the attempt-th run of set.
@@ -478,23 +603,46 @@ func beginRun(path, set string, boot mi1.Boot, bootKnown bool) (runState, error)
 		if bootKnown && !boot.Same(st.Boot) {
 			reason = "gazda a repornit în timpul probei"
 		}
-		st.Invalidated = append(st.Invalidated, runIDOf(set, st.Attempt)+": "+reason)
+		st = invalidate(st, runIDOf(set, st.Attempt)+": "+reason)
 	}
 	st.Attempt++
-	st.Open, st.Boot = true, boot
+	st.Open, st.Boot, st.Crashes = true, boot, 0
 	return st, saveState(path, st)
 }
 
 // abandonRun records that the run of st ended without a result, invalid
 // for reason, "<run id>: <why>": the next run redoes it and lists it.
 func abandonRun(path string, st runState, reason string) error {
-	st.Open, st.Invalidated = false, append(st.Invalidated, reason)
+	st = invalidate(st, reason)
+	st.Open = false
 	return saveState(path, st)
 }
 
-// finishRun records that the run of st ended.
+// invalidate lists the run of st as invalid for reason, "<run id>: <why>",
+// with the crashes that it measured, which the redo's envelope carries:
+// a measured crash decides G11 even when its run did not end (G27).
+func invalidate(st runState, reason string) runState {
+	if st.Crashes > 0 {
+		reason += ", după " + CrashText(st.Crashes)
+	}
+	st.Invalidated = append(st.Invalidated, reason)
+	st.CrashesInvalidated += st.Crashes
+	st.Crashes = 0
+	return st
+}
+
+// CrashText is n crashes in Romanian: «1 crash», «2 crash-uri».
+func CrashText(n int) string {
+	if n == 1 {
+		return "1 crash"
+	}
+	return fmt.Sprintf("%d crash-uri", n)
+}
+
+// finishRun records that the run of st ended: its envelope carries its
+// crashes and the redone runs'.
 func finishRun(path string, st runState) error {
-	st.Open, st.Invalidated = false, nil
+	st.Open, st.Crashes, st.Invalidated, st.CrashesInvalidated = false, 0, nil, 0
 	return saveState(path, st)
 }
 

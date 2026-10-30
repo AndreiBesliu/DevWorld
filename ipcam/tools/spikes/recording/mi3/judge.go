@@ -170,7 +170,7 @@ func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (host
 	d := e.MI3
 	j.Rows = append(j.Rows, results.Row{Code: prefix + "nivel și camere", Source: host,
 		Value: fmt.Sprintf("%s, %s, %s", d.Tier, camerasText(d.Cameras), SessionsText(Sessions(d.Tier)))})
-	valid := validPacing(d.PacingP99Ms, d.SkippedAUs)
+	valid := validPacing(d.PacingP99Ms, d.SkippedAUs) && d.InvalidReason == ""
 	failed, missing := false, false
 	for _, key := range BudgetKeys(d.Tier) {
 		lim := limit(key, d.Tier, d.Cameras)
@@ -259,19 +259,33 @@ func recommended(steps []results.Mi3Step) (n int, settled bool) {
 	return 0, false
 }
 
-// invalidText lists the pacing of the first hour's invalid attempts.
+// invalidText lists why the first hour's attempts are invalid.
 func invalidText(d *results.Mi3Data) string {
 	var parts []string
 	for _, s := range d.Steps {
 		if s.Valid || s.Cameras != d.Cameras || s.Minutes != FullMinutes {
 			break
 		}
-		parts = append(parts, fmt.Sprintf("încercarea %d: %s", s.Attempt, pacingText(s.PacingP99Ms, s.SkippedAUs)))
+		parts = append(parts, fmt.Sprintf("încercarea %d: %s", s.Attempt, invalidWhy(s.PacingP99Ms, s.SkippedAUs, s.InvalidReason)))
 	}
 	if len(parts) == 0 {
-		return pacingText(d.PacingP99Ms, d.SkippedAUs)
+		return invalidWhy(d.PacingP99Ms, d.SkippedAUs, d.InvalidReason)
 	}
 	return strings.Join(parts, "; ")
+}
+
+// invalidWhy is why a step does not count: its pacing, when the controller
+// sent unevenly (R07), and the reason why its load did not run its whole
+// window (mis-2).
+func invalidWhy(p99 int64, skipped int, reason string) string {
+	var why []string
+	if !validPacing(p99, skipped) || reason == "" {
+		why = append(why, pacingText(p99, skipped))
+	}
+	if reason != "" {
+		why = append(why, reason)
+	}
+	return strings.Join(why, "; ")
 }
 
 // infoRows adds the rows and notes of host's run that are no gate: the
@@ -331,7 +345,7 @@ func stepText(s results.Mi3Step) string {
 	head := stepHead(s)
 	switch {
 	case !s.Valid:
-		return head + ": nevalidă (" + pacingText(s.PacingP99Ms, s.SkippedAUs) + ")"
+		return head + ": nevalidă (" + invalidWhy(s.PacingP99Ms, s.SkippedAUs, s.InvalidReason) + ")"
 	case s.Pass:
 		return head + ": trece"
 	}

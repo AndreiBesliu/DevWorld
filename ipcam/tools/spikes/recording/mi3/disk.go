@@ -31,10 +31,12 @@ const maxBox = 64 << 20
 
 // diskFigures are the disk budgets' measurements of a step's recordings
 // (§4.8): file bytes ÷ stream bytes per mode, and fsyncs per second per
-// open file.
+// open file; and the seconds of parts that each stream recorded, by its
+// "<cam>_<profile>" name (mis-2).
 type diskFigures struct {
 	ratio       map[string]float64
 	fsyncPerSec float64
+	seconds     map[string]float64
 }
 
 // segmentStats is what one segment file holds: its size on disk, the
@@ -54,10 +56,12 @@ type segmentStats struct {
 // may cut short, is left out. The fsync at a segment's close, one per 5
 // min, is not in the rate. It counts closed parts, so it sits near 1 by
 // construction and cannot see an fsync in plus: the report names it so
-// (Proxies).
+// (Proxies). Each stream's seconds are all of its parts', from the
+// recordings' folders, rec/<cam>/<profile>/….
 func measureDisk(rec string, id age.Identity) (diskFigures, error) {
 	sizes, payloads := map[string]int64{}, map[string]int64{}
 	var closes, seconds float64
+	recorded := map[string]float64{}
 	err := filepath.WalkDir(rec, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || !d.Type().IsRegular() || !strings.Contains(d.Name(), ".mp4") {
 			return err
@@ -72,6 +76,13 @@ func measureDisk(rec string, id age.Identity) (diskFigures, error) {
 		}
 		sizes[mode] += st.size
 		payloads[mode] += st.payload
+		if rel, err := filepath.Rel(rec, path); err == nil {
+			if dirs := strings.Split(filepath.ToSlash(rel), "/"); len(dirs) > 2 {
+				for _, p := range st.parts {
+					recorded[dirs[0]+"_"+dirs[1]] += p
+				}
+			}
+		}
 		if n := len(st.parts); n >= 2 {
 			closes += float64(n - 1)
 			for _, p := range st.parts[:n-1] {
@@ -83,7 +94,7 @@ func measureDisk(rec string, id age.Identity) (diskFigures, error) {
 	if err != nil {
 		return diskFigures{}, fmt.Errorf("mi3: the recordings: %w", err)
 	}
-	f := diskFigures{ratio: map[string]float64{}}
+	f := diskFigures{ratio: map[string]float64{}, seconds: recorded}
 	for mode, payload := range payloads {
 		if payload > 0 {
 			f.ratio[mode] = float64(sizes[mode]) / float64(payload)

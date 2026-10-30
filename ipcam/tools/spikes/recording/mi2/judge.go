@@ -4,6 +4,7 @@ package mi2
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,6 +23,11 @@ const (
 	Kill9Runs   = 20
 	RunHours    = 72
 )
+
+// maxNotRecordedShare is how much of a 72 h run a camera may go without a
+// new part (mis-1): more, and the run measured an ipcam-hub that did not
+// record, which says nothing of its stability.
+const maxNotRecordedShare = 0.01
 
 // restartNote is C07's caveat, which the report states.
 const restartNote = "Repornirea ipcam-hub făcută de recspike este o limită inferioară pentru recuperarea prin SCM (Windows) și systemd (Linux) din Faza 1 (C07)."
@@ -154,16 +160,16 @@ func judgeResumes(j *results.Judgement, host, kill9 string, envs []results.Envel
 	return hostPass
 }
 
-// judgeRun judges host's 72 h run: the one with the most crashes, or, of
-// runs without any, the longest.
+// judgeRun judges host's 72 h run: the one with the most crashes, its own
+// and its redone runs' (G27), or, of runs with as many, one that recorded
+// (mis-1), then the longest.
 func judgeRun(j *results.Judgement, host string, envs []results.Envelope) hostState {
 	var run *results.Envelope
 	for i, e := range envs {
 		if e.Code != "MI2" || e.Host != host || e.MI2 == nil {
 			continue
 		}
-		if run == nil || e.MI2.Crashes72h > run.MI2.Crashes72h ||
-			(e.MI2.Crashes72h == run.MI2.Crashes72h && e.MI2.Hours > run.MI2.Hours) {
+		if run == nil || betterRun(e.MI2, run.MI2) {
 			run = &envs[i]
 		}
 	}
@@ -177,13 +183,20 @@ func judgeRun(j *results.Judgement, host string, envs []results.Envelope) hostSt
 	d := run.MI2
 	complete := d.Hours >= RunHours
 	crashRow.Value = fmt.Sprintf("%d (în %s h)", d.Crashes72h, results.Decimal(d.Hours, 1))
-	crashRow.Pass = results.RowPass(d.Crashes72h == 0, complete)
+	if d.CrashesInvalidated > 0 {
+		crashRow.Value += ", plus " + CrashText(d.CrashesInvalidated) + " în rulările refăcute"
+	}
+	crashRow.Pass = results.RowPass(crashes(d) == 0, complete)
+	maxNotRecorded := maxNotRecordedMinutes(d)
+	recorded := d.NotRecordingMinutes <= maxNotRecorded
 	j.Rows = append(j.Rows, crashRow,
+		results.Row{Code: prefix + "timp fără înregistrare (camera cea mai afectată)", Value: results.Decimal(d.NotRecordingMinutes, 1) + " min",
+			Limit: "≤ 1 % din rulare (" + results.Decimal(maxNotRecorded, 1) + " min)", Source: host, Pass: results.RowPass(recorded, complete)},
 		results.Row{Code: prefix + "reporniri MediaMTX (HUB-13)", Value: strconv.Itoa(d.ChildRestarts), Source: host},
 		results.Row{Code: prefix + "fereastra păstrată", Value: results.Decimal(d.WindowHours, 2) + " h", Source: host})
 	if d.OnSdCard {
 		j.Rows = append(j.Rows, results.Row{Code: CardRowCode(host), Value: cardText(d.CardStates), Source: host})
-		if d.Crashes72h == 0 && slices.ContainsFunc(d.CardStates, func(s results.CardState) bool { return s.State == "failed" }) {
+		if crashes(d) == 0 && slices.ContainsFunc(d.CardStates, func(s results.CardState) bool { return s.State == "failed" }) {
 			j.Notes = append(j.Notes, host+": cardul SD a ajuns EȘUAT în proba de 72 h, iar de atunci ipcam-hub a oprit înregistrarea pe toate "+
 				"camerele (T40): „0 crash-uri” acoperă și orele de după, măsurate fără înregistrare.")
 		}
@@ -191,15 +204,47 @@ func judgeRun(j *results.Judgement, host string, envs []results.Envelope) hostSt
 	if len(d.Invalidated) > 0 {
 		j.Rows = append(j.Rows, results.Row{Code: prefix + "rulări refăcute", Value: strings.Join(d.Invalidated, "; "), Source: host})
 	}
-	switch {
-	case d.Crashes72h > 0:
+	if d.Crashes72h > 0 {
 		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: rularea %s: %d crash-uri ipcam-hub în %s h", run.Set, run.RunID, d.Crashes72h, results.Decimal(d.Hours, 1)))
+	}
+	if d.CrashesInvalidated > 0 {
+		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: %s ipcam-hub în rulările refăcute înainte de %s", run.Set, CrashText(d.CrashesInvalidated), run.RunID))
+	}
+	switch {
+	case crashes(d) > 0:
 		return hostFail
+	case !recorded:
+		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: rularea %s: o cameră nu s-a înregistrat %s min din %s h, peste 1 %% din rulare: "+
+			"proba a măsurat un ipcam-hub care nu înregistra. Refaceți proba cu reccontroller -local pornit tot timpul",
+			run.Set, run.RunID, results.Decimal(d.NotRecordingMinutes, 1), results.Decimal(d.Hours, 1)))
+		return hostIncomplete
 	case !complete:
 		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: proba de 72 h a rulat doar %s h", host, results.Decimal(d.Hours, 1)))
 		return hostIncomplete
 	}
 	return hostPass
+}
+
+// crashes is a 72 h run's crashes and its redone runs' (mis-3).
+func crashes(d *results.Mi2Data) int { return d.Crashes72h + d.CrashesInvalidated }
+
+// betterRun reports whether the 72 h run d judges G11 before the run best
+// (judgeRun): more crashes, or as many and recorded while best did not
+// record (mis-1), or then longer.
+func betterRun(d, best *results.Mi2Data) bool {
+	if c, cb := crashes(d), crashes(best); c != cb {
+		return c > cb
+	}
+	if r, rb := d.NotRecordingMinutes <= maxNotRecordedMinutes(d), best.NotRecordingMinutes <= maxNotRecordedMinutes(best); r != rb {
+		return r
+	}
+	return d.Hours > best.Hours
+}
+
+// maxNotRecordedMinutes is 1 % of the run d, in minutes to a tenth, as the
+// envelope's NotRecordingMinutes.
+func maxNotRecordedMinutes(d *results.Mi2Data) float64 {
+	return math.Round(maxNotRecordedShare*d.Hours*60*10) / 10
 }
 
 // cardNames are the card's states in the report's Romanian (§13.1).

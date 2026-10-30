@@ -144,6 +144,8 @@ func mi2Rows(row func(key, index, value string), d *results.Mi2Data) {
 	row("childRestarts", "", integer(d.ChildRestarts))
 	row("onSdCard", "", boolean(d.OnSdCard))
 	row("windowHours", "", num(d.WindowHours))
+	row("notRecordingMinutes", "", num(d.NotRecordingMinutes))
+	row("crashesInvalidated", "", integer(d.CrashesInvalidated))
 	for i, s := range d.CardStates {
 		row("cardState", integer(i), s.State)
 		row("cardStateAtMs", integer(i), integer(s.AtMs))
@@ -187,6 +189,9 @@ func mi3Rows(row func(key, index, value string), d *results.Mi3Data) {
 	if d.SixteenStopped != "" {
 		row("sixteenStopped", "", d.SixteenStopped)
 	}
+	if d.InvalidReason != "" {
+		row("invalidReason", "", d.InvalidReason)
+	}
 }
 
 // stepRows writes a step of MI3 under prefix.
@@ -198,6 +203,9 @@ func stepRows(row func(key, index, value string), prefix, index string, s result
 	row(prefix+"pass", index, boolean(s.Pass))
 	row(prefix+"pacingP99Ms", index, integer(s.PacingP99Ms))
 	row(prefix+"skippedAUs", index, integer(s.SkippedAUs))
+	if s.InvalidReason != "" {
+		row(prefix+"invalidReason", index, s.InvalidReason)
+	}
 }
 
 // mi4Rows writes the figures that e's MI4 data holds: a host's run, an AGE
