@@ -796,9 +796,12 @@ func TestStability_MeasuresTheTimeNothingWasRecorded(t *testing.T) {
 		if n := strings.Count(h.out.String(), notRecording); n != 1 {
 			t.Fatalf("after the first stop, the warning was printed %d times, want once:\n%s", n, h.out)
 		}
+		// The run takes a tick before it reads it, so the second advance
+		// returns only once the first tick has seen the recording again.
 		hub.status(8, 500*time.Millisecond) // it records again
 		h.clock.advance(t, time.Minute)
-		hub.status(8, time.Minute+500*time.Millisecond) // and stops again
+		h.clock.advance(t, time.Minute)
+		hub.status(8, 2*time.Minute+500*time.Millisecond) // and stops again
 		h.clock.advance(t, time.Minute)
 		h.clock.advance(t, time.Minute)
 		if n := strings.Count(h.out.String(), notRecording); n != 2 {
