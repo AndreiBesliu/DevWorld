@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -23,6 +24,21 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
 )
+
+// asMainEnv, set to a folder, makes the test binary run reccontroller's
+// main as if it were installed in that folder, listening on free loopback
+// ports: the child process of the hangup test (hangup_unix_test.go).
+const asMainEnv = "RECCONTROLLER_TEST_MAIN_DIR"
+
+func TestMain(m *testing.M) {
+	if dir := os.Getenv(asMainEnv); dir != "" {
+		executable = func() (string, error) { return filepath.Join(dir, "reccontroller"), nil }
+		listenConfig = func(bool) controller.ListenConfig { return controller.ListenConfig{Host: "127.0.0.1"} }
+		main()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 // manualClock is a source.Clock that moves only when the test sets it;
 // each move wakes every ticker.
@@ -550,6 +566,27 @@ func TestSuperviseBeacons_ShowsAndRestarts(t *testing.T) {
 		t.Errorf("screen:\n%s\nwant the receiver stopped for good", screen.String())
 	}
 }
+
+// TestScreenAndLog_KeepsTheLinesOfADeadScreen (report-1): the controller's
+// screen lines also go to its log, and a screen that fails, as one whose
+// ssh window died does (EIO, EPIPE), loses none of them there.
+func TestScreenAndLog_KeepsTheLinesOfADeadScreen(t *testing.T) {
+	var log strings.Builder
+	w := screenAndLog{screen: failingWriter{}, log: &log}
+	for _, line := range []string{"Rularea pc-bugcheck-03-1: validă; …\n", "Gazda „pc” s-a conectat.\n"} {
+		if n, err := fmt.Fprint(w, line); err != nil || n != len(line) {
+			t.Errorf("writing %q = %d, %v; want it written whole, without an error", line, n, err)
+		}
+	}
+	if got := log.String(); got != "Rularea pc-bugcheck-03-1: validă; …\nGazda „pc” s-a conectat.\n" {
+		t.Errorf("the log holds %q, want both lines", got)
+	}
+}
+
+// failingWriter is a screen whose terminal went away.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, syscall.EIO }
 
 // TestFlags_RomanianUsageAndErrors: reccontroller's usage and its flag
 // errors are Romanian, never the flag package's English.

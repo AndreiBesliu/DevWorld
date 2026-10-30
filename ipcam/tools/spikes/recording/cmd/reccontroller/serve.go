@@ -44,7 +44,19 @@ func serve(ctx context.Context, cfg serveConfig, out io.Writer) error {
 		return fmt.Errorf("nu pot asculta pe porturile probei (rulează deja un reccontroller?): %w", err)
 	}
 	defer func() { _ = lns.Close() }()
-	return serveOn(ctx, cfg, lns, out)
+	return serveOn(ctx, cfg, lns, screenAndLog{screen: out, log: logFile})
+}
+
+// screenAndLog writes each line of the controller's screen to its log too:
+// a screen that went away with its ssh window (report-1) fails every
+// write, and the verdicts stay in reccontroller.log. Only the log's error
+// is returned.
+type screenAndLog struct{ screen, log io.Writer }
+
+func (w screenAndLog) Write(p []byte) (int, error) {
+	_, err := w.log.Write(p)
+	_, _ = w.screen.Write(p)
+	return len(p), err
 }
 
 // serveOn serves on the listeners lns until ctx is done.
@@ -108,6 +120,7 @@ func serveOn(ctx context.Context, cfg serveConfig, lns *controller.Listeners, ou
 	c.say("reccontroller rulează %s: RTSP %d, legătură %d, semnal %d, aplicație %d, încărcare %d.",
 		where, port(lns.RTSP), port(lns.Link), c.beaconPort, port(lns.App), port(lns.Upload))
 	c.say("Rezultatele se păstrează în %s. Oprire: Ctrl+C.", c.results)
+	defer stayAwake(c.say)()
 
 	go func() {
 		<-ctx.Done()

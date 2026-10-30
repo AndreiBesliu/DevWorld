@@ -16,7 +16,8 @@
 // pull` is the final
 // collection on the PC: it waits for the Pi's `recspike push` and stores
 // its results under results/pi/ (G15). Every line it prints is Romanian;
-// its log goes to reccontroller.log next to the binary.
+// its log, with every line of its screen, goes to reccontroller.log next
+// to the binary. On Windows it keeps the PC awake while it serves or pulls.
 //
 //	reccontroller [-local] [-media DIR]
 //	reccontroller pull
@@ -32,12 +33,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cli"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 )
 
 // usage is the command's help, in Romanian.
@@ -51,6 +54,9 @@ const usage = `Folosire:
 `
 
 func main() {
+	// The Pi's controller often runs in an ssh window of the PC under test,
+	// which dies at each bugcheck and power cut (report-1).
+	cli.IgnoreHangup()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
@@ -62,9 +68,45 @@ func main() {
 	}
 }
 
+// executable is reccontroller's own path, and listenConfig where it
+// listens; tests run main with a folder and free ports of theirs.
+var (
+	executable   = os.Executable
+	listenConfig = controller.DefaultListenConfig
+)
+
+// keepAwake keeps Windows from sleeping while reccontroller serves or pulls
+// (report-2): the PC is then the Pi's controller, its camera source and its
+// beacon's receiver, often all night with nobody at it, and Windows counts
+// only the keyboard and the mouse as activity, never the network. Outside
+// Windows it is nil: nothing is asked.
+var keepAwake = windowsKeepAwake()
+
+func windowsKeepAwake() func() (release func(), err error) {
+	if runtime.GOOS == "windows" {
+		return mi1.KeepAwake
+	}
+	return nil
+}
+
+// stayAwake asks keepAwake for the PC to stay awake, says so in Romanian
+// with say, and returns the release of the request.
+func stayAwake(say func(format string, args ...any)) (release func()) {
+	if keepAwake == nil {
+		return func() {}
+	}
+	release, err := keepAwake()
+	if err != nil {
+		say("Atenție: reccontroller nu poate împiedica intrarea PC-ului în repaus (%v). Pe durata probei, opriți repausul din setările de alimentare ale Windows.", err)
+		return func() {}
+	}
+	say("Cât timp această fereastră este deschisă, PC-ul nu intră în repaus.")
+	return release
+}
+
 // run runs the command in args until ctx is done.
 func run(ctx context.Context, args []string, out io.Writer) error {
-	exe, err := os.Executable()
+	exe, err := executable()
 	if err != nil {
 		return err
 	}
@@ -87,5 +129,5 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if err := cli.ParseFlags(flags, args, out, usage); err != nil {
 		return err
 	}
-	return serve(ctx, serveConfig{dir: dir, local: *local, media: *media, listen: controller.DefaultListenConfig(*local)}, out)
+	return serve(ctx, serveConfig{dir: dir, local: *local, media: *media, listen: listenConfig(*local)}, out)
 }

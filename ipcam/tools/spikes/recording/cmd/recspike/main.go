@@ -79,6 +79,9 @@ const usage = `Folosire:
 `
 
 func main() {
+	// A set, MI2's 72 h and MI3's hours outlive an ssh window easily
+	// (report-1); every subcommand ignores the hangup alike.
+	cli.IgnoreHangup()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := report(run(ctx, os.Args[1:], bufio.NewReader(os.Stdin), os.Stdout), os.Stderr)
 	stop()

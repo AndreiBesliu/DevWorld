@@ -101,6 +101,7 @@ De fiecare dată când deschideți un terminal nou pe Pi, scrieți întâi `cd ~
 2. Întrerupeți actualizările Windows pe durata probei: „Setări” → „Windows Update” → „Întrerupeți actualizările” (alegeți cea mai lungă perioadă). O actualizare care repornește PC-ul în timpul probei ar strica rulările.
 3. În fereastra de administrator, scrieți `recspike.exe install`. Dacă ați pornit-o dintr-o fereastră obișnuită, apare «Windows cere acum permisiunea de administrator»<!--recspike-->: răspundeți „Da”. Programul instalează pornirea automată: după fiecare repornire din fereastra automată și după fiecare tăiere reală, proba continuă singură. Pe desktop apare scurtătura «Proba înregistrare – tăieri reale»<!--recspike-->, folosită la pasul 7.
 4. Tot la instalare, recspike schimbă o setare a Windows și o spune: «Serviciul de timp Windows pornește acum automat»<!--recspike-->. Serviciul de timp Windows pornește automat, iar declanșatoarele care îl pot opri sunt scoase, ca ceasul PC-ului să se sincronizeze după fiecare repornire. La pasul 14, `recspike.exe uninstall` pune la loc ambele setări, exact cum erau.
+5. Cât timp PC-ul e controlorul (pasul 5), `reccontroller.exe` nu-l lasă să intre în repaus. Dacă PC-ul intră totuși în repaus în timpul probei, sau dacă controlorul scrie «Atenție: reccontroller nu poate împiedica intrarea PC-ului în repaus»<!--reccontroller-->, opriți repausul pe durata probei: „Setări” → „Sistem” → „Alimentare” → „Ecran și repaus” → la repaus alegeți „Niciodată”. După probă, readuceți setarea cum era (pasul 14).
 
 ### Pe Pi (nu și pe un Pi armv6)
 
@@ -125,7 +126,15 @@ Cum porniți controlorul:
 - pe PC, într-o fereastră de administrator: `reccontroller.exe`;
 - pe Pi, în terminal: `sudo ./reccontroller` (pe un Pi armv6: `./reccontroller-linux-armv6`).
 
-Controlorul scrie «reccontroller rulează …»<!--reccontroller--> și «Rezultatele se păstrează în …»<!--reccontroller-->. Lăsați fereastra deschisă cât rulează proba pe celălalt dispozitiv. Îl opriți cu Ctrl+C. Pe un dispozitiv poate rula un singur controlor: altfel apare «nu pot asculta pe porturile probei (rulează deja un reccontroller?)»<!--reccontroller-->.
+Controlorul scrie «reccontroller rulează …»<!--reccontroller--> și «Rezultatele se păstrează în …»<!--reccontroller-->. Pe PC scrie și «Cât timp această fereastră este deschisă, PC-ul nu intră în repaus.»<!--reccontroller-->: ecranul PC-ului se poate stinge, dar PC-ul nu intră în repaus cât rulează controlorul (dacă intră totuși, vedeți pasul 4.5). Lăsați fereastra deschisă cât rulează proba pe celălalt dispozitiv. Îl opriți cu Ctrl+C. Pe un dispozitiv poate rula un singur controlor: altfel apare «nu pot asculta pe porturile probei (rulează deja un reccontroller?)»<!--reccontroller-->.
+
+**Când PC-ul e gazda, nu porniți controlorul Pi-ului dintr-o fereastră `ssh` deschisă de pe PC.** La ecranele albastre și la tăierile reale, fereastra `ssh` dispare odată cu PC-ul și poate opri controlorul de pe Pi, cu tot ce măsurase. Porniți controlorul de pe ecranul și tastatura Pi-ului. Dacă Pi-ul nu are ecran, porniți-l din `ssh` desprins de fereastră:
+
+```
+sudo setsid -f ./reccontroller > reccontroller-ecran.txt 2>&1
+```
+
+Pe un Pi armv6: `setsid -f ./reccontroller-linux-armv6 > reccontroller-ecran.txt 2>&1`. Apoi puteți închide fereastra `ssh`: controlorul rulează mai departe. Ce scrie el vedeți cu `tail -f reccontroller-ecran.txt` (Ctrl+C închide doar vizualizarea, nu și controlorul). Îl opriți cu `sudo pkill -x reccontroller` (pe un Pi armv6: `pkill -f reccontroller-linux-armv6`).
 
 Cum aflați adresele:
 
@@ -140,7 +149,7 @@ Fereastra automată oprește brusc înregistrarea de 42 de ori pe fiecare dispoz
 
 ### PC-ul ca gazdă
 
-1. Pe Pi, porniți controlorul: `sudo ./reccontroller` (pe un Pi armv6: `./reccontroller-linux-armv6`).
+1. Pe Pi, porniți controlorul de pe ecranul Pi-ului sau desprins de `ssh`, ca la pasul 5, nu într-o fereastră `ssh` de pe PC: `sudo ./reccontroller` (pe un Pi armv6: `./reccontroller-linux-armv6`).
 2. Pe PC, în fereastra de administrator: `recspike.exe mi1 --controller <adresa Pi-ului> --window 22:00-06:00 --kind kill9`. Până la începutul ferestrei, recspike scrie «Aștept fereastra …»<!--recspike-->. Lăsați fereastra deschisă. Setul e gata când apare «Proba … are toate rulările.»<!--recspike-->.
 3. Apoi: `recspike.exe mi1 --controller <adresa Pi-ului> --window 22:00-06:00 --kind bugcheck`. La fiecare rulare, PC-ul afișează un ecran albastru și repornește. E intenționat: nu atingeți nimic. După repornire, proba continuă singură, chiar dacă nu vă conectați în Windows. Pe Pi, controlorul scrie după fiecare rulare dacă a fost «validă»<!--reccontroller--> sau nu.
 
@@ -174,7 +183,7 @@ Nu tăiați înainte de cerere și nici mai târziu de 2 minute după ea. O astf
 
 ### PC-ul ca gazdă
 
-1. Pe Pi, porniți controlorul: `sudo ./reccontroller` (pe un Pi armv6: `./reccontroller-linux-armv6`).
+1. Pe Pi, porniți controlorul de pe ecranul Pi-ului sau desprins de `ssh`, ca la pasul 5, nu într-o fereastră `ssh` de pe PC: `sudo ./reccontroller` (pe un Pi armv6: `./reccontroller-linux-armv6`).
 2. Pe PC, în fereastra de administrator: `recspike.exe mi1 --controller <adresa Pi-ului> --real`.
 3. Când apare cererea, tăiați alimentarea PC-ului.
 4. După repornire, Windows termină singur rularea întreruptă. Apoi deschideți de pe desktop scurtătura «Proba înregistrare – tăieri reale»<!--recspike--> și răspundeți „Da”. Dacă verificarea de după repornire nu s-a terminat, fereastra scrie întâi «Proba termină verificarea de după repornire. Așteptați…»<!--recspike-->. Apoi urmează următoarea tăiere.
@@ -288,12 +297,12 @@ Rezultatele numesc dispozitivele doar `pc` și `pi` și conțin modelul Pi-ului,
 După ce ne-ați trimis rezultatele:
 
 1. Pe PC, în fereastra de administrator: `recspike.exe uninstall`. Trebuie să apară «Pornirea automată și scurtătura de pe desktop au fost șterse.»<!--recspike--> și «Serviciul de timp Windows are din nou setările de dinainte.»<!--recspike-->: serviciul de timp are din nou pornirea și declanșatoarele de dinainte de pasul 4.
-2. Pe Pi (nu și pe un Pi armv6): `sudo ./recspike uninstall`. Trebuie să apară «Pornirea automată a fost ștearsă.»<!--recspike-->.
+2. Pe Pi (nu și pe un Pi armv6): `sudo ./recspike uninstall`. Trebuie să apară «Pornirea automată a fost ștearsă.»<!--recspike-->. Dacă pe Pi rulează încă un controlor pornit desprins de `ssh` (pasul 5), opriți-l: `sudo pkill -x reccontroller` (pe un Pi armv6: `pkill -f reccontroller-linux-armv6`).
 3. Reluați actualizările Windows: „Setări” → „Windows Update” → „Reluați actualizările”.
 4. Scoateți regulile de firewall ale probei: în Start căutați „Permiteți o aplicație prin Paravanul de protecție Windows”, apăsați „Modificare setări”, selectați `reccontroller` și apăsați „Eliminare”; la fel pentru `recspike`, dacă apare. Dacă un program apare pe mai multe rânduri, eliminați-le pe toate.
 5. Ștergeți folderele `C:\proba-inregistrare` și, pe Pi, `~/proba-inregistrare` (`sudo rm -r ~/proba-inregistrare`).
 6. Pe telefon, dezinstalați «Proba ipcam»<!--android--> și luați înapoi permisiunea Chrome de a instala aplicații: „Setări” → „Aplicații” → Chrome → „Instalați aplicații necunoscute” → dezactivați „Permiteți din această sursă”. Dacă ați dezactivat „Blocare automată” și nu ați reactivat-o, reactivați-o.
-7. Dacă ați trecut rețeaua PC-ului pe „Rețea privată” doar pentru probă, readuceți-o cum era.
+7. Dacă ați trecut rețeaua PC-ului pe „Rețea privată” doar pentru probă, sau ați oprit repausul PC-ului (pasul 4.5), readuceți-le cum erau.
 
 ## 15. Ce faceți dacă ceva nu merge
 

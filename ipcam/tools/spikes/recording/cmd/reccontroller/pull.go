@@ -21,6 +21,7 @@ import (
 func pull(ctx context.Context, ln net.Listener, resultsDir string, out io.Writer) error {
 	defer func() { _ = ln.Close() }()
 	_, _ = fmt.Fprintln(out, "Aștept rezultatele Pi-ului: porniți pe Pi ./recspike push --controller <adresa acestui PC>.")
+	defer stayAwake(func(format string, args ...any) { _, _ = fmt.Fprintf(out, format+"\n", args...) })()
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 	for {
