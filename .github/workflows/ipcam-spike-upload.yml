@@ -103,6 +103,21 @@ jobs:
         run: |
           set -o pipefail
           go tool golangci-lint run ${TREES} 2>&1 | tee "${RUNNER_TEMP}/lint.log"
+      - name: Cross
+        # c1's release ships ipcam-hub for linux/arm/7 and linux/arm64, and no other push
+        # workflow cross-compiles the hub or lints its Windows-only files. go tool would build
+        # golangci-lint itself for GOOS=windows, which this runner cannot run; go tool -n
+        # builds it for the runner and prints its path.
+        id: cross
+        run: |
+          set -o pipefail
+          {
+            lint="$(go tool -n golangci-lint)" &&
+              GOOS=linux GOARCH=arm GOARM=7 go build ${TREES} &&
+              GOOS=linux GOARCH=arm64 go build ${TREES} &&
+              GOOS=windows GOARCH=amd64 go vet ${TREES} &&
+              GOOS=windows "${lint}" run ${TREES}
+          } 2>&1 | tee "${RUNNER_TEMP}/cross.log"
       - name: Test
         # -count=1: a result restored from the Go build cache would hide a flaky test.
         id: test
