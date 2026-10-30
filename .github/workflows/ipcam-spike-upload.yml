@@ -81,7 +81,7 @@ jobs:
       # 4, 7b, 9 and 10 each add theirs (P12). ./hub runs hub/spikeonly_test.go, which keeps
       # the spike marker out of the production module. The Lint and Cross steps lint the
       # trees under ./hub with hub/.golangci.yml and the others with the upload spike's.
-      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/...
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/catalog/...
     defaults:
       run:
         working-directory: ipcam
@@ -194,7 +194,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     env:
-      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/...
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/catalog/...
     defaults:
       run:
         working-directory: ipcam
