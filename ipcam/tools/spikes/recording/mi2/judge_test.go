@@ -331,7 +331,9 @@ func TestMI2_CrashesOfRedoneRunsFail(t *testing.T) {
 	if row := rowOf(t, j, "MI2 pc: crash-uri ipcam-hub în 72 h"); row.Value != "0 (în 72,0 h), plus 1 crash în rulările refăcute" || row.Pass == nil || *row.Pass {
 		t.Errorf("crash row %+v, want 0 (în 72,0 h), plus 1 crash în rulările refăcute, failed", row)
 	}
-	if !slices.ContainsFunc(j.Reasons, func(r string) bool { return r == "pc-72h: 1 crash ipcam-hub în rulările refăcute înainte de pc-72h-2" }) {
+	if !slices.ContainsFunc(j.Reasons, func(r string) bool {
+		return r == "pc-72h: 1 crash ipcam-hub în rulările refăcute înainte de pc-72h-2"
+	}) {
 		t.Errorf("reasons %q, want the crash of the redone runs", j.Reasons)
 	}
 }

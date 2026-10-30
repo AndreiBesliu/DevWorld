@@ -275,7 +275,7 @@ func (o Options) record(ctx context.Context, config string, stderr io.Writer, wi
 			o.say("ipcam-hub nu s-a oprit curat: %v", err)
 		}
 	}
-	unready := 0   // the setup failures in a row
+	unready := 0    // the setup failures in a row
 	warned := false // the owner was warned that nothing records
 	for {
 		select {
