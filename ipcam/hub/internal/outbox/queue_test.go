@@ -871,28 +871,31 @@ func TestOutbox_StuckUploadingRowDueAgain(t *testing.T) {
 		full("upload_sessions", "INSERT"), full("upload_sessions", "UPDATE"), full("placements", "UPDATE")); err != nil {
 		t.Fatal(err)
 	}
-	var hookErr atomic.Value
+	var mu sync.Mutex
+	var hookErrs []error // the errors of the hooks, which run on the queue's goroutines
+	hookExec := func(stmt string) {
+		if err := h.exec(stmt); err != nil {
+			mu.Lock()
+			hookErrs = append(hookErrs, err)
+			mu.Unlock()
+		}
+	}
 	var fill sync.Once
 	// The card fills once the first chunk is stored, before its session is
 	// written, and has room again once the reset to pending failed too.
-	f.stored = func(fakeCall) {
-		fill.Do(func() {
-			if err := h.exec("INSERT INTO test_full VALUES (1)"); err != nil {
-				hookErr.Store(err)
-			}
-		})
-	}
+	f.stored = func(fakeCall) { fill.Do(func() { hookExec("INSERT INTO test_full VALUES (1)") }) }
 	obs := &localHook{recObserver: h.obs, hook: func(n int32) {
 		if n == 2 {
-			if err := h.exec("DELETE FROM test_full"); err != nil {
-				hookErr.Store(err)
-			}
+			hookExec("DELETE FROM test_full")
 		}
 	}}
 	q := h.newQueue(map[string]storage.Destination{"dst-a": f}, func(o *Options) { o.Observer = obs })
 	h.run(q, time.Second, 5*time.Minute, h.verified(p))
 
-	if err, _ := hookErr.Load().(error); err != nil {
+	mu.Lock()
+	err := errors.Join(hookErrs...)
+	mu.Unlock()
+	if err != nil {
 		t.Fatal(err)
 	}
 	if local := h.obs.of("LocalError"); len(local) != 2 {
