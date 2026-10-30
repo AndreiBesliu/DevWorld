@@ -63,6 +63,11 @@ go build -o "${tmp}/go-licenses" github.com/google/go-licenses/v2
 toolchain="$(go env GOVERSION)"
 # One line per module and license: name, version, license name, license file.
 printf '{{range .}}{{.Name}}\t{{.Version}}\t{{.LicenseName}}\t{{.LicensePath}}\n{{end}}' > "${tmp}/report.tpl"
+# The prefixes that the reports leave out: this repository's own modules,
+# and in the recording release keywrap, whose license is quoted by hand
+# below, so that the video release's notices do not depend on it.
+ignores=(--ignore "${own_module_prefix}")
+[[ "${release}" == video ]] || ignores+=(--ignore "${keywrap_package}")
 # report <target> <package>...: go-licenses' lines for the packages built for
 # the target (GOOS/GOARCH/GOARM), in the folder where it runs.
 report() {
@@ -70,7 +75,7 @@ report() {
   IFS=/ read -r goos goarch goarm <<< "$1"
   shift
   GOOS="${goos}" GOARCH="${goarch}" GOARM="${goarm}" CGO_ENABLED=0 \
-    "${tmp}/go-licenses" report --template "${tmp}/report.tpl" --ignore "${own_module_prefix}" --ignore "${keywrap_package}" "$@"
+    "${tmp}/go-licenses" report --template "${tmp}/report.tpl" "${ignores[@]}" "$@"
 }
 if [[ "${release}" == video ]]; then
   for target in "${targets[@]}"; do

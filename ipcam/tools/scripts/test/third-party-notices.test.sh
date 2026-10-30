@@ -44,6 +44,14 @@ for arg in "$@"; do
   [[ "${arg}" == ./* || "${arg}" == . ]] && packages+=("${arg}")
 done
 echo "${folder} ${GOOS}/${GOARCH}/${GOARM:-} ${GOWORK:-on} ${packages[*]}" >> "${FAKE_CALLS:-/dev/null}"
+# Each call's --ignore prefixes go to FAKE_IGNORES as "<folder> <prefix>...".
+ignores=()
+previous=""
+for arg in "$@"; do
+  [[ "${previous}" != --ignore ]] || ignores+=("${arg}")
+  previous="${arg}"
+done
+echo "${folder} ${ignores[*]}" >> "${FAKE_IGNORES:-/dev/null}"
 report="go-licenses-${GOOS}.tsv"
 if [[ "${folder}" == mediamtx ]]; then
   [[ "${GOWORK:-}" == off ]] || { echo 'fake go-licenses: the fork runs with GOWORK=off' >&2; exit 2; }
@@ -118,6 +126,13 @@ check 'a Go module without a license file fails' 1 --has 'example.com/nolicense 
 check 'a failing go-licenses fails the notices' 1 --has 'go-licenses: cannot load packages' -- \
   notices FAKE_GO_LICENSES_FAILS=1
 
+# keywrap, which only the MediaMTX fork reaches, is ignored in the recording
+# release's reports alone: the video release's notices do not depend on it.
+notices FAKE_IGNORES="${tmp}/video-ignores" > /dev/null 2>&1
+check 'the video release ignores only the modules of this repository' 0 --is "ipcam github.com/AndreiBesliu/DevWorld/ipcam
+ipcam github.com/AndreiBesliu/DevWorld/ipcam
+ipcam github.com/AndreiBesliu/DevWorld/ipcam" -- cat "${tmp}/video-ignores"
+
 check 'an argument is a usage error' 2 --has usage -- env PATH="${tmp}/bin:${PATH}" FAKE_DATA="${data}" "${script}" extra
 check 'an unknown release is a usage error' 2 --has usage -- notices_of audio
 
@@ -152,4 +167,27 @@ ipcam linux/arm/6 on ${armv6}
 mediamtx windows/amd64/ off .
 mediamtx linux/arm64/ off .
 mediamtx linux/arm/7 off ." -- cat "${tmp}/calls"
+notices_of recording FAKE_IGNORES="${tmp}/recording-ignores" > /dev/null 2>&1
+ignored='github.com/AndreiBesliu/DevWorld/ipcam github.com/benburkert/openpgp/aes/keywrap'
+check 'the recording release ignores keywrap too, which it names by hand' 0 --is "ipcam ${ignored}
+ipcam ${ignored}
+ipcam ${ignored}
+ipcam ${ignored}
+mediamtx ${ignored}
+mediamtx ${ignored}
+mediamtx ${ignored}" -- cat "${tmp}/recording-ignores"
+
+# The recording release's two notices that are written by hand fail when
+# their source is missing: a keywrap.go without its license header, and an
+# hls.js of the app whose version is not the one that the fork embeds.
+mkdir -p "${tmp}/no-header"
+cp -R "${data}/." "${tmp}/no-header/"
+printf 'package keywrap\n' > "${tmp}/no-header/modules/openpgp/aes/keywrap/keywrap.go"
+check 'a keywrap.go without its license header fails the recording notices' 1 \
+  --has 'github.com/benburkert/openpgp/aes/keywrap v0.0.0-20160410205803-c2471f86866c: no license in the header of keywrap.go' -- \
+  env PATH="${tmp}/bin:${PATH}" FAKE_DATA="${tmp}/no-header" "${script}" --release recording
+sed 's|"version": "1.7.3"|"version": "1.6.15"|' "${data}/pnpm-list.json" > "${tmp}/other-hlsjs-list.json"
+check 'an app hls.js of another version than the one that the fork embeds fails the recording notices' 1 \
+  --has 'hls.js v1.7.3: no npm package of this version whose license to quote for the hls.min.js in mediamtx' -- \
+  notices_of recording FAKE_LIST="${tmp}/other-hlsjs-list.json"
 finish third-party-notices.test.sh

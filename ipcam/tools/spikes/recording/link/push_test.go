@@ -1,7 +1,9 @@
 package link
 
 import (
+	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,5 +55,40 @@ func TestPush_AnswersTheSessionThenThePull(t *testing.T) {
 	var noPull *NoPullError
 	if err := Push(t.Context(), host, "pi", dir); !errors.As(err, &noPull) {
 		t.Errorf("Push on a link that closed before the pull = %v, want a NoPullError", err)
+	}
+}
+
+// TestPushTo_CtrlCDuringTheDialIsTheCancel (Task 13 review, M1): the end of
+// ctx while PushTo dials the controller is ctx's error, which the owner
+// reads as their own Ctrl+C, not a connection failure; a dial that fails
+// by itself is a DialError.
+func TestPushTo_CtrlCDuringTheDialIsTheCancel(t *testing.T) {
+	system := dial
+	t.Cleanup(func() { dial = system })
+	dialing := make(chan struct{})
+	dial = func(ctx context.Context, _ string) (*Conn, error) {
+		close(dialing)
+		<-ctx.Done()
+		return nil, errors.New("dial tcp4 192.0.2.1:7081: operation was canceled")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- PushTo(ctx, "192.0.2.1", "pi", t.TempDir()) }()
+	<-dialing
+	cancel()
+	var dialErr *DialError
+	if err := <-done; !errors.Is(err, context.Canceled) || errors.As(err, &dialErr) {
+		t.Errorf("PushTo cancelled during the dial = %v, want context.Canceled", err)
+	}
+
+	dial = system
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := ln.Addr().String()
+	_ = ln.Close()
+	if err := PushTo(t.Context(), closed, "pi", t.TempDir()); !errors.As(err, &dialErr) {
+		t.Errorf("PushTo to a closed port = %v, want a DialError", err)
 	}
 }

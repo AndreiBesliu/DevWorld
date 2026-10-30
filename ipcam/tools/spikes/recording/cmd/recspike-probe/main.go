@@ -24,12 +24,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -146,20 +144,13 @@ func run(ctx context.Context, p probe, args []string, out io.Writer) error {
 }
 
 // pushResults sends the results folder dir to the PC's `reccontroller
-// pull` at addr, with the link's port when addr has none (link.Push).
+// pull` at addr, with the link's port when addr has none (link.PushTo).
 func pushResults(ctx context.Context, addr, dir string, out io.Writer) error {
-	if _, _, err := net.SplitHostPort(addr); err != nil {
-		addr = net.JoinHostPort(addr, strconv.Itoa(link.Port))
-	}
-	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	c, err := link.Dial(dialCtx, addr)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("nu mă pot conecta la PC (portul %d; rulează acolo reccontroller pull?): %w", link.Port, err)
-	}
-	defer func() { _ = c.Close() }()
+	var dialErr *link.DialError
 	var noPull *link.NoPullError
-	switch err := link.Push(ctx, c, "pi", dir); {
+	switch err := link.PushTo(ctx, addr, "pi", dir); {
+	case errors.As(err, &dialErr):
+		return fmt.Errorf("nu mă pot conecta la PC (portul %d; rulează acolo reccontroller pull?): %w", link.Port, dialErr.Err)
 	case errors.As(err, &noPull):
 		return fmt.Errorf("PC-ul a închis legătura înainte să ceară rezultatele: %w", noPull.Err)
 	case err != nil:
