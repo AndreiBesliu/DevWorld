@@ -56,7 +56,9 @@ const partSuffix = ".part"
 
 // partSyncQueue is how many syncs may wait behind a slow one before the
 // disk writer waits too: over 17 minutes of 1 s parts, while a segment holds
-// 5 minutes of them.
+// 5 minutes of them. With the kernel's dirty-page limits, it is what bounds
+// the parts that are written but not yet synced (C1-R24): maxQueuedBytes
+// (diskwriter.go) bounds only the parts not yet written.
 const partSyncQueue = 1024
 
 // partSyncer runs one segment's syncs on a goroutine of its own (MTX-1), in
