@@ -7,12 +7,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 
@@ -73,8 +71,8 @@ func TestServe_InTheProtectedReleaseFolder(t *testing.T) {
 	for _, name := range []string{"main.h264", "sub.h264", "sub-256k.h264"} {
 		copyFile(t, filepath.Join(media, name), filepath.Join(dir, "media", name))
 	}
-	setOwner(t, dir, sid)
-	setOwner(t, program, sid)
+	spiketest.SetOwner(t, dir, sid)
+	spiketest.SetOwner(t, program, sid)
 	for _, name := range mi1.DataFolders {
 		if err := os.MkdirAll(mi1.DataFolder(dir, name), 0o700); err != nil {
 			t.Fatal(err)
@@ -86,13 +84,13 @@ func TestServe_InTheProtectedReleaseFolder(t *testing.T) {
 	t.Logf("the protected folder: %s", aclOf(dir))
 	t.Logf("a program in it: %s", aclOf(program))
 
-	standard := standardToken(t)
-	asStandard(t, standard, func() {
+	standard := spiketest.StandardToken(t)
+	spiketest.AsStandard(t, standard, func() {
 		for what, change := range map[string]func() error{
 			"added a file next to the programs": func() error { return os.WriteFile(filepath.Join(dir, "version.dll"), []byte("MZ"), 0o600) },
 			"overwrote a program":               func() error { return os.WriteFile(program, []byte("MZ"), 0o600) },
-			"changed the folder's DACL":         func() error { return grantFull(dir, sid) },
-			"changed a program's DACL":          func() error { return grantFull(program, sid) },
+			"changed the folder's DACL":         func() error { return spiketest.GrantFull(dir, sid) },
+			"changed a program's DACL":          func() error { return spiketest.GrantFull(program, sid) },
 		} {
 			if err := change(); err == nil {
 				t.Errorf("a standard window %s of the protected folder", what)
@@ -111,7 +109,7 @@ func TestServe_InTheProtectedReleaseFolder(t *testing.T) {
 	for _, cmd := range mi1.UnprotectFolderCommands(dir) {
 		icacls(t, cmd)
 	}
-	asStandard(t, standard, func() {
+	spiketest.AsStandard(t, standard, func() {
 		if err := os.RemoveAll(dir); err != nil {
 			t.Errorf("after uninstall's reset, a standard window cannot delete the folder: %v", err)
 		}
@@ -192,95 +190,6 @@ func serveOnce(t *testing.T, window string, token windows.Token, dir, runID stri
 		if time.Now().After(deadline) {
 			t.Fatalf("%s: work/reccontroller.log lacks the envelope's line; screen:\n%s", window, shown.String())
 		}
-	}
-}
-
-var procCreateRestrictedToken = windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
-
-// standardToken is this elevated process's token as UAC filters it for a
-// standard window: Administrators for deny only, no privilege beyond
-// SeChangeNotifyPrivilege (DISABLE_MAX_PRIVILEGE, LUA_TOKEN), and medium
-// integrity.
-func standardToken(t *testing.T) windows.Token {
-	t.Helper()
-	var self windows.Token
-	if err := windows.OpenProcessToken(windows.CurrentProcess(),
-		windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ASSIGN_PRIMARY|windows.TOKEN_ADJUST_DEFAULT, &self); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = self.Close() }()
-	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const disableMaxPrivilege, luaToken = 0x1, 0x4
-	deny := windows.SIDAndAttributes{Sid: admins}
-	var token windows.Token
-	if r, _, err := procCreateRestrictedToken.Call(uintptr(self), disableMaxPrivilege|luaToken,
-		1, uintptr(unsafe.Pointer(&deny)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&token))); r == 0 { //nolint:gosec // CreateRestrictedToken's own arguments
-		t.Fatalf("CreateRestrictedToken: %v", err)
-	}
-	t.Cleanup(func() { _ = token.Close() })
-	medium, err := windows.CreateWellKnownSid(windows.WinMediumLabelSid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	label := windows.Tokenmandatorylabel{Label: windows.SIDAndAttributes{Sid: medium, Attributes: windows.SE_GROUP_INTEGRITY}}
-	if err := windows.SetTokenInformation(token, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&label)), label.Size()); err != nil { //nolint:gosec // a TOKEN_MANDATORY_LABEL
-		t.Fatal(err)
-	}
-	return token
-}
-
-// asStandard runs f on this goroutine's thread while it impersonates
-// token, a standard window's.
-func asStandard(t *testing.T, token windows.Token, f func()) {
-	t.Helper()
-	var imp windows.Token
-	if err := windows.DuplicateTokenEx(token, windows.TOKEN_IMPERSONATE|windows.TOKEN_QUERY, nil,
-		windows.SecurityImpersonation, windows.TokenImpersonation, &imp); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = imp.Close() }()
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	if err := windows.SetThreadToken(nil, imp); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := windows.RevertToSelf(); err != nil {
-			t.Fatal(err)
-		}
-	}()
-	f()
-}
-
-// grantFull tries to give sid Full control of path, as only a DACL's
-// writer may.
-func grantFull(path, sid string) error {
-	s, err := windows.StringToSid(sid)
-	if err != nil {
-		return err
-	}
-	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
-		AccessPermissions: windows.GENERIC_ALL, AccessMode: windows.GRANT_ACCESS, Inheritance: windows.NO_INHERITANCE,
-		Trustee: windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER, TrusteeValue: windows.TrusteeValueFromSID(s)},
-	}}, nil)
-	if err != nil {
-		return err
-	}
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
-}
-
-// setOwner makes sid the owner of path, as when that user made it.
-func setOwner(t *testing.T, path, sid string) {
-	t.Helper()
-	s, err := windows.StringToSid(sid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, s, nil, nil, nil); err != nil {
-		t.Fatalf("owner of %s: %v", path, err)
 	}
 }
 
