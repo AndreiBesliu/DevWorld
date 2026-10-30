@@ -111,9 +111,12 @@ func TestNTPWait_RecordsWaitAndGivesUpAfter10Min(t *testing.T) {
 	}
 }
 
-// TestNTPWait_ParsesTheSystemsAnswers: timedatectl says yes or no; w32tm's
-// status names a source, which is a sync only when it is not the local
-// clock.
+// TestNTPWait_ParsesTheSystemsAnswers (mi1-2): timedatectl says yes or no;
+// `w32tm /query /source` prints only the clock's source, with no label to
+// translate, so a Romanian Windows' answer, which its console writes in
+// code page 852, reads as an English one: synced unless the source is
+// empty or the local clock ("Local CMOS Clock", "Free-running System
+// Clock"); an error printed instead of a source is no sync either.
 func TestNTPWait_ParsesTheSystemsAnswers(t *testing.T) {
 	for out, want := range map[string]bool{"yes\n": true, "no\n": false, "": false} {
 		if got := timedatectlSynced(out); got != want {
@@ -121,16 +124,65 @@ func TestNTPWait_ParsesTheSystemsAnswers(t *testing.T) {
 		}
 	}
 	for out, want := range map[string]bool{
-		"Leap Indicator: 0(no warning)\r\nSource: time.windows.com,0x9\r\nPoll Interval: 10 (1024s)\r\n": true,
-		"Leap Indicator: 3(not synchronized)\r\nSource: Local CMOS Clock\r\n":                            false,
-		"Source: Free-running System Clock\r\n":                                                          false,
-		"Leap Indicator: 0\r\nSursă: ro.pool.ntp.org\r\n":                                                true,
-		"The following error occurred: The service has not been started. (0x80070426)\r\n":               false,
+		"time.windows.com,0x9\r\n":                true,  // an English Windows synced by NTP
+		cp852("ro.pool.ntp.org,0x9\r\n"):          true,  // a Romanian Windows' console, in code page 852
+		"VM IC Time Synchronization Provider\r\n": true,  // a virtual machine's host
+		"Local CMOS Clock\r\n":                    false, // the local clock
+		"Free-running System Clock\r\n":           false, // no source at all
+		"":                                        false,
+		" \r\n":                                   false,
+		cp852("A apărut următoarea eroare: Serviciul nu a fost pornit. (0x80070426)\r\n"): false,
 	} {
 		if got := w32tmSynced(out); got != want {
 			t.Errorf("w32tmSynced(%q) = %v, want %v", out, got, want)
 		}
 	}
+}
+
+// TestSystemNTP_AsksW32tmForTheSourceAlone (mi1-2): on Windows the NTP
+// check runs `w32tm /query /source`, whose answer has no translated label,
+// and reads a Romanian console's answer, in code page 852, as synced;
+// /query /status, matched by its translated labels, refused every PC set
+// on a Romanian Windows.
+func TestSystemNTP_AsksW32tmForTheSourceAlone(t *testing.T) {
+	var args []string
+	old := runW32tm
+	runW32tm = func(_ context.Context, a ...string) ([]byte, error) {
+		args = a
+		return []byte(cp852("ro.pool.ntp.org,0x9\r\n")), nil
+	}
+	t.Cleanup(func() { runW32tm = old })
+	synced, err := SystemNTP("windows")(t.Context())
+	if !synced || err != nil || len(args) != 2 || args[0] != "/query" || args[1] != "/source" {
+		t.Errorf("SystemNTP(windows) = %v, %v with w32tm %q; want synced, from w32tm /query /source", synced, err, args)
+	}
+}
+
+// cp852 encodes s as a Romanian Windows console writes it: in code page
+// 852, where ă is 0xC7, â 0x83 and î 0x8C, and ș and ț, which it lacks,
+// become its s and t with a cedilla, 0xAD and 0xEE; ASCII stays as it is.
+func cp852(s string) string {
+	var b []byte
+	for _, r := range s {
+		switch r {
+		case 'ă':
+			b = append(b, 0xc7)
+		case 'â':
+			b = append(b, 0x83)
+		case 'î':
+			b = append(b, 0x8c)
+		case 'ș':
+			b = append(b, 0xad)
+		case 'ț':
+			b = append(b, 0xee)
+		default:
+			if r >= 0x80 {
+				panic("cp852: no byte for " + string(r))
+			}
+			b = append(b, byte(r)) //nolint:gosec // r < 0x80
+		}
+	}
+	return string(b)
 }
 
 // TestNTPWait_WindowsErrors (Review Focus 2, G14, C1-R16): w32tm's
@@ -148,7 +200,7 @@ func TestNTPWait_WindowsErrors(t *testing.T) {
 		want error
 	}{
 		{"The following error occurred: Access is denied. (0x80070005)\r\n", 1, ErrNTPNeedsAdmin},
-		{"S-a produs următoarea eroare: Acces refuzat. (0x80070005)\r\n", 1, ErrNTPNeedsAdmin},
+		{cp852("S-a produs următoarea eroare: Acces refuzat. (0x80070005)\r\n"), 1, ErrNTPNeedsAdmin},
 		{"", 0x80070005, ErrNTPNeedsAdmin},
 		{"The following error occurred: The service has not been started. (0x80070426)\r\n", 1, ErrTimeServiceStopped},
 		{"", 0x80070426, ErrTimeServiceStopped},

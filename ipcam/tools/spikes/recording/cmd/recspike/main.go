@@ -145,11 +145,7 @@ func run(ctx context.Context, args []string, in *bufio.Reader, out io.Writer) er
 		if err != nil {
 			return err
 		}
-		f, err := ownFolders()
-		if err != nil {
-			return err
-		}
-		a := systemAutostart(out, f.work)
+		a := systemAutostart(out)
 		if cmd == "install" {
 			return a.install(exe)
 		}

@@ -10,13 +10,13 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 )
 
-// TestRebootedSince_ComparesTheBoot (item 3): after an OS stop, the host
+// TestBootedSince_ComparesTheBoot (item 3): after an OS stop, the host
 // rebooted when its boot is not the stop's: another boot id on Linux, or on
 // Windows a boot time more than bootTimeTolerance from the stop's, whatever
 // the uptimes say. Two readings of one Windows boot, a few seconds apart,
 // are no reboot, and a boot that is not known on either side is no reboot
 // either: the run is redone, never given a false ColdBootMs.
-func TestRebootedSince_ComparesTheBoot(t *testing.T) {
+func TestBootedSince_ComparesTheBoot(t *testing.T) {
 	stopAt := time.Date(2026, 10, 25, 22, 0, 0, 0, time.UTC)
 	at := func(d time.Duration) *time.Time {
 		t := stopAt.Add(d)
@@ -37,8 +37,8 @@ func TestRebootedSince_ComparesTheBoot(t *testing.T) {
 		{"no boot now", &Boot{ID: "a5f1"}, Boot{}, errors.New("no boot_id"), false},
 	} {
 		d := &Driver{ThisBoot: func() (Boot, error) { return tc.now, tc.nowErr }}
-		if got := d.rebootedSince(&CurrentRun{StopBoot: tc.stop}); got != tc.rebooted {
-			t.Errorf("%s: rebootedSince = %v, want %v", tc.name, got, tc.rebooted)
+		if got := d.bootedSince(tc.stop); got != tc.rebooted {
+			t.Errorf("%s: bootedSince = %v, want %v", tc.name, got, tc.rebooted)
 		}
 	}
 }

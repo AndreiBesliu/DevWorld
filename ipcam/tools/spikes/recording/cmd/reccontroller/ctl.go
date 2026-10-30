@@ -109,6 +109,10 @@ type runState struct {
 	start     link.RunStart
 	startMark controller.PacingMark
 	endMark   *controller.PacingMark // when its beacons went silent, near the stop
+	// sent is the send times of the run's streams from its first beacon to
+	// just after its stop, copied when its beacons went silent: the send
+	// log may have dropped them when a late report comes (mi1-1).
+	sent      *controller.SendTimes
 	cut       controller.Cut
 	scheduled bool       // its cut is scheduled: a repeated ready changes nothing
 	conn      *link.Conn // the host's latest connection that named the run
@@ -283,17 +287,31 @@ func (c *ctl) startRun(conn *link.Conn, m link.RunStart) {
 	c.say("Rularea %s (%s, %s) a început.", m.RunID, m.Set, m.Kind)
 }
 
+// sentAfterStop is how long after its last beacon a run's copy of the
+// send times reaches: a host stops within a beacon interval of its last
+// beacon, and the copy is taken once the beacons have been silent this
+// long.
+const sentAfterStop = controller.BeaconSilence
+
 // markEnd marks the end of the run's pacing when its beacons go silent,
-// shortly after the stop (R07).
+// shortly after the stop (R07), and copies the send times that the run's
+// judgement needs, from its first beacon to sentAfterStop after its last
+// (mi1-1).
 func (c *ctl) markEnd(r *runState) {
-	if _, err := c.beacons.WaitSilence(r.ctx, r.start.RunID, c.clock); err != nil {
+	last, err := c.beacons.WaitSilence(r.ctx, r.start.RunID, c.clock)
+	if err != nil {
 		return // the run ended first
 	}
 	mark := c.pacer.MarkPacing()
+	from := last.At
+	if first, ok := c.beacons.First(r.start.RunID); ok {
+		from = first.At
+	}
+	sent := c.sendLog.Times(r.start.Streams, from, last.At.Add(sentAfterStop))
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.runs[r.start.RunID] == r {
-		r.endMark = &mark
+		r.endMark, r.sent = &mark, sent
 	}
 }
 
@@ -547,13 +565,17 @@ func (c *ctl) judgeReport(r *runState, m link.Report) link.Verdict {
 		r.cut.BootAt = beacons[0].At // no cut was sent: the run's first beacon
 	}
 	cut, end := r.cut, r.endMark
+	var sent controller.SendTimer = c.sendLog // the report came before the silence was seen
+	if r.sent != nil {
+		sent = r.sent
+	}
 	c.mu.Unlock()
 	if end == nil {
 		mark := c.pacer.MarkPacing() // the report came before the silence was seen
 		end = &mark
 	}
 	pacing := c.pacer.Pacing(r.startMark, *end, stopAt)
-	run := c.judge(r, m, cut, beaconsSeen{n: len(beacons), interrupted: interrupted, late: late}, errBound, pacing)
+	run := c.judge(r, m, cut, beaconsSeen{n: len(beacons), interrupted: interrupted, late: late}, errBound, pacing, sent)
 
 	// A lab smoke run's envelope goes under its own results set, apart from
 	// the set's counted envelopes. An envelope of the same run id, on disk
@@ -569,7 +591,7 @@ func (c *ctl) judgeReport(r *runState, m link.Report) link.Verdict {
 		c.say("Rularea %s: nu pot scrie rezultatul (%v); rularea nu contează.", m.RunID, written)
 		run.Valid, run.InvalidReason = false, addReason(run.InvalidReason, notWritten)
 	}
-	v := link.Verdict{Run: run, Timing: c.lossTiming(run, m, stopAt)}
+	v := link.Verdict{Run: run, Timing: lossTiming(run, m, stopAt, sent)}
 	c.mu.Lock()
 	r.cancel()
 	if c.runs[m.RunID] == r {
@@ -597,9 +619,9 @@ func (c *ctl) judgeReport(r *runState, m link.Report) link.Verdict {
 // lossTiming is the controller's side of the diagnostics of run, judged
 // from m, when one of its streams lost more than its limit (mi1.OverLimit):
 // the stop moment and the send times of those streams' last recorded
-// access units, on the controller's clock; nil when every stream kept
-// within its limit.
-func (c *ctl) lossTiming(run results.Run, m link.Report, stopAt time.Time) *link.Timing {
+// access units, from sent, on the controller's clock; nil when every
+// stream kept within its limit.
+func lossTiming(run results.Run, m link.Report, stopAt time.Time, sent controller.SendTimer) *link.Timing {
 	var timing *link.Timing
 	for _, s := range run.Streams {
 		if !mi1.OverLimit(s) {
@@ -612,8 +634,8 @@ func (c *ctl) lossTiming(run results.Run, m link.Report, stopAt time.Time) *link
 			if index.Stream != s.Stream {
 				continue
 			}
-			if sent, ok := c.sendLog.SendTime(s.Stream, index.LastRecordedIndex); ok {
-				timing.LastSentMs[s.Stream] = sent.UnixMilli()
+			if at, ok := sent.SendTime(s.Stream, index.LastRecordedIndex); ok {
+				timing.LastSentMs[s.Stream] = at.UnixMilli()
 			}
 		}
 	}
@@ -636,14 +658,14 @@ type beaconsSeen struct {
 	interrupted, late bool
 }
 
-// judge is the run as its envelope holds it. A stream that the host could
-// not read, or whose index has no send time, lost everything since the
-// run's first beacon. A run whose beacons came back after a silence
+// judge is the run as its envelope holds it, with the send times of sent.
+// A stream that the host could not read, or whose index has no send time,
+// lost everything since the run's first beacon. A run whose beacons came back after a silence
 // (interrupted) is invalid for that reason: its stop is not its last kept
 // beacon; so is a run whose start the controller missed (late), whose
 // timing is partial.
 func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons beaconsSeen, errBound time.Duration,
-	pacing controller.PacingStats) results.Run {
+	pacing controller.PacingStats, sent controller.SendTimer) results.Run {
 	valid := controller.Valid(cut)
 	if r.start.Smoke {
 		valid = controller.ValidWithin(cut, smokeValidFrom, smokeValidTo)
@@ -678,7 +700,7 @@ func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons beac
 			if s.Stream != stream {
 				continue
 			}
-			if l, ok := controller.Loss(cut.StopAt, stream, s.LastRecordedIndex, c.sendLog); ok {
+			if l, ok := controller.Loss(cut.StopAt, stream, s.LastRecordedIndex, sent); ok {
 				loss = l
 			}
 		}

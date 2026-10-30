@@ -85,3 +85,42 @@ func TestSendLog_KeepsTheLastHour(t *testing.T) {
 		}
 	}
 }
+
+// TestSendTimes_KeepARunsWindow (mi1-1): a run's copy of the send log,
+// taken over [from, to] for its streams, still gives their send times in
+// that window once the log itself has dropped them, and Loss reads it as
+// it reads the log; nothing outside the window or the streams is copied.
+func TestSendTimes_KeepARunsWindow(t *testing.T) {
+	l := NewSendLog()
+	start := time.Date(2026, 10, 21, 22, 0, 0, 0, time.UTC)
+	at := func(i uint64) time.Time { return start.Add(time.Duration(i) * 50 * time.Millisecond) } //nolint:gosec // small in this test
+	for i := range uint64(2000) {
+		l.Record("cam01_main", i, at(i))
+		l.Record("cam01_sub", i, at(i))
+	}
+	times := l.Times([]string{"cam01_main", "cam02_main"}, at(1000), at(1500))
+	for i := uint64(2000); i < 2000+sendLogKeep; i++ {
+		l.Record("cam01_main", i, at(i)) // an hour later, the log has moved on
+	}
+	if _, ok := l.SendTime("cam01_main", 1200); ok {
+		t.Fatal("test setup: the log still has index 1200")
+	}
+	for _, tc := range []struct {
+		stream string
+		index  uint64
+		ok     bool
+	}{
+		{"cam01_main", 1000, true}, {"cam01_main", 1200, true}, {"cam01_main", 1500, true},
+		{"cam01_main", 999, false}, {"cam01_main", 1501, false}, // outside the window
+		{"cam01_sub", 1200, false},  // not one of the run's streams
+		{"cam02_main", 1200, false}, // one of them, never sent
+	} {
+		got, ok := times.SendTime(tc.stream, tc.index)
+		if ok != tc.ok || (ok && !got.Equal(at(tc.index))) {
+			t.Errorf("SendTime(%s, %d) = %v, %v; want ok %v", tc.stream, tc.index, got, ok, tc.ok)
+		}
+	}
+	if loss, ok := Loss(at(1500), "cam01_main", 1200, times); !ok || loss != 15*time.Second {
+		t.Errorf("Loss from the copy = %v, %v; want 15 s", loss, ok)
+	}
+}

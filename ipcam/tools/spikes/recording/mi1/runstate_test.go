@@ -129,6 +129,32 @@ func recordSyncs(t *testing.T) *[]string {
 	return &synced
 }
 
+// TestSaveRunState_FlushesTheRenamedFile (mi1-3): the run state is renamed
+// over the old one (with write-through on Windows), and the renamed file is
+// flushed before its folder: the state saved just before NotMyFault or
+// sysrq must be on disk when the host goes down.
+func TestSaveRunState_FlushesTheRenamedFile(t *testing.T) {
+	synced := recordSyncs(t)
+	path := filepath.Join(t.TempDir(), "state", "run-state.json")
+	st := &RunState{Set: SetPCBugcheck, Mode: ModeAutomated, Kind: "bugcheck",
+		Current: &CurrentRun{RunID: "pc-bugcheck-02-1", Index: 2, Attempt: 1, Streams: []string{MainStream}, Phase: PhaseStopping}}
+	realPath := syncPath
+	syncPath = func(p string) error {
+		if p == path {
+			if got, err := LoadRunState(path); err != nil || got == nil || got.Current == nil || got.Current.Phase != PhaseStopping {
+				t.Errorf("the file flushed holds %+v (%v), want the state just saved: the rename comes first", got, err)
+			}
+		}
+		return realPath(p)
+	}
+	if err := SaveRunState(path, st); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"file " + path, "folder " + filepath.Dir(path)}; !reflect.DeepEqual(*synced, want) {
+		t.Errorf("synced %q\nwant %q", *synced, want)
+	}
+}
+
 // TestWriteRun_TheRunsFilesOutliveAPowerCut (G09, G14): the run's run.json
 // and RI_g, which recspike reads again after the host's reboot, reach the
 // disk before the run starts, and so do the entries of the run's folder and

@@ -11,9 +11,10 @@ import (
 )
 
 // sendLogKeep is how many of each stream's newest indexes the send log
-// keeps: an hour at 20 fps. A run's report comes after the host's reboot,
-// the NTP wait (at most 10 min) and reconcile, so its last recorded index
-// was sent well within the hour; a 72 h run keeps bounded memory.
+// keeps: an hour at 20 fps. A run's report normally comes after the host's
+// reboot, the NTP wait (at most 10 min) and reconcile, so its last
+// recorded index was sent well within the hour; a later one is judged
+// from the run's own copy (SendTimes). A 72 h run keeps bounded memory.
 const sendLogKeep = 20 * 3600
 
 // SendLog maps each sent access unit, by stream and SEI index, to the time
@@ -78,6 +79,81 @@ func (l *SendLog) SendTime(stream string, index uint64) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return l.base.Add(ring.entries[slot].off), true
+}
+
+// SendTimer gives the time when a stream's index was sent: the send log,
+// or a run's copy of it (SendTimes).
+type SendTimer interface {
+	SendTime(stream string, index uint64) (time.Time, bool)
+}
+
+// SendTimes is a copy of the send log's times of some streams within a
+// window: a run's, from its first beacon to just after its stop, taken
+// when its beacons go silent. The log keeps an hour, and a run's report
+// can come later than that (mi1-1): from the copy, a late report gets the
+// loss of a prompt one.
+type SendTimes struct {
+	base    time.Time
+	streams map[string]*sendSpan
+}
+
+// sendSpan is one stream's copied entries, from index first on.
+type sendSpan struct {
+	first   uint64
+	entries []sendEntry
+}
+
+// Times copies the send times of streams that fall within [from, to].
+func (l *SendLog) Times(streams []string, from, to time.Time) *SendTimes {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	t := &SendTimes{base: l.base, streams: map[string]*sendSpan{}}
+	lo, hi := from.Sub(l.base), to.Sub(l.base)
+	for _, stream := range streams {
+		ring := l.streams[stream]
+		if ring == nil {
+			continue
+		}
+		in := func(e sendEntry) bool { return e.tag != 0 && lo <= e.off && e.off <= hi }
+		// A stream's indexes only grow, so the ring holds a span of at most
+		// sendLogKeep of them, and so does the window.
+		var first, last uint64
+		found := false
+		for _, e := range ring.entries {
+			if !in(e) {
+				continue
+			}
+			if index := e.tag - 1; !found {
+				first, last, found = index, index, true
+			} else {
+				first, last = min(first, index), max(last, index)
+			}
+		}
+		if !found {
+			continue
+		}
+		span := &sendSpan{first: first, entries: make([]sendEntry, last-first+1)}
+		for _, e := range ring.entries {
+			if in(e) {
+				span.entries[e.tag-1-first] = e
+			}
+		}
+		t.streams[stream] = span
+	}
+	return t
+}
+
+// SendTime returns when index of stream was sent; ok is false when the
+// copy does not hold it.
+func (t *SendTimes) SendTime(stream string, index uint64) (time.Time, bool) {
+	span := t.streams[stream]
+	if span == nil || index < span.first || index-span.first >= uint64(len(span.entries)) {
+		return time.Time{}, false
+	}
+	if e := span.entries[index-span.first]; e.tag == index+1 {
+		return t.base.Add(e.off), true
+	}
+	return time.Time{}, false
 }
 
 // feedSendLog records every frame that a simulator sends of stream, a file

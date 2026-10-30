@@ -100,9 +100,12 @@ type CurrentRun struct {
 	// ResumeMs is the kill to the restarted ipcam-hub's recording (kill9),
 	// without the harness's raw HUB-04 scan at the stop.
 	ResumeMs *int64 `json:"resumeMs,omitempty"`
-	// StopBoot is the host's boot when recspike asked the OS to stop
-	// (sysrq, bugcheck): another boot after it proves the reboot.
-	StopBoot *Boot `json:"stopBoot,omitempty"`
+	// StartBoot is the host's boot when the run began, saved with the run's
+	// first state, and StopBoot its boot when recspike asked the OS to stop
+	// (sysrq, bugcheck): another boot after either proves the reboot. The
+	// start's tells it when the stop's save was lost to the stop (mi1-3).
+	StartBoot *Boot `json:"startBoot,omitempty"`
+	StopBoot  *Boot `json:"stopBoot,omitempty"`
 	// Hub04FoundAtStop is true when the raw scan of the run's own device
 	// right after the stop, before ipcam-hub reconciled, found clear video
 	// or failed (G08).
@@ -163,8 +166,10 @@ func loadRunStates(path string) (*runStates, error) {
 // SaveRunState writes st as the active set's state into the run state file
 // at path, beside the other sets' states, which it keeps. The file is
 // written whole and durably: beside its final name, synced, renamed over
-// it, and the folder synced, so that a power cut leaves the old file or
-// the new one.
+// it (with write-through on Windows), the renamed file flushed and the
+// folder synced, so that a power cut leaves the old file or the new one,
+// and a stop right after the save, NotMyFault's or sysrq's, the new one
+// (mi1-3).
 func SaveRunState(path string, st *RunState) error {
 	states, err := loadRunStates(path)
 	if err != nil {
@@ -197,7 +202,10 @@ func SaveRunState(path string, st *RunState) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameReplace(tmp, path); err != nil {
+		return err
+	}
+	if err := syncPath(path); err != nil {
 		return err
 	}
 	return syncDir(dir)

@@ -37,7 +37,8 @@ func xmlText(s string) string {
 // taskXML is the PC's boot task (G14): at every boot, as the owner's user
 // whether logged on or not (S4U), with the highest privileges, it runs
 // `recspike resume` in recspike's folder; it never stops it, and runs it on
-// battery too.
+// battery too, at the normal priority (5), which ipcam-hub and MediaMTX
+// inherit: Task Scheduler's default, 7, is below normal (mi1-5).
 func taskXML(exe, dir, userSID string) string {
 	return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -61,6 +62,7 @@ func taskXML(exe, dir, userSID string) string {
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>5</Priority>
     <Enabled>true</Enabled>
   </Settings>
   <Actions Context="Author">
@@ -144,14 +146,26 @@ type autostart struct {
 	unitPath    string
 	tempDir     string
 	timeService timeService
-	// savedStart keeps the time service's settings from before install, in
-	// recspike's private folder.
+	// savedStart keeps the time service's settings from before install,
+	// outside the release folder (timeServiceFile).
 	savedStart string
 	out        io.Writer
 }
 
-// systemAutostart is this OS's; work is recspike's private folder.
-func systemAutostart(out io.Writer, work string) autostart {
+// timeServiceFile is where install keeps the time service's settings from
+// before it: under %ProgramData%\ipcam-recspike, outside the release folder,
+// so that an owner who deletes that folder and extracts a new release
+// there does not lose them (mi1-6).
+func timeServiceFile() string {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return filepath.Join(programData, autostartName, "w32time-start.json")
+}
+
+// systemAutostart is this OS's.
+func systemAutostart(out io.Writer) autostart {
 	return autostart{
 		goos:       runtime.GOOS,
 		privileged: mi1.Privileged,
@@ -169,7 +183,7 @@ func systemAutostart(out io.Writer, work string) autostart {
 		unitPath:    systemdUnitPath,
 		tempDir:     os.TempDir(),
 		timeService: mi1.TimeService{},
-		savedStart:  filepath.Join(work, "w32time-start.json"),
+		savedStart:  timeServiceFile(),
 		out:         out,
 	}
 }
@@ -229,6 +243,11 @@ func (a autostart) install(exe string) error {
 		return nil
 	}
 	if ok, err := a.elevated("install"); !ok || err != nil {
+		return err
+	}
+	// Before the boot task: whether one is registered already tells the
+	// probe's settings of the time service from the owner's (mi1-6).
+	if err := a.saveTimeService(); err != nil {
 		return err
 	}
 	sid, err := a.userSID()
@@ -309,13 +328,9 @@ func (a autostart) uninstall() error {
 // startTimeService sets Windows' time service to start automatically,
 // removes its triggers and starts it (C1-R16, C1-R16b): on a PC outside a
 // domain it is otherwise stopped after every boot, by its start type or by
-// its "not in a domain" trigger, and the clock never syncs. Its settings
-// from before are saved once, so that a second install keeps the original
-// ones for uninstall.
+// its "not in a domain" trigger, and the clock never syncs. install has
+// saved its settings from before (saveTimeService).
 func (a autostart) startTimeService() error {
-	if err := a.saveTimeService(); err != nil {
-		return err
-	}
 	if err := a.timeService.SetStartType(serviceAutoStart); err != nil {
 		return fmt.Errorf("nu pot porni automat serviciul de timp Windows: %w", err)
 	}
@@ -328,11 +343,19 @@ func (a autostart) startTimeService() error {
 	return nil
 }
 
+// restoreByHand gives Windows' time service its usual settings on a PC
+// outside a domain back: started on demand, with its domain triggers.
+const restoreByHand = "într-o fereastră de administrator: sc config w32time start= demand, apoi sc triggerinfo w32time start/domainjoin stop/domainleave"
+
 // saveTimeService saves the time service's start type and triggers in
 // savedStart, unless an install saved them already. A file saved before
 // C1-R16b holds the start type only, and that install left the triggers on
 // the service: the triggers that it has now are added to the file, which
-// keeps its start type, so that uninstall puts both back.
+// keeps its start type, so that uninstall puts both back. With no file, a
+// service that starts automatically without triggers while the boot task
+// is registered has the probe's settings, from an install whose file is
+// gone: they are not saved as the ones from before, and the owner reads
+// how to restore Windows' usual ones by hand (mi1-6).
 func (a autostart) saveTimeService() error {
 	const cannotSave = "nu pot salva setările de dinainte ale serviciului de timp Windows"
 	saved, found, err := a.loadSavedTimeService()
@@ -348,6 +371,11 @@ func (a autostart) saveTimeService() error {
 	}
 	if saved.Triggers, err = a.timeService.Triggers(); err != nil {
 		return fmt.Errorf("nu pot citi declanșatoarele serviciului de timp Windows: %w", err)
+	}
+	if !found && a.probeSettings(saved) {
+		_, _ = fmt.Fprintf(a.out, "Serviciul de timp Windows pornește deja automat și nu are declanșatoare, ca după o instalare a probei, "+
+			"dar setările lui de dinainte nu mai sunt salvate: nu le salvez pe acestea în locul lor. După probă, puneți-le la loc %s.\n", restoreByHand)
+		return nil
 	}
 	if saved.Triggers == nil {
 		saved.Triggers = []mi1.ServiceTrigger{} // saved as none, not as a file without triggers
@@ -365,6 +393,13 @@ func (a autostart) saveTimeService() error {
 	return nil
 }
 
+// probeSettings reports whether the time service's settings, saved, are
+// the probe's: it starts automatically, without triggers, and the boot
+// task is registered.
+func (a autostart) probeSettings(saved savedTimeService) bool {
+	return saved.StartType == serviceAutoStart && len(saved.Triggers) == 0 && a.run("schtasks", "/Query", "/TN", autostartName) == nil
+}
+
 // loadSavedTimeService reads the settings that an install saved; found is
 // false when there is no file.
 func (a autostart) loadSavedTimeService() (saved savedTimeService, found bool, err error) {
@@ -379,14 +414,24 @@ func (a autostart) loadSavedTimeService() (saved savedTimeService, found bool, e
 }
 
 // restoreTimeService gives the time service back the start type and the
-// triggers that install saved; without a saved file, install changed
-// nothing. A file saved before C1-R16b leaves the triggers as they are.
+// triggers that install saved, and removes the file and its folder.
+// Without a saved file, install changed nothing, or found the probe's
+// settings with nothing saved: then the owner reads again how to restore
+// Windows' usual ones by hand. A file saved before C1-R16b leaves the
+// triggers as they are.
 func (a autostart) restoreTimeService() error {
 	saved, found, err := a.loadSavedTimeService()
 	if err != nil {
 		return fmt.Errorf("nu pot citi setările salvate ale serviciului de timp Windows (%s): %w", filepath.Base(a.savedStart), err)
 	}
 	if !found {
+		now := savedTimeService{}
+		if now.StartType, err = a.timeService.StartType(); err == nil {
+			now.Triggers, err = a.timeService.Triggers()
+		}
+		if err == nil && now.StartType == serviceAutoStart && len(now.Triggers) == 0 {
+			_, _ = fmt.Fprintf(a.out, "Setările de dinainte ale serviciului de timp Windows nu sunt salvate; ca să-i puneți la loc setările obișnuite: %s.\n", restoreByHand)
+		}
 		return nil
 	}
 	if err := a.timeService.SetStartType(saved.StartType); err != nil {
@@ -401,5 +446,6 @@ func (a autostart) restoreTimeService() error {
 	if err := os.Remove(a.savedStart); err != nil {
 		return fmt.Errorf("nu pot șterge setările salvate ale serviciului de timp Windows: %w", err)
 	}
+	_ = os.Remove(filepath.Dir(a.savedStart)) // its folder, once empty
 	return nil
 }

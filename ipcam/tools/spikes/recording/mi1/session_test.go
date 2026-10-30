@@ -819,6 +819,54 @@ func TestResume_AfterAFailedOSStop_RunIsInvalidWithoutColdBoot(t *testing.T) {
 	}
 }
 
+// TestResume_StopSaveLost_ColdBootStillMeasured (mi1-3): a bugcheck or
+// sysrq can come before the save of the phase `stopping` is on disk, so
+// that the reboot finds the run still `recording`, without the stop's
+// boot. The run's own boot, saved when it began, shows the reboot: the
+// resume measures ColdBootMs all the same, so G12's cold-boot row does not
+// lose a counted run.
+func TestResume_StopSaveLost_ColdBootStillMeasured(t *testing.T) {
+	r := newRig(t, "pi")
+	statePath := filepath.Join(r.results, "state", "run-state.json")
+	r.cutPower(t, SetOptions{Set: SetPiSysrq, Mode: ModeAutomated, Kind: "sysrq", Window: windowAroundNow(t)},
+		func(d *Driver, down func()) {
+			d.OSStop = func(context.Context, controller.ShutdownKind) error {
+				// The stop's save never reached the disk: the file is the
+				// one that the run's start saved.
+				st, err := LoadRunState(statePath)
+				if err != nil || st == nil || st.Current == nil || st.Current.Phase != PhaseStopping {
+					t.Errorf("the state at the stop = %+v, %v; want the run stopping", st, err)
+				} else {
+					st.Current.Phase, st.Current.StopBoot = PhaseRecording, nil
+					if err := SaveRunState(statePath, st); err != nil {
+						t.Error(err)
+					}
+				}
+				down()
+				return nil
+			}
+		})
+
+	d := r.driver(t) // another boot
+	d.Uptime = func() (time.Duration, error) { return 41 * time.Second, nil }
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	next := cancelAt(r.f, "run_start pi-sysrq-02-1", cancel)
+	if err := d.Resume(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Resume = %v, want the test's cancel during run 2", err)
+	}
+	if err := <-next; err != nil {
+		t.Fatal(err)
+	}
+	reports := r.f.runReports()
+	if len(reports) != 1 || reports[0].RunID != "pi-sysrq-01-1" {
+		t.Fatalf("reports %+v, want run 1's", reports)
+	}
+	if ms := reports[0].ColdBootMs; ms == nil || *ms > 41_000 || *ms < 40_000 {
+		t.Errorf("ColdBootMs = %s, want the 41 s of uptime at the recording event although the stop's save was lost", ptrText(ms))
+	}
+}
+
 // ptrText is *p, or "nil".
 func ptrText(p *int64) string {
 	if p == nil {

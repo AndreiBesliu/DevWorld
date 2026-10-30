@@ -110,6 +110,9 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 	if st.Mode == ModeReal {
 		cur.Slot = p.Index
 	}
+	if boot, err := d.thisBoot(); err == nil {
+		cur.StartBoot = &boot
+	}
 	cur.trace = &cutTrace{}
 	vol, err := d.volumes().Prepare(ctx, cur.RunID, cur.Encrypted)
 	if err != nil {
@@ -396,10 +399,17 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 		return fmt.Errorf("rularea %s nu mai are dosarul de date: %w", cur.RunID, err)
 	}
 	// The host booted since the OS stop that recspike asked for: ColdBootMs
-	// is measured on its boot clock.
+	// is measured on its boot clock. A sysrq or bugcheck run still
+	// recording, on another boot than its start's, was stopped too: the
+	// stop's own save did not reach the disk before the stop (mi1-3).
+	kind := controller.ShutdownKind(st.Kind)
+	osStop := kind == controller.KindSysrq || kind == controller.KindBugcheck
 	booted := cur.Phase == PhaseStopping
-	if booted && !d.rebootedSince(cur) {
+	switch {
+	case booted && !d.bootedSince(cur.StopBoot):
 		return d.notRebooted(ctx, s, st, cur, vol)
+	case cur.Phase == PhaseRecording && osStop && d.bootedSince(cur.StartBoot):
+		booted = true
 	}
 	if cur.Phase != PhaseStopped {
 		if _, err := d.stopped(cur, vol, s.info.Needles); err != nil {
@@ -419,8 +429,7 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 	if err != nil {
 		return err
 	}
-	kind := controller.ShutdownKind(st.Kind)
-	coldBoot := booted && (kind == controller.KindSysrq || kind == controller.KindBugcheck)
+	coldBoot := booted && osStop
 	var coldBootMs *int64
 	if coldBoot {
 		waitCtx, cancel := context.WithTimeout(ctx, eventTimeout)
@@ -436,12 +445,12 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 	return d.finish(ctx, s, st, cur, vol, hub, coldBootMs)
 }
 
-// rebootedSince reports whether the host booted after recspike asked the
-// OS to stop for cur: its boot is not the stop's (Boot). A boot that is not
-// known, at the stop or now, is no reboot.
-func (d *Driver) rebootedSince(cur *CurrentRun) bool {
+// bootedSince reports whether the host booted after then, a boot that
+// recspike saved: its boot is not that one (Boot). A boot that is not
+// known, then or now, is no reboot.
+func (d *Driver) bootedSince(then *Boot) bool {
 	boot, err := d.thisBoot()
-	return err == nil && cur.StopBoot != nil && !boot.Same(*cur.StopBoot)
+	return err == nil && then != nil && !boot.Same(*then)
 }
 
 // notRebooted ends a run whose OS stop did not reboot the host (the stop

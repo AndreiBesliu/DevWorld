@@ -36,6 +36,7 @@ type task struct {
 		Arguments        string `xml:"Arguments"`
 		WorkingDirectory string `xml:"WorkingDirectory"`
 	} `xml:"Actions>Exec"`
+	Priority *int `xml:"Settings>Priority"`
 }
 
 // fakeOS records what install and uninstall ask of the OS.
@@ -45,6 +46,8 @@ type fakeOS struct {
 	files    map[string][]byte
 	links    []string
 	time     *fakeService
+	// noTask makes `schtasks /Query` fail: no boot task is registered.
+	noTask bool
 }
 
 // serviceDemandStart is SERVICE_DEMAND_START: W32Time's start type on a PC
@@ -113,6 +116,9 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 		run: func(name string, args ...string) error {
 			cmd := append([]string{name}, args...)
 			f.commands = append(f.commands, cmd)
+			if name == "schtasks" && slices.Contains(args, "/Query") && f.noTask {
+				return errors.New("schtasks: exit status 1: the task does not exist")
+			}
 			if name == "schtasks" && slices.Contains(args, "/XML") {
 				data, err := os.ReadFile(args[slices.Index(args, "/XML")+1])
 				if err != nil {
@@ -131,7 +137,7 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 		unitPath:    filepath.Join(dir, "ipcam-recspike.service"),
 		tempDir:     dir,
 		timeService: f.time,
-		savedStart:  filepath.Join(dir, "work", "w32time-start.json"),
+		savedStart:  filepath.Join(dir, "ProgramData", "ipcam-recspike", "w32time-start.json"),
 		out:         io.Discard,
 	}
 	return a, f, desktop
@@ -161,6 +167,12 @@ func TestInstall_WindowsTaskXML(t *testing.T) {
 	}
 	if tk.Exec.Command != exe || tk.Exec.Arguments != "resume" || tk.Exec.WorkingDirectory != dir {
 		t.Errorf("exec = %+v, want %s resume in %s", tk.Exec, exe, dir)
+	}
+	// Task Scheduler's default 7 is below normal, which ipcam-hub and
+	// MediaMTX would inherit in every run that the boot task records
+	// (mi1-5): 5 is the normal class.
+	if tk.Priority == nil || *tk.Priority != 5 {
+		t.Errorf("priority = %v, want 5 (normal)", tk.Priority)
 	}
 
 	a, f, desktop := newAutostart(t, "windows", true)
@@ -398,13 +410,98 @@ func TestInstall_OverAFileWithoutTriggers_KeepsThemForUninstall(t *testing.T) {
 	}
 }
 
+// TestInstall_TimeServiceSettingsOutliveTheReleaseFolder (mi1-6): the time
+// service's settings from before the first install are kept outside the
+// release folder, under %ProgramData%\ipcam-recspike, so that an owner who
+// deletes the folder and extracts a new release there installs again
+// without losing them: uninstall still puts back the settings of before
+// the first install, not the probe's.
+func TestInstall_TimeServiceSettingsOutliveTheReleaseFolder(t *testing.T) {
+	programData := filepath.Join(t.TempDir(), "ProgramData")
+	t.Setenv("ProgramData", programData)
+	release := filepath.Join(t.TempDir(), "proba-inregistrare")
+	saved := systemAutostart(io.Discard).savedStart
+	if want := filepath.Join(programData, "ipcam-recspike", "w32time-start.json"); saved != want {
+		t.Fatalf("the settings are saved at %s, want %s", saved, want)
+	}
+	a, f, _ := newAutostart(t, "windows", true)
+	a.savedStart = saved
+	if err := a.install(filepath.Join(release, "recspike.exe")); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if err := os.RemoveAll(release); err != nil { // a new release in a fresh folder
+		t.Fatal(err)
+	}
+	if err := a.install(filepath.Join(release, "recspike.exe")); err != nil {
+		t.Fatalf("install again: %v", err)
+	}
+	if err := a.uninstall(); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !reflect.DeepEqual(f.time.triggers, workgroupTriggers()) || f.time.startType != serviceDemandStart {
+		t.Errorf("after uninstall: triggers %+v, start type %d; want the triggers %+v and the start type %d of before the first install",
+			f.time.triggers, f.time.startType, workgroupTriggers(), serviceDemandStart)
+	}
+	if _, err := os.Stat(filepath.Dir(saved)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("%s is still there after uninstall (%v)", filepath.Dir(saved), err)
+	}
+}
+
+// TestInstall_ProbesSettingsAreNeverSavedAsTheOriginal (mi1-6): with no
+// saved settings, a time service that already starts automatically
+// without triggers while the boot task is registered carries the probe's
+// own settings, from an install whose saved settings are gone: install
+// does not save them as the ones from before, says so in Romanian, and
+// gives the two sc commands that restore Windows' usual ones, which
+// uninstall gives again. The same settings without a boot task are the
+// owner's own, and are saved.
+func TestInstall_ProbesSettingsAreNeverSavedAsTheOriginal(t *testing.T) {
+	const restore = "sc config w32time start= demand, apoi sc triggerinfo w32time start/domainjoin stop/domainleave"
+	a, f, _ := newAutostart(t, "windows", true)
+	f.time.startType, f.time.triggers = serviceAutoStart, nil
+	var out strings.Builder
+	a.out = &out
+	if err := a.install(`C:\proba-inregistrare\recspike.exe`); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if _, err := os.Stat(a.savedStart); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the probe's settings were saved as the original ones (%v)", err)
+	}
+	if !strings.Contains(out.String(), "nu le salvez") || !strings.Contains(out.String(), restore) {
+		t.Errorf("install printed:\n%s\nwant the Romanian note and %q", out.String(), restore)
+	}
+	if f.time.startType != serviceAutoStart || len(f.time.triggers) != 0 || !f.time.running {
+		t.Errorf("after install: start type %d, triggers %+v, running %v; want the probe's settings, running", f.time.startType, f.time.triggers, f.time.running)
+	}
+	out.Reset()
+	f.time.asked = nil
+	if err := a.uninstall(); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if len(f.time.asked) != 0 || !strings.Contains(out.String(), restore) || strings.Contains(out.String(), "din nou setările de dinainte") {
+		t.Errorf("uninstall asked %q of the time service and printed:\n%s\nwant nothing changed, and %q", f.time.asked, out.String(), restore)
+	}
+
+	a, f, _ = newAutostart(t, "windows", true)
+	f.time.startType, f.time.triggers, f.noTask = serviceAutoStart, nil, true
+	if err := a.install(`C:\proba-inregistrare\recspike.exe`); err != nil {
+		t.Fatalf("install without a boot task: %v", err)
+	}
+	if _, err := os.Stat(a.savedStart); err != nil {
+		t.Errorf("the owner's own settings were not saved: %v", err)
+	}
+}
+
 // TestInstall_TimeServiceSettingsErrorsAreRomanian (item 9): when install
 // cannot save the time service's settings, or uninstall cannot read them
 // back, the owner reads why in Romanian, with the system's error after it.
 func TestInstall_TimeServiceSettingsErrorsAreRomanian(t *testing.T) {
 	a, f, _ := newAutostart(t, "windows", true)
-	work := filepath.Dir(a.savedStart)
-	if err := os.WriteFile(work, nil, 0o600); err != nil { // work/ is a file: nothing can be saved in it
+	folder := filepath.Dir(a.savedStart)
+	if err := os.MkdirAll(filepath.Dir(folder), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(folder, nil, 0o600); err != nil { // the settings' folder is a file: nothing can be saved in it
 		t.Fatal(err)
 	}
 	err := a.install(`C:\proba\recspike.exe`)

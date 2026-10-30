@@ -393,13 +393,14 @@ func TestReport_WritesTheEnvelope(t *testing.T) {
 		stopAt = cut.PromptAt.Add(-10 * time.Millisecond)
 		r.beaconAt("pi-kill9-05-1", seq+1, stopAt)
 	}
+	// The send log has each frame from when it went out, before the stop.
+	r.c.sendLog.Record("cam01_main", 7000, stopAt.Add(-850*time.Millisecond))
+	r.c.sendLog.Record("cam02_main", 7001, stopAt.Add(-1200*time.Millisecond))
 	r.clock.set(stopAt.Add(controller.BeaconSilence + 100*time.Millisecond))
 	waitFor(t, "the pacing's end mark", func() bool {
 		marks := r.pacer.markTimes()
 		return len(marks) >= 2 && marks[len(marks)-1].After(stopAt.Add(controller.BeaconSilence))
 	})
-	r.c.sendLog.Record("cam01_main", 7000, stopAt.Add(-850*time.Millisecond))
-	r.c.sendLog.Record("cam02_main", 7001, stopAt.Add(-1200*time.Millisecond))
 	resume := int64(812)
 	report := link.Report{
 		RunID: "pi-kill9-05-1",
@@ -816,6 +817,56 @@ func (r *rig) kill9RunFrom(conn *link.Conn, id string, first uint64) link.Report
 		Reconcile:  json.RawMessage(`{"type":"reconcile","seq":1,"final":true,"aborted":false,"unreadable":0,"tornParts":0,"catalogMismatches":0}`),
 		Verify:     json.RawMessage(`{"type":"verify","unreadable":0,"tornParts":0,"catalogMismatches":0}`),
 		Hub04Clear: true, NtpSynced: true, WriteCache: "unknown",
+	}
+}
+
+// TestReport_LateReportKeepsItsLoss (mi1-1): the send log keeps each
+// stream's newest hour of indexes, while a run's report can come much
+// later: the boot task could not reach the controller, and the owner ran
+// the command again the next evening. The controller keeps the send times
+// of the run's streams from its first beacon to just after its stop when
+// its beacons go silent, so a report that comes after the log has dropped
+// the run's last recorded index gets the verdict and the loss of a prompt
+// one, never a loss of the whole run.
+func TestReport_LateReportKeepsItsLoss(t *testing.T) {
+	verdict := func(late bool) link.Verdict {
+		r := newRig(t)
+		conn := r.connect("pc")
+		report := r.validKill9Run(conn, "pc-kill9-05-1")
+		stopAt := r.clock.Now() // the run's last beacon
+		r.clock.set(stopAt.Add(controller.BeaconSilence + 100*time.Millisecond))
+		waitFor(t, "the run's end", func() bool {
+			r.c.mu.Lock()
+			defer r.c.mu.Unlock()
+			run := r.c.runs["pc-kill9-05-1"]
+			return run != nil && run.endMark != nil
+		})
+		if late {
+			// The cameras go on: more frames than the log keeps.
+			at := r.clock.Now()
+			for index := uint64(5001); ; index++ {
+				at = at.Add(50 * time.Millisecond)
+				r.c.sendLog.Record("cam01_main", index, at)
+				if _, ok := r.c.sendLog.SendTime("cam01_main", 5000); !ok {
+					break
+				}
+			}
+			r.clock.set(at)
+		}
+		r.send(conn, report)
+		v, ok := r.receive(conn).(link.Verdict)
+		if !ok {
+			t.Fatalf("late %v: no verdict", late)
+		}
+		return v
+	}
+	prompt, late := verdict(false), verdict(true)
+	if !mi1.Counts(prompt.Run) || prompt.Run.LossMs != 700 {
+		t.Fatalf("test setup: the prompt report's verdict %+v, want a counting run of 700 ms", prompt.Run)
+	}
+	if !reflect.DeepEqual(late.Run, prompt.Run) {
+		t.Errorf("the late report's verdict %+v (loss %d ms, valid %v), want the prompt one's %+v",
+			late.Run, late.Run.LossMs, late.Run.Valid, prompt.Run)
 	}
 }
 

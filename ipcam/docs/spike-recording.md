@@ -296,7 +296,7 @@ Rezultatele numesc dispozitivele doar `pc` și `pi` și conțin modelul Pi-ului,
 
 După ce ne-ați trimis rezultatele:
 
-1. Pe PC, în fereastra de administrator: `recspike.exe uninstall`. Trebuie să apară «Pornirea automată și scurtătura de pe desktop au fost șterse.»<!--recspike--> și «Serviciul de timp Windows are din nou setările de dinainte.»<!--recspike-->: serviciul de timp are din nou pornirea și declanșatoarele de dinainte de pasul 4.
+1. Pe PC, în fereastra de administrator: `recspike.exe uninstall`. Trebuie să apară «Pornirea automată și scurtătura de pe desktop au fost șterse.»<!--recspike--> și «Serviciul de timp Windows are din nou setările de dinainte.»<!--recspike-->: serviciul de timp are din nou pornirea și declanșatoarele de dinainte de pasul 4. Dacă în locul rândului despre serviciul de timp apare «Setările de dinainte ale serviciului de timp Windows nu sunt salvate»<!--recspike-->, scrieți în aceeași fereastră, pe rând, cele două comenzi `sc` din acel rând.
 2. Pe Pi (nu și pe un Pi armv6): `sudo ./recspike uninstall`. Trebuie să apară «Pornirea automată a fost ștearsă.»<!--recspike-->. Dacă pe Pi rulează încă un controlor pornit desprins de `ssh` (pasul 5), opriți-l: `sudo pkill -x reccontroller` (pe un Pi armv6: `pkill -f reccontroller-linux-armv6`).
 3. Reluați actualizările Windows: „Setări” → „Windows Update” → „Reluați actualizările”.
 4. Scoateți regulile de firewall ale probei: în Start căutați „Permiteți o aplicație prin Paravanul de protecție Windows”, apăsați „Modificare setări”, selectați `reccontroller` și apăsați „Eliminare”; la fel pentru `recspike`, dacă apare. Dacă un program apare pe mai multe rânduri, eliminați-le pe toate.
@@ -320,7 +320,8 @@ Cazuri pe care le puteți rezolva singur:
   - «recspike nu rulează ca root»<!--recspike-->: pe Pi, porniți comanda cu `sudo`;
   - «spațiu liber insuficient»<!--recspike-->: eliberați spațiu pe dispozitivul gazdă;
   - «controlorul nu primește semnalul UDP al gazdei»<!--recspike-->: firewall-ul controlorului, ca la pasul 2.9;
-  - «serviciul de timp Windows nu rulează»<!--recspike-->: reluați `recspike.exe install` (pasul 4.3).
+  - «serviciul de timp Windows nu rulează»<!--recspike-->: reluați `recspike.exe install` (pasul 4.3);
+  - «ceasul gazdei nu este sincronizat prin NTP»<!--recspike-->: pe PC, într-o fereastră de administrator, scrieți `w32tm /resync`, așteptați un minut, apoi porniți din nou aceeași comandă. Pe Pi, verificați că are internet, așteptați câteva minute și porniți din nou aceeași comandă.
 - **O tăiere reală nu contează.** Dacă ați tăiat alimentarea înainte de «Scoateți acum alimentarea»<!--reccontroller--> sau la mai mult de 2 minute după, controlorul scrie rândul tăierii cu «nevalidă»<!--reccontroller-->, iar proba reface tăierea în același loc. Nu e nevoie să faceți altceva decât să urmați din nou cererea.
 - **Laptopul nu se oprește când scoateți încărcătorul.** Bateria îl ține pornit: țineți apăsat butonul de pornire cel puțin 10 secunde, imediat după cerere. Tăierea contează la fel.
 - **Pi-ul înregistrează pe un card SD, iar în MI2 cardul dă erori sau devine doar-citire.** ipcam-hub oprește înregistrarea și notează golul; acesta e un rezultat al probei, nu o greșeală a dvs. Lăsați proba să ruleze până la final și scrieți-ne în chat. Un SSD pe USB evită problema.
