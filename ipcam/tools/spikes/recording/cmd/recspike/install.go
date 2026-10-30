@@ -155,6 +155,11 @@ type autostart struct {
 	// Administrators alone; ownerSID reads the owner of a file, as a SID.
 	savedStart string
 	ownerSID   func(path string) (string, error)
+	// protect makes that folder and gives it to Administrators and SYSTEM
+	// alone (mi1.ProtectConfigDir); writeProtected writes a new file there
+	// that only they may change (mi1.WriteProtected).
+	protect        func(dir string) error
+	writeProtected func(path string, data []byte) error
 	// savedModes keeps the modes of the Pi's release folder and programs
 	// from before install (piModesPath).
 	savedModes string
@@ -206,21 +211,23 @@ func systemAutostart(out io.Writer) autostart {
 			}
 			return nil
 		},
-		userSID:     mi1.UserSID,
-		desktop:     mi1.DesktopDir,
-		shortcut:    mi1.CreateShortcut,
-		unitPath:    systemdUnitPath,
-		tempDir:     os.TempDir(),
-		timeService: mi1.TimeService{},
-		savedStart:  timeServiceFile(),
-		ownerSID:    mi1.FileOwnerSID,
-		savedModes:  piModesPath,
-		memoryDump:  filepath.Join(cmp.Or(os.Getenv("SystemRoot"), `C:\Windows`), "MEMORY.DMP"),
-		hubConfig:   filepath.Join(protectedDir(), mi1.HubConfigName),
-		mkdirAll:    func(path string) error { return os.MkdirAll(path, 0o700) },
-		chown:       os.Lchown,
-		chmod:       os.Chmod,
-		out:         out,
+		userSID:        mi1.UserSID,
+		desktop:        mi1.DesktopDir,
+		shortcut:       mi1.CreateShortcut,
+		unitPath:       systemdUnitPath,
+		tempDir:        os.TempDir(),
+		timeService:    mi1.TimeService{},
+		savedStart:     timeServiceFile(),
+		ownerSID:       mi1.FileOwnerSID,
+		protect:        mi1.ProtectConfigDir,
+		writeProtected: mi1.WriteProtected,
+		savedModes:     piModesPath,
+		memoryDump:     filepath.Join(cmp.Or(os.Getenv("SystemRoot"), `C:\Windows`), "MEMORY.DMP"),
+		hubConfig:      filepath.Join(protectedDir(), mi1.HubConfigName),
+		mkdirAll:       func(path string) error { return os.MkdirAll(path, 0o700) },
+		chown:          os.Lchown,
+		chmod:          os.Chmod,
+		out:            out,
 	}
 }
 
@@ -494,11 +501,7 @@ func (a autostart) saveTimeService() error {
 	}
 	data, err := json.Marshal(saved)
 	if err == nil {
-		err = os.WriteFile(a.savedStart, append(data, '\n'), 0o600)
-	}
-	if err == nil { // Windows may give it to the administrator's own account
-		own := mi1.AdministratorsOwnCommand(a.savedStart)
-		err = a.run(own[0], own[1:]...)
+		err = a.writeProtected(a.savedStart, append(data, '\n'))
 	}
 	if err != nil {
 		return fmt.Errorf("%s: %w", cannotSave, err)
@@ -507,20 +510,12 @@ func (a autostart) saveTimeService() error {
 }
 
 // protectSavedStart makes the folder of savedStart and gives it to
-// Administrators alone, with a protected DACL (Administrators and SYSTEM):
-// %ProgramData% lets any user create a folder in it first, and the elevated
-// uninstall applies what the folder holds to the time service.
+// Administrators, with a protected DACL of Administrators and SYSTEM alone:
+// %ProgramData% lets any user create a folder in it first, and give itself
+// an entry in its DACL, and the elevated uninstall applies what the folder
+// holds to the time service (Final fix C review, I2).
 func (a autostart) protectSavedStart() error {
-	dir := filepath.Dir(a.savedStart)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	for _, cmd := range mi1.AdministratorsOnlyCommands(dir) {
-		if err := a.run(cmd[0], cmd[1:]...); err != nil {
-			return err
-		}
-	}
-	return nil
+	return a.protect(filepath.Dir(a.savedStart))
 }
 
 // probeSettings reports whether the time service's settings, saved, are

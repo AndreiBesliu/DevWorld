@@ -111,7 +111,7 @@ type Driver struct {
 	deviceChecks func(binDir, dataDir string, cameras int) []Check
 	osStopIn     func(ctx context.Context, kind controller.ShutdownKind, binDir string) error
 	// protectDir makes ConfigDir writable by Administrators and SYSTEM, or
-	// root, alone; nil is protectConfigDir.
+	// root, alone; nil is ProtectConfigDir.
 	protectDir func(dir string) error
 	// linkDown, when set, runs each time a link to the controller has
 	// failed and its session reports it down: tests wait for it instead of

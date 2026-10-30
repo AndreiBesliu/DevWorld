@@ -19,7 +19,7 @@ func TestProtectConfigDir_RootsAlone(t *testing.T) {
 	if err := os.Chmod(dir, 0o777); err != nil { //nolint:gosec // the mode that the test corrects
 		t.Fatal(err)
 	}
-	if err := protectConfigDir(dir); err != nil {
+	if err := ProtectConfigDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(dir)

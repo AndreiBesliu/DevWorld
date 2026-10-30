@@ -54,6 +54,9 @@ type fakeOS struct {
 	owners []string
 	// failICacls makes every icacls command fail.
 	failICacls bool
+	// protected are the folders that install gave to Administrators and
+	// SYSTEM alone, and written the files that it wrote anew there.
+	protected, written []string
 	// owner is the owner's SID of every file, as ownerSID reads it.
 	owner string
 	// myFault makes `sc query MyFault` succeed: NotMyFault's driver
@@ -160,6 +163,14 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 		memoryDump:  filepath.Join(dir, "Windows", "MEMORY.DMP"),
 		hubConfig:   filepath.Join(dir, "ProgramData", "ipcam-recspike", mi1.HubConfigName),
 		ownerSID:    func(string) (string, error) { return f.owner, nil },
+		protect: func(dir string) error {
+			f.protected = append(f.protected, dir)
+			return os.MkdirAll(dir, 0o700)
+		},
+		writeProtected: func(path string, data []byte) error {
+			f.written = append(f.written, path)
+			return os.WriteFile(path, data, 0o600)
+		},
 		mkdirAll: func(path string) error {
 			f.dirs = append(f.dirs, path)
 			return nil
@@ -795,33 +806,27 @@ func TestInstall_PiReleaseBelongsToRoot(t *testing.T) {
 }
 
 // TestInstall_TimeServiceSettingsAreAdministrators (Final fix A review,
-// Minor 2): %ProgramData%\ipcam-recspike inherits ProgramData's ACL, where
-// any user may create a folder and a file first. So install gives the
-// folder to Administrators, with a protected DACL (Administrators and
-// SYSTEM) before it saves the settings there, and install and uninstall
-// refuse a saved file that Administrators or SYSTEM do not own: settings
-// that another account planted are never applied to the time service.
+// Minor 2; Final fix C review, I2): %ProgramData%\ipcam-recspike inherits
+// ProgramData's ACL, where any user may create a folder and a file first.
+// So install gives the folder to Administrators, with a protected DACL of
+// Administrators and SYSTEM alone (mi1.ProtectConfigDir), before it saves
+// the settings there in a new file that only they may change
+// (mi1.WriteProtected); and install and uninstall refuse a saved file that
+// Administrators or SYSTEM do not own: settings that another account
+// planted are never applied to the time service.
 func TestInstall_TimeServiceSettingsAreAdministrators(t *testing.T) {
 	a, f, _ := newAutostart(t, "windows", true)
 	if err := a.install(`C:\proba-inregistrare\recspike.exe`); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	folder := filepath.Dir(a.savedStart)
-	want := [][]string{
-		{"icacls", folder, "/setowner", "*S-1-5-32-544"},
-		{"icacls", folder, "/inheritance:r", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"},
+	if folder := filepath.Dir(a.savedStart); !slices.Equal(f.protected, []string{folder}) {
+		t.Errorf("install protected %q, want %s", f.protected, folder)
 	}
-	var got [][]string
-	for _, c := range named(f.commands, "icacls") {
-		if c[1] == folder {
-			got = append(got, c)
-		}
+	if !slices.Equal(f.written, []string{a.savedStart}) {
+		t.Errorf("install wrote %q as Administrators' own, want the saved settings %s", f.written, a.savedStart)
 	}
-	if !slices.EqualFunc(got, want, slices.Equal) {
-		t.Errorf("icacls on %s = %q, want %q", folder, got, want)
-	}
-	if own := []string{"icacls", a.savedStart, "/setowner", "*S-1-5-32-544"}; !slices.ContainsFunc(f.commands, func(c []string) bool { return slices.Equal(c, own) }) {
-		t.Errorf("the saved settings were not given to Administrators: commands %q, want %q among them", f.commands, own)
+	if got := named(f.commands, "icacls"); slices.ContainsFunc(got, func(c []string) bool { return strings.HasPrefix(c[1], filepath.Dir(a.savedStart)) }) {
+		t.Errorf("install ran icacls on the settings' folder: %q", got)
 	}
 
 	for _, owner := range []string{"S-1-5-21-1004336348-1177238915-682003330-1002", ""} {

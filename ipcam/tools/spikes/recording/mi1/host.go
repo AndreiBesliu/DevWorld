@@ -723,8 +723,11 @@ const HubConfigName = "ipcam-hub-run.json"
 // directory the run's volume's, and RI_g's file the one in the run's
 // folder when the run state says that the run is encrypted. The owner's
 // runs write the config into d.ConfigDir, which only Administrators and
-// SYSTEM, or root, may write; the lab's, and a driver without one, back
-// into run.json.
+// SYSTEM, or root, may write, as a new file that no one else may change
+// (WriteProtected): whatever was planted in that folder before install
+// keeps no entry in its DACL, and a file planted at the config's name is
+// replaced, not written through (Final fix C review, I2). The lab's runs,
+// and a driver without a ConfigDir, write it back into run.json.
 func (d *Driver) hubConfig(st *RunState, cur *CurrentRun, vol Volume) (string, error) {
 	path := filepath.Join(d.runDir(cur.RunID), "run.json")
 	saved, err := hubproc.ReadConfig(path)
@@ -735,18 +738,23 @@ func (d *Driver) hubConfig(st *RunState, cur *CurrentRun, vol Volume) (string, e
 	if cur.Encrypted {
 		cfg.IdentityFile = filepath.Join(d.runDir(cur.RunID), "ri_g.key")
 	}
-	if d.ConfigDir != "" && st.Mode != ModeLab {
-		protect := d.protectDir
-		if protect == nil {
-			protect = protectConfigDir
-		}
-		if err := protect(d.ConfigDir); err != nil {
-			return "", fmt.Errorf("nu pot proteja folderul %s, din care pornește ipcam-hub: %w", d.ConfigDir, err)
-		}
-		path = filepath.Join(d.ConfigDir, HubConfigName)
+	if d.ConfigDir == "" || st.Mode == ModeLab {
+		return path, hubproc.WriteConfig(path, cfg)
 	}
-	if err := hubproc.WriteConfig(path, cfg); err != nil {
-		return "", err
+	protect := d.protectDir
+	if protect == nil {
+		protect = ProtectConfigDir
+	}
+	path = filepath.Join(d.ConfigDir, HubConfigName)
+	data, err := hubproc.EncodeConfig(cfg)
+	if err == nil {
+		err = protect(d.ConfigDir)
+	}
+	if err == nil {
+		err = WriteProtected(path, data)
+	}
+	if err != nil {
+		return "", fmt.Errorf("nu pot proteja folderul %s, din care pornește ipcam-hub: %w", d.ConfigDir, err)
 	}
 	return path, nil
 }
