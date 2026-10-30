@@ -143,6 +143,8 @@ Cum aflați adresele:
 
 Adresele se pot schimba după o repornire a routerului. Dacă un program nu se mai conectează, verificați-le din nou.
 
+Programele probei se conectează între ele fără parolă și se bazează pe rețeaua dvs. de acasă. Rulați proba doar acasă, cu dispozitivele legate la routerul dvs., niciodată într-o rețea publică (o cafenea, un hotel).
+
 ## 6. Fereastra automată, pe fiecare dispozitiv
 
 Fereastra automată oprește brusc înregistrarea de 42 de ori pe fiecare dispozitiv și măsoară ce se pierde. Rulează doar în fereastra de ore aleasă de dvs., de exemplu noaptea, când nu folosiți dispozitivele. Ora se scrie ca `HH:MM-HH:MM`, de exemplu `22:00-06:00`. Fiecare dispozitiv are două seturi, pe rând: întâi `kill9` (oprește doar programul de înregistrare), apoi `bugcheck` pe PC (ecran albastru) sau `sysrq` pe Pi (repornire bruscă).
@@ -220,7 +222,9 @@ sudo ./recspike mi2 --controller 127.0.0.1
 La pornire, recspike scrie cât spațiu îi trebuie: «Proba de … h înregistrează …»<!--recspike-->, «Sunt necesari cel puțin … GB liberi»<!--recspike--> și «Spațiu liber aici: …»<!--recspike-->, apoi «Proba MI2 … începe: …»<!--recspike-->. Dacă spațiul nu ajunge, scrie «Spațiul liber nu ajunge pentru o fereastră de cel puțin 1 h.»<!--recspike-->: eliberați spațiu și porniți din nou. La final scrie «Proba MI2 … s-a încheiat după … h.»<!--recspike-->.
 
 - Dacă folosiți Pi-ul prin `ssh` de pe PC, lăsați ferestrele `ssh` deschise toate cele 72 de ore: închiderea lor oprește proba de pe Pi.
-- Dacă un dispozitiv repornește în timpul MI2 (o pană de curent, de exemplu), porniți din nou pe el ambele comenzi: întâi `reccontroller` cu `-local`, apoi `recspike mi2`. Rularea întreruptă nu contează și se reface de la început.
+- Dacă un dispozitiv repornește în timpul MI2 (o pană de curent, de exemplu), porniți din nou pe el ambele comenzi: întâi `reccontroller` cu `-local`, apoi `recspike mi2`. Rularea întreruptă nu contează și se reface de la început. Dacă ipcam-hub avusese un crash înainte, recspike scrie la repornire «Proba MI2 … s-a întrerupt după …»<!--recspike-->: crash-ul rămâne în rezultate.
+- Dacă recspike scrie «Camerele nu se mai înregistrează: verificați că reccontroller -local rulează.»<!--recspike-->, faceți ce scrie pe același rând: porniți din nou `reccontroller -local` dacă s-a oprit; dacă l-ați pornit din nou, opriți `recspike mi2` cu Ctrl+C și porniți-l din nou.
+- Dacă ipcam-hub se oprește singur, recspike scrie «ipcam-hub s-a oprit neașteptat»<!--recspike--> și îl pornește din nou. E un rezultat al probei, nu o greșeală a dvs.: lăsați proba să ruleze mai departe.
 
 ## 9. MI3 (1 h)
 
@@ -238,7 +242,7 @@ Fără spațiul unui pas, recspike nu îl pornește și scrie că pasul nu a por
 - **PC-ul ca gazdă.** Pe Pi: `sudo ./reccontroller` (pe un Pi armv6: `./reccontroller-linux-armv6`). Pe PC, în fereastra de administrator: `recspike.exe mi3 --controller <adresa Pi-ului>`. Dacă firewall-ul întreabă de `recspike.exe`, răspundeți ca la pasul 2.
 - **Pi-ul ca gazdă** (nu și pe un Pi armv6). Pe PC: `reccontroller.exe`. Pe Pi: `sudo ./recspike mi3 --controller <adresa PC-ului>`.
 
-Proba începe cu «Proba MI3 începe: …»<!--recspike--> și se încheie cu «Proba MI3 s-a încheiat: rezultatul este …»<!--recspike-->.
+Proba începe cu «Proba MI3 începe: …»<!--recspike--> și se încheie cu «Proba MI3 s-a încheiat: rezultatul este …»<!--recspike-->. Dacă după el apare un rând cu «deci pasul nu are rezultat»<!--recspike-->, verificați că fereastra controlorului e deschisă și că rețeaua merge, apoi porniți din nou aceeași comandă.
 
 ## 10. MI4 (Pi)
 
@@ -338,4 +342,7 @@ Cazuri pe care le puteți rezolva singur:
 - **«notmyfault64.exe nu mai e semnat de Microsoft»<!--recspike-->** în fereastra automată: fișierul s-a schimbat după pornirea setului. Reluați pasul 4.1, apoi porniți din nou aceeași comandă.
 - **«nu pot asculta pe porturile probei (rulează deja un reccontroller?)»<!--reccontroller-->** Pe același dispozitiv rulează deja un controlor, poate într-o fereastră uitată. Închideți-l și porniți din nou.
 - **«Transferul nu a reușit: …»<!--reccontroller-->** la pasul 13: porniți din nou comanda `push` pe Pi.
+- **«segmentul s-a închis după … s, nu după …: porniți din nou proba»<!--recspike-->** la MI4 sau MI9: porniți din nou aceeași comandă.
+- **«din care pornește ipcam-hub»<!--recspike-->** într-un rând care începe cu «nu pot proteja folderul»<!--recspike-->, în fereastra automată sau la tăierile reale: pe PC, porniți comanda din fereastra de administrator (pasul 2.5); pe Pi, cu `sudo`. Dacă rândul apare și așa, scrieți-ne în chat rândul întreg.
+- **«nu aparține administratorilor sau sistemului»<!--recspike-->** la `recspike.exe install` sau `uninstall`: un fișier din `C:\ProgramData\ipcam-recspike` nu a fost scris de probă. Ștergeți-l, cum scrie pe rând, dintr-o fereastră de administrator (`del` și numele fișierului), apoi porniți din nou comanda.
 - **Ați oprit un program cu Ctrl+C.** recspike scrie «Proba a fost oprită de dvs.»<!--recspike-->. Ce s-a măsurat până atunci rămâne; porniți din nou aceeași comandă când puteți.
