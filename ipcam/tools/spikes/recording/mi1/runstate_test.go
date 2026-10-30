@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -108,6 +109,27 @@ func TestRunState_OldFormat_SaysTheStateFolderCanBeDeleted(t *testing.T) {
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != old { //nolint:gosec // the test's file
 		t.Errorf("the old run state changed: %q, %v", data, err)
+	}
+}
+
+// TestRunState_RunIDIsAFileName (Final fix A review, Minor 1): the run
+// state lies in results/, which the owner's own token may change, and the
+// elevated resume joins its run id to work/. A run id that is not one file
+// name refuses the load, as a damaged state does.
+func TestRunState_RunIDIsAFileName(t *testing.T) {
+	for _, id := range []string{`..\..\Windows\Temp\x`, "../../etc", "a/b", ""} {
+		path := filepath.Join(t.TempDir(), "state", "run-state.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		states := `{"active":"pc-bugcheck","sets":{"pc-bugcheck":{"set":"pc-bugcheck","mode":"automated","kind":"bugcheck","done":[],` +
+			`"current":{"runId":` + strconv.Quote(id) + `,"index":1,"attempt":1,"encrypted":false,"padLowBitrate":true,"streams":["cam01_main"],"phase":"recording"}}}}` + "\n"
+		if err := os.WriteFile(path, []byte(states), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if st, err := LoadRunState(path); err == nil || !strings.HasPrefix(err.Error(), "starea probelor nu se poate citi") {
+			t.Errorf("run id %q: LoadRunState = %+v, %v; want the Romanian refusal of a damaged state", id, st, err)
+		}
 	}
 }
 

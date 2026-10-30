@@ -90,6 +90,11 @@ type ctl struct {
 	judged  map[string]link.Verdict // the verdicts sent, for a report sent again
 	steps   map[string]*mi3Step     // MI3's steps in progress (mi3.go)
 	mi9Runs map[string]*mi9Run      // MI9's runs awaiting their answer (mi9.go)
+
+	// saveMu serialises saveResult: results.Create looks before it writes,
+	// so two connections that send one name at once could both pass the
+	// look, and the second would replace the first's envelope.
+	saveMu sync.Mutex
 }
 
 func newCtl(ctx context.Context, cfg ctlConfig) *ctl {
@@ -780,7 +785,7 @@ const maxResultBytes = 64 << 10
 // MI9/lan/<its run id>.json, at most maxResultBytes, and only when no
 // envelope of that name is there yet (security-2). Anything else is
 // refused: the link takes any peer on the LAN, and the counted envelopes
-// stay as they are.
+// stay as they are. One connection saves at a time (saveMu).
 func (c *ctl) saveResult(m link.Results) {
 	refuse := func(why string) { c.say("Am refuzat un rezultat primit pe legătură: %s.", why) }
 	if len(m.Data) > maxResultBytes {
@@ -796,7 +801,10 @@ func (c *ctl) saveResult(m link.Results) {
 		refuse("o gazdă trimite doar rezultatul MI9 pe LAN, cu numele lui")
 		return
 	}
-	switch err := results.Create(c.results, e); {
+	c.saveMu.Lock()
+	err = results.Create(c.results, e)
+	c.saveMu.Unlock()
+	switch {
 	case errors.Is(err, results.ErrExists):
 		refuse("există deja un rezultat cu numele " + m.Name + ", care rămâne")
 	case err != nil:

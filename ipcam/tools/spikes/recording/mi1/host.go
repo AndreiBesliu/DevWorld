@@ -123,8 +123,7 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 	// one is fresh (Images.Prepare refuses a leftover image). Once the run
 	// state holds it, a later recspike finishes it on this volume
 	// (finishAfterReboot), and its report releases it.
-	config, err := d.writeRun(cur, vol, s)
-	if err != nil {
+	if _, err := d.writeRun(cur, vol, s); err != nil {
 		return errors.Join(err, vol.Release())
 	}
 	st.Current, st.NextRun, st.Slot = cur, p.Index, cur.Slot
@@ -141,6 +140,10 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 		return err
 	}
 	defer func() { _ = log.Close() }()
+	config, err := d.ownMediaMTX(cur)
+	if err != nil {
+		return err
+	}
 	hub, err := hubproc.Start(hubproc.Options{Binary: d.Hub, Config: config, Stderr: log, OnEvent: cur.trace.event,
 		Beacon: &hubproc.Beacon{Addr: s.beaconAddr, RunID: cur.RunID}})
 	if err != nil {
@@ -325,6 +328,9 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 		if err := SaveRunState(d.statePath(), st); err != nil {
 			return err
 		}
+		if _, err := d.ownMediaMTX(cur); err != nil {
+			return err
+		}
 		again, err := hub.Restart()
 		if err != nil {
 			return err
@@ -425,7 +431,11 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 		return err
 	}
 	defer func() { _ = log.Close() }()
-	hub, err := hubproc.Start(hubproc.Options{Binary: d.Hub, Config: filepath.Join(d.runDir(cur.RunID), "run.json"), Stderr: log})
+	config, err := d.ownMediaMTX(cur)
+	if err != nil {
+		return err
+	}
+	hub, err := hubproc.Start(hubproc.Options{Binary: d.Hub, Config: config, Stderr: log})
 	if err != nil {
 		return err
 	}
@@ -474,6 +484,9 @@ func (d *Driver) afterStop(ctx context.Context, s *session, st *RunState, cur *C
 	}
 	cur.Phase = PhaseStopped
 	if err := SaveRunState(d.statePath(), st); err != nil {
+		return err
+	}
+	if _, err := d.ownMediaMTX(cur); err != nil {
 		return err
 	}
 	again, err := hub.Restart()
@@ -693,6 +706,28 @@ func (d *Driver) writeRun(cur *CurrentRun, vol Volume, s *session) (string, erro
 	// entries of its folder and of the folder in work/, must be on the
 	// disk before the run starts, a stop 20 s later included.
 	return config, errors.Join(syncPath(config), syncDir(dir), syncDir(d.Work))
+}
+
+// ownMediaMTX returns the run's run.json once it names the release's own
+// MediaMTX, d.MediaMTX ("" for the one next to ipcam-hub), before every
+// start of ipcam-hub: the first, the resume after a reboot and the
+// restarts after a stop run elevated on the PC (the boot task, the
+// shortcut), while run.json lies in work/, which the owner's own token may
+// change, and ipcam-hub runs the binary that it names (Final fix A review,
+// Minor 1).
+func (d *Driver) ownMediaMTX(cur *CurrentRun) (string, error) {
+	config := filepath.Join(d.runDir(cur.RunID), "run.json")
+	cfg, err := hubproc.ReadConfig(config)
+	if err != nil {
+		return "", err
+	}
+	if cfg.MediaMTX != d.MediaMTX {
+		cfg.MediaMTX = d.MediaMTX
+		if err := hubproc.WriteConfig(config, cfg); err != nil {
+			return "", err
+		}
+	}
+	return config, nil
 }
 
 // identity reads the run's RI_g; nil for a clear run.

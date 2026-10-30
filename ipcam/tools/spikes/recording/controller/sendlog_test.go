@@ -174,3 +174,25 @@ func TestSendLog_WaitFedWaitsForTheFeed(t *testing.T) {
 		t.Error("SendTimers found an index that neither timer has")
 	}
 }
+
+// TestSendTimes_SpanCappedAtTheLogsKeep (Final fix A review, Minor 4): a
+// copy holds at most the log's span of indexes per stream, so a stream
+// whose index restarted inside the window, with old high indexes still in
+// the ring, never allocates up to the old maximum; the newest indexes of
+// the window keep their times.
+func TestSendTimes_SpanCappedAtTheLogsKeep(t *testing.T) {
+	l := NewSendLog()
+	start := time.Date(2026, 10, 30, 4, 0, 0, 0, time.UTC)
+	const old = 10_000_000
+	l.Record("cam01_main", old, start)
+	for i := range uint64(100) { // the simulator started again: its index restarted
+		l.Record("cam01_main", i, start.Add(time.Duration(i+1)*50*time.Millisecond))
+	}
+	times := l.Times([]string{"cam01_main"}, start, start.Add(time.Minute))
+	if n := len(times.streams["cam01_main"].entries); n > sendLogKeep {
+		t.Errorf("the copy holds %d entries for a stream, want at most %d", n, sendLogKeep)
+	}
+	if at, ok := times.SendTime("cam01_main", old); !ok || !at.Equal(start) {
+		t.Errorf("the newest index of the window: %v, %v; want %v", at, ok, start)
+	}
+}

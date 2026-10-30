@@ -368,17 +368,17 @@ func (e Envelope) Validate() error {
 	case (e.Code == "MI9") != (e.MI9 != nil):
 		return fmt.Errorf("results: an %s envelope with mi9 %v: only MI9's has it, always", e.Code, e.MI9 != nil)
 	}
-	if !fileName(e.Set) {
+	if !FileName(e.Set) {
 		return fmt.Errorf("results: set %q is not a file name", e.Set)
 	}
-	if !fileName(e.RunID) {
+	if !FileName(e.RunID) {
 		return fmt.Errorf("results: run id %q is not a file name", e.RunID)
 	}
 	return nil
 }
 
-// fileName reports whether name is one local path element on every OS.
-func fileName(name string) bool {
+// FileName reports whether name is one local path element on every OS.
+func FileName(name string) bool {
 	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `/\:`) && filepath.IsLocal(name)
 }
 

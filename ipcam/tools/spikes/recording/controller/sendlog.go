@@ -167,8 +167,10 @@ func (l *SendLog) Times(streams []string, from, to time.Time) *SendTimes {
 			continue
 		}
 		in := func(e sendEntry) bool { return e.tag != 0 && lo <= e.off && e.off <= hi }
-		// A stream's indexes only grow, so the ring holds a span of at most
-		// sendLogKeep of them, and so does the window.
+		// A stream's indexes grow, so the ring holds a span of at most
+		// sendLogKeep of them; a simulator that started again restarts its
+		// index, and the copy then keeps the newest sendLogKeep indexes of
+		// the window, never a span up to the old maximum.
 		var first, last uint64
 		found := false
 		for _, e := range ring.entries {
@@ -184,9 +186,10 @@ func (l *SendLog) Times(streams []string, from, to time.Time) *SendTimes {
 		if !found {
 			continue
 		}
+		first = max(first, last-min(last, sendLogKeep-1))
 		span := &sendSpan{first: first, entries: make([]sendEntry, last-first+1)}
 		for _, e := range ring.entries {
-			if in(e) {
+			if in(e) && e.tag-1 >= first {
 				span.entries[e.tag-1-first] = e
 			}
 		}

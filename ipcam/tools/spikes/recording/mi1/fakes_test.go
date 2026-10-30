@@ -40,6 +40,9 @@ const (
 	fakeHubEnv        = "MI1_FAKE_HUB"
 	fakeLogEnv        = "MI1_FAKE_LOG"
 	fakeReadyAfterEnv = "MI1_FAKE_READY_AFTER"
+	// fakeMediaMTXLogEnv names a file to which the fake appends the
+	// mediamtx of each run.json that it runs, as "mediamtx=<path>".
+	fakeMediaMTXLogEnv = "MI1_FAKE_MEDIAMTX_LOG"
 )
 
 // fakeReadyWait bounds the fake ipcam-hub's wait for fakeReadyAfterEnv's
@@ -69,6 +72,12 @@ func fakeHub(args []string) int {
 	}
 	signal.Ignore(os.Interrupt, syscall.SIGTERM)
 	logLine(fmt.Sprintf("hub %d", os.Getpid()))
+	if path := os.Getenv(fakeMediaMTXLogEnv); path != "" {
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil { //nolint:gosec // the test's log
+			_, _ = f.WriteString("mediamtx=" + cfg.MediaMTX + "\n")
+			_ = f.Close()
+		}
+	}
 	emit := func(fields map[string]any) {
 		fields["atMs"] = time.Now().UnixMilli()
 		b, _ := json.Marshal(fields)

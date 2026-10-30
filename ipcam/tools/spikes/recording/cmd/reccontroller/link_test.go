@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -125,6 +126,35 @@ func TestResults_OnlyMI9EnvelopesNeverReplaced(t *testing.T) {
 	}
 }
 
+// TestResults_TwoSendsOfOneNameKeepOne (Final fix A review, Minor 6): two
+// connections that send an envelope of the same name at the same moment
+// never both see it kept: one is kept, the other refused, and the file is
+// the kept one's, never replaced by the other.
+func TestResults_TwoSendsOfOneNameKeepOne(t *testing.T) {
+	r := newRig(t)
+	a, b := r.connect("pc"), r.connect("pc")
+	for i := range 20 {
+		name := fmt.Sprintf("MI9/lan/pc-mi9-%d.json", i)
+		runID := fmt.Sprintf("pc-mi9-%d", i)
+		before := strings.Count(r.screen.String(), "Am primit") + strings.Count(r.screen.String(), "Am refuzat")
+		var wg sync.WaitGroup
+		for k, conn := range []*link.Conn{a, b} {
+			wg.Go(func() {
+				if err := conn.Send(link.Results{Name: name, Data: mi9Envelope(t, runID, float64(100+k))}); err != nil {
+					t.Errorf("send: %v", err)
+				}
+			})
+		}
+		wg.Wait()
+		waitFor(t, "both answers to "+name, func() bool {
+			return strings.Count(r.screen.String(), "Am primit")+strings.Count(r.screen.String(), "Am refuzat") >= before+2
+		})
+		if kept := strings.Count(r.screen.String(), "Am primit "+name+"."); kept != 1 {
+			t.Fatalf("%s was kept %d times, want once; screen:\n%s", name, kept, r.screen.String())
+		}
+	}
+}
+
 // TestPull_ASilentConnectionBlocksNothing (security-2): `reccontroller
 // pull` takes connections side by side, so a LAN peer that connects and
 // sends nothing neither holds the Pi's push nor the end: once the Pi's
@@ -206,6 +236,123 @@ func TestPull_ASilentConnectionTimesOut(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("pull did not end after Ctrl+C")
 	}
+}
+
+// TestPull_AStalledPiDelaysNothing (Final fix A review, Minor 7): a peer
+// whose hello says it is the Pi, and that then sends nothing, does not
+// hold the real Pi's push for its read deadline: pull reads each folder
+// apart, and only stores one at a time.
+func TestPull_AStalledPiDelaysNothing(t *testing.T) {
+	old := pullReadTimeout
+	pullReadTimeout = time.Hour
+	t.Cleanup(func() { pullReadTimeout = old })
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcResults := filepath.Join(t.TempDir(), "results")
+	piResults := t.TempDir()
+	writeEnvelope(t, piResults, "MI2", "mi2", "pi", nil)
+	var out syncBuffer
+	done := make(chan error, 1)
+	go func() { done <- pull(t.Context(), ln, pcResults, &out) }()
+
+	stalled, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stalled.Close() })
+	fake := link.NewConn(stalled)
+	if err := fake.Send(link.Hello{Role: "host", Host: "pi", Version: link.Version}); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := fake.Receive(); err != nil || m.Type() != "pull_results" {
+		t.Fatalf("the stalled Pi got %v, %v; want pull_results", m, err)
+	}
+
+	pushed := make(chan error, 1)
+	go func() {
+		var piOut syncBuffer
+		pushed <- mi1.Push(t.Context(), ln.Addr().String(), piResults, "pi", &piOut)
+	}()
+	select {
+	case err := <-pushed:
+		if err != nil {
+			t.Fatalf("the Pi's push beside a stalled one: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the Pi's push waited behind a stalled Pi; screen:\n%s", out.String())
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("pull: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("pull did not end after the Pi's push")
+	}
+	if _, err := os.Stat(filepath.Join(pcResults, "pi", "MI2", "mi2", "mi2-1.json")); err != nil {
+		t.Errorf("the Pi's results: %v", err)
+	}
+}
+
+// TestPull_OnlyThePiHearsThatItsTransferFailed (Final fix A review, Minor
+// 7): a connection that is not the Pi's, a port scan, a silent peer or
+// another host, prints nothing on pull's screen; a Pi whose transfer fails
+// after its hello is told to push again.
+func TestPull_OnlyThePiHearsThatItsTransferFailed(t *testing.T) {
+	old := pullReadTimeout
+	pullReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { pullReadTimeout = old })
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var out syncBuffer
+	done := make(chan error, 1)
+	go func() { done <- pull(ctx, ln, filepath.Join(t.TempDir(), "results"), &out) }()
+	const failed = "Transferul nu a reușit"
+
+	scan, err := net.Dial("tcp4", ln.Addr().String()) // a port scan
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = scan.Close()
+	<-dialSilent(t, ln.Addr().String()) // closed at its deadline
+	pc, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := link.NewConn(pc).Send(link.Hello{Role: "host", Host: "pc", Version: link.Version}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = pc.Read(make([]byte, 1)) // closed by pull
+	_ = pc.Close()
+	time.Sleep(100 * time.Millisecond)
+	if strings.Contains(out.String(), failed) {
+		t.Errorf("pull printed a failed transfer for peers that are not the Pi:\n%s", out.String())
+	}
+
+	pi, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	piConn := link.NewConn(pi)
+	if err := piConn.Send(link.Hello{Role: "host", Host: "pi", Version: link.Version}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := piConn.Receive(); err != nil {
+		t.Fatal(err)
+	}
+	_ = pi.Close() // the Pi's link drops before its folder
+	waitFor(t, "the failed transfer's line", func() bool { return strings.Contains(out.String(), failed) })
+	if n := strings.Count(out.String(), failed); n != 1 {
+		t.Errorf("pull printed %d failed transfers, want the Pi's one:\n%s", n, out.String())
+	}
+	cancel()
+	<-done
 }
 
 // dialSilent connects to addr and sends nothing; the channel is closed

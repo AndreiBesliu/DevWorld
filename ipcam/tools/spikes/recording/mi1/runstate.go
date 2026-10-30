@@ -151,7 +151,11 @@ func loadRunStates(path string) (*runStates, error) {
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(states); err != nil {
+	err = dec.Decode(states)
+	if err == nil {
+		err = states.validRunIDs()
+	}
+	if err != nil {
 		// The file of an older recspike, one set's state, or a damaged one:
 		// every load and save refuses it, so the owner hears how to start over.
 		return nil, fmt.Errorf("starea probelor nu se poate citi (%s: %w); poate a rămas de la o versiune mai veche a recspike. "+
@@ -161,6 +165,18 @@ func loadRunStates(path string) (*runStates, error) {
 		states.Sets = map[string]*RunState{}
 	}
 	return states, nil
+}
+
+// validRunIDs refuses a current run whose id is not one file name: the
+// run state lies in results/, which the owner's own token may change, and
+// the elevated resume joins the id to work/ (Final fix A review, Minor 1).
+func (s *runStates) validRunIDs() error {
+	for _, st := range s.Sets {
+		if st != nil && st.Current != nil && !results.FileName(st.Current.RunID) {
+			return fmt.Errorf("the run id %q is not a file name", st.Current.RunID)
+		}
+	}
+	return nil
 }
 
 // SaveRunState writes st as the active set's state into the run state file

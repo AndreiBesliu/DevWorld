@@ -54,6 +54,8 @@ type fakeOS struct {
 	owners []string
 	// failICacls makes every icacls command fail.
 	failICacls bool
+	// owner is the owner's SID of every file, as ownerSID reads it.
+	owner string
 }
 
 // serviceDemandStart is SERVICE_DEMAND_START: W32Time's start type on a PC
@@ -106,7 +108,8 @@ func (s *fakeService) Start() error {
 
 func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeOS, string) {
 	t.Helper()
-	f := &fakeOS{files: map[string][]byte{}, time: &fakeService{startType: serviceDemandStart, triggers: workgroupTriggers()}}
+	f := &fakeOS{files: map[string][]byte{}, time: &fakeService{startType: serviceDemandStart, triggers: workgroupTriggers()},
+		owner: "S-1-5-32-544"}
 	dir := t.TempDir()
 	desktop := filepath.Join(dir, "Desktop")
 	if err := os.MkdirAll(desktop, 0o750); err != nil {
@@ -147,6 +150,8 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 		tempDir:     dir,
 		timeService: f.time,
 		savedStart:  filepath.Join(dir, "ProgramData", "ipcam-recspike", "w32time-start.json"),
+		savedModes:  filepath.Join(dir, "var", "lib", "ipcam-recspike", "release-modes.json"),
+		ownerSID:    func(string) (string, error) { return f.owner, nil },
 		mkdirAll: func(path string) error {
 			f.dirs = append(f.dirs, path)
 			return nil
@@ -162,6 +167,18 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 		out: io.Discard,
 	}
 	return a, f, desktop
+}
+
+// onRelease is the commands of cmds on the release folder of the PC's
+// tests, C:\proba-inregistrare, and what is in it.
+func onRelease(cmds [][]string) [][]string {
+	var out [][]string
+	for _, c := range cmds {
+		if len(c) > 1 && strings.HasPrefix(c[1], `C:\proba-inregistrare`) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // named is the commands of cmds that run name.
@@ -457,6 +474,15 @@ func TestInstall_TimeServiceSettingsOutliveTheReleaseFolder(t *testing.T) {
 	if want := filepath.Join(programData, "ipcam-recspike", "w32time-start.json"); saved != want {
 		t.Fatalf("the settings are saved at %s, want %s", saved, want)
 	}
+	// Settings that an older release saved in its own work folder, the
+	// probe's (automatic, no trigger): install never reads them there.
+	stale := filepath.Join(release, "work", "w32time-start.json")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte(`{"startType":2,"triggers":[]}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	a, f, _ := newAutostart(t, "windows", true)
 	a.savedStart = saved
 	if err := a.install(filepath.Join(release, "recspike.exe")); err != nil {
@@ -464,6 +490,9 @@ func TestInstall_TimeServiceSettingsOutliveTheReleaseFolder(t *testing.T) {
 	}
 	if err := os.RemoveAll(release); err != nil { // a new release in a fresh folder
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(release); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the old release folder is still there (%v)", err)
 	}
 	if err := a.install(filepath.Join(release, "recspike.exe")); err != nil {
 		t.Fatalf("install again: %v", err)
@@ -589,7 +618,7 @@ func TestInstall_WindowsProtectsTheReleaseFolder(t *testing.T) {
 		{"icacls", `C:\proba-inregistrare\results`, "/grant:r", "*" + sid + ":(OI)(CI)M"},
 		{"icacls", `C:\proba-inregistrare\work`, "/grant:r", "*" + sid + ":(OI)(CI)M"},
 	}
-	if got := named(f.commands, "icacls"); !slices.EqualFunc(got, want, slices.Equal) {
+	if got := onRelease(named(f.commands, "icacls")); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("icacls commands = %q, want %q", got, want)
 	}
 	if i, j := slices.IndexFunc(f.commands, func(c []string) bool { return c[0] == "icacls" }),
@@ -605,7 +634,7 @@ func TestInstall_WindowsProtectsTheReleaseFolder(t *testing.T) {
 	if err := a.uninstall(`C:\proba-inregistrare\recspike.exe`); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	if got, want := named(f.commands, "icacls"), [][]string{{"icacls", `C:\proba-inregistrare`, "/reset", "/T", "/C", "/Q"}}; !slices.EqualFunc(got, want, slices.Equal) {
+	if got, want := onRelease(named(f.commands, "icacls")), [][]string{{"icacls", `C:\proba-inregistrare`, "/reset", "/T", "/C", "/Q"}}; !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("uninstall's icacls commands = %q, want %q", got, want)
 	}
 	if !strings.Contains(out.String(), "Folderul probei are din nou permisiunile de dinainte") {
@@ -640,9 +669,12 @@ func TestInstall_RefusesWhenTheFolderStaysOpen(t *testing.T) {
 // they are, for what writes them. A program that is a symbolic link is
 // refused, and so is a folder whose owner cannot change. `sudo ./recspike
 // uninstall` gives the folder and the programs back to the account that
-// ran sudo.
+// ran sudo, with their modes of before.
 func TestInstall_PiReleaseBelongsToRoot(t *testing.T) {
 	release := t.TempDir()
+	if err := os.Chmod(release, 0o750); err != nil { //nolint:gosec // the folder's mode of before install
+		t.Fatal(err)
+	}
 	exe := filepath.Join(release, "recspike")
 	for _, name := range []string{"recspike", "reccontroller", "ipcam-hub", "mediamtx"} {
 		if err := os.WriteFile(filepath.Join(release, name), []byte("ELF"), 0o755); err != nil { //nolint:gosec // a program's stand-in
@@ -678,7 +710,16 @@ func TestInstall_PiReleaseBelongsToRoot(t *testing.T) {
 	if err := a.uninstall(exe); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
+	// The modes of before first, while root owns the folder, then the
+	// owner.
 	want = nil
+	for _, p := range []string{release, exe, filepath.Join(release, "reccontroller"), filepath.Join(release, "ipcam-hub"), filepath.Join(release, "mediamtx")} {
+		mode := "-rwxr-xr-x"
+		if p == release {
+			mode = "-rwxr-x---"
+		}
+		want = append(want, p+" "+mode)
+	}
 	for _, p := range []string{release, exe, filepath.Join(release, "reccontroller"), filepath.Join(release, "ipcam-hub"), filepath.Join(release, "mediamtx")} {
 		want = append(want, p+" 1000:1001")
 	}
@@ -705,5 +746,111 @@ func TestInstall_PiReleaseBelongsToRoot(t *testing.T) {
 	if err := a.install(filepath.Join(t.TempDir(), "recspike")); err == nil || !strings.HasPrefix(err.Error(), "nu pot da folderul probei lui root") ||
 		!strings.Contains(err.Error(), "operation not permitted") || len(f.commands) != 0 {
 		t.Errorf("install whose chown fails = %v, ran %q; want a Romanian refusal with the system's error, and no unit", err, f.commands)
+	}
+}
+
+// TestInstall_TimeServiceSettingsAreAdministrators (Final fix A review,
+// Minor 2): %ProgramData%\ipcam-recspike inherits ProgramData's ACL, where
+// any user may create a folder and a file first. So install gives the
+// folder to Administrators, with a protected DACL (Administrators and
+// SYSTEM) before it saves the settings there, and install and uninstall
+// refuse a saved file that Administrators or SYSTEM do not own: settings
+// that another account planted are never applied to the time service.
+func TestInstall_TimeServiceSettingsAreAdministrators(t *testing.T) {
+	a, f, _ := newAutostart(t, "windows", true)
+	if err := a.install(`C:\proba-inregistrare\recspike.exe`); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	folder := filepath.Dir(a.savedStart)
+	want := [][]string{
+		{"icacls", folder, "/setowner", "*S-1-5-32-544"},
+		{"icacls", folder, "/inheritance:r", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"},
+	}
+	var got [][]string
+	for _, c := range named(f.commands, "icacls") {
+		if c[1] == folder {
+			got = append(got, c)
+		}
+	}
+	if !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("icacls on %s = %q, want %q", folder, got, want)
+	}
+	if own := []string{"icacls", a.savedStart, "/setowner", "*S-1-5-32-544"}; !slices.ContainsFunc(f.commands, func(c []string) bool { return slices.Equal(c, own) }) {
+		t.Errorf("the saved settings were not given to Administrators: commands %q, want %q among them", f.commands, own)
+	}
+
+	for _, owner := range []string{"S-1-5-21-1004336348-1177238915-682003330-1002", ""} {
+		a, f, _ := newAutostart(t, "windows", true)
+		if err := os.MkdirAll(filepath.Dir(a.savedStart), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(a.savedStart, []byte(`{"startType":2,"triggers":[]}`+"\n"), 0o600); err != nil { // planted
+			t.Fatal(err)
+		}
+		f.owner = owner
+		if err := a.install(`C:\proba-inregistrare\recspike.exe`); err == nil ||
+			!strings.HasPrefix(err.Error(), "nu pot salva setările de dinainte ale serviciului de timp Windows") || !strings.Contains(err.Error(), "administrator") {
+			t.Errorf("owner %q: install over a planted file = %v, want a Romanian refusal", owner, err)
+		}
+		if len(f.time.asked) != 0 || len(named(f.commands, "schtasks")) != 0 {
+			t.Errorf("owner %q: after the refusal, time service %q, commands %q; want nothing installed", owner, f.time.asked, f.commands)
+		}
+		if err := a.uninstall(`C:\proba-inregistrare\recspike.exe`); err == nil ||
+			!strings.HasPrefix(err.Error(), "nu pot citi setările salvate ale serviciului de timp Windows") {
+			t.Errorf("owner %q: uninstall with a planted file = %v, want a Romanian refusal", owner, err)
+		}
+		if len(f.time.asked) != 0 {
+			t.Errorf("owner %q: uninstall applied the planted settings: %q", owner, f.time.asked)
+		}
+	}
+}
+
+// TestUninstall_PiRestoresTheModesOfBefore (Final fix A review, Minor 9):
+// `sudo ./recspike install` gives the Pi's release folder and programs
+// mode 0755, and keeps their modes of before where only root writes;
+// uninstall puts them back with their ownership. An uninstall with no
+// boot service installed changes nothing in the folder.
+func TestUninstall_PiRestoresTheModesOfBefore(t *testing.T) {
+	release := filepath.Join(t.TempDir(), "proba")
+	if err := os.MkdirAll(release, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(release, 0o750); err != nil { //nolint:gosec // the folder's mode of before install, whatever the umask
+		t.Fatal(err)
+	}
+	exe := filepath.Join(release, "recspike")
+	for name, mode := range map[string]os.FileMode{"recspike": 0o755, "ipcam-hub": 0o700} {
+		if err := os.WriteFile(filepath.Join(release, name), []byte("ELF"), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("SUDO_UID", "1000")
+	t.Setenv("SUDO_GID", "1001")
+
+	a, f, _ := newAutostart(t, "linux", true)
+	if err := a.uninstall(exe); err != nil {
+		t.Fatalf("uninstall without a boot service: %v", err)
+	}
+	if len(f.owners) != 0 {
+		t.Errorf("uninstall without a boot service changed %q, want nothing", f.owners)
+	}
+
+	if err := a.install(exe); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if err := a.install(exe); err != nil { // again: the modes of before stay those of the first
+		t.Fatalf("install again: %v", err)
+	}
+	f.owners = nil
+	if err := a.uninstall(exe); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	for _, change := range []string{release + " -rwxr-x---", exe + " -rwxr-xr-x", filepath.Join(release, "ipcam-hub") + " -rwx------"} {
+		if !slices.Contains(f.owners, change) {
+			t.Errorf("uninstall changed %q, want %q among them", f.owners, change)
+		}
+	}
+	if _, err := os.Stat(a.savedModes); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the modes of before are still kept after uninstall (%v)", err)
 	}
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -81,6 +82,88 @@ func (a autostart) ownRelease(exe string, uid, gid int, mode os.FileMode) error 
 		if err := own(p); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// saveModes keeps in savedModes the modes of the Pi's release folder of
+// exe and of the programs in it, before install gives them mode 0755, so
+// that uninstall puts them back (giveRelease). A path whose mode is kept
+// already keeps it: an install again does not take the probe's modes for
+// those of before.
+func (a autostart) saveModes(exe string) error {
+	modes, err := a.loadModes()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(exe)
+	programs, err := releasePrograms(dir, exe)
+	if err != nil {
+		return err
+	}
+	for _, p := range append([]string{dir}, programs...) {
+		if _, ok := modes[p]; ok {
+			continue
+		}
+		info, err := os.Lstat(p)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		case err != nil:
+			return err
+		}
+		modes[p] = info.Mode().Perm()
+	}
+	data, err := json.Marshal(modes)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(a.savedModes), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(a.savedModes, append(data, '\n'), 0o600)
+}
+
+// loadModes reads the modes that install kept, by path; none without a
+// file.
+func (a autostart) loadModes() (map[string]os.FileMode, error) {
+	modes := map[string]os.FileMode{}
+	data, err := os.ReadFile(a.savedModes)
+	if errors.Is(err, os.ErrNotExist) {
+		return modes, nil
+	}
+	if err == nil {
+		err = json.Unmarshal(data, &modes)
+	}
+	return modes, err
+}
+
+// giveRelease gives the Pi's release folder of exe and the programs in it
+// back to uid:gid, with the modes that install kept, and forgets them. The
+// modes go back first, while root still owns the folder and nobody else
+// can put a link in place of a program.
+func (a autostart) giveRelease(exe string, uid, gid int) error {
+	modes, err := a.loadModes()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(exe)
+	programs, err := releasePrograms(dir, exe)
+	if err != nil {
+		return err
+	}
+	for _, p := range append([]string{dir}, programs...) {
+		if mode, ok := modes[p]; ok {
+			if err := a.chmod(p, mode); err != nil {
+				return err
+			}
+		}
+	}
+	if err := a.ownRelease(exe, uid, gid, 0); err != nil {
+		return err
+	}
+	if err := os.Remove(a.savedModes); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	return nil
 }

@@ -25,6 +25,9 @@ const (
 	autostartName   = "ipcam-recspike"
 	systemdUnitPath = "/etc/systemd/system/ipcam-recspike.service"
 	shortcutArgs    = "mi1 --real --resume"
+	// piModesPath keeps the modes of the Pi's release from before install,
+	// where only root writes.
+	piModesPath = "/var/lib/ipcam-recspike/release-modes.json"
 )
 
 // xmlText escapes s for an XML text node.
@@ -147,8 +150,13 @@ type autostart struct {
 	tempDir     string
 	timeService timeService
 	// savedStart keeps the time service's settings from before install,
-	// outside the release folder (timeServiceFile).
+	// outside the release folder (timeServiceFile), in a folder of
+	// Administrators alone; ownerSID reads the owner of a file, as a SID.
 	savedStart string
+	ownerSID   func(path string) (string, error)
+	// savedModes keeps the modes of the Pi's release folder and programs
+	// from before install (piModesPath).
+	savedModes string
 	// mkdirAll makes the PC's data folders; chown and chmod change the
 	// owner and the mode of the Pi's release (security-1).
 	mkdirAll func(path string) error
@@ -189,6 +197,8 @@ func systemAutostart(out io.Writer) autostart {
 		tempDir:     os.TempDir(),
 		timeService: mi1.TimeService{},
 		savedStart:  timeServiceFile(),
+		ownerSID:    mi1.FileOwnerSID,
+		savedModes:  piModesPath,
 		mkdirAll:    func(path string) error { return os.MkdirAll(path, 0o700) },
 		chown:       os.Lchown,
 		chmod:       os.Chmod,
@@ -238,7 +248,11 @@ func (a autostart) install(exe string) error {
 		if !a.privileged() {
 			return errors.New("instalarea scrie în /etc/systemd: porniți-o cu sudo ./recspike install")
 		}
-		if err := a.ownRelease(exe, 0, 0, 0o755); err != nil {
+		err := a.saveModes(exe)
+		if err == nil {
+			err = a.ownRelease(exe, 0, 0, 0o755)
+		}
+		if err != nil {
 			return fmt.Errorf("nu pot da folderul probei lui root, așa că nu instalez pornirea automată: %w", err)
 		}
 		_, _ = fmt.Fprintln(a.out, "Folderul probei și programele din el sunt acum ale lui root; le schimbați doar cu sudo.")
@@ -297,21 +311,21 @@ func (a autostart) install(exe string) error {
 
 // uninstall removes the autostart and the shortcut, and gives the release
 // folder back as it was before install (security-1); what is already gone
-// is no error.
+// is no error. On the Pi, with no boot service installed, nothing changes.
 func (a autostart) uninstall(exe string) error {
 	if a.goos != "windows" {
 		if !a.privileged() {
 			return errors.New("dezinstalarea scrie în /etc/systemd: porniți-o cu sudo ./recspike uninstall")
 		}
-		if uid, gid, ok := sudoUser(); ok {
-			if err := a.ownRelease(exe, uid, gid, 0); err != nil {
-				return fmt.Errorf("nu pot da folderul probei înapoi contului dvs.: %w", err)
-			}
-			_, _ = fmt.Fprintln(a.out, "Folderul probei și programele din el sunt din nou ale contului dvs.")
-		}
 		if _, err := os.Stat(a.unitPath); errors.Is(err, os.ErrNotExist) {
 			_, _ = fmt.Fprintln(a.out, "Pornirea automată nu este instalată.")
 			return nil
+		}
+		if uid, gid, ok := sudoUser(); ok {
+			if err := a.giveRelease(exe, uid, gid); err != nil {
+				return fmt.Errorf("nu pot da folderul probei înapoi contului dvs.: %w", err)
+			}
+			_, _ = fmt.Fprintln(a.out, "Folderul probei și programele din el sunt din nou ale contului dvs.")
 		}
 		if err := a.run("systemctl", "disable", autostartName+".service"); err != nil {
 			return err
@@ -380,6 +394,9 @@ const restoreByHand = "într-o fereastră de administrator: sc config w32time st
 // how to restore Windows' usual ones by hand (mi1-6).
 func (a autostart) saveTimeService() error {
 	const cannotSave = "nu pot salva setările de dinainte ale serviciului de timp Windows"
+	if err := a.protectSavedStart(); err != nil {
+		return fmt.Errorf("%s: %w", cannotSave, err)
+	}
 	saved, found, err := a.loadSavedTimeService()
 	switch {
 	case err != nil:
@@ -404,13 +421,31 @@ func (a autostart) saveTimeService() error {
 	}
 	data, err := json.Marshal(saved)
 	if err == nil {
-		err = os.MkdirAll(filepath.Dir(a.savedStart), 0o700)
-	}
-	if err == nil {
 		err = os.WriteFile(a.savedStart, append(data, '\n'), 0o600)
+	}
+	if err == nil { // whatever owner Windows gives the files of an administrator
+		own := mi1.AdministratorsOwnCommand(a.savedStart)
+		err = a.run(own[0], own[1:]...)
 	}
 	if err != nil {
 		return fmt.Errorf("%s: %w", cannotSave, err)
+	}
+	return nil
+}
+
+// protectSavedStart makes the folder of savedStart and gives it to
+// Administrators alone, with a protected DACL (Administrators and SYSTEM):
+// %ProgramData% lets any user create a folder in it first, and the elevated
+// uninstall applies what the folder holds to the time service.
+func (a autostart) protectSavedStart() error {
+	dir := filepath.Dir(a.savedStart)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	for _, cmd := range mi1.AdministratorsOnlyCommands(dir) {
+		if err := a.run(cmd[0], cmd[1:]...); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -423,11 +458,21 @@ func (a autostart) probeSettings(saved savedTimeService) bool {
 }
 
 // loadSavedTimeService reads the settings that an install saved; found is
-// false when there is no file.
+// false when there is no file. A file that Administrators or SYSTEM do not
+// own is refused: another account may have put it there before the first
+// install.
 func (a autostart) loadSavedTimeService() (saved savedTimeService, found bool, err error) {
 	data, err := os.ReadFile(a.savedStart)
 	if errors.Is(err, os.ErrNotExist) {
 		return saved, false, nil
+	}
+	var owner string
+	if err == nil {
+		owner, err = a.ownerSID(a.savedStart)
+	}
+	if err == nil && !mi1.AdministratorsOwned(owner) {
+		err = fmt.Errorf("fișierul %s nu aparține administratorilor sau sistemului, deci poate l-a pus acolo alt cont, "+
+			"și nu îl folosesc; ștergeți-l dintr-o fereastră de administrator", a.savedStart)
 	}
 	if err == nil {
 		err = json.Unmarshal(data, &saved)

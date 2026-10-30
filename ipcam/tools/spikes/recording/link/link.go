@@ -187,18 +187,28 @@ func (c *Conn) readLine() ([]byte, error) {
 // PullResults asks the far side for its results folder and unpacks it into
 // dir, which it creates; files already there with other names stay.
 func (c *Conn) PullResults(dir string) error {
-	if err := c.Send(PullResults{}); err != nil {
-		return err
-	}
-	m, err := c.Receive()
+	data, err := c.FetchResults()
 	if err != nil {
 		return err
 	}
+	return Untar(dir, data)
+}
+
+// FetchResults asks the peer for its results folder and returns it as the
+// tar that Untar unpacks.
+func (c *Conn) FetchResults() ([]byte, error) {
+	if err := c.Send(PullResults{}); err != nil {
+		return nil, err
+	}
+	m, err := c.Receive()
+	if err != nil {
+		return nil, err
+	}
 	tarball, ok := m.(ResultsTar)
 	if !ok {
-		return fmt.Errorf("link: got %s, want results_tar", m.Type())
+		return nil, fmt.Errorf("link: got %s, want results_tar", m.Type())
 	}
-	return Untar(dir, tarball.Data)
+	return tarball.Data, nil
 }
 
 // SendResultsTar answers PullResults with the results folder dir; a folder

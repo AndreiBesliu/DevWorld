@@ -19,6 +19,7 @@ import (
 	"filippo.io/age"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubproc"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/lastindex"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
@@ -864,6 +865,75 @@ func TestResume_StopSaveLost_ColdBootStillMeasured(t *testing.T) {
 	}
 	if ms := reports[0].ColdBootMs; ms == nil || *ms > 41_000 || *ms < 40_000 {
 		t.Errorf("ColdBootMs = %s, want the 41 s of uptime at the recording event although the stop's save was lost", ptrText(ms))
+	}
+}
+
+// TestResume_ElevatedHubRunsTheReleasesMediaMTX (Final fix A review,
+// Minor 1): the resume after a reboot runs elevated on the PC (the boot
+// task, the shortcut), and a run's run.json lies in work/, which the
+// owner's own token may change. A run.json that names another MediaMTX,
+// changed before the resume or while a run is announced, is not obeyed:
+// every start of ipcam-hub runs the release's own, the one next to it.
+func TestResume_ElevatedHubRunsTheReleasesMediaMTX(t *testing.T) {
+	r := newRig(t, "pi")
+	r.cutPower(t, SetOptions{Set: SetPiSysrq, Mode: ModeAutomated, Kind: "sysrq", Window: windowAroundNow(t)},
+		func(d *Driver, down func()) {
+			d.OSStop = func(context.Context, controller.ShutdownKind) error {
+				down()
+				return nil
+			}
+		})
+	planted := filepath.Join(t.TempDir(), "planted", "mediamtx")
+	plant := func() error {
+		configs, err := filepath.Glob(filepath.Join(r.work, "*", "run.json"))
+		for _, config := range configs {
+			cfg, err := hubproc.ReadConfig(config)
+			if err != nil {
+				return err
+			}
+			cfg.MediaMTX = planted
+			if err := hubproc.WriteConfig(config, cfg); err != nil {
+				return err
+			}
+		}
+		return err
+	}
+	if err := plant(); err != nil {
+		t.Fatal(err)
+	}
+	// Each save of the run state comes between a run's run.json and its
+	// ipcam-hub: the next run's first start, and the restarts after a stop.
+	realSync := syncPath
+	t.Cleanup(func() { syncPath = realSync })
+	syncPath = func(path string) error {
+		if filepath.Base(path) == "run-state.json" {
+			if err := plant(); err != nil {
+				return err
+			}
+		}
+		return realSync(path)
+	}
+	started := filepath.Join(t.TempDir(), "mediamtx.log")
+	t.Setenv(fakeMediaMTXLogEnv, started)
+
+	d := r.driver(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	next := cancelAt(r.f, "ready pi-sysrq-02-1", cancel)
+	if err := d.Resume(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Resume = %v, want the test's cancel during run 2", err)
+	}
+	if err := <-next; err != nil {
+		t.Fatal(err)
+	}
+	lines := readLog(t, started)
+	if len(lines) < 2 {
+		t.Fatalf("ipcam-hub ran %d times, want after the reboot and for run 2: %q", len(lines), lines)
+	}
+	for _, l := range lines {
+		if l != "mediamtx="+d.MediaMTX {
+			t.Errorf("ipcam-hub ran with %q, want the release's own MediaMTX (%q)", l, "mediamtx="+d.MediaMTX)
+		}
 	}
 }
 

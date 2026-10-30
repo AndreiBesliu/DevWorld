@@ -25,9 +25,12 @@ var pullReadTimeout = 30 * time.Second
 // push`, stores the Pi's results folder under results/pi, and prints what
 // both devices hold and, in Romanian, what is missing. It takes
 // connections side by side, each with a read deadline (pullReadTimeout),
-// and closes the ones still open once the Pi's folder is here, so that a
-// LAN peer that connects and sends nothing holds neither the Pi's push nor
-// the end (security-2).
+// reads each Pi's folder apart and stores one at a time, and closes the
+// connections still open once the Pi's folder is here, so that a LAN peer
+// that connects and sends nothing, or says it is the Pi and then sends
+// nothing, holds neither the Pi's push nor the end (security-2). Only a
+// connection whose hello was the Pi's is told, when its transfer fails,
+// to push again: a port scan or another host gets no line.
 func pull(ctx context.Context, ln net.Listener, resultsDir string, out io.Writer) error {
 	defer func() { _ = ln.Close() }()
 	_, _ = fmt.Fprintln(out, "Aștept rezultatele Pi-ului: porniți pe Pi ./recspike push --controller <adresa acestui PC>.")
@@ -40,7 +43,7 @@ func pull(ctx context.Context, ln net.Listener, resultsDir string, out io.Writer
 	defer stop()
 	var (
 		wg     sync.WaitGroup
-		mu     sync.Mutex // the screen, and one Pi folder at a time
+		mu     sync.Mutex // the screen, and one Pi folder stored at a time
 		pulled bool
 	)
 	for {
@@ -62,12 +65,15 @@ func pull(ctx context.Context, ln net.Listener, resultsDir string, out io.Writer
 			defer func() { _ = nc.Close() }()
 			conn := link.NewConn(nc)
 			_ = nc.SetReadDeadline(time.Now().Add(pullReadTimeout))
-			err := piHello(conn)
+			if piHello(conn) != nil {
+				return // a port scan, a silent peer or another host
+			}
+			_ = nc.SetReadDeadline(time.Now().Add(pullReadTimeout))
+			tarball, err := conn.FetchResults()
 			mu.Lock()
 			defer mu.Unlock()
 			if err == nil && !pulled {
-				_ = nc.SetReadDeadline(time.Now().Add(pullReadTimeout))
-				if err = pullFrom(conn, resultsDir, out); err == nil {
+				if err = storePi(conn, tarball, resultsDir, out); err == nil {
 					pulled = true
 					finish() // the Pi's folder is here: no more connections
 				}
@@ -91,10 +97,10 @@ func piHello(conn *link.Conn) error {
 	return nil
 }
 
-// pullFrom pulls the Pi's results folder over conn, whose hello was the
-// Pi's, and prints what both devices hold.
-func pullFrom(conn *link.Conn, resultsDir string, out io.Writer) error {
-	if err := conn.PullResults(filepath.Join(resultsDir, "pi")); err != nil {
+// storePi stores tarball, the Pi's results folder that came over conn,
+// under results/pi, and prints what both devices hold.
+func storePi(conn *link.Conn, tarball []byte, resultsDir string, out io.Writer) error {
+	if err := link.Untar(filepath.Join(resultsDir, "pi"), tarball); err != nil {
 		return err
 	}
 	_ = conn.Send(link.Bye{})
