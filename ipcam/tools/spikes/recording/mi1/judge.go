@@ -402,9 +402,11 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 	case !complete && res.counted == 0:
 		res.state = setIncomplete
 		res.reasons = append(res.reasons, s.name+": lipsește")
+		openSet(j, s, missing)
 	case !complete:
 		res.state = setIncomplete
 		res.reasons = append(res.reasons, missing...)
+		openSet(j, s, missing)
 	case median > GeneralMedianMs:
 		res.state = setFail
 		res.reasons = append(res.reasons, fmt.Sprintf("%s: mediana %s, peste %s", s.name, SecondsText(median), WholeSecondsText(GeneralMedianMs)))
@@ -436,6 +438,18 @@ func judgeSet(j *results.Judgement, s setInfo, runs []results.Run, piUnsupported
 		j.Rows = append(j.Rows, o17Row(j, prefix, s.name, s.source, o17, marked))
 	}
 	return res
+}
+
+// openSet records, for a set of an owner device, what keeps it from its
+// plan (missing) as its open part (results.OpenPart); the lab's sets are
+// no owner's.
+func openSet(j *results.Judgement, s setInfo, missing []string) {
+	if s.source != "pc" && s.source != "pi" {
+		return
+	}
+	for _, m := range missing {
+		j.AddOpen(results.Label("MI1", s.name, s.source), strings.TrimPrefix(m, s.name+": "))
+	}
 }
 
 // notO17Run is why a run marked O17-off (encrypted, the setting off) is not

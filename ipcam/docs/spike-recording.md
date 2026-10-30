@@ -273,8 +273,11 @@ La final, PC-ul adună rezultatele ambelor dispozitive și vă spune ce lipseșt
 1. Opriți orice controlor deschis pe PC (Ctrl+C în fereastra lui).
 2. Pe PC, într-o fereastră de administrator: `reccontroller.exe pull`. Apare «Aștept rezultatele Pi-ului: …»<!--reccontroller-->.
 3. Pe Pi: `sudo ./recspike push --controller <adresa PC-ului>`. `sudo` e necesar, pentru că rezultatele Pi-ului sunt ale administratorului (root); fără el, recspike refuză cu «rezultatele sunt ale lui root, fiindcă proba a rulat cu sudo»<!--recspike-->. Pe un Pi armv6: `./recspike-probe-linux-armv6 --push <adresa PC-ului>`. Pi-ul scrie «Am trimis rezultatele.»<!--recspike-->.
-4. Pe PC apare «Am pus rezultatele Pi-ului în …»<!--reccontroller-->, apoi «Prezente: …»<!--reccontroller--> și fie «Nu lipsește nimic.»<!--reccontroller-->, fie «Lipsesc: …»<!--reccontroller-->. Cu un Pi armv6, PC-ul scrie întâi «Modelul Pi-ului nu este suportat»<!--reccontroller--> și nu mai așteaptă rezultate cu Pi-ul ca gazdă.
-5. Dacă lipsește ceva, refaceți pasul care îl produce, apoi reluați acest pas:
+4. Pe PC apare «Am pus rezultatele Pi-ului în …»<!--reccontroller-->, apoi «Prezente: …»<!--reccontroller-->. Cu un Pi armv6, PC-ul scrie întâi «Modelul Pi-ului nu este suportat»<!--reccontroller--> și nu mai așteaptă rezultate cu Pi-ul ca gazdă. PC-ul verifică apoi dacă rezultatele ajung pentru un verdict, nu doar dacă există:
+   - «Lipsesc: …»<!--reccontroller--> numește ce nu există deloc;
+   - «Părți incomplete:»<!--reccontroller--> e urmat de câte un rând pentru fiecare parte care există, dar nu ajunge încă pentru un verdict, de exemplu `MI1 pc-bugcheck (pc): 14 din 20 rulări valide → pasul 6, porniți din nou aceeași comandă.` Rândul spune ce lipsește și pasul de refăcut;
+   - «Nu lipsește nimic.»<!--reccontroller--> apare doar când nu lipsește nimic și nicio parte nu e incompletă.
+5. Dacă lipsește ceva sau o parte e incompletă, refaceți pasul numit, pe dispozitivul din paranteză, apoi reluați acest pas. Pentru o parte incompletă, rândul ei numește pasul: porniți din nou aceeași comandă. Un set MI1 continuă de unde a rămas; MI2, MI3, MI4 și MI9 se reiau de la început. Pentru ce lipsește:
 
    | Ce lipsește | Ce refaceți |
    |---|---|
@@ -287,14 +290,14 @@ La final, PC-ul adună rezultatele ambelor dispozitive și vă spune ce lipseșt
    | `MI9 lan (pc)`, `MI9 lan (pi)` | pasul 11, pe dispozitivul numit |
    | `AGE` | pasul 12 |
 
-6. Când nu mai lipsește nimic, deschideți `C:\proba-inregistrare`, faceți clic dreapta pe folderul `results` → „Copiere”, apoi clic dreapta pe desktop → „Lipire”. Arhiva se face pe desktop, pentru că în folderul probei scrie doar un administrator (pasul 4.3). Pe desktop, clic dreapta pe folderul `results` → „Comprimați în fișier ZIP”. Dacă nu vedeți opțiunea: „Afișați mai multe opțiuni” → „Trimitere la” → „Folder comprimat (arhivat)”. Trimiteți doar această arhivă: e a PC-ului și cuprinde și rezultatele Pi-ului.
+6. Când apare «Nu lipsește nimic.»<!--reccontroller-->, deschideți `C:\proba-inregistrare`, faceți clic dreapta pe folderul `results` → „Copiere”, apoi clic dreapta pe desktop → „Lipire”. Arhiva se face pe desktop, pentru că în folderul probei scrie doar un administrator (pasul 4.3). Pe desktop, clic dreapta pe folderul `results` → „Comprimați în fișier ZIP”. Dacă nu vedeți opțiunea: „Afișați mai multe opțiuni” → „Trimitere la” → „Folder comprimat (arhivat)”. Trimiteți doar această arhivă: e a PC-ului și cuprinde și rezultatele Pi-ului.
 7. Trimiteți arhiva în chat. Sau încărcați-o în Google Drive-ul dvs., în folderul `ipcam-teste` (creați-l dacă nu există), și scrieți-ne în chat că e acolo.
 
 Rezultatele numesc dispozitivele doar `pc` și `pi` și conțin modelul Pi-ului, sistemul de operare, tipul de stocare și măsurătorile. Nu conțin adrese IP, numele rețelei, numele dispozitivelor sau numere de serie.
 
 ## 14. Cum opriți testul și ștergeți pornirea automată
 
-După ce ne-ați trimis rezultatele:
+După ce v-am confirmat în chat că rezultatele sunt complete, ștergeți pornirea automată și folderele probei, ca mai jos. Până la confirmare, păstrați folderele `C:\proba-inregistrare` și, pe Pi, `~/proba-inregistrare`, cu pornirea automată instalată: dacă trebuie refăcută o parte, ea continuă din aceste foldere, fără o instalare nouă.
 
 1. Pe PC, în fereastra de administrator: `recspike.exe uninstall`. Trebuie să apară «Pornirea automată și scurtătura de pe desktop au fost șterse.»<!--recspike-->, «Serviciul de timp Windows are din nou setările de dinainte.»<!--recspike--> și «Folderul probei are din nou permisiunile de dinainte; îl puteți șterge.»<!--recspike-->: serviciul de timp are din nou pornirea și declanșatoarele de dinainte de pasul 4. Dacă în locul rândului despre serviciul de timp apare «Setările de dinainte ale serviciului de timp Windows nu sunt salvate»<!--recspike-->, scrieți în aceeași fereastră, pe rând, cele două comenzi `sc` din acel rând.
 2. Pe Pi (nu și pe un Pi armv6): `sudo ./recspike uninstall`. Trebuie să apară «Folderul probei și programele din el sunt din nou ale contului dvs.»<!--recspike--> și «Pornirea automată a fost ștearsă.»<!--recspike-->. Dacă pe Pi rulează încă un controlor pornit desprins de `ssh` (pasul 5), opriți-l: `sudo pkill -x reccontroller` (pe un Pi armv6: `pkill -f reccontroller-linux-armv6`).

@@ -113,6 +113,9 @@ const (
 	partDeferred
 )
 
+// piPart names the Pi's MI4 as the final collection does.
+var piPart = results.Label("MI4", "", "pi")
+
 // verdict collects the parts of G13.
 type verdict struct {
 	j        results.Judgement
@@ -168,6 +171,7 @@ func Judge(envs []results.Envelope) results.Judgement {
 			v.j.Reasons = append(v.j.Reasons, "pi: amânat ("+piDeferral+")")
 		} else {
 			v.j.Reasons = append(v.j.Reasons, "pi: lipsește proba MI4")
+			v.j.AddOpen(piPart, "lipsește proba MI4")
 		}
 		v.row("MI4 pi: rezultat", "lipsește", "", "pi", nil)
 		v.add(state, "")
@@ -197,6 +201,7 @@ func (v *verdict) judgePi(e *results.Envelope) {
 	if len(d.ReadMs) == 0 {
 		v.row("MI4 pi: citiri aleatoare", "lipsește", "fiecare ≤ 50 ms", "pi", nil)
 		v.add(partMissing, "")
+		v.j.AddOpen(piPart, "lipsesc citirile aleatoare")
 	} else {
 		readMax := slices.Max(d.ReadMs)
 		ok := readMax <= MaxReadMs
@@ -219,6 +224,7 @@ func (v *verdict) judgeSeek(d *results.Mi4Data) {
 	if len(d.SeekMs) == 0 {
 		v.row("MI4 pi: primul cadru după salt", "lipsește", "≤ 1500 ms", "pi", nil)
 		v.add(partMissing, "")
+		v.j.AddOpen(piPart, "lipsesc salturile")
 		return
 	}
 	seekMax := slices.Max(d.SeekMs)
@@ -268,8 +274,9 @@ func (v *verdict) judgeRate(e *results.Envelope) {
 	case d.CryptoMBs <= 0:
 		v.row("MI4 pi: criptare pe un nucleu", "lipsește", "", "pi", nil)
 		v.add(partMissing, "")
+		v.j.AddOpen(piPart, "lipsește criptarea pe un nucleu")
 		return
-	case !judged:
+	case !judged: // the model's want, which no run of the owner gives
 		v.row("MI4 pi: criptare pe un nucleu", mbs(d.CryptoMBs), "fără prag: modelul nu are un număr recomandat", "pi", nil)
 		v.add(partMissing, "")
 		return

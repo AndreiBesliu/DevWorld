@@ -120,6 +120,14 @@ func (v *verdict) row(code, value, limit, source string, pass *bool) {
 	v.j.Rows = append(v.j.Rows, results.Row{Code: code, Value: value, Limit: limit, Source: source, Pass: pass})
 }
 
+// open records why l, a LAN leg of an owner device, leaves G18 without a
+// verdict, as its part of the final collection (results.OpenPart).
+func (v *verdict) open(l leg, why string) {
+	if l.Source == SourceLAN && (l.host == "pc" || l.host == "pi") {
+		v.j.AddOpen(results.Label("MI9", LANSet, l.host), why)
+	}
+}
+
 // legRow is a row of l: its source is the leg's, its table its host's.
 func (v *verdict) legRow(l leg, code, value, limit string, pass *bool) {
 	v.j.Rows = append(v.j.Rows, results.Row{Code: code, Value: value, Limit: limit, Source: l.Source, Host: l.host, Pass: pass})
@@ -217,6 +225,7 @@ func (v *verdict) seeks(legs []leg) {
 			v.legRow(l, rowCode, "lipsește", limit, nil)
 			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s (%s): lipsesc salturile", l.host, l.Source))
 			v.missing = true
+			v.open(l, "lipsesc salturile")
 			continue
 		}
 		worst, cut := slowest(l.SeekMs, l.Partial)
@@ -234,6 +243,7 @@ func (v *verdict) seeks(legs []leg) {
 			v.legRow(l, rowCode, fmt.Sprintf("max %s ms (%d din %d de salturi)", ms(worst), len(l.SeekMs), Seeks), limit, nil)
 			v.j.Reasons = append(v.j.Reasons, fmt.Sprintf("%s (%s): s-au măsurat doar %d din %d de salturi", l.host, l.Source, len(l.SeekMs), Seeks))
 			v.missing = true
+			v.open(l, fmt.Sprintf("s-au măsurat doar %d din %d de salturi", len(l.SeekMs), Seeks))
 		default:
 			v.legRow(l, rowCode, fmt.Sprintf("max %s ms (%d salturi)", ms(worst), len(l.SeekMs)), limit, results.RowPass(true, true))
 		}

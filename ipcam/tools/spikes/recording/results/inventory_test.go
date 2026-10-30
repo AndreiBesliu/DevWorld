@@ -92,7 +92,7 @@ func TestInventory_ReportsMissingSets(t *testing.T) {
 	if !slices.IsSorted(present) || len(slices.Compact(slices.Clone(present))) != len(present) {
 		t.Errorf("present = %q, want sorted and without repeats", present)
 	}
-	text := InventoryText(present, missing)
+	text := InventoryText(present, missing, nil)
 	if !strings.Contains(text, "Lipsesc: MI2 (pi), MI4 (pi)") {
 		t.Errorf("InventoryText = %q, want «Lipsesc: MI2 (pi), MI4 (pi)»", text)
 	}
@@ -107,7 +107,7 @@ func TestInventory_ReportsMissingSets(t *testing.T) {
 		if len(missing) != 0 {
 			t.Errorf("missing = %q, want none", missing)
 		}
-		if text := InventoryText(present, missing); strings.Contains(text, "Lipsesc") || !strings.Contains(text, "Nu lipsește nimic.") {
+		if text := InventoryText(present, missing, nil); strings.Contains(text, "Lipsesc") || !strings.Contains(text, "Nu lipsește nimic.") {
 			t.Errorf("InventoryText = %q, want «Nu lipsește nimic.»", text)
 		}
 	})
@@ -132,4 +132,51 @@ func TestInventory_ReportsMissingSets(t *testing.T) {
 			t.Errorf("Inventory = %q, %q; want nothing present and %q missing", present, missing, want)
 		}
 	})
+}
+
+// TestIncompleteParts_InTheGuidesOrderWithTheirStep (mi1-4, mis-4): the
+// open parts that the judges leave are listed once per part, in the
+// guide's order, each with what it lacks and its guide step; an absent
+// part is left to «Lipsesc», and an unsupported Pi's parts are not
+// listed. «Nu lipsește nimic.» needs both lists empty.
+func TestIncompleteParts_InTheGuidesOrderWithTheirStep(t *testing.T) {
+	open := []OpenPart{
+		{"MI9 lan (pi)", "s-au măsurat doar 14 din 20 de salturi"},
+		{"MI1 pc-bugcheck (pc)", "14 din 20 rulări valide"},
+		{"MI1 pc-bugcheck (pc)", "14 din 20 porniri la rece măsurate"},
+		{"MI1 pc-bugcheck (pc)", "14 din 20 rulări valide"},
+		{"MI2 (pc)", "proba de 72 h a rulat doar 30,0 h"},
+		{"MI3 (pi)", "lipsește proba MI3"},
+	}
+	got := IncompleteParts(open, []string{"MI3 (pi)"}, true)
+	want := []string{
+		"MI1 pc-bugcheck (pc): 14 din 20 rulări valide; 14 din 20 porniri la rece măsurate → pasul 6, porniți din nou aceeași comandă.",
+		"MI2 (pc): proba de 72 h a rulat doar 30,0 h → pasul 8, porniți din nou ambele comenzi.",
+		"MI9 lan (pi): s-au măsurat doar 14 din 20 de salturi → pasul 11, porniți din nou aceeași comandă.",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("IncompleteParts =\n%q\nwant\n%q", got, want)
+	}
+	if got := IncompleteParts(open, nil, false); len(got) != 2 || strings.Contains(strings.Join(got, "\n"), "(pi)") {
+		t.Errorf("with an unsupported Pi, IncompleteParts = %q, want only the PC's two parts", got)
+	}
+	text := InventoryText([]string{"AGE"}, nil, want[:1])
+	if !strings.Contains(text, "Părți incomplete:\n- "+want[0]+"\n") || strings.Contains(text, "Nu lipsește nimic") {
+		t.Errorf("InventoryText = %q, want the incomplete part and no «Nu lipsește nimic»", text)
+	}
+}
+
+// TestInventory_AnAGEResultThatMeasuredNothingIsMissing (report-4): an
+// interrupted AGE result, or one without mbps, does not count.
+func TestInventory_AnAGEResultThatMeasuredNothingIsMissing(t *testing.T) {
+	for _, result := range []string{
+		`{"scenario":"AGE","interrupted":true,"mbps":12.5}`,
+		`{"scenario":"AGE","interrupted":false}`,
+	} {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "app", "android-samsung-sm-a245f-20261101-101500-age.json"), result)
+		if present, missing := Inventory(dir, false); slices.Contains(present, "AGE") || !slices.Contains(missing, "AGE") {
+			t.Errorf("%s: present %q, missing %q; want AGE missing", result, present, missing)
+		}
+	}
 }
