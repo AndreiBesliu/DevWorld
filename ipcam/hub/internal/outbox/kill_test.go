@@ -71,7 +71,7 @@ func runKillHelper() int {
 
 // TestOutbox_ResumesFromLastOffset (P25, §9.9): a hub killed during an
 // upload, once offset K is persisted, leaves the placement uploading; the
-// next hub resets it to pending before its first poll and resumes it at K,
+// next hub resets it to pending at its first poll and resumes it at K,
 // sending only the rest, with one Commit and one object.
 func TestOutbox_ResumesFromLastOffset(t *testing.T) {
 	dir := t.TempDir()
@@ -137,6 +137,7 @@ func TestOutbox_ResumesFromLastOffset(t *testing.T) {
 	case <-blocked:
 	case <-time.After(time.Minute):
 		_ = first.Process.Kill()
+		_ = first.Wait() // its output is complete only once Wait returns
 		t.Fatalf("the first helper never sent the chunk after offset %d; its output:\n%s", k, firstOut)
 	}
 	if err := first.Process.Kill(); err != nil {
@@ -158,7 +159,6 @@ func TestOutbox_ResumesFromLastOffset(t *testing.T) {
 	_ = cat.Close()
 
 	mark := len(f.callsOf(""))
-	queuedBefore := len(rec.queuedStates())
 	second, secondOut := startKillHelper(t, env)
 	waited := make(chan error, 1)
 	go func() { waited <- second.Wait() }()
@@ -169,12 +169,13 @@ func TestOutbox_ResumesFromLastOffset(t *testing.T) {
 		}
 	case <-time.After(time.Minute):
 		_ = second.Process.Kill()
+		<-waited // its output is complete only once Wait returns
 		t.Fatalf("the second helper did not finish within 1 min; its output:\n%s", secondOut)
 	}
 
-	if states := rec.queuedStates()[queuedBefore:]; len(states) != 1 || states[0] != catalog.PlacementPending {
-		t.Errorf("the second helper first read the placement as %q, want pending: Run resets it before its first poll", states)
-	}
+	// The row was uploading after the kill, and DuePlacements never returns
+	// such a row: that the second helper uploads it at all, from K, proves
+	// Run's reset to pending kept its session.
 	var chunks []fakeCall
 	commits := 0
 	for _, c := range f.callsOf("")[mark:] {
@@ -207,7 +208,7 @@ func TestOutbox_ResumesFromLastOffset(t *testing.T) {
 }
 
 // startKillHelper starts the test binary as the helper process with env,
-// and returns it and its combined output, read once it has exited.
+// and returns it and its combined output, to read once Wait has returned.
 func startKillHelper(t *testing.T, env []string) (*exec.Cmd, *bytes.Buffer) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec // G204: the test binary itself
@@ -225,19 +226,12 @@ func startKillHelper(t *testing.T, env []string) (*exec.Cmd, *bytes.Buffer) {
 type helperReports struct {
 	mu      sync.Mutex
 	offsets map[int64]bool // the persisted offsets that Progress reported
-	queued  []string
 }
 
 func (r *helperReports) persisted(off int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.offsets[off]
-}
-
-func (r *helperReports) queuedStates() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]string(nil), r.queued...)
 }
 
 // rpcRequest and rpcReply carry a Destination call between httpDest and
@@ -262,23 +256,17 @@ type rpcReply struct {
 }
 
 // serveFake serves f's upload methods at /<method>, and records the
-// helpers' observer reports at /report.
+// helpers' persisted offsets at /report.
 func serveFake(f *fakeDest, rec *helperReports) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /report", func(_ http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
+		off, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
-		switch q.Get("event") {
-		case "progress":
-			off, _ := strconv.ParseInt(q.Get("offset"), 10, 64)
-			if rec.offsets == nil {
-				rec.offsets = map[int64]bool{}
-			}
-			rec.offsets[off] = true
-		case "queued":
-			rec.queued = append(rec.queued, q.Get("state"))
+		if rec.offsets == nil {
+			rec.offsets = map[int64]bool{}
 		}
+		rec.offsets[off] = true
 	})
 	mux.HandleFunc("POST /{method}", func(w http.ResponseWriter, r *http.Request) {
 		var req rpcRequest
@@ -421,8 +409,8 @@ func (d *httpDest) List(context.Context, storage.ObjectKey) iter.Seq2[storage.Ob
 }
 
 // httpObserver is the helper's Observer: it reports to the parent each
-// persisted offset and the state in which the queue first read the
-// placement, and cancels the helper's queue once the placement is verified.
+// persisted offset, and cancels the helper's queue once the placement is
+// verified.
 type httpObserver struct {
 	url      string
 	verified context.CancelFunc
@@ -436,14 +424,12 @@ func (o *httpObserver) report(values url.Values) {
 	}
 }
 
-func (o *httpObserver) Queued(p catalog.Placement) {
-	o.report(url.Values{"event": {"queued"}, "state": {p.State}})
-}
+func (o *httpObserver) Queued(catalog.Placement) {}
 
 func (o *httpObserver) Resumed(catalog.Placement, int64) {}
 
 func (o *httpObserver) Progress(_ catalog.Placement, confirmedOffset, _ int64) {
-	o.report(url.Values{"event": {"progress"}, "offset": {strconv.FormatInt(confirmedOffset, 10)}})
+	o.report(url.Values{"offset": {strconv.FormatInt(confirmedOffset, 10)}})
 }
 
 func (o *httpObserver) Verified(catalog.Placement, storage.ObjectRef, storage.CallCounts) {

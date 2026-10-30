@@ -23,7 +23,7 @@ const (
 	// ResetAfter, then one probe upload.
 	StatePausedDailyCap DestState = "PAUSED_DAILY_CAP"
 	// StateUnreachable: the destination keeps failing while the backoff is at
-	// its cap. It is retried, and is OK again on the first success.
+	// its cap. It is retried, and is OK again on the first chunk it confirms.
 	StateUnreachable DestState = "UNREACHABLE"
 )
 
@@ -181,11 +181,19 @@ func (d *destination) failure(now time.Time, r float64, retryAfter time.Duration
 	return wait
 }
 
-// success ends the failures in a row: an UNREACHABLE d, or one whose
-// daily-cap probe passed, is OK again.
-func (d *destination) success() {
+// answered ends the failures in a row: d confirmed a chunk, which proves that
+// it answers, so an UNREACHABLE d is OK again.
+func (d *destination) answered() {
 	d.failures = 0
-	if d.state == StateUnreachable || d.state == StatePausedDailyCap {
+	if d.state == StateUnreachable {
+		d.set(StateOK, "")
+	}
+}
+
+// success is a verified copy on d: d answered, and a daily-cap probe passed.
+func (d *destination) success() {
+	d.answered()
+	if d.state == StatePausedDailyCap {
 		d.set(StateOK, "")
 	}
 }

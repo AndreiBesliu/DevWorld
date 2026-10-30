@@ -38,9 +38,17 @@ type Clock interface {
 
 // Options are a Queue's settings. Every zero field takes its default.
 type Options struct {
-	Clock   Clock          // the system clock by default
-	Rand    func() float64 // in [0, 1): the backoff's jitter; math/rand/v2's Float64 by default
-	Workers int            // uploads at a time per destination (§9.3 parallel_per_destination); 2 by default
+	Clock Clock // the system clock by default
+	// Rand returns the backoff's jitter, in [0, 1); math/rand/v2's Float64
+	// by default. The queue calls it with its mutex held, so it need not be
+	// safe for concurrent use.
+	Rand func() float64
+	// Workers is how many uploads each destination runs at a time (§9.3
+	// parallel_per_destination); 2 by default. It counts per destination, so
+	// a backlog on one holds back no other (C2-R8). An upload holds a buffer
+	// of Caps.PartSize while it sends and another while it verifies, so peak
+	// buffer memory is about destinations × Workers × 2 × Caps.PartSize.
+	Workers int
 	// RecDir is the spool, ipcam-hub's <dataDir>/rec: a segment's Path is
 	// relative to it.
 	RecDir string
@@ -58,8 +66,10 @@ type Options struct {
 // Observer hears what the queue does. Its methods are called from the
 // queue's goroutines and must not call the Queue.
 type Observer interface {
-	// Queued: a worker read p from DuePlacements for the first time, so only
-	// committed placements are reported.
+	// Queued: a worker read p from DuePlacements for the first time with its
+	// bytes, so only committed placements are reported. A placement whose
+	// bytes changed (superseded), or that came back after it failed for good,
+	// is queued anew.
 	Queued(p catalog.Placement)
 	// Resumed: p's upload continues at offset, which its provider confirmed.
 	Resumed(p catalog.Placement, offset int64)
@@ -70,15 +80,16 @@ type Observer interface {
 	// upload's API calls (P18).
 	Verified(p catalog.Placement, ref storage.ObjectRef, calls storage.CallCounts)
 	// Failed: p's upload failed for reason, one of auth_expired, quota_full,
-	// rate_limited, daily_cap, session_expired, not_found, transient,
-	// permanent, hash_mismatch and local_unreadable. p is as the catalog now
-	// holds it: failed, or pending when its destination paused it.
+	// rate_limited, daily_cap, not_found, transient, permanent,
+	// hash_mismatch and local_unreadable. p is as the catalog now holds it:
+	// failed, or pending when its destination paused it.
 	Failed(p catalog.Placement, reason string, attempts int)
 	// DestState: destID's state is now s, with alert for the owner.
 	DestState(destID string, s DestState, alert string)
 	// LocalError: an error of the catalog or of the spool, with no directory
-	// in it, as recorder's fileError writes them. One that repeats is
-	// reported once while it lasts.
+	// in it, as recorder's fileError writes them. A spool file, or a catalog
+	// operation, that keeps failing is reported once, until it succeeds
+	// again.
 	LocalError(err error)
 }
 
@@ -98,12 +109,27 @@ type Queue struct {
 	// emitMu keeps the DestState calls in the order of the changes.
 	emitMu sync.Mutex
 
-	mu         sync.Mutex
-	active     int                  // uploads and quota reads in flight
-	inflight   map[string]bool      // the placements that a worker holds
-	seen       map[string]bool      // the placements reported Queued
-	mismatches map[string]int       // each placement's hash mismatches in this run (P34)
-	lastLocal  map[localKind]string // the last local error reported of each kind, while it lasts
+	mu     sync.Mutex
+	active int // uploads and quota reads in flight
+	// inflight holds the placements that a worker holds. A placement enters
+	// it before its worker marks it uploading, so the reset of uploading
+	// rows never takes an upload in flight.
+	inflight map[string]bool
+	// resetDue: Run has not reset the uploading rows yet, or a worker ended
+	// since, which may have left its row uploading. Only then can a row be
+	// uploading with no worker, so only then does a poll read every
+	// placement to reset them (about 80 ms at 16k rows).
+	resetDue bool
+	// seen holds the placements reported Queued, each with its bytes then,
+	// and mismatches each placement's hash mismatches (P34). A placement
+	// leaves both once it is verified or failed for good, and when its
+	// bytes change: superseded, it is queued anew.
+	seen map[string]int64
+	// mismatches are counted in RAM only: a restart forgets them, so each
+	// restart allows a placement up to 2 more mismatched uploads, and
+	// deletes, than maxMismatches. The report's «Limitări» states it.
+	mismatches map[string]int
+	failing    map[localKey]bool // the local errors reported, until their file or operation succeeds
 }
 
 // New returns the queue of dests, by destination ID, on cat.
@@ -128,7 +154,7 @@ func New(cat *catalog.DB, dests map[string]storage.Destination, opts Options) *Q
 	}
 	q := &Queue{
 		cat: cat, opts: opts, dests: map[string]*destination{}, wake: make(chan struct{}, 1),
-		inflight: map[string]bool{}, seen: map[string]bool{}, mismatches: map[string]int{}, lastLocal: map[localKind]string{},
+		inflight: map[string]bool{}, resetDue: true, seen: map[string]int64{}, mismatches: map[string]int{}, failing: map[localKey]bool{},
 	}
 	for id, d := range dests {
 		q.dests[id] = newDestination(id, d)
@@ -150,19 +176,16 @@ func (q *Queue) Enqueue(ctx context.Context, tx *sql.Tx, p catalog.Placement) er
 }
 
 // Run uploads until ctx is done, then waits for its uploads to stop and
-// returns nil. Before its first poll it resets every uploading placement of
-// its destinations to pending, keeping its attempts and its session, so a
-// row that a kill left uploading is due again and resumes. It then polls the
-// due placements every second, on Enqueue and when an upload ends.
+// returns nil. It polls the due placements every second, on Enqueue and when
+// an upload ends. Each poll first resets every uploading placement of its
+// destinations that no worker holds to pending, keeping its attempts and its
+// session: a row that a kill left uploading, or that an upload could not
+// settle (a full card fails both writes), is due again and resumes. A poll
+// skips that reset when no upload ended since the last one: no row can have
+// been left uploading.
 func (q *Queue) Run(ctx context.Context) error {
-	reset := false
 	for ctx.Err() == nil {
-		if !reset {
-			reset = q.resetUploading(ctx)
-		}
-		if reset {
-			q.poll(ctx)
-		}
+		q.poll(ctx)
 		tick := q.opts.Clock.After(pollEvery)
 		if q.idle != nil && q.quiet() {
 			q.idle()
@@ -205,32 +228,47 @@ func (q *Queue) State(destID string) DestState {
 }
 
 // resetUploading sets every uploading placement of the queue's destinations
-// back to pending, and reports whether it could.
-func (q *Queue) resetUploading(ctx context.Context) bool {
+// that no worker holds back to pending, keeping its attempts and its
+// session, when a reset is due (resetDue). Only this goroutine starts
+// workers, so none takes such a row meanwhile; a row that its worker settled
+// since the read is no longer uploading, and the write leaves it as it is.
+func (q *Queue) resetUploading(ctx context.Context) {
+	q.mu.Lock()
+	due := q.resetDue
+	q.resetDue = false
+	q.mu.Unlock()
+	if !due {
+		return
+	}
+	again := func() { // a catalog error: the next poll resets again
+		q.mu.Lock()
+		q.resetDue = true
+		q.mu.Unlock()
+	}
 	all, err := q.cat.Placements(ctx)
-	if err != nil {
-		q.localError(ctx, localCatalog, err)
-		return false
+	if q.catalogFailed(ctx, opPlacements, err) {
+		again()
+		return
 	}
 	for _, p := range all {
-		if p.State != catalog.PlacementUploading || q.dests[p.DestinationID] == nil {
+		if p.State != catalog.PlacementUploading || q.dests[p.DestinationID] == nil || q.held(p.ID) {
 			continue
 		}
 		reset := p
 		reset.State = catalog.PlacementPending
-		if err := q.cat.UpdatePlacement(ctx, reset, p.State, p.Bytes); err != nil && !errors.Is(err, catalog.ErrStalePlacement) {
-			q.localError(ctx, localCatalog, err)
-			return false
+		if q.catalogFailed(ctx, opUpdatePlacement, q.cat.UpdatePlacement(ctx, reset, p.State, p.Bytes)) {
+			again()
+			return
 		}
 	}
-	return true
 }
 
-// poll fails the due placements whose segment is lost, starts the quota
-// reads that are due, and starts an upload of each due placement that its
-// destination has room for.
+// poll resets the uploading placements that no worker holds, fails the due
+// placements whose segment is lost, starts the quota reads that are due, and
+// starts an upload of each due placement that its destination has room for.
 func (q *Queue) poll(ctx context.Context) {
 	now := q.opts.Clock.Now()
+	q.resetUploading(ctx)
 	q.failLost(ctx, now)
 	q.readQuotas(ctx, now)
 	for _, id := range q.ids {
@@ -251,8 +289,7 @@ func (q *Queue) dispatch(ctx context.Context, d *destination, now time.Time) {
 	// A row in flight may be due again, superseded under its worker; it is
 	// skipped until that worker lets it go.
 	due, err := q.cat.DuePlacements(ctx, now.UnixMilli(), []string{d.id}, slots+busy)
-	if err != nil {
-		q.localError(ctx, localCatalog, err)
+	if q.catalogFailed(ctx, opDuePlacements, err) {
 		return
 	}
 	for _, p := range due {
@@ -261,10 +298,17 @@ func (q *Queue) dispatch(ctx context.Context, d *destination, now time.Time) {
 		}
 		q.mu.Lock()
 		held := q.inflight[p.ID]
-		first := !held && !q.seen[p.ID]
+		bytes, seen := q.seen[p.ID]
+		first := !held && (!seen || bytes != p.Bytes)
+		if first {
+			// New to the queue, or superseded: its mismatches were of other
+			// bytes.
+			q.seen[p.ID] = p.Bytes
+			delete(q.mismatches, p.ID)
+		}
 		if !held {
 			slots--
-			q.inflight[p.ID], q.seen[p.ID] = true, true
+			q.inflight[p.ID] = true
 			d.busy++
 			q.active++
 			q.wg.Add(1)
@@ -283,27 +327,45 @@ func (q *Queue) dispatch(ctx context.Context, d *destination, now time.Time) {
 // due again (g1-4, g2-04): its spool file is gone.
 func (q *Queue) failLost(ctx context.Context, now time.Time) {
 	lost, err := q.cat.LostPlacements(ctx, now.UnixMilli(), q.ids)
-	if err != nil {
-		q.localError(ctx, localCatalog, err)
+	if q.catalogFailed(ctx, opLostPlacements, err) {
 		return
 	}
 	for _, p := range lost {
-		q.mu.Lock()
-		held := q.inflight[p.ID]
-		q.mu.Unlock()
-		if held {
+		if q.held(p.ID) {
 			continue
 		}
 		failed := p
 		failed.State, failed.NextAttemptAtMs = catalog.PlacementFailed, 0
-		if err := q.cat.UpdatePlacement(ctx, failed, p.State, p.Bytes); err != nil {
-			if !errors.Is(err, catalog.ErrStalePlacement) {
-				q.localError(ctx, localCatalog, err)
-			}
+		if err := q.catalogErr(opUpdatePlacement, q.cat.UpdatePlacement(ctx, failed, p.State, p.Bytes)); err != nil {
+			q.localError(ctx, err) // ErrStalePlacement is none: the row changed since the read
 			continue
 		}
+		q.forget(p.ID)
 		q.opts.Observer.Failed(failed, reasonLocalUnreadable, failed.Attempts)
 	}
+}
+
+// held reports whether a worker holds the placement id.
+func (q *Queue) held(id string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.inflight[id]
+}
+
+// forget drops what the queue keeps in RAM of the placement id: it is
+// verified, failed for good or superseded.
+func (q *Queue) forget(id string) {
+	q.mu.Lock()
+	delete(q.seen, id)
+	delete(q.mismatches, id)
+	q.mu.Unlock()
+}
+
+// jitter draws Options.Rand with the queue's mutex held.
+func (q *Queue) jitter() float64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.opts.Rand()
 }
 
 // readQuotas starts each read of a destination's quota that is due: at the
@@ -386,28 +448,70 @@ const (
 	localSpool
 )
 
-// localError reports err, an error of the catalog or of the spool, unless it
-// is the error of its kind reported last, or ctx is done: a stop is no error
-// (g2-02).
-func (q *Queue) localError(ctx context.Context, kind localKind, err error) {
-	if ctx.Err() != nil {
+// localKey names what a local error is of: a spool file, by its path, or a
+// catalog operation.
+type localKey struct {
+	kind localKind
+	name string
+}
+
+// The catalog operations of the queue, by which their local errors are told
+// apart.
+const (
+	opPlacements          = "Placements"
+	opDuePlacements       = "DuePlacements"
+	opLostPlacements      = "LostPlacements"
+	opUpdatePlacement     = "UpdatePlacement"
+	opSegmentByID         = "SegmentByID"
+	opUploadSession       = "UploadSession"
+	opPutUploadSession    = "PutUploadSession"
+	opDeleteUploadSession = "DeleteUploadSession"
+)
+
+// catalogErr takes err, what the catalog operation op returned. A success,
+// or ErrStalePlacement, which the catalog returns as it should, ends op's
+// local error; any other error is returned as op's *localErr.
+func (q *Queue) catalogErr(op string, err error) error {
+	key := localKey{kind: localCatalog, name: op}
+	if err == nil || errors.Is(err, catalog.ErrStalePlacement) {
+		q.localOK(key)
+		return err
+	}
+	return &localErr{key: key, err: err}
+}
+
+// catalogFailed reports err, what the catalog operation op returned, and
+// whether op failed; ErrStalePlacement is no failure of the catalog.
+func (q *Queue) catalogFailed(ctx context.Context, op string, err error) bool {
+	if err = q.catalogErr(op, err); err == nil || errors.Is(err, catalog.ErrStalePlacement) {
+		return false
+	}
+	q.localError(ctx, err)
+	return true
+}
+
+// localError reports err, a *localErr, unless the error of its file or
+// operation is already reported and that file or operation has not
+// succeeded since, or ctx is done: a stop is no error (g2-02).
+func (q *Queue) localError(ctx context.Context, err error) {
+	var local *localErr
+	if ctx.Err() != nil || !errors.As(err, &local) {
 		return
 	}
-	msg := err.Error()
 	q.mu.Lock()
-	repeated := q.lastLocal[kind] == msg
-	q.lastLocal[kind] = msg
+	reported := q.failing[local.key]
+	q.failing[local.key] = true
 	q.mu.Unlock()
-	if !repeated {
+	if !reported {
 		q.opts.Observer.LocalError(err)
 	}
 }
 
-// localOK ends the local error of kind, so the same error later is reported
-// again.
-func (q *Queue) localOK(kind localKind) {
+// localOK ends the local error of key, a spool file that was read or a
+// catalog operation that succeeded, so its next error is reported again.
+func (q *Queue) localOK(key localKey) {
 	q.mu.Lock()
-	delete(q.lastLocal, kind)
+	delete(q.failing, key)
 	q.mu.Unlock()
 }
 

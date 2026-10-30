@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -552,6 +553,11 @@ func testSupersede(t *testing.T, during string) {
 	if n := len(h.obs.of("Failed")) + len(h.obs.of("LocalError")) + f.count("Delete"); n != 0 {
 		t.Errorf("%d Failed, LocalError or Delete calls, want none: %+v", n, h.obs.of(""))
 	}
+	// Superseded, the placement is new to the queue: it is reported queued
+	// again, with its new bytes.
+	if queued := h.obs.of("Queued"); len(queued) != 2 || queued[0].P.Bytes != s.Bytes || queued[1].P.Bytes != int64(len(newData)) {
+		t.Errorf("Queued calls %+v, want two: with the old bytes, then the new", queued)
+	}
 }
 
 // TestOutbox_LostSegmentFailsOnce (g1-4, g2-04, g2-06): a placement whose
@@ -805,5 +811,250 @@ func TestOutbox_CancelIsNoFailure(t *testing.T) {
 		if !bytes.Equal(got, data) {
 			t.Errorf("object %s holds %d bytes, not the segment's %d", key, len(got), len(data))
 		}
+	}
+}
+
+// exec runs stmts on the harness's catalog in one transaction. Tests use it
+// to plant faults that the catalog's API cannot make, such as a full card.
+func (h *harness) exec(stmts ...string) error {
+	return h.cat.WithTx(h.t.Context(), func(tx *sql.Tx) error {
+		for _, stmt := range stmts {
+			if _, err := tx.ExecContext(h.t.Context(), stmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// failsOf returns the Failed calls of the placement id, in order.
+func (h *harness) failsOf(id string) []obsEvent {
+	var fails []obsEvent
+	for _, e := range h.obs.of("Failed") {
+		if e.P.ID == id {
+			fails = append(fails, e)
+		}
+	}
+	return fails
+}
+
+// localHook is a recObserver that also calls hook with each LocalError and
+// how many it has heard, on the queue's goroutine.
+type localHook struct {
+	*recObserver
+	n    atomic.Int32
+	hook func(n int32)
+}
+
+func (o *localHook) LocalError(err error) {
+	o.recObserver.LocalError(err)
+	o.hook(o.n.Add(1))
+}
+
+// TestOutbox_StuckUploadingRowDueAgain (g2-02): a catalog error mid-upload
+// whose reset to pending fails too, as both do on a full card, leaves the
+// row uploading with no worker. Once the catalog recovers, the next poll
+// resets it to pending, keeping its attempts and its session, and the
+// placement is verified without a new Run.
+func TestOutbox_StuckUploadingRowDueAgain(t *testing.T) {
+	h := newHarness(t)
+	f := newFakeDest(storage.KindLocal, h.clk.Now)
+	data := randomBytes(3*fakePart, 1)
+	p := h.enqueue(h.segment("a", 0, data), "dst-a", catalog.ClassContinuous)
+	// The card is full while test_full holds a row: every write of a session
+	// or of a placement fails.
+	full := func(table, op string) string {
+		return "CREATE TRIGGER test_full_" + table + "_" + op + " BEFORE " + op + " ON " + table +
+			" WHEN EXISTS (SELECT 1 FROM test_full) BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END"
+	}
+	if err := h.exec("CREATE TABLE test_full (x INTEGER)",
+		full("upload_sessions", "INSERT"), full("upload_sessions", "UPDATE"), full("placements", "UPDATE")); err != nil {
+		t.Fatal(err)
+	}
+	var hookErr atomic.Value
+	var fill sync.Once
+	// The card fills once the first chunk is stored, before its session is
+	// written, and has room again once the reset to pending failed too.
+	f.stored = func(fakeCall) {
+		fill.Do(func() {
+			if err := h.exec("INSERT INTO test_full VALUES (1)"); err != nil {
+				hookErr.Store(err)
+			}
+		})
+	}
+	obs := &localHook{recObserver: h.obs, hook: func(n int32) {
+		if n == 2 {
+			if err := h.exec("DELETE FROM test_full"); err != nil {
+				hookErr.Store(err)
+			}
+		}
+	}}
+	q := h.newQueue(map[string]storage.Destination{"dst-a": f}, func(o *Options) { o.Observer = obs })
+	h.run(q, time.Second, 5*time.Minute, h.verified(p))
+
+	if err, _ := hookErr.Load().(error); err != nil {
+		t.Fatal(err)
+	}
+	if local := h.obs.of("LocalError"); len(local) != 2 {
+		t.Errorf("LocalError calls %+v, want 2: the session's write and the reset's", local)
+	}
+	if fails := h.obs.of("Failed"); len(fails) != 0 {
+		t.Errorf("Failed calls %+v, want none: a catalog error is no failure of the upload", fails)
+	}
+	if resumed := h.obs.of("Resumed"); len(resumed) != 1 || resumed[0].Offset != fakePart || f.count("BeginUpload") != 1 {
+		t.Errorf("Resumed calls %+v and %d BeginUpload calls, want the one session resumed at %d", resumed, f.count("BeginUpload"), fakePart)
+	}
+	if got := h.placementOf(p.ObjectID, "dst-a"); got.Attempts != 0 {
+		t.Errorf("the verified placement is %+v, want no attempt counted", got)
+	}
+}
+
+// TestOutbox_LocalErrorOncePerFile (g2-04): a spool file that keeps failing
+// is reported once while it fails, however many other files read well
+// meanwhile; after a good read of that file, its next failure is reported
+// again.
+func TestOutbox_LocalErrorOncePerFile(t *testing.T) {
+	h := newHarness(t)
+	f := newFakeDest(storage.KindLocal, h.clk.Now)
+	bad := h.enqueue(h.segment("bad", 0, randomBytes(2*fakePart+1, 1)), "dst-a", catalog.ClassContinuous)
+	var good []catalog.Placement
+	for i := range 3 {
+		s := h.segment("good"+strconv.Itoa(i), time.Duration(i+1)*time.Minute, randomBytes(fakePart+i, byte(i+2)))
+		good = append(good, h.enqueue(s, "dst-a", catalog.ClassContinuous))
+	}
+	// failing is 1 while every read of bad.mp4 fails, and 2 while its next
+	// read after its first chunk fails, once.
+	var failing atomic.Int32
+	failing.Store(1)
+	q := h.newQueue(map[string]storage.Destination{"dst-a": f}, func(o *Options) {
+		o.ReadSpool = func(path string, off int64, b []byte) (int, error) {
+			if filepath.Base(path) == "bad.mp4" && (failing.Load() == 1 || off > 0 && failing.CompareAndSwap(2, 0)) {
+				return 0, &fs.PathError{Op: "read", Path: path, Err: syscall.EIO}
+			}
+			return readSpool(path, off, b)
+		}
+	})
+	h.run(q, time.Second, 10*time.Minute, func() bool { return h.verified(good...)() && len(h.failsOf(bad.ID)) >= 3 })
+	if local := h.obs.of("LocalError"); len(local) != 1 {
+		t.Errorf("LocalError calls %+v while bad.mp4 kept failing and the others read, want 1", local)
+	}
+
+	failing.Store(2)
+	h.run(q, time.Second, 10*time.Minute, h.verified(bad))
+	local := h.obs.of("LocalError")
+	if len(local) != 2 {
+		t.Fatalf("LocalError calls %+v, want 2: bad.mp4 failed again after a good read", local)
+	}
+	for _, e := range local {
+		if !errors.Is(e.Err, syscall.EIO) || !strings.Contains(e.Err.Error(), "bad.mp4") {
+			t.Errorf("LocalError %v, want bad.mp4's EIO", e.Err)
+		}
+	}
+}
+
+// TestOutbox_RandNeedsNoLock: the queue calls Options.Rand with its mutex
+// held, so a Rand that is not safe for concurrent use, such as a PCG's, races
+// with nothing under -race while two destinations' workers draw the jitter
+// of their backoffs: after spool read errors and hash mismatches.
+func TestOutbox_RandNeedsNoLock(t *testing.T) {
+	h := newHarness(t)
+	dests := map[string]storage.Destination{}
+	for _, id := range []string{"dst-a", "dst-b"} {
+		f := newFakeDest(storage.KindLocal, h.clk.Now)
+		var mu sync.Mutex
+		mismatched := map[storage.ObjectKey]bool{}
+		f.commitRef = func(ref storage.ObjectRef) storage.ObjectRef {
+			mu.Lock()
+			defer mu.Unlock()
+			if !mismatched[ref.Key] {
+				mismatched[ref.Key] = true
+				ref.Size++
+			}
+			return ref
+		}
+		dests[id] = f
+	}
+	var ps []catalog.Placement
+	for i := range 4 {
+		s := h.segment("s"+strconv.Itoa(i), time.Duration(i)*time.Minute, randomBytes(100+i, byte(i)))
+		ps = append(ps, h.enqueue(s, "dst-a", catalog.ClassContinuous), h.enqueue(s, "dst-b", catalog.ClassContinuous))
+	}
+	// The first two reads of each file fail, and two failing reads return
+	// together, so that their workers draw the jitter at once.
+	var mu sync.Mutex
+	reads := map[string]int{}
+	var waiting chan struct{}
+	together := func() {
+		mu.Lock()
+		if waiting != nil {
+			close(waiting)
+			waiting = nil
+			mu.Unlock()
+			return
+		}
+		ch := make(chan struct{})
+		waiting = ch
+		mu.Unlock()
+		select {
+		case <-ch:
+		case <-time.After(100 * time.Millisecond): // no other failing read came
+			mu.Lock()
+			if waiting == ch {
+				waiting = nil
+			}
+			mu.Unlock()
+		}
+	}
+	q := h.newQueue(dests, func(o *Options) {
+		o.Rand = rand.New(rand.NewPCG(1, 2)).Float64 //nolint:gosec // G404: a jitter, and a source not safe for concurrent use on purpose
+		o.ReadSpool = func(path string, off int64, b []byte) (int, error) {
+			mu.Lock()
+			reads[path]++
+			n := reads[path]
+			mu.Unlock()
+			if n <= 2 {
+				together()
+				return 0, &fs.PathError{Op: "read", Path: path, Err: syscall.EIO}
+			}
+			return readSpool(path, off, b)
+		}
+	})
+	h.run(q, time.Second, 30*time.Minute, h.verified(ps...))
+}
+
+// TestOutbox_DonePlacementsLeaveNoState (C2-R8): the queue keeps nothing in
+// RAM of a placement that is verified or failed for good, so its memory does
+// not grow over the hub's life.
+func TestOutbox_DonePlacementsLeaveNoState(t *testing.T) {
+	h := newHarness(t)
+	a, b := newFakeDest(storage.KindLocal, h.clk.Now), newFakeDest(storage.KindLocal, h.clk.Now)
+	var once sync.Once
+	a.commitRef = func(ref storage.ObjectRef) storage.ObjectRef {
+		once.Do(func() { ref.Size++ })
+		return ref
+	}
+	var ps []catalog.Placement
+	for i := range 5 {
+		s := h.segment("s"+strconv.Itoa(i), time.Duration(i)*time.Minute, randomBytes(fakePart+i, byte(i)))
+		ps = append(ps, h.enqueue(s, "dst-a", catalog.ClassContinuous), h.enqueue(s, "dst-b", catalog.ClassContinuous))
+	}
+	refused := h.enqueue(h.segment("refused", 10*time.Minute, randomBytes(100, 9)), "dst-b", catalog.ClassContinuous)
+	b.setFault(func(_ context.Context, c fakeCall) error {
+		if c.Method == "BeginUpload" && c.N == 100 { // the refused segment's size
+			return storage.ErrPermanent
+		}
+		return nil
+	})
+	q := h.newQueue(map[string]storage.Destination{"dst-a": a, "dst-b": b})
+	h.run(q, time.Second, 10*time.Minute, func() bool {
+		return h.verified(ps...)() && h.placementOf(refused.ObjectID, "dst-b").State == catalog.PlacementFailed
+	})
+	if fails := h.obs.of("Failed"); len(fails) != 2 || len(h.failsOf(refused.ID)) != 1 {
+		t.Errorf("Failed calls %+v, want one hash mismatch and one refusal", fails)
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.seen) != 0 || len(q.mismatches) != 0 {
+		t.Errorf("after every placement is done the queue keeps %v and %v, want nothing", q.seen, q.mismatches)
 	}
 }

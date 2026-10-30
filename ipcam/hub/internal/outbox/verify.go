@@ -11,8 +11,9 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
 )
 
-// maxMismatches is how many uploads of a placement in a run may end in a
-// mismatch; after the last it stays failed (P34).
+// maxMismatches is how many uploads of a placement may end in a mismatch;
+// after the last it stays failed (P34). The count lives in RAM (see
+// Queue.mismatches), so it holds within one run of the hub.
 const maxMismatches = 3
 
 // verify compares ref, the committed copy, with the spool file that was
@@ -42,12 +43,10 @@ func (u *upload) verify(ctx context.Context, ref storage.ObjectRef) error {
 	if err := u.write(ctx, done); err != nil {
 		return err
 	}
-	if err := u.q.cat.DeleteUploadSession(ctx, done.ID); err != nil {
-		u.q.localError(ctx, localCatalog, err)
-	}
+	u.q.catalogFailed(ctx, opDeleteUploadSession, u.q.cat.DeleteUploadSession(ctx, done.ID))
+	u.q.forget(done.ID)
 	u.q.mu.Lock()
 	u.d.success()
-	delete(u.q.mismatches, done.ID)
 	u.q.mu.Unlock()
 	u.q.opts.Observer.Verified(done, ref, u.st.Calls)
 	u.q.notify(u.d)
@@ -66,14 +65,18 @@ func (u *upload) mismatch(ctx context.Context, ref storage.ObjectRef) error {
 	p.Attempts++
 	p.NextAttemptAtMs = 0
 	if n < maxMismatches {
-		p.NextAttemptAtMs = u.q.opts.Clock.Now().Add(Backoff(p.Attempts, u.q.opts.Rand())).UnixMilli()
+		p.NextAttemptAtMs = u.q.opts.Clock.Now().Add(Backoff(p.Attempts, u.q.jitter())).UnixMilli()
 	}
 	if err := u.write(ctx, p); err != nil {
 		return err
 	}
-	u.q.mu.Lock()
-	u.q.mismatches[p.ID] = n
-	u.q.mu.Unlock()
+	if n < maxMismatches {
+		u.q.mu.Lock()
+		u.q.mismatches[p.ID] = n
+		u.q.mu.Unlock()
+	} else {
+		u.q.forget(p.ID) // failed for good
+	}
 	_, _ = u.d.d.Delete(ctx, ref) // a copy left behind is overwritten by the next upload of its key
 	u.dropSession(ctx)
 	u.q.opts.Observer.Failed(p, reasonHashMismatch, p.Attempts)

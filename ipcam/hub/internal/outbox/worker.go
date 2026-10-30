@@ -22,7 +22,6 @@ const (
 	reasonQuotaFull       = "quota_full"
 	reasonRateLimited     = "rate_limited"
 	reasonDailyCap        = "daily_cap"
-	reasonSessionExpired  = "session_expired"
 	reasonNotFound        = "not_found"
 	reasonTransient       = "transient"
 	reasonPermanent       = "permanent"
@@ -33,25 +32,24 @@ const (
 // defaultChunk is the chunk size of a destination that declares none.
 const defaultChunk = 8 << 20
 
+// maxSessionRestarts is how many new sessions one attempt opens after its
+// provider forgot one (§9.9): 3, each from 0. Past them the expiry counts as
+// a transient failure, with its backoff, so a provider that keeps forgetting
+// sessions does not hold a worker in a loop.
+const maxSessionRestarts = 3
+
 // errPaused stops an upload whose destination paused before its next call.
 var errPaused = errors.New("outbox: the destination paused")
 
-// localErr is an error of the hub's own disk: of the catalog or of the spool.
+// localErr is an error of the hub's own disk: of a catalog operation or of a
+// spool file, which key names.
 type localErr struct {
-	kind localKind
-	err  error
+	key localKey
+	err error
 }
 
 func (e *localErr) Error() string { return e.err.Error() }
 func (e *localErr) Unwrap() error { return e.err }
-
-// catalogErr marks err as the catalog's; ErrStalePlacement stays as it is.
-func catalogErr(err error) error {
-	if errors.Is(err, catalog.ErrStalePlacement) {
-		return err
-	}
-	return &localErr{kind: localCatalog, err: err}
-}
 
 // spoolErr is a read error of the spool file at path, with the file's name
 // and not its directory, as recorder's fileError writes them.
@@ -60,7 +58,7 @@ func spoolErr(path string, err error) error {
 	if errors.As(err, &pe) {
 		err = fmt.Errorf("%s: %w", pe.Op, pe.Err)
 	}
-	return &localErr{kind: localSpool, err: fmt.Errorf("outbox: read %s: %w", filepath.Base(path), err)}
+	return &localErr{key: localKey{kind: localSpool, name: path}, err: fmt.Errorf("outbox: read %s: %w", filepath.Base(path), err)}
 }
 
 // readSpool is Options.ReadSpool's default: it opens the file, reads p at
@@ -95,6 +93,7 @@ func (q *Queue) work(ctx context.Context, d *destination, p catalog.Placement) {
 		q.mu.Lock()
 		delete(q.inflight, p.ID)
 		d.busy--
+		q.resetDue = true // the upload may have left its row uploading
 		q.mu.Unlock()
 		q.done()
 	}()
@@ -116,8 +115,8 @@ func (u *upload) run(ctx context.Context) error {
 		return err
 	}
 	seg, err := u.q.cat.SegmentByID(ctx, u.p.ObjectID)
-	if err != nil {
-		return catalogErr(err)
+	if err = u.q.catalogErr(opSegmentByID, err); err != nil {
+		return err
 	}
 	u.path = filepath.Join(u.q.opts.RecDir, filepath.FromSlash(seg.Path))
 	key := KeyFor(u.q.opts.HubID, u.q.opts.HubName, seg, u.p.Class)
@@ -126,9 +125,14 @@ func (u *upload) run(ctx context.Context) error {
 		meta.ContentType = "application/octet-stream"
 	}
 	ref, err := u.transfer(ctx, key, meta)
-	if errors.Is(err, storage.ErrSessionExpired) && ctx.Err() == nil {
-		// The provider forgot the session (§9.9): a new one from 0, once.
+	// The provider forgot the session (§9.9): a new one from 0, at most
+	// maxSessionRestarts times.
+	for restarts := 0; errors.Is(err, storage.ErrSessionExpired) && ctx.Err() == nil; restarts++ {
 		u.dropSession(ctx)
+		if restarts == maxSessionRestarts {
+			err = fmt.Errorf("outbox: %s: %d sessions expired in one attempt: %v: %w", key, restarts+1, err, storage.ErrTransient)
+			break
+		}
 		ref, err = u.transfer(ctx, key, meta)
 	}
 	if err != nil {
@@ -154,8 +158,8 @@ func (u *upload) transfer(ctx context.Context, key storage.ObjectKey, meta stora
 // begins a new one and stores it, and returns the offset to send from.
 func (u *upload) open(ctx context.Context, key storage.ObjectKey, meta storage.Meta) (int64, error) {
 	saved, _, ok, err := u.q.cat.UploadSession(ctx, u.p.ID)
-	if err != nil {
-		return 0, catalogErr(err)
+	if err = u.q.catalogErr(opUploadSession, err); err != nil {
+		return 0, err
 	}
 	var st storage.UploadState
 	if ok && json.Unmarshal(saved, &st) == nil && st.Key == key && st.Size == u.p.Bytes {
@@ -199,6 +203,7 @@ func (u *upload) send(ctx context.Context, off int64) error {
 		if u.st.Offset <= off || u.st.Offset > size {
 			return fmt.Errorf("outbox: %s confirmed %d bytes after a chunk at %d: %w", u.st.Key, u.st.Offset, off, storage.ErrTransient)
 		}
+		u.q.answered(u.d)
 		off = u.st.Offset
 		if err := u.saveSession(ctx); err != nil {
 			return err
@@ -227,7 +232,7 @@ func (u *upload) readSpool(off int64, p []byte) error {
 	if err != nil {
 		return spoolErr(u.path, err)
 	}
-	u.q.localOK(localSpool)
+	u.q.localOK(localKey{kind: localSpool, name: u.path})
 	return nil
 }
 
@@ -238,33 +243,32 @@ func (u *upload) saveSession(ctx context.Context) error {
 	if err == nil {
 		err = u.q.cat.PutUploadSession(ctx, u.p.ID, u.p.Bytes, state, u.st.Offset)
 	}
-	if err != nil {
-		return catalogErr(err)
-	}
-	return nil
+	return u.q.catalogErr(opPutUploadSession, err)
 }
 
 // write writes p over the placement's row while the row is as the upload
 // last wrote or read it, and keeps p as the row.
 func (u *upload) write(ctx context.Context, p catalog.Placement) error {
-	if err := u.q.cat.UpdatePlacement(ctx, p, u.p.State, u.p.Bytes); err != nil {
-		return catalogErr(err)
+	if err := u.q.catalogErr(opUpdatePlacement, u.q.cat.UpdatePlacement(ctx, p, u.p.State, u.p.Bytes)); err != nil {
+		return err
 	}
 	u.p = p
-	u.q.localOK(localCatalog)
 	return nil
 }
 
 // settle is write for the end of an upload. A row that changed under the
-// upload stays as it is, and the upload's session is aborted (g1-4); an
-// error of the catalog is reported. It returns the write's error.
+// upload stays as it is: it was superseded, so the upload's session is
+// aborted (g1-4) and the queue forgets the placement. An error of the
+// catalog is reported; the row then stays uploading until the next poll
+// resets it. It returns the write's error.
 func (u *upload) settle(ctx context.Context, p catalog.Placement) error {
 	err := u.write(ctx, p)
 	switch {
 	case errors.Is(err, catalog.ErrStalePlacement):
 		u.abort(ctx)
+		u.q.forget(u.p.ID)
 	case err != nil:
-		u.q.localError(ctx, localCatalog, err)
+		u.q.localError(ctx, err)
 	}
 	return err
 }
@@ -281,9 +285,7 @@ func (u *upload) abort(ctx context.Context) {
 // upload of the placement starts from 0.
 func (u *upload) dropSession(ctx context.Context) {
 	u.abort(ctx)
-	if err := u.q.cat.DeleteUploadSession(ctx, u.p.ID); err != nil {
-		u.q.localError(ctx, localCatalog, err)
-	}
+	u.q.catalogFailed(ctx, opDeleteUploadSession, u.q.cat.DeleteUploadSession(ctx, u.p.ID))
 }
 
 // quotaFull reads the destination's quota before an upload over 1 GiB
@@ -300,6 +302,14 @@ func (u *upload) quotaFull(ctx context.Context) bool {
 	u.q.mu.Unlock()
 	u.q.notify(u.d)
 	return full
+}
+
+// answered takes a chunk that d confirmed: d answers (P26).
+func (q *Queue) answered(d *destination) {
+	q.mu.Lock()
+	d.answered()
+	q.mu.Unlock()
+	q.notify(d)
 }
 
 // paused reports whether d's uploads in flight must stop now.
@@ -319,14 +329,16 @@ func (u *upload) fail(ctx context.Context, err error) {
 	switch {
 	case errors.Is(err, catalog.ErrStalePlacement):
 		// The row changed under the upload (g1-4): the next poll uploads it as
-		// it is now, from 0 when its bytes changed.
+		// it is now, from 0 when its bytes changed, as a placement new to the
+		// queue.
 		u.abort(ctx)
+		u.q.forget(u.p.ID)
 	case errors.Is(err, errPaused):
 		_ = u.settle(ctx, u.withState(catalog.PlacementPending))
-	case errors.As(err, &local) && local.kind == localSpool:
+	case errors.As(err, &local) && local.key.kind == localSpool:
 		u.spoolFailed(ctx, local)
 	case errors.As(err, &local):
-		u.q.localError(ctx, localCatalog, local)
+		u.q.localError(ctx, local)
 		if u.p.State == catalog.PlacementUploading {
 			_ = u.settle(ctx, u.withState(catalog.PlacementPending))
 		}
@@ -351,18 +363,19 @@ func (u *upload) spoolFailed(ctx context.Context, err *localErr) {
 	p := u.withState(catalog.PlacementFailed)
 	if !gone {
 		p.Attempts++
-		p.NextAttemptAtMs = u.q.opts.Clock.Now().Add(Backoff(p.Attempts, u.q.opts.Rand())).UnixMilli()
+		p.NextAttemptAtMs = u.q.opts.Clock.Now().Add(Backoff(p.Attempts, u.q.jitter())).UnixMilli()
 	}
 	settled := u.settle(ctx, p)
 	if errors.Is(settled, catalog.ErrStalePlacement) {
 		return
 	}
-	u.q.localError(ctx, localSpool, err)
+	u.q.localError(ctx, err)
 	if settled != nil {
 		return
 	}
 	if gone {
 		u.dropSession(ctx)
+		u.q.forget(p.ID)
 	}
 	u.q.opts.Observer.Failed(p, reasonLocalUnreadable, p.Attempts)
 }
@@ -400,6 +413,7 @@ func (u *upload) destFailed(ctx context.Context, err error) {
 	if u.settle(ctx, p) == nil {
 		if errors.Is(err, storage.ErrPermanent) {
 			u.dropSession(ctx)
+			u.q.forget(p.ID)
 		}
 		u.q.opts.Observer.Failed(p, reasonOf(err), p.Attempts)
 	}
@@ -418,8 +432,6 @@ func reasonOf(err error) string {
 		return reasonDailyCap
 	case storage.Reason(err).Code == storage.ReasonRateLimited:
 		return reasonRateLimited
-	case errors.Is(err, storage.ErrSessionExpired):
-		return reasonSessionExpired
 	case errors.Is(err, storage.ErrNotFound):
 		return reasonNotFound
 	case errors.Is(err, storage.ErrPermanent):

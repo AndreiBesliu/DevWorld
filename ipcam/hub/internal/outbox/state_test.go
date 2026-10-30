@@ -1,6 +1,7 @@
 package outbox
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -201,6 +202,108 @@ func TestOutbox_SessionExpiredRestartsFrom0(t *testing.T) {
 	}
 }
 
+// TestOutbox_SessionExpiredAgainRestartsAgain (§9.9): a new session that
+// expires too is replaced again from 0, without a failure, up to
+// maxSessionRestarts new sessions in one attempt; past them the attempt
+// fails as transient, with a backoff.
+func TestOutbox_SessionExpiredAgainRestartsAgain(t *testing.T) {
+	t.Run("twice, then success", func(t *testing.T) {
+		h := newHarness(t)
+		f := newFakeDest(storage.KindGoogleDrive, h.clk.Now)
+		data := randomBytes(3*fakePart+1, 1)
+		p := h.enqueue(h.segment("a", 0, data), "dst-a", catalog.ClassContinuous)
+		f.setFault(func(_ context.Context, c fakeCall) error {
+			if c.Method == "PutChunk" && (c.Session == "s1" && c.Off == fakePart || c.Session == "s2" && c.Off == 0) {
+				return fmt.Errorf("fake: 404 on the session: %w", storage.ErrSessionExpired)
+			}
+			return nil
+		})
+		q := h.newQueue(map[string]storage.Destination{"dst-a": f})
+		h.run(q, time.Second, 5*time.Minute, h.verified(p))
+
+		var aborted []string
+		for _, c := range f.callsOf("Abort") {
+			aborted = append(aborted, c.Session)
+		}
+		if !slices.Equal(aborted, []string{"s1", "s2"}) || f.count("BeginUpload") != 3 {
+			t.Errorf("aborted sessions %v and %d BeginUpload calls, want s1 and s2 aborted and 3", aborted, f.count("BeginUpload"))
+		}
+		if fails := h.obs.of("Failed"); len(fails) != 0 {
+			t.Errorf("Failed calls %+v, want none", fails)
+		}
+		for key, got := range f.objectMap() {
+			if !bytes.Equal(got, data) {
+				t.Errorf("object %s holds %d bytes, not the segment's %d", key, len(got), len(data))
+			}
+		}
+	})
+
+	t.Run("past the bound", func(t *testing.T) {
+		h := newHarness(t)
+		f := newFakeDest(storage.KindGoogleDrive, h.clk.Now)
+		h.enqueue(h.segment("a", 0, randomBytes(2*fakePart, 1)), "dst-a", catalog.ClassContinuous)
+		f.setFault(func(_ context.Context, c fakeCall) error {
+			if c.Method == "PutChunk" {
+				return fmt.Errorf("fake: 404 on the session: %w", storage.ErrSessionExpired)
+			}
+			return nil
+		})
+		q := h.newQueue(map[string]storage.Destination{"dst-a": f})
+		h.run(q, time.Second, 5*time.Minute, func() bool { return len(h.obs.of("Failed")) > 0 })
+
+		fails := h.obs.of("Failed")
+		if fails[0].Reason != "transient" || fails[0].Attempts != 1 || fails[0].P.NextAttemptAtMs != fails[0].At.Add(Backoff(1, 0)).UnixMilli() {
+			t.Errorf("Failed calls %+v, want the first transient, due again after Backoff(1)", fails)
+		}
+		if b, a := f.count("BeginUpload"), f.count("Abort"); b != 1+maxSessionRestarts || a != b {
+			t.Errorf("%d BeginUpload and %d Abort calls before the failure, want %d of each", b, a, 1+maxSessionRestarts)
+		}
+	})
+}
+
+// TestOutbox_UnreachableEndsAtFirstChunk (P26): after an outage long enough
+// for UNREACHABLE, the first chunk that the destination confirms makes it OK
+// again, not the end of the upload: a confirmed PutChunk proves that it
+// answers.
+func TestOutbox_UnreachableEndsAtFirstChunk(t *testing.T) {
+	h := newHarness(t)
+	f := newFakeDest(storage.KindGoogleDrive, h.clk.Now)
+	outageEnd := h.start.Add(time.Hour)
+	var q *Queue
+	var mu sync.Mutex
+	atChunk := map[int64]DestState{} // the destination's state when each chunk was sent
+	f.setFault(func(_ context.Context, c fakeCall) error {
+		if c.At.Before(outageEnd) {
+			return fmt.Errorf("fake: dial tcp: i/o timeout: %w", storage.ErrTransient)
+		}
+		if c.Method == "PutChunk" {
+			mu.Lock()
+			atChunk[c.Off] = q.State("dst-a")
+			mu.Unlock()
+		}
+		return nil
+	})
+	p := h.enqueue(h.segment("a", 0, randomBytes(4*fakePart, 1)), "dst-a", catalog.ClassContinuous)
+	q = h.newQueue(map[string]storage.Destination{"dst-a": f}, func(o *Options) {
+		o.Rand = func() float64 { return 0.5 }
+		o.Workers = 1
+	})
+	h.run(q, time.Minute, 3*time.Hour, h.verified(p))
+
+	if n := len(h.obs.of("Failed")); n < unreachableAfter {
+		t.Fatalf("%d failures during the outage, want at least %d", n, unreachableAfter)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if atChunk[0] != StateUnreachable || atChunk[fakePart] != StateOK || atChunk[3*fakePart] != StateOK {
+		t.Errorf("the states at the chunks at 0, %d and %d: %s, %s and %s; want UNREACHABLE, then OK from the first chunk's confirmation",
+			fakePart, 3*fakePart, atChunk[0], atChunk[fakePart], atChunk[3*fakePart])
+	}
+	if states := h.destStates("dst-a"); !slices.Equal(states, []DestState{StateUnreachable, StateOK}) {
+		t.Errorf("DestState %v, want UNREACHABLE, then OK", states)
+	}
+}
+
 // TestOutbox_AuthExpiredBlocks (P26): an expired sign-in blocks the
 // destination with its alert, and nothing is sent until Unblock.
 func TestOutbox_AuthExpiredBlocks(t *testing.T) {
@@ -379,7 +482,7 @@ func TestOutbox_RecycleQuota_PausesKeepLocal(t *testing.T) {
 // TestOutbox_OutageRecoversWithoutAction (§9.9, P26): 6 h without the
 // destination, then it answers again: every placement is verified and the
 // destination is OK, after UNREACHABLE from the 9th failure in a row to the
-// first success, with nobody calling Unblock.
+// first chunk it confirms, with nobody calling Unblock.
 func TestOutbox_OutageRecoversWithoutAction(t *testing.T) {
 	h := newHarness(t)
 	f := newFakeDest(storage.KindGoogleDrive, h.clk.Now)
@@ -418,11 +521,10 @@ func TestOutbox_OutageRecoversWithoutAction(t *testing.T) {
 	if alert := events[unreachable].Alert; alert != "Destinația nu răspunde; se reîncearcă." {
 		t.Errorf("UNREACHABLE's alert is %q", alert)
 	}
-	firstVerified := slices.IndexFunc(events, func(e obsEvent) bool { return e.Kind == "Verified" })
+	firstProgress := slices.IndexFunc(events, func(e obsEvent) bool { return e.Kind == "Progress" })
 	ok := slices.IndexFunc(events, func(e obsEvent) bool { return e.Kind == "DestState" && e.State == StateOK })
-	if firstVerified < 0 || ok < firstVerified || events[ok].At != events[firstVerified].At || events[ok].At.Before(outageEnd) {
-		t.Errorf("OK at %s (event %d), first verification at %s (event %d); want OK on the first success, after the outage",
-			events[ok].At, ok, events[firstVerified].At, firstVerified)
+	if firstProgress < 1 || ok != firstProgress-1 || events[ok].At.Before(outageEnd) {
+		t.Errorf("OK is event %d, the first chunk's Progress event %d; want OK as the first chunk is confirmed, after the outage", ok, firstProgress)
 	}
 	for _, e := range events[unreachable+1 : ok] {
 		if e.Kind == "Failed" && e.Attempts > 0 {
