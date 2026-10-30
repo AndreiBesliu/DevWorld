@@ -149,7 +149,7 @@ func run(ctx context.Context, args []string, in *bufio.Reader, out io.Writer) er
 		if cmd == "install" {
 			return a.install(exe)
 		}
-		return a.uninstall()
+		return a.uninstall(exe)
 	}
 	_, _ = fmt.Fprint(out, usage)
 	return fmt.Errorf("comandă necunoscută: %s", cmd)

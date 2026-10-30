@@ -16,8 +16,8 @@
 // pull` is the final
 // collection on the PC: it waits for the Pi's `recspike push` and stores
 // its results under results/pi/ (G15). Every line it prints is Romanian;
-// its log, with every line of its screen, goes to reccontroller.log next
-// to the binary. On Windows it keeps the PC awake while it serves or pulls.
+// its log, with every line of its screen, goes to work/reccontroller.log
+// next to the binary. On Windows it keeps the PC awake while it serves or pulls.
 //
 //	reccontroller [-local] [-media DIR]
 //	reccontroller pull

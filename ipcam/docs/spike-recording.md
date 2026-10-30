@@ -99,14 +99,14 @@ De fiecare dată când deschideți un terminal nou pe Pi, scrieți întâi `cd ~
 
 1. Descărcați NotMyFault de pe pagina Microsoft Sysinternals: <https://learn.microsoft.com/sysinternals/downloads/notmyfault>. Despachetați arhiva și copiați `notmyfault64.exe` în `C:\proba-inregistrare`, lângă `recspike.exe`. E programul Microsoft care provoacă ecranul albastru din fereastra automată; nu avem voie să-l punem noi în arhivă.
 2. Întrerupeți actualizările Windows pe durata probei: „Setări” → „Windows Update” → „Întrerupeți actualizările” (alegeți cea mai lungă perioadă). O actualizare care repornește PC-ul în timpul probei ar strica rulările.
-3. În fereastra de administrator, scrieți `recspike.exe install`. Dacă ați pornit-o dintr-o fereastră obișnuită, apare «Windows cere acum permisiunea de administrator»<!--recspike-->: răspundeți „Da”. Programul instalează pornirea automată: după fiecare repornire din fereastra automată și după fiecare tăiere reală, proba continuă singură. Pe desktop apare scurtătura «Proba înregistrare – tăieri reale»<!--recspike-->, folosită la pasul 7.
+3. În fereastra de administrator, scrieți `recspike.exe install`. Dacă ați pornit-o dintr-o fereastră obișnuită, apare «Windows cere acum permisiunea de administrator»<!--recspike-->: răspundeți „Da”. Programul instalează pornirea automată: după fiecare repornire din fereastra automată și după fiecare tăiere reală, proba continuă singură. Pe desktop apare scurtătura «Proba înregistrare – tăieri reale»<!--recspike-->, folosită la pasul 7. Tot acum, recspike protejează folderul probei, din care pornirea automată rulează programele ca administrator: «Folderul probei poate fi schimbat acum doar de un administrator»<!--recspike-->. Programele probei scriu doar în `results` și `work`. Dacă mai puneți ceva în folder (de exemplu `notmyfault64.exe`, pasul 4.1), Windows cere permisiunea de administrator: apăsați „Continuare”.
 4. Tot la instalare, recspike schimbă o setare a Windows și o spune: «Serviciul de timp Windows pornește acum automat»<!--recspike-->. Serviciul de timp Windows pornește automat, iar declanșatoarele care îl pot opri sunt scoase, ca ceasul PC-ului să se sincronizeze după fiecare repornire. La pasul 14, `recspike.exe uninstall` pune la loc ambele setări, exact cum erau.
 5. Cât timp PC-ul e controlorul (pasul 5), `reccontroller.exe` nu-l lasă să intre în repaus. Dacă PC-ul intră totuși în repaus în timpul probei, sau dacă controlorul scrie «Atenție: reccontroller nu poate împiedica intrarea PC-ului în repaus»<!--reccontroller-->, opriți repausul pe durata probei: „Setări” → „Sistem” → „Alimentare” → „Ecran și repaus” → la repaus alegeți „Niciodată”. După probă, readuceți setarea cum era (pasul 14).
 
 ### Pe Pi (nu și pe un Pi armv6)
 
 1. Faceți o copie a cardului SD sau a SSD-ului Pi-ului, de exemplu cu Win32 Disk Imager pe PC (butonul „Read”). Fereastra automată oprește Pi-ul brusc de 21 de ori, iar tăierile reale îi taie alimentarea; copia vă protejează sistemul.
-2. În terminal, în folderul probei, scrieți `sudo ./recspike install`. `sudo` poate cere parola contului dvs. de pe Pi. Trebuie să apară «Pornirea automată este instalată»<!--recspike-->.
+2. În terminal, în folderul probei, scrieți `sudo ./recspike install`. `sudo` poate cere parola contului dvs. de pe Pi. Trebuie să apară «Folderul probei și programele din el sunt acum ale lui root»<!--recspike--> și «Pornirea automată este instalată»<!--recspike-->. Pornirea automată rulează programele ca root, de aceea de acum folderul probei se schimbă doar cu `sudo`.
 3. Pe Pi, porniți programele probei mereu cu `sudo`, cum scrie în ghid: `sudo ./recspike …` și `sudo ./reccontroller …`. Pornirea automată rulează ca administrator (root), iar rezultatele trebuie să rămână ale lui.
 
 ### Cardul SD și modelul Pi-ului
@@ -131,7 +131,7 @@ Controlorul scrie «reccontroller rulează …»<!--reccontroller--> și «Rezul
 **Când PC-ul e gazda, nu porniți controlorul Pi-ului dintr-o fereastră `ssh` deschisă de pe PC.** La ecranele albastre și la tăierile reale, fereastra `ssh` dispare odată cu PC-ul și poate opri controlorul de pe Pi, cu tot ce măsurase. Porniți controlorul de pe ecranul și tastatura Pi-ului. Dacă Pi-ul nu are ecran, porniți-l din `ssh` desprins de fereastră:
 
 ```
-sudo setsid -f ./reccontroller > reccontroller-ecran.txt 2>&1
+sudo sh -c 'setsid -f ./reccontroller > reccontroller-ecran.txt 2>&1'
 ```
 
 Pe un Pi armv6: `setsid -f ./reccontroller-linux-armv6 > reccontroller-ecran.txt 2>&1`. Apoi puteți închide fereastra `ssh`: controlorul rulează mai departe. Ce scrie el vedeți cu `tail -f reccontroller-ecran.txt` (Ctrl+C închide doar vizualizarea, nu și controlorul). Îl opriți cu `sudo pkill -x reccontroller` (pe un Pi armv6: `pkill -f reccontroller-linux-armv6`).
@@ -287,7 +287,7 @@ La final, PC-ul adună rezultatele ambelor dispozitive și vă spune ce lipseșt
    | `MI9 lan (pc)`, `MI9 lan (pi)` | pasul 11, pe dispozitivul numit |
    | `AGE` | pasul 12 |
 
-6. Când nu mai lipsește nimic, deschideți `C:\proba-inregistrare` și faceți clic dreapta pe folderul `results` → „Comprimați în fișier ZIP”. Dacă nu vedeți opțiunea: „Afișați mai multe opțiuni” → „Trimitere la” → „Folder comprimat (arhivat)”. Trimiteți doar această arhivă: e a PC-ului și cuprinde și rezultatele Pi-ului.
+6. Când nu mai lipsește nimic, deschideți `C:\proba-inregistrare`, faceți clic dreapta pe folderul `results` → „Copiere”, apoi clic dreapta pe desktop → „Lipire”. Arhiva se face pe desktop, pentru că în folderul probei scrie doar un administrator (pasul 4.3). Pe desktop, clic dreapta pe folderul `results` → „Comprimați în fișier ZIP”. Dacă nu vedeți opțiunea: „Afișați mai multe opțiuni” → „Trimitere la” → „Folder comprimat (arhivat)”. Trimiteți doar această arhivă: e a PC-ului și cuprinde și rezultatele Pi-ului.
 7. Trimiteți arhiva în chat. Sau încărcați-o în Google Drive-ul dvs., în folderul `ipcam-teste` (creați-l dacă nu există), și scrieți-ne în chat că e acolo.
 
 Rezultatele numesc dispozitivele doar `pc` și `pi` și conțin modelul Pi-ului, sistemul de operare, tipul de stocare și măsurătorile. Nu conțin adrese IP, numele rețelei, numele dispozitivelor sau numere de serie.
@@ -296,11 +296,11 @@ Rezultatele numesc dispozitivele doar `pc` și `pi` și conțin modelul Pi-ului,
 
 După ce ne-ați trimis rezultatele:
 
-1. Pe PC, în fereastra de administrator: `recspike.exe uninstall`. Trebuie să apară «Pornirea automată și scurtătura de pe desktop au fost șterse.»<!--recspike--> și «Serviciul de timp Windows are din nou setările de dinainte.»<!--recspike-->: serviciul de timp are din nou pornirea și declanșatoarele de dinainte de pasul 4. Dacă în locul rândului despre serviciul de timp apare «Setările de dinainte ale serviciului de timp Windows nu sunt salvate»<!--recspike-->, scrieți în aceeași fereastră, pe rând, cele două comenzi `sc` din acel rând.
-2. Pe Pi (nu și pe un Pi armv6): `sudo ./recspike uninstall`. Trebuie să apară «Pornirea automată a fost ștearsă.»<!--recspike-->. Dacă pe Pi rulează încă un controlor pornit desprins de `ssh` (pasul 5), opriți-l: `sudo pkill -x reccontroller` (pe un Pi armv6: `pkill -f reccontroller-linux-armv6`).
+1. Pe PC, în fereastra de administrator: `recspike.exe uninstall`. Trebuie să apară «Pornirea automată și scurtătura de pe desktop au fost șterse.»<!--recspike-->, «Serviciul de timp Windows are din nou setările de dinainte.»<!--recspike--> și «Folderul probei are din nou permisiunile de dinainte; îl puteți șterge.»<!--recspike-->: serviciul de timp are din nou pornirea și declanșatoarele de dinainte de pasul 4. Dacă în locul rândului despre serviciul de timp apare «Setările de dinainte ale serviciului de timp Windows nu sunt salvate»<!--recspike-->, scrieți în aceeași fereastră, pe rând, cele două comenzi `sc` din acel rând.
+2. Pe Pi (nu și pe un Pi armv6): `sudo ./recspike uninstall`. Trebuie să apară «Folderul probei și programele din el sunt din nou ale contului dvs.»<!--recspike--> și «Pornirea automată a fost ștearsă.»<!--recspike-->. Dacă pe Pi rulează încă un controlor pornit desprins de `ssh` (pasul 5), opriți-l: `sudo pkill -x reccontroller` (pe un Pi armv6: `pkill -f reccontroller-linux-armv6`).
 3. Reluați actualizările Windows: „Setări” → „Windows Update” → „Reluați actualizările”.
 4. Scoateți regulile de firewall ale probei: în Start căutați „Permiteți o aplicație prin Paravanul de protecție Windows”, apăsați „Modificare setări”, selectați `reccontroller` și apăsați „Eliminare”; la fel pentru `recspike`, dacă apare. Dacă un program apare pe mai multe rânduri, eliminați-le pe toate.
-5. Ștergeți folderele `C:\proba-inregistrare` și, pe Pi, `~/proba-inregistrare` (`sudo rm -r ~/proba-inregistrare`).
+5. Ștergeți folderele `C:\proba-inregistrare` și, pe Pi, `~/proba-inregistrare` (`sudo rm -r ~/proba-inregistrare`). Pe desktopul PC-ului, ștergeți și copia folderului `results` și arhiva, după ce ne-ați trimis-o.
 6. Pe telefon, dezinstalați «Proba ipcam»<!--android--> și luați înapoi permisiunea Chrome de a instala aplicații: „Setări” → „Aplicații” → Chrome → „Instalați aplicații necunoscute” → dezactivați „Permiteți din această sursă”. Dacă ați dezactivat „Blocare automată” și nu ați reactivat-o, reactivați-o.
 7. Dacă ați trecut rețeaua PC-ului pe „Rețea privată” doar pentru probă, sau ați oprit repausul PC-ului (pasul 4.5), readuceți-le cum erau.
 
@@ -326,6 +326,8 @@ Cazuri pe care le puteți rezolva singur:
 - **Laptopul nu se oprește când scoateți încărcătorul.** Bateria îl ține pornit: țineți apăsat butonul de pornire cel puțin 10 secunde, imediat după cerere. Tăierea contează la fel.
 - **Pi-ul înregistrează pe un card SD, iar în MI2 cardul dă erori sau devine doar-citire.** ipcam-hub oprește înregistrarea și notează golul; acesta e un rezultat al probei, nu o greșeală a dvs. Lăsați proba să ruleze până la final și scrieți-ne în chat. Un SSD pe USB evită problema.
 - **Un dispozitiv a repornit singur** (o pană de curent, o actualizare). În fereastra automată, proba continuă singură după repornire. În MI2, porniți din nou ambele comenzi (pasul 8). În MI3, MI4 sau MI9, porniți din nou comanda.
+- **«nu pot proteja folderul probei»<!--recspike-->** la `recspike.exe install`: porniți-l din fereastra de administrator (pasul 2.5). Dacă refuză din nou, scrieți-ne în chat rândul întreg.
+- **«notmyfault64.exe nu mai e semnat de Microsoft»<!--recspike-->** în fereastra automată: fișierul s-a schimbat după pornirea setului. Reluați pasul 4.1, apoi porniți din nou aceeași comandă.
 - **«nu pot asculta pe porturile probei (rulează deja un reccontroller?)»<!--reccontroller-->** Pe același dispozitiv rulează deja un controlor, poate într-o fereastră uitată. Închideți-l și porniți din nou.
 - **«Transferul nu a reușit: …»<!--reccontroller-->** la pasul 13: porniți din nou comanda `push` pe Pi.
 - **Ați oprit un program cu Ctrl+C.** recspike scrie «Proba a fost oprită de dvs.»<!--recspike-->. Ce s-a măsurat până atunci rămâne; porniți din nou aceeași comandă când puteți.

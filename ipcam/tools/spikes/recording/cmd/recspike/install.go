@@ -149,7 +149,12 @@ type autostart struct {
 	// savedStart keeps the time service's settings from before install,
 	// outside the release folder (timeServiceFile).
 	savedStart string
-	out        io.Writer
+	// mkdirAll makes the PC's data folders; chown and chmod change the
+	// owner and the mode of the Pi's release (security-1).
+	mkdirAll func(path string) error
+	chown    func(path string, uid, gid int) error
+	chmod    func(path string, mode os.FileMode) error
+	out      io.Writer
 }
 
 // timeServiceFile is where install keeps the time service's settings from
@@ -184,6 +189,9 @@ func systemAutostart(out io.Writer) autostart {
 		tempDir:     os.TempDir(),
 		timeService: mi1.TimeService{},
 		savedStart:  timeServiceFile(),
+		mkdirAll:    func(path string) error { return os.MkdirAll(path, 0o700) },
+		chown:       os.Lchown,
+		chmod:       os.Chmod,
 		out:         out,
 	}
 }
@@ -230,6 +238,10 @@ func (a autostart) install(exe string) error {
 		if !a.privileged() {
 			return errors.New("instalarea scrie în /etc/systemd: porniți-o cu sudo ./recspike install")
 		}
+		if err := a.ownRelease(exe, 0, 0, 0o755); err != nil {
+			return fmt.Errorf("nu pot da folderul probei lui root, așa că nu instalez pornirea automată: %w", err)
+		}
+		_, _ = fmt.Fprintln(a.out, "Folderul probei și programele din el sunt acum ale lui root; le schimbați doar cu sudo.")
 		if err := os.WriteFile(a.unitPath, []byte(systemdUnit(exe)), 0o644); err != nil { //nolint:gosec // a systemd unit is world-readable
 			return err
 		}
@@ -245,13 +257,16 @@ func (a autostart) install(exe string) error {
 	if ok, err := a.elevated("install"); !ok || err != nil {
 		return err
 	}
+	sid, err := a.userSID()
+	if err != nil {
+		return err
+	}
+	if err := a.protectFolder(dir, sid); err != nil {
+		return err
+	}
 	// Before the boot task: whether one is registered already tells the
 	// probe's settings of the time service from the owner's (mi1-6).
 	if err := a.saveTimeService(); err != nil {
-		return err
-	}
-	sid, err := a.userSID()
-	if err != nil {
 		return err
 	}
 	file := filepath.Join(a.tempDir, autostartName+".xml")
@@ -280,12 +295,19 @@ func (a autostart) install(exe string) error {
 	return nil
 }
 
-// uninstall removes the autostart and the shortcut; what is already gone
+// uninstall removes the autostart and the shortcut, and gives the release
+// folder back as it was before install (security-1); what is already gone
 // is no error.
-func (a autostart) uninstall() error {
+func (a autostart) uninstall(exe string) error {
 	if a.goos != "windows" {
 		if !a.privileged() {
 			return errors.New("dezinstalarea scrie în /etc/systemd: porniți-o cu sudo ./recspike uninstall")
+		}
+		if uid, gid, ok := sudoUser(); ok {
+			if err := a.ownRelease(exe, uid, gid, 0); err != nil {
+				return fmt.Errorf("nu pot da folderul probei înapoi contului dvs.: %w", err)
+			}
+			_, _ = fmt.Fprintln(a.out, "Folderul probei și programele din el sunt din nou ale contului dvs.")
 		}
 		if _, err := os.Stat(a.unitPath); errors.Is(err, os.ErrNotExist) {
 			_, _ = fmt.Fprintln(a.out, "Pornirea automată nu este instalată.")
@@ -322,7 +344,7 @@ func (a autostart) uninstall() error {
 		return err
 	}
 	_, _ = fmt.Fprintln(a.out, "Pornirea automată și scurtătura de pe desktop au fost șterse.")
-	return nil
+	return a.unprotectFolder(a.folderOf(exe))
 }
 
 // startTimeService sets Windows' time service to start automatically,

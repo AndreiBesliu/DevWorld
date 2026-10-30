@@ -21,7 +21,9 @@ import (
 // ssh window gets SIGHUP when that window's far end dies (the PC under test
 // in a bugcheck or a power cut), and its screen then fails (EPIPE, EIO).
 // It keeps serving through both: a host that connects afterwards gets its
-// session, and the line that the dead screen lost is in reccontroller.log.
+// session, and the line that the dead screen lost is in its log,
+// work/reccontroller.log: the release folder itself is the
+// administrator's on a PC that recspike install protected (security-1).
 func TestMain_HangupKeepsServing(t *testing.T) {
 	media := spiketest.Required(t, "MEDIAGEN_DIR", "SPIKE_REQUIRE_MEDIA")
 	dir := t.TempDir()
@@ -90,8 +92,8 @@ func TestMain_HangupKeepsServing(t *testing.T) {
 	} else if _, ok := m.(link.Session); !ok {
 		t.Fatalf("after SIGHUP, the host got %s, want its session", m.Type())
 	}
-	waitFor(t, "the host's line in reccontroller.log", func() bool {
-		data, err := os.ReadFile(filepath.Join(dir, "reccontroller.log")) //nolint:gosec // the test's folder
+	waitFor(t, "the host's line in work/reccontroller.log", func() bool {
+		data, err := os.ReadFile(filepath.Join(dir, "work", "reccontroller.log")) //nolint:gosec // the test's folder
 		return err == nil && strings.Contains(string(data), "Gazda „pc” s-a conectat.")
 	})
 

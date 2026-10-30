@@ -32,7 +32,14 @@ type serveConfig struct {
 
 // serve serves until ctx is done.
 func serve(ctx context.Context, cfg serveConfig, out io.Writer) error {
-	logFile, err := os.OpenFile(filepath.Join(cfg.dir, "reccontroller.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // next to the binary
+	// The log goes to work/, a data folder: on a PC that recspike install
+	// protected, a standard window writes only results/ and work/
+	// (security-1).
+	work := filepath.Join(cfg.dir, "work")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		return fmt.Errorf("nu pot deschide jurnalul: %w", err)
+	}
+	logFile, err := os.OpenFile(filepath.Join(work, "reccontroller.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // reccontroller's own folder
 	if err != nil {
 		return fmt.Errorf("nu pot deschide jurnalul: %w", err)
 	}
@@ -49,8 +56,8 @@ func serve(ctx context.Context, cfg serveConfig, out io.Writer) error {
 
 // screenAndLog writes each line of the controller's screen to its log too:
 // a screen that went away with its ssh window (report-1) fails every
-// write, and the verdicts stay in reccontroller.log. Only the log's error
-// is returned.
+// write, and the verdicts stay in work/reccontroller.log. Only the log's
+// error is returned.
 type screenAndLog struct{ screen, log io.Writer }
 
 func (w screenAndLog) Write(p []byte) (int, error) {
