@@ -49,6 +49,32 @@ class MetricsPluginTest {
     }
 
     @Test
+    fun autorunHandoff_aRecreatedActivityRunsTheScenarioItsPageNeverGot() {
+        // The emulator job's first cold start (3b35760): the system created the Activity again
+        // (changingConfigurations=true) before the first one had handed the scenario to its
+        // page. load() had taken the extras off the Intent, so the second Activity saw none.
+        val first = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = false, savedPending = null)
+        assertEquals("autorun=S1", first.pendingQuery)
+        val saved = first.pendingQuery // onSaveInstanceState before the page got the query
+        val second = AutorunHandoff.onLoad(extrasQuery = null, restored = true, savedPending = saved)
+        assertEquals("autorun=S1", second.pendingQuery)
+        second.handed()
+        assertNull(second.pendingQuery)
+    }
+
+    @Test
+    fun autorunHandoff_aRestoredActivityDoesNotRunAScenarioItsPageHadAgain() {
+        // Process death: the page ran S1, the app went to the background, the system killed its
+        // process and restored the Activity from the launch Intent it kept, extras included.
+        val first = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = false, savedPending = null)
+        first.handed()
+        val restored = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = true, savedPending = first.pendingQuery)
+        assertNull(restored.pendingQuery)
+        // A launch without extras runs nothing.
+        assertNull(AutorunHandoff.onLoad(extrasQuery = null, restored = false, savedPending = null).pendingQuery)
+    }
+
+    @Test
     fun pageForLog_dropsTheHubAddressAndKeepsTheScenario() {
         assertEquals(
             "http://localhost/ (autorun S1)",

@@ -1,0 +1,1 @@
+{"schema":"ipcam.phase0c1.result/1","code":"MI2","runId":"pc-72h-1","set":"pc-72h","host":"pc","os":"windows","storage":"ssd","runs":null,"mi2":{"hours":72.3,"cameras":8,"crashes72h":0,"childRestarts":0,"onSdCard":false,"windowHours":6}}

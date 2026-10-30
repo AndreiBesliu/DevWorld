@@ -8,11 +8,14 @@
 # is reliable, which one start per job cannot: every start must give its result,
 # and the script goes on after a start that fails, to count how many do.
 #
+# The first launch after the emulator booted is a warm-up, not counted: the
+# emulator is still finishing its boot then (see warm_up).
+#
 # Two more starts check what must not end or repeat a run:
 # - the probe changes the system's font scale 5 s after the launch. The Activity
 #   must not be created again for that (nor for the other changes an emulator or
-#   a phone makes at run time, such as the SIM's mcc and mnc): a new Activity gets
-#   no launch extras, and the scenario would be lost;
+#   a phone makes at run time, such as the SIM's mcc and mnc): a new Activity
+#   would end the run in progress with its WebView;
 # - the process-death start sends the finished app to the background, kills its
 #   process and starts it again from the launcher Intent. The system restores the
 #   Activity from the launch Intent it kept, extras included, and the scenario
@@ -29,27 +32,47 @@
 # 3 starts on a push); the full mode adds the two checks above (on a pull
 # request, with 5 starts).
 #
+# The age mode runs the recorder spike's AGE scenario once from a cold start
+# (C1-R25): agerange's speed in an Android WebView. The emulator's speed is not
+# judged; its result must arrive with mbps > 0, which shows that the scenario runs
+# in the WebView. ipcam-mobile runs it in a step of its own once the S1 step has
+# passed, so in a new emulator, after a warm-up launch of its own.
+#
 # On failure it prints the cause as check annotations, which can be read where
 # the job log cannot. Each check and the outcome also go to the job's step
-# summary ($GITHUB_STEP_SUMMARY), which GitHub keeps whole, while it shows only
-# about ten annotations of a level per step.
+# summary ($GITHUB_STEP_SUMMARY), which GitHub keeps whole, while it keeps only
+# ten annotations of a level per step: a full run of the S1 starts gives exactly
+# ten notices (the warm-up, which carries the network check, five starts, the
+# device facts, the probe, and the start before the process death with its
+# check), and the age mode two (its warm-up and AGE).
 #
 #   apps/mobile/ci/emulator-smoke.sh <apk> <spikehub results folder> <spikehub log> [starts] [full|quick]
+#   apps/mobile/ci/emulator-smoke.sh <apk> <spikehub results folder> <spikehub log> age
 set -euo pipefail
 shopt -s nullglob
 
+usage() {
+  echo "usage: $0 <apk> <spikehub results folder> <spikehub log> [starts] [full|quick]" >&2
+  echo "       $0 <apk> <spikehub results folder> <spikehub log> age" >&2
+  exit 2
+}
+[[ $# -ge 3 ]] || usage
 apk="$1"
 results="$2"
 hub_log="$3"
-starts="${4:-3}"
-mode="${5:-full}"
-if [[ ! "${starts}" =~ ^[1-9][0-9]*$ || ! "${mode}" =~ ^(full|quick)$ ]]; then
-  echo "usage: $0 <apk> <spikehub results folder> <spikehub log> [starts] [full|quick]" >&2
-  exit 2
+if [[ "${4:-}" == age ]]; then
+  [[ $# -eq 4 ]] || usage
+  starts=0
+  mode=age
+else
+  starts="${4:-3}"
+  mode="${5:-full}"
+  [[ "${starts}" =~ ^[1-9][0-9]*$ && "${mode}" =~ ^(full|quick)$ ]] || usage
 fi
 app=ro.ipcam.spike
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 run_timeout=150 # seconds one start may take; S1 takes about a minute
+age_timeout=240 # seconds the AGE start may take; a phone needs a few seconds
 
 # Prints standard input as one annotation of level $1 (error, notice) titled $2.
 # GitHub shows about 4000 characters of an annotation: keep the first 3300.
@@ -70,6 +93,14 @@ summarize() {
 # The app's own log lines (tag SpikeMetrics): each Activity and page it went through.
 app_log() {
   adb logcat -d -v time -s SpikeMetrics:V | sed -E 's/ [VDIWEF]\/SpikeMetrics\( *[0-9]+\): / /' | cut -c1-300 | tail -n "$1"
+}
+
+# The system's view of the app, its last $1 events: Activities created, created
+# again and destroyed (wm_ since Android 10), processes started and died.
+system_events() {
+  adb logcat -b events -d -v threadtime |
+    grep -E "(am|wm)_(create_activity|destroy_activity|relaunch|proc_start|proc_died|kill|crash|anr).*${app}" |
+    cut -c1-200 | tail -n "$1" || true
 }
 
 # The page's state, the app's log lines and the system's view of the app, as
@@ -93,9 +124,7 @@ diagnose() (
   } 2>&1 | cut -c1-1800 | annotate error "emulator page"
   {
     app_log 14
-    # The system's view of the app: Activities created and destroyed, processes started and died.
-    adb logcat -b events -d -v threadtime | grep -E "am_(create_activity|destroy_activity|relaunch_activity|proc_start|proc_died|kill|crash|anr).*${app}" |
-      cut -c1-200 | tail -n 8
+    system_events 8
   } | annotate error "emulator app log"
   {
     adb logcat -d -v brief | grep -E '^[VDIWEF]/(Capacitor[^ (]*|chromium|cr_WebViewFactory|AndroidRuntime) *\(' |
@@ -105,9 +134,20 @@ diagnose() (
   } | annotate error "emulator logcat"
 )
 
-# The emulator's network comes up a little after boot: start S1 only when
+# The emulator's 1-minute load average.
+load_average() {
+  adb shell cat /proc/loadavg | tr -d '\r' | cut -d' ' -f1
+}
+
+# The emulator's load average, and how long it has been up.
+emulator_load() {
+  printf 'load average %s, up %s s' "$(load_average)" "$(adb shell cat /proc/uptime | tr -d '\r' | cut -d. -f1)"
+}
+
+# The emulator's network comes up a little after boot: start the app only when
 # spikehub answers (toybox nc: -w connect timeout, -q quit after stdin ends).
-# If it stays unreachable for 2 min, S1 cannot run: report why and stop.
+# If it stays unreachable for 2 min, nothing can run: report why and stop. The
+# check's time goes into the warm-up's notice (network).
 booted=${SECONDS}
 until adb shell 'nc -w 2 -q 1 10.0.2.2 7080 </dev/null' >/dev/null 2>&1; do
   if ((SECONDS - booted >= 120)); then
@@ -117,7 +157,7 @@ until adb shell 'nc -w 2 -q 1 10.0.2.2 7080 </dev/null' >/dev/null 2>&1; do
   fi
   sleep 2
 done
-echo "spikehub reachable check took $((SECONDS - booted)) s" | annotate notice "emulator network"
+network="spikehub reachable check took $((SECONDS - booted)) s; $(emulator_load)"
 
 adb install -r "${apk}"
 
@@ -263,7 +303,98 @@ survives_process_death() {
   return 1
 }
 
+# The first launch after the emulator booted, not counted. The emulator is still
+# finishing its boot then, and every failure of this job up to 2026-10-30 with
+# annotations came from that launch alone, never from a later one: the system
+# created the Activity again 0.1 s after the launch (an app resource change after
+# boot, which no configChanges entry stops; AutorunHandoff now keeps the scenario
+# across it), the player's first frame came after its 4 s limit, or the metrics
+# plugin's first answer after the page's 3 s. The warm-up takes the app's and the
+# WebView's first launch, then waits at most 2 min for the emulator's load average
+# to fall below its CPU count, so that the counted starts measure the app's cold
+# start rather than the device's boot. Its notice, titled $1, says what it saw,
+# after the network check's line; it never fails.
+warm_up() {
+  local title="$1" deadline cpus log events waited
+  adb shell am force-stop "${app}"
+  adb logcat -b all -c
+  adb shell am start -W -n "${app}/.MainActivity" >/dev/null
+  deadline=$((SECONDS + 60))
+  until [[ "$(app_log 60)" == *'page loaded'* ]] || ((SECONDS >= deadline)); do sleep 2; done
+  log="$(app_log 14)"
+  events="$(system_events 8)"
+  cpus="$(adb shell nproc | tr -d '\r' || true)"
+  waited=${SECONDS}
+  deadline=$((SECONDS + 120))
+  until awk -v avg="$(load_average)" -v cpus="${cpus:-1}" 'BEGIN { exit !(avg + 0 < cpus + 0) }' ||
+    ((SECONDS >= deadline)); do
+    sleep 5
+  done
+  adb shell am force-stop "${app}"
+  summarize "- warm-up launch (not counted): waited $((SECONDS - waited)) s for the emulator to settle; $(emulator_load), ${cpus} CPUs"
+  {
+    echo "${network}"
+    echo "waited $((SECONDS - waited)) s for the emulator to settle; $(emulator_load), ${cpus} CPUs"
+    echo "${log}"
+    echo "${events}"
+  } | annotate notice "${title}"
+}
+
+# AGE once (age mode): the app starts cold with the launch extras autorun=AGE,
+# like an S1 start, since a warm start ignores them. Returns 0 with a notice when
+# spikehub stores an AGE result with mbps > 0 that was not interrupted, else 1
+# with an error and the diagnosis. The notice and the error carry the app's log
+# lines: the extras that the Activity read and the scenario that the page got.
+age_start() {
+  local launch stored="" deadline file known line problem=""
+  adb shell am force-stop "${app}"
+  adb logcat -b all -c
+  known="$(printf '%s\n' "${results}"/*.json)"
+  launch="$(adb shell am start -W -n "${app}/.MainActivity" --es autorun AGE --es hub http://10.0.2.2:7080 | tr -d '\r')"
+  launch="${launch//$'\n'/ | }"
+  echo "AGE: ${launch}"
+  deadline=$((SECONDS + age_timeout))
+  while [[ -z "${stored}" ]] && ((SECONDS < deadline)); do
+    for file in "${results}"/*.json; do
+      if ! grep -qxF -- "${file}" <<<"${known}" && jq -e '.scenario == "AGE"' "${file}" >/dev/null; then
+        stored="${file}"
+      fi
+    done
+    [[ -n "${stored}" ]] || sleep 3
+  done
+  if [[ -z "${stored}" ]]; then
+    problem="no AGE result within ${age_timeout} s"
+  elif ! jq -e '(.mbps | type == "number") and .mbps > 0 and .interrupted != true' "${stored}" >/dev/null; then
+    problem="$(jq -r '"AGE stored without mbps > 0: mbps \(.mbps), interrupted \(.interrupted); notes: \(.notes | join("; "))"' "${stored}")"
+  fi
+  if [[ -n "${problem}" ]]; then
+    {
+      echo "${problem}; ${launch}"
+      app_log 12
+    } | annotate error "emulator AGE"
+    summarize "- AGE: failed: ${problem}"
+    diagnose
+    return 1
+  fi
+  line="$(jq -r '"AGE stored: \(.mbps * 10 | round / 10) Mbps, \(.bytes) bytes in \(.ms | round) ms (the emulator'"'"'s speed is not judged);"
+    + " \(.device.model) \(.device.os) \(.device.webview); notes: \(.notes | join("; "))"' "${stored}")"
+  summarize "- ${line}"
+  {
+    echo "${line}"
+    echo "launch: ${launch}"
+    app_log 12
+  } | annotate notice "emulator AGE"
+}
+
+if [[ "${mode}" == age ]]; then
+  summarize "### AGE in the emulator's WebView (C1-R25)"
+  warm_up "emulator AGE warm-up"
+  age_start
+  exit
+fi
+
 summarize "### Emulator smoke test (AND-3), ${mode} mode"
+warm_up "emulator warm-up"
 failures=0
 checks=$((starts + 1)) # the starts and the device facts
 facts=""

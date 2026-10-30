@@ -27,8 +27,11 @@ import java.net.URLEncoder
 
 private const val TAG = "SpikeMetrics"
 
-/** The key of the marker in the Activity's saved state: this Activity has handled its launch extras. */
+/** The key of the Activity's saved state: this Activity has read its launch extras. */
 private const val HANDLED_KEY = "spikeAutorunHandled"
+
+/** The key, in that state, of the query string that its page had not been given yet (AutorunHandoff). */
+private const val PENDING_KEY = "spikeAutorunPending"
 
 private val THERMAL_NAMES = mapOf(
     PowerManager.THERMAL_STATUS_NONE to "NONE",
@@ -85,12 +88,14 @@ internal fun autorunQuery(autorun: String?, hub: String?): String? {
  * reloads the page with the extras as its query string.
  *
  * Only a cold start honours the extras. `load()` reads them once and removes
- * them from the Activity's Intent, and it marks the Activity's saved state
- * (the system keeps it across a process death). An Activity that is restored
- * with the marker (it was created again, or its process died and the system
- * started it from the launch Intent it kept, extras included) ignores the
- * extras: its scenario ended with the old page, and the next `am start` is the
- * way to run it again. A warm start (`onNewIntent`) does not read them at all.
+ * them from the Activity's Intent, and the Activity's saved state (which the
+ * system keeps across a process death) holds the scenario until the page has
+ * been given it (AutorunHandoff). An Activity that is created again before that
+ * runs the scenario; one restored after its page had it (it was created again,
+ * or its process died and the system started it from the launch Intent it
+ * kept, extras included) ignores the extras: its scenario ended with the old
+ * page, and the next `am start` is the way to run it again. A warm start
+ * (`onNewIntent`) does not read them at all.
  * The manifest's `configChanges` keep configuration changes from creating the
  * Activity again, because that would lose the run in progress. The Activity is exported
  * and takes any `hub` URL: any app on the device can start a run against a
@@ -117,40 +122,55 @@ class MetricsPlugin : Plugin() {
         }
     }
 
+    /** The launch extras' scenario until the page has it; the Activity's saved state keeps it. */
+    private var handoff = AutorunHandoff.onLoad(extrasQuery = null, restored = false, savedPending = null)
+
     override fun load() {
         val intent = activity.intent
         val registry = activity.savedStateRegistry
-        val restored = registry.consumeRestoredStateForKey(HANDLED_KEY) != null
-        if (registry.getSavedStateProvider(HANDLED_KEY) == null) {
-            registry.registerSavedStateProvider(HANDLED_KEY, SavedStateRegistry.SavedStateProvider { Bundle().apply { putBoolean(HANDLED_KEY, true) } })
-        }
+        val saved = registry.consumeRestoredStateForKey(HANDLED_KEY)
+        val restored = saved != null
         val autorun = intent.getStringExtra("autorun")
         val hub = intent.getStringExtra("hub")
-        val query = autorunQuery(autorun, hub).takeUnless { restored }
+        handoff = AutorunHandoff.onLoad(autorunQuery(autorun, hub), restored, saved?.getString(PENDING_KEY))
+        if (registry.getSavedStateProvider(HANDLED_KEY) == null) {
+            registry.registerSavedStateProvider(
+                HANDLED_KEY,
+                SavedStateRegistry.SavedStateProvider {
+                    Bundle().apply {
+                        putBoolean(HANDLED_KEY, true)
+                        putString(PENDING_KEY, handoff.pendingQuery)
+                    }
+                },
+            )
+        }
         intent.removeExtra("autorun")
         intent.removeExtra("hub")
         Log.i(
             TAG,
             "load: pid=${Process.myPid()} activity=${id(activity)} bridge=${id(bridge)} intent=${id(intent)} restored=$restored " +
-                "autorun=$autorun hub=${hub != null} run=${query != null} config=${configForLog(activity.resources.configuration)}",
+                "autorun=$autorun hub=${hub != null} pending=${saved?.getString(PENDING_KEY) != null} " +
+                "run=${handoff.pendingQuery != null} config=${configForLog(activity.resources.configuration)}",
         )
         // Runs after the bridge has started its own first load of the page.
         val webView = bridge.webView
         webView.post {
             bridge.addWebViewListener(pageEvents)
             Log.i(TAG, "load posted: attached=${webView.isAttachedToWindow} url=${pageForLog(webView.url)}")
-            if (query != null) {
+            handoff.pendingQuery?.let { query ->
                 val url = "${bridge.localUrl}/?$query"
                 webView.loadUrl(url)
+                handoff.handed()
                 Log.i(TAG, "loadUrl: ${pageForLog(url)}")
             }
         }
     }
 
-    private fun lifecycle(event: String, config: Configuration? = null) {
+    private fun lifecycle(event: String, config: Configuration? = null, changes: Int? = null) {
         Log.i(
             TAG,
             "$event: activity=${id(activity)} changingConfigurations=${activity.isChangingConfigurations}" +
+                (changes?.let { " changes=0x${Integer.toHexString(it)}" } ?: "") +
                 (config?.let { " config=${configForLog(it)}" } ?: ""),
         )
     }
@@ -163,10 +183,14 @@ class MetricsPlugin : Plugin() {
 
     override fun handleOnStop() = lifecycle("stop")
 
-    override fun handleOnDestroy() = lifecycle("destroy", activity.resources.configuration)
+    // With the changes that create the Activity again (getChangingConfigurations), for
+    // instance 0x80000000 when the system changes the app's resources (CONFIG_ASSETS_PATHS).
+    override fun handleOnDestroy() = lifecycle("destroy", activity.resources.configuration, activity.changingConfigurations)
 
+    // BridgeActivity.load() passes the Activity's own launch Intent here too (launch=true),
+    // after load() took its extras. Only launch=false is a warm start's Intent.
     override fun handleOnNewIntent(intent: Intent) {
-        Log.i(TAG, "new intent: autorun=${intent.hasExtra("autorun")} (a warm start ignores the extras)")
+        Log.i(TAG, "new intent: autorun=${intent.hasExtra("autorun")} launch=${intent === activity.intent} (a warm start ignores the extras)")
     }
 
     override fun handleOnConfigurationChanged(newConfig: Configuration) = lifecycle("configuration changed", newConfig)

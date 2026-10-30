@@ -1,0 +1,120 @@
+// SPIKE-ONLY: ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md
+
+package results
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+)
+
+// Write validates e and writes it to <dir>/<code>/<set>/<runId>.json, as one
+// line of JSON. The file is written beside its final name, synced and
+// renamed over it, so a reader never sees half an envelope, and the folder
+// is synced after the rename, so the envelope keeps its name after a power
+// cut; so is the parent of each folder that Write creates. When that last
+// sync fails, the envelope is removed again: an error from Write leaves no
+// envelope of the run.
+func Write(dir string, e Envelope) error { return write(dir, e, true) }
+
+// ErrExists is Create's error for an envelope whose file exists already.
+var ErrExists = errors.New("results: the envelope exists already")
+
+// Create is Write for an envelope that must not exist yet: a run id names
+// one run, so the envelope of a counted run is never replaced by another
+// run's of the same id. An envelope on disk already is ErrExists, and stays
+// as it is. Create looks before it writes, so it does not order two writers
+// of one envelope at the same moment: both may write it, the later rename
+// replacing the earlier envelope, or the later writer may find the earlier
+// one's envelope, of the same run, and get ErrExists. A caller writes each
+// envelope from one goroutine at a time: reccontroller judges a run's
+// report once, and a report sent again while the first is being judged
+// waits for that verdict.
+func Create(dir string, e Envelope) error { return write(dir, e, false) }
+
+// write is Write, and with replace false Create.
+func write(dir string, e Envelope, replace bool) error {
+	if err := e.Validate(); err != nil {
+		return err
+	}
+	data, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	folder := filepath.Join(dir, e.Code, e.Set)
+	if err := mkdirAllSynced(folder); err != nil {
+		return err
+	}
+	final := filepath.Join(folder, e.RunID+".json")
+	if !replace {
+		if _, err := os.Lstat(final); err == nil {
+			return ErrExists
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	f, err := os.CreateTemp(folder, e.RunID+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }() // gone after the rename
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		return err
+	}
+	if err := syncDir(folder); err != nil {
+		// The writer reports the failure, and the run is redone: no
+		// envelope of it may stay on disk to be counted.
+		return errors.Join(err, os.Remove(final))
+	}
+	return nil
+}
+
+// mkdirAllSynced creates folder and its missing parents, as os.MkdirAll
+// does, and syncs the parent of each folder that it created, top down, so
+// that the new folders survive a power cut.
+func mkdirAllSynced(folder string) error {
+	var missing []string
+	for d := folder; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil || !errors.Is(err, os.ErrNotExist) || filepath.Dir(d) == d {
+			break
+		}
+		missing = append(missing, d)
+	}
+	if err := os.MkdirAll(folder, 0o750); err != nil {
+		return err
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := syncDir(filepath.Dir(missing[i])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// syncDir makes the entries of the folder dir durable: an fsync of the
+// directory, except on Windows, which has none (NTFS journals its entries).
+// Tests replace it to see when Write calls it.
+var syncDir = func(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir) //nolint:gosec // the results folder that Write made
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
+}
