@@ -715,6 +715,28 @@ func TestCatalog_PutPlacementTx_SupersedesUnverified(t *testing.T) {
 	}
 }
 
+// TestCatalog_PutPlacementTx_SupersedeRefreshesFields (P03): a placement
+// superseded by other bytes takes the new placement's encryption, class and
+// rule IDs with them, so its row describes the copy now to be made.
+func TestCatalog_PutPlacementTx_SupersedeRefreshesFields(t *testing.T) {
+	db := openTest(t)
+	s := putTestSegment(t, db, "a", 1000, 10)
+	putPlacement(t, db, newPlacement(s, "dst-a", ClassContinuous))
+	was := placementOf(t, db, s.ID, "dst-a")
+
+	next := newPlacement(s, "dst-a", ClassEventClip)
+	next.Bytes, next.Encrypt, next.RuleIDs = 11, true, "rule-1,rule-2"
+	if !putPlacement(t, db, next) {
+		t.Fatal("other bytes did not supersede the placement")
+	}
+	got := placementOf(t, db, s.ID, "dst-a")
+	want := was
+	want.Bytes, want.Encrypt, want.Class, want.RuleIDs = 11, true, ClassEventClip, "rule-1,rule-2"
+	if got != want {
+		t.Errorf("the superseded placement is %+v, want %+v", got, want)
+	}
+}
+
 // TestCatalog_PutPlacementTx_KeepsVerified (P03): a verified copy cannot be
 // replaced yet, so its placement stays as it is, whatever the bytes.
 func TestCatalog_PutPlacementTx_KeepsVerified(t *testing.T) {
