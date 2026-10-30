@@ -138,9 +138,12 @@ jobs:
   emulator:
     # AND-3: the APK on an API 36 emulator runs S1 by autorun (R5) against
     # spikehub with 4 simulated cameras on the runner, from cold starts in a row
-    # (one start per job could not show a launch that fails now and then). A push
-    # runs 3 starts; a pull request runs the full loop: 5 starts, one that changes
-    # the font scale during the run, and one that survives the process's death.
+    # (one start per job could not show a launch that fails now and then), after
+    # a warm-up launch that is not counted. A push runs 3 starts; a pull request
+    # runs the full loop: 5 starts, one that changes the font scale during the
+    # run, and one that survives the process's death. Once S1 has passed, the
+    # recorder spike's AGE scenario runs once in the same emulator (C1-R25): its
+    # result must arrive with mbps > 0; the emulator's speed is not judged.
     # Each check goes to the step summary too (emulator-smoke.sh).
     needs: android
     runs-on: ubuntu-24.04
@@ -193,7 +196,7 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: S1 on the emulator
+      - name: S1, then AGE, on the emulator
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           api-level: 36
@@ -202,4 +205,10 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect -camera-back none
           working-directory: ipcam
-          script: apps/mobile/ci/emulator-smoke.sh "${RUNNER_TEMP}/apk/app-spike-debug.apk" "${RUNNER_TEMP}/results" "${RUNNER_TEMP}/spikehub.log" ${{ github.event_name == 'pull_request' && '5 full' || '3 quick' }}
+          # The runner runs each line on its own and stops at the first that fails:
+          # AGE runs only after S1 has passed, in the emulator S1 has warmed up (a
+          # step of its own would boot a new emulator). Its annotations are titled
+          # «emulator AGE».
+          script: |
+            apps/mobile/ci/emulator-smoke.sh "${RUNNER_TEMP}/apk/app-spike-debug.apk" "${RUNNER_TEMP}/results" "${RUNNER_TEMP}/spikehub.log" ${{ github.event_name == 'pull_request' && '5 full' || '3 quick' }}
+            apps/mobile/ci/emulator-smoke.sh "${RUNNER_TEMP}/apk/app-spike-debug.apk" "${RUNNER_TEMP}/results" "${RUNNER_TEMP}/spikehub.log" age
