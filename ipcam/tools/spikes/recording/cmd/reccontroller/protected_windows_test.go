@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -180,8 +181,17 @@ func serveOnce(t *testing.T, window string, token windows.Token, dir, runID stri
 		_, err := os.Stat(filepath.Join(dir, "results", filepath.FromSlash(name)))
 		return err == nil
 	})
-	if log, err := os.ReadFile(filepath.Join(dir, "work", "reccontroller.log")); err != nil || !strings.Contains(string(log), "Am primit "+name+".") { //nolint:gosec // the test's folder
-		t.Errorf("%s: work/reccontroller.log (%v) lacks the envelope's line; screen:\n%s", window, err, shown.String())
+	// reccontroller says that it got the envelope once the envelope is in
+	// results/: the line follows the file, so the test waits for it, as
+	// TestMain_HangupKeepsServing does.
+	logged := func() bool {
+		log, err := os.ReadFile(filepath.Join(dir, "work", "reccontroller.log")) //nolint:gosec // the test's folder
+		return err == nil && strings.Contains(string(log), "Am primit "+name+".")
+	}
+	for deadline := time.Now().Add(10 * time.Second); !logged(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: work/reccontroller.log lacks the envelope's line; screen:\n%s", window, shown.String())
+		}
 	}
 }
 

@@ -924,6 +924,10 @@ func TestResume_ElevatedHubStartsFromTrustedValues(t *testing.T) {
 	d := r.driver(t)
 	d.ConfigDir = filepath.Join(t.TempDir(), "ProgramData", "ipcam-recspike")
 	d.protectDir = func(dir string) error { return os.MkdirAll(dir, 0o700) } // icacls is the PC's (TestProtectConfigDir_RootsAlone)
+	// Run 2 gets no cut: reccontroller's comes minutes after the ready, and
+	// a fake's at once would race the test's cancel at that ready, to an OS
+	// stop that this driver does not have (Windows CI, a0616ba).
+	r.f.onReady = func(*link.Conn, link.RunStart) {}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	next := cancelAt(r.f, "ready pi-sysrq-02-1", cancel)
