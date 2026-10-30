@@ -14,7 +14,10 @@
 # when the first one fails; exits 1 when one failed, 2 on a usage error.
 set -euo pipefail
 
-read -r -a trees <<< "${TREES:-}"
+# The trees are split at every space, tab and newline, as the workflow's
+# unquoted ${TREES} is, so a YAML literal block (TREES: |) lints every line.
+# read -d '' reads to the end and then returns 1, which is no error here.
+read -r -d '' -a trees <<< "${TREES:-}" || true
 if [[ $# -ne 1 || -z "$1" || ${#trees[@]} -eq 0 ]]; then
   echo "usage: TREES='<tree>...' $0 <goos>" >&2
   exit 2

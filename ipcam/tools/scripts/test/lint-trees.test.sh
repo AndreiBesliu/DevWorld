@@ -70,6 +70,12 @@ check 'extra spaces between the trees change nothing' 0 --is \
   "linux in ipcam: ${upload_run} ./tools/spikes/upload/...
 linux in ipcam: ${hub_run} ./hub" -- \
   lints '  ./tools/spikes/upload/...   ./hub ' -- linux
+# A YAML literal block (TREES: |) puts the trees on lines of their own, with a
+# newline at the end.
+check 'trees on lines of their own are all linted' 0 --is \
+  "linux in ipcam: ${upload_run} ./tools/spikes/upload/...
+linux in ipcam: ${hub_run} ./hub ./hub/internal/storage/... ./hub/internal/outbox/..." -- \
+  lints $'./tools/spikes/upload/... ./hub\n./hub/internal/storage/...\n\t./hub/internal/outbox/...\n' -- linux
 check 'a failing upload lint fails, and the hub lint still runs' 1 \
   --has 'fake lint: issues under ./tools/spikes/upload/...' --has "${hub_run} ./hub" -- \
   lints "${both}" FAKE_FAIL=./tools/spikes/upload/... -- windows
@@ -84,5 +90,6 @@ check 'no GOOS is a usage error' 2 --has usage --lacks 'in ipcam' -- lints "${bo
 check 'two arguments are a usage error' 2 --has usage -- lints "${both}" -- linux windows
 check 'no TREES is a usage error' 2 --has usage --lacks 'in ipcam' -- lints '' -- linux
 check 'TREES of spaces only is a usage error' 2 --has usage --lacks 'in ipcam' -- lints '   ' -- linux
+check 'TREES of blank lines only is a usage error' 2 --has usage --lacks 'in ipcam' -- lints $'\n \n\t\n' -- linux
 
 finish lint-trees.test.sh
