@@ -1,0 +1,257 @@
+name: ipcam-spike-upload
+
+# The Phase 0 (c2) upload spike (ipcam/docs/superpowers/plans/2026-10-18-phase0c2-upload-spike.md):
+# the spike module tools/spikes/upload and, as the plan's tasks add them, the hub packages
+# it measures (TREES). Its lab, MI5's 15-min variant, is ipcam-spike-upload-lab.yml.
+# ipcam-spike-recording.yml also tests c2's hub packages, through its ./hub/...: accepted
+# double coverage.
+
+on:
+  push:
+    # Branch pushes only, as in the other ipcam workflows: a tag push ignores path filters.
+    branches: ['**']
+    paths:
+      - 'ipcam/hub/**'
+      - 'ipcam/tools/spikes/upload/**'
+      # uploadreport imports the video module's redact package.
+      - 'ipcam/tools/spikes/video/**'
+      # The hub shares requirements with the recorder spike, so in the workspace that
+      # module's go.mod can select newer versions of the hub's dependencies, and its go.sum
+      # holds their checksums.
+      - 'ipcam/tools/spikes/recording/go.mod'
+      - 'ipcam/tools/spikes/recording/go.sum'
+      # The pinned tools (golangci-lint, govulncheck, go-licenses), the scripts the jobs
+      # run, and the license allowlist that the license check reads.
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      - 'ipcam/tools/scripts/**'
+      - 'ipcam/tools/licenses/**'
+      - 'ipcam/go.work'
+      - 'ipcam/go.work.sum'
+      # The line endings of the checkout on the windows job.
+      - 'ipcam/.gitattributes'
+      - '.github/workflows/ipcam-spike-upload.yml'
+  pull_request:
+    paths:
+      - 'ipcam/hub/**'
+      - 'ipcam/tools/spikes/upload/**'
+      # uploadreport imports the video module's redact package.
+      - 'ipcam/tools/spikes/video/**'
+      # The hub shares requirements with the recorder spike, so in the workspace that
+      # module's go.mod can select newer versions of the hub's dependencies, and its go.sum
+      # holds their checksums.
+      - 'ipcam/tools/spikes/recording/go.mod'
+      - 'ipcam/tools/spikes/recording/go.sum'
+      # The pinned tools (golangci-lint, govulncheck, go-licenses), the scripts the jobs
+      # run, and the license allowlist that the license check reads.
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      - 'ipcam/tools/scripts/**'
+      - 'ipcam/tools/licenses/**'
+      - 'ipcam/go.work'
+      - 'ipcam/go.work.sum'
+      # The line endings of the checkout on the windows job.
+      - 'ipcam/.gitattributes'
+      - '.github/workflows/ipcam-spike-upload.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipcam-spike-upload-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Go version comes from go.work alone; never switch toolchains silently.
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+# Every step that runs a command writes its output to ${RUNNER_TEMP}/<step id>.log. Job
+# logs cannot be read from everywhere, check-run annotations can (gh api
+# repos/<owner>/<repo>/check-runs/<job id>/annotations), so the last step of each job
+# turns the log of each failed step into one error annotation: the failure and compile
+# error lines of a go test, else the end of the log.
+
+jobs:
+  upload:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # The packages that the jobs build, lint, test and check, one tree per word. Tasks 2,
+      # 4, 7b, 9 and 10 each add theirs (P12). ./hub runs hub/spikeonly_test.go, which keeps
+      # the spike marker out of the production module. The Lint and Cross steps lint the
+      # trees under ./hub with hub/.golangci.yml and the others with the upload spike's.
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/...
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/hub/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+      - name: Build
+        id: build
+        run: |
+          set -o pipefail
+          go build ${TREES} 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: Lint
+        # tools/scripts/lint-trees.sh lints each module's trees with that module's config:
+        # golangci-lint takes the config of the first path it analyses.
+        id: lint
+        run: |
+          set -o pipefail
+          tools/scripts/lint-trees.sh linux 2>&1 | tee "${RUNNER_TEMP}/lint.log"
+      - name: Cross
+        # c1's release ships ipcam-hub for linux/arm/7 and linux/arm64, and no other push
+        # workflow cross-compiles the hub or lints its Windows-only files. lint-trees.sh runs
+        # golangci-lint built for the runner (go tool -n) with GOOS=windows: go tool would build
+        # it for Windows, which this runner cannot run.
+        id: cross
+        run: |
+          set -o pipefail
+          {
+            GOOS=linux GOARCH=arm GOARM=7 go build ${TREES} &&
+              GOOS=linux GOARCH=arm64 go build ${TREES} &&
+              GOOS=windows GOARCH=amd64 go vet ${TREES} &&
+              tools/scripts/lint-trees.sh windows
+          } 2>&1 | tee "${RUNNER_TEMP}/cross.log"
+      - name: Test
+        # -count=1: a result restored from the Go build cache would hide a flaky test.
+        id: test
+        run: |
+          set -o pipefail
+          go test -count=1 -race ${TREES} 2>&1 | tee "${RUNNER_TEMP}/test.log"
+      - name: Video build list
+        # R04: the modules that join the workspace must not move a dependency of the video spike.
+        id: build-list
+        run: |
+          set -o pipefail
+          tools/scripts/check-video-build-list.sh 2>&1 | tee "${RUNNER_TEMP}/build-list.log"
+      - name: Vulnerabilities of the upload spike
+        # govulncheck needs a directory that holds a go.mod.
+        id: vuln-upload
+        working-directory: ipcam/tools/spikes/upload
+        run: |
+          set -o pipefail
+          go tool govulncheck ./... 2>&1 | tee "${RUNNER_TEMP}/vuln-upload.log"
+      - name: Vulnerabilities of the hub
+        id: vuln-hub
+        working-directory: ipcam/hub
+        run: |
+          set -o pipefail
+          go tool govulncheck ./... 2>&1 | tee "${RUNNER_TEMP}/vuln-hub.log"
+      - name: Licenses
+        id: licenses
+        run: |
+          set -o pipefail
+          tools/scripts/check-licenses.sh ${TREES} 2>&1 | tee "${RUNNER_TEMP}/licenses.log"
+      - name: Show failures as annotations
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              # go-licenses warns about every package with assembly; those lines hide its verdict.
+              grep -vE '^(W[0-9]{4} |/)' "${log}" | tail -n 60 | tools/scripts/annotate.sh "${id}" 60
+            fi
+          done
+
+  windows:
+    # On windows-latest: the same trees' tests and build (the markers test reads a CRLF
+    # checkout here), without -race, which needs a C compiler there; the upload job runs
+    # the tests with it. Then the S4U smoke (P49): ci/s4u-run.ps1 runs whoami.exe in a
+    # temporary Task Scheduler task with an S4U logon, the logon of uploadspike's
+    # autostart, where Task 9 unseals a token.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/...
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/hub/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+      - name: Test
+        id: test
+        run: |
+          set -o pipefail
+          go test -count=1 ${TREES} 2>&1 | tee "${RUNNER_TEMP}/test.log"
+      - name: Build
+        id: build
+        run: |
+          set -o pipefail
+          go build ${TREES} 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: S4U smoke
+        # The script must exit 0, and whoami must name the runner's user. Then two cheap
+        # checks of its exit code: the program's own (cmd.exe /c exit 7 gives 7), and 124
+        # when the program outlives -TimeoutSec (ping for about 29 s, with -TimeoutSec 2).
+        id: s4u
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/s4u.log"
+          out="${RUNNER_TEMP}/s4u.txt"
+          status=0
+          pwsh -File tools/spikes/upload/ci/s4u-run.ps1 -Exe "$WINDIR/System32/whoami.exe" -Out "$RUNNER_TEMP/s4u.txt" 2>&1 |
+            tee "${log}" || status=$?
+          echo "s4u-run.ps1 exited ${status}; whoami in the S4U task printed: $(cat "${out}" 2> /dev/null)" | tee -a "${log}"
+          if [[ ${status} -ne 0 ]] || ! { [[ -n ${USERNAME} ]] && grep -qiF -- "${USERNAME}" "${out}"; }; then
+            echo "S4U smoke: want exit 0, a USERNAME, and that user '${USERNAME}' in the output" | tee -a "${log}"
+            exit 1
+          fi
+          # MSYS_NO_PATHCONV: Git Bash may rewrite an argument that starts with /c as a drive
+          # path (C:/).
+          status=0
+          MSYS_NO_PATHCONV=1 pwsh -File tools/spikes/upload/ci/s4u-run.ps1 -Exe "$WINDIR/System32/cmd.exe" \
+            -Arguments '/c exit 7' -Out "$RUNNER_TEMP/s4u-exit7.txt" 2>&1 | tee -a "${log}" || status=$?
+          echo "cmd.exe /c exit 7 in the S4U task: s4u-run.ps1 exited ${status}, want 7" | tee -a "${log}"
+          [[ ${status} -eq 7 ]] || exit 1
+          # The target goes first, so the -Arguments value does not start with '-', which
+          # pwsh -File may take for a parameter name.
+          status=0
+          pwsh -File tools/spikes/upload/ci/s4u-run.ps1 -Exe "$WINDIR/System32/PING.EXE" -Arguments '127.0.0.1 -n 30' \
+            -TimeoutSec 2 -Out "$RUNNER_TEMP/s4u-timeout.txt" 2>&1 | tee -a "${log}" || status=$?
+          echo "ping -n 30 127.0.0.1 with -TimeoutSec 2 in the S4U task: s4u-run.ps1 exited ${status}, want 124" |
+            tee -a "${log}"
+          [[ ${status} -eq 124 ]] || exit 1
+      - name: Show failures as annotations
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            fi
+          done

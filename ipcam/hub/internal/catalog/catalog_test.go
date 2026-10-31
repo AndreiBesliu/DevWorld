@@ -2,10 +2,14 @@ package catalog
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func openTest(t *testing.T) *DB {
@@ -385,5 +389,469 @@ func TestCatalog_TailReasons(t *testing.T) {
 	}
 	if reason, found, err := db.TailReason(ctx, part); err != nil || found {
 		t.Errorf("TailReason after DeleteTailReason = %q, %v, %v; want none", reason, found, err)
+	}
+}
+
+// TestCatalog_MigrationAddsUploadTables (P03, g1-3): c2's migration, the
+// last of migrations, takes a catalog of the schema before it to the newest
+// one with its rows kept and the four upload tables added, and a second Open
+// changes nothing.
+func TestCatalog_MigrationAddsUploadTables(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "catalog.db")
+	before := len(migrations) - 1
+	older, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmts := append(slices.Clone(migrations[:before]),
+		fmt.Sprintf("PRAGMA user_version = %d", before),
+		`INSERT INTO segments (id, camera_id, profile, local_path, start_ms, end_ms, bytes, encrypted, local_state)
+			VALUES ('seg-1', 'c1', 'main', 'c1/main/d/a.mp4', 1, 2, 3, 0, 'complete')`,
+		"INSERT INTO gaps (camera_id, profile, start_ms, end_ms, reason) VALUES ('c1', 'main', 100, 200, 'restart')",
+		"INSERT INTO tail_reasons (local_path, reason) VALUES ('c1/main/d/b.mp4.part', 'card')")
+	for _, stmt := range stmts {
+		if _, err := older.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = older.Close()
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open of a catalog one migration behind: %v", err)
+	}
+	first := dumpCatalog(t, db)
+	_ = db.Close()
+	if first.version != len(migrations) {
+		t.Errorf("user_version = %d, want %d", first.version, len(migrations))
+	}
+	for _, table := range []string{"placements", "upload_sessions", "secrets", "remote_folders"} {
+		if !slices.Contains(first.tables, table) {
+			t.Errorf("no table %s after the migration; tables %q", table, first.tables)
+		}
+	}
+	wantRows := []string{
+		"gaps: c1 main 100 200 restart",
+		"segments: seg-1 c1/main/d/a.mp4 complete 3",
+		"tail_reasons: c1/main/d/b.mp4.part card",
+	}
+	if !slices.Equal(first.rows, wantRows) {
+		t.Errorf("rows after the migration %q, want %q", first.rows, wantRows)
+	}
+
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatalf("a second Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if second := dumpCatalog(t, db); !reflect.DeepEqual(second, first) {
+		t.Errorf("a second Open changed the catalog: %+v, was %+v", second, first)
+	}
+}
+
+// catalogDump is what TestCatalog_MigrationAddsUploadTables compares: the
+// schema version, the schema and c1's rows.
+type catalogDump struct {
+	version int
+	tables  []string
+	schema  []string
+	rows    []string
+}
+
+func dumpCatalog(t *testing.T, db *DB) catalogDump {
+	t.Helper()
+	ctx := t.Context()
+	var d catalogDump
+	if err := db.sql.QueryRowContext(ctx, "PRAGMA user_version").Scan(&d.version); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.sql.QueryContext(ctx, "SELECT type, name, coalesce(sql, '') FROM sqlite_master ORDER BY type, name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var kind, name, text string
+		if err := rows.Scan(&kind, &name, &text); err != nil {
+			t.Fatal(err)
+		}
+		if kind == "table" {
+			d.tables = append(d.tables, name)
+		}
+		d.schema = append(d.schema, kind+" "+name+": "+text)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		"SELECT 'gaps: ' || camera_id || ' ' || profile || ' ' || start_ms || ' ' || end_ms || ' ' || reason FROM gaps",
+		"SELECT 'segments: ' || id || ' ' || local_path || ' ' || local_state || ' ' || bytes FROM segments",
+		"SELECT 'tail_reasons: ' || local_path || ' ' || reason FROM tail_reasons",
+	} {
+		rows, err := db.sql.QueryContext(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var row string
+			if err := rows.Scan(&row); err != nil {
+				t.Fatal(err)
+			}
+			d.rows = append(d.rows, row)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return d
+}
+
+// putTestSegment writes a complete segment of c1/main starting at startMs and
+// returns its row.
+func putTestSegment(t *testing.T, db *DB, name string, startMs, bytes int64) Segment {
+	t.Helper()
+	s := Segment{Cam: "c1", Profile: "main", Path: "c1/main/d/" + name + ".mp4", StartMs: startMs, EndMs: startMs + 1000, Bytes: bytes, State: StateComplete}
+	if err := db.PutSegment(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := db.Segments(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range segs {
+		if row.Path == s.Path {
+			return row
+		}
+	}
+	t.Fatalf("no row for %s", s.Path)
+	return Segment{}
+}
+
+// putPlacement puts p in a transaction of its own and returns whether it
+// superseded the pair's row.
+func putPlacement(t *testing.T, db *DB, p Placement) bool {
+	t.Helper()
+	var superseded bool
+	err := db.WithTx(t.Context(), func(tx *sql.Tx) error {
+		var err error
+		superseded, err = PutPlacementTx(t.Context(), tx, p)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("PutPlacementTx(%+v): %v", p, err)
+	}
+	return superseded
+}
+
+// placementOf returns the placement row of objectID on destID.
+func placementOf(t *testing.T, db *DB, objectID, destID string) Placement {
+	t.Helper()
+	all, err := db.Placements(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range all {
+		if p.ObjectID == objectID && p.DestinationID == destID {
+			return p
+		}
+	}
+	t.Fatalf("no placement of %s on %s in %+v", objectID, destID, all)
+	return Placement{}
+}
+
+// newPlacement is a placement of s on destID, as outbox.PlacementFor makes
+// it.
+func newPlacement(s Segment, destID, class string) Placement {
+	return Placement{ObjectKind: ObjectSegment, ObjectID: s.ID, DestinationID: destID, Class: class,
+		Encrypt: s.Encrypted, State: PlacementPending, Bytes: s.Bytes}
+}
+
+// setPlacement writes p's state, attempts and next attempt over the row as
+// it is now.
+func setPlacement(t *testing.T, db *DB, p Placement) {
+	t.Helper()
+	was := placementOf(t, db, p.ObjectID, p.DestinationID)
+	p.ID = was.ID
+	if err := db.UpdatePlacement(t.Context(), p, was.State, was.Bytes); err != nil {
+		t.Fatalf("UpdatePlacement(%+v): %v", p, err)
+	}
+}
+
+func hasSession(t *testing.T, db *DB, placementID string) bool {
+	t.Helper()
+	_, _, ok, err := db.UploadSession(t.Context(), placementID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ok
+}
+
+// TestCatalog_StaleWritesChangeNothing (g1-4): a placement write that
+// names a state or bytes the row no longer has changes nothing and says so,
+// and a session is stored only while its placement is uploading the bytes
+// the worker read.
+func TestCatalog_StaleWritesChangeNothing(t *testing.T) {
+	db := openTest(t)
+	ctx := t.Context()
+	s := putTestSegment(t, db, "a", 1000, 10)
+	putPlacement(t, db, newPlacement(s, "dst-a", ClassContinuous))
+	p := placementOf(t, db, s.ID, "dst-a")
+
+	taken := p
+	taken.State = PlacementUploading
+	for _, tc := range []struct {
+		wasState string
+		wasBytes int64
+	}{{PlacementFailed, 10}, {PlacementPending, 11}} {
+		if err := db.UpdatePlacement(ctx, taken, tc.wasState, tc.wasBytes); !errors.Is(err, ErrStalePlacement) {
+			t.Errorf("UpdatePlacement with was %s/%d = %v, want ErrStalePlacement", tc.wasState, tc.wasBytes, err)
+		}
+		if got := placementOf(t, db, s.ID, "dst-a"); got != p {
+			t.Errorf("a stale UpdatePlacement changed the row to %+v, was %+v", got, p)
+		}
+	}
+	if err := db.PutUploadSession(ctx, p.ID, 10, []byte(`{"Offset":0}`), 0); !errors.Is(err, ErrStalePlacement) {
+		t.Errorf("PutUploadSession of a pending placement = %v, want ErrStalePlacement", err)
+	}
+	if hasSession(t, db, p.ID) {
+		t.Error("PutUploadSession stored a session of a pending placement")
+	}
+
+	if err := db.UpdatePlacement(ctx, taken, PlacementPending, 10); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id    string
+		bytes int64
+	}{{p.ID, 11}, {"no-such-placement", 10}} {
+		if err := db.PutUploadSession(ctx, tc.id, tc.bytes, []byte(`{"Offset":4}`), 4); !errors.Is(err, ErrStalePlacement) {
+			t.Errorf("PutUploadSession(%s, %d bytes) = %v, want ErrStalePlacement", tc.id, tc.bytes, err)
+		}
+		if hasSession(t, db, tc.id) {
+			t.Errorf("PutUploadSession(%s, %d bytes) stored a session", tc.id, tc.bytes)
+		}
+	}
+	for _, off := range []int64{4, 8} {
+		if err := db.PutUploadSession(ctx, p.ID, 10, fmt.Appendf(nil, `{"Offset":%d}`, off), off); err != nil {
+			t.Fatalf("PutUploadSession of the uploading placement: %v", err)
+		}
+	}
+	state, off, ok, err := db.UploadSession(ctx, p.ID)
+	if err != nil || !ok || off != 8 || string(state) != `{"Offset":8}` {
+		t.Errorf("UploadSession = %s, %d, %v, %v; want the last put, at 8", state, off, ok, err)
+	}
+	if err := db.DeleteUploadSession(ctx, p.ID); err != nil || hasSession(t, db, p.ID) {
+		t.Errorf("DeleteUploadSession = %v, and the session is still there: %v", err, hasSession(t, db, p.ID))
+	}
+}
+
+// TestCatalog_PutPlacementTx_SupersedesUnverified (P03, g1-4, g2-06): new
+// bytes reset an unverified placement to pending from 0, and a lost
+// segment's placement that came back with the same bytes is due again; a
+// placement still due later keeps its row.
+func TestCatalog_PutPlacementTx_SupersedesUnverified(t *testing.T) {
+	db := openTest(t)
+	ctx := t.Context()
+	s := putTestSegment(t, db, "a", 1000, 10)
+	if putPlacement(t, db, newPlacement(s, "dst-a", ClassContinuous)) {
+		t.Error("a new pair says superseded")
+	}
+	p := placementOf(t, db, s.ID, "dst-a")
+	if p.ID == "" || p.State != PlacementPending || p.Bytes != 10 || p.Attempts != 0 || p.NextAttemptAtMs != 0 || p.ObjectKind != ObjectSegment {
+		t.Errorf("the new placement is %+v, want pending with an id and 10 bytes", p)
+	}
+
+	for _, state := range []string{PlacementPending, PlacementUploading, PlacementFailed} {
+		setPlacement(t, db, Placement{ObjectID: s.ID, DestinationID: "dst-a", State: state, Attempts: 3, NextAttemptAtMs: 5000})
+		if state == PlacementUploading {
+			if err := db.PutUploadSession(ctx, p.ID, p.Bytes, []byte(`{}`), 4); err != nil {
+				t.Fatal(err)
+			}
+		}
+		next := newPlacement(s, "dst-a", ClassContinuous)
+		next.Bytes = p.Bytes + 1
+		if !putPlacement(t, db, next) {
+			t.Errorf("new bytes on a %s placement: not superseded", state)
+		}
+		got := placementOf(t, db, s.ID, "dst-a")
+		if got.ID != p.ID || got.State != PlacementPending || got.Bytes != next.Bytes || got.Attempts != 0 || got.NextAttemptAtMs != 0 {
+			t.Errorf("new bytes on a %s placement left %+v, want pending at 0 attempts with %d bytes and id %s", state, got, next.Bytes, p.ID)
+		}
+		if hasSession(t, db, p.ID) {
+			t.Errorf("new bytes on a %s placement kept its upload session", state)
+		}
+		p = got
+	}
+
+	// A lost segment's placement, never due again, whose file came back with
+	// the same bytes.
+	if err := db.UpdatePlacement(ctx, Placement{ID: p.ID, State: PlacementUploading, Attempts: 2}, PlacementPending, p.Bytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutUploadSession(ctx, p.ID, p.Bytes, []byte(`{}`), 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdatePlacement(ctx, Placement{ID: p.ID, State: PlacementFailed, Attempts: 2}, PlacementUploading, p.Bytes); err != nil {
+		t.Fatal(err)
+	}
+	if putPlacement(t, db, newPlacement(Segment{ID: s.ID, Bytes: p.Bytes}, "dst-a", ClassContinuous)) {
+		t.Error("the same bytes on a failed placement say superseded")
+	}
+	if got := placementOf(t, db, s.ID, "dst-a"); got.State != PlacementPending || got.Attempts != 0 || got.NextAttemptAtMs != 0 || got.Bytes != p.Bytes {
+		t.Errorf("the same bytes on a failed placement never due again left %+v, want pending at 0 attempts", got)
+	}
+	if hasSession(t, db, p.ID) {
+		t.Error("the same bytes on a failed placement kept its upload session")
+	}
+
+	// A failed placement due later keeps its row and its attempts.
+	setPlacement(t, db, Placement{ObjectID: s.ID, DestinationID: "dst-a", State: PlacementFailed, Attempts: 4, NextAttemptAtMs: 9000})
+	before := placementOf(t, db, s.ID, "dst-a")
+	if putPlacement(t, db, newPlacement(Segment{ID: s.ID, Bytes: p.Bytes}, "dst-a", ClassContinuous)) {
+		t.Error("the same bytes on a failed placement due later say superseded")
+	}
+	if got := placementOf(t, db, s.ID, "dst-a"); got != before {
+		t.Errorf("the same bytes on a failed placement due later left %+v, want it unchanged: %+v", got, before)
+	}
+}
+
+// TestCatalog_PutPlacementTx_SupersedeRefreshesFields (P03): a placement
+// superseded by other bytes takes the new placement's encryption, class and
+// rule IDs with them, so its row describes the copy now to be made.
+func TestCatalog_PutPlacementTx_SupersedeRefreshesFields(t *testing.T) {
+	db := openTest(t)
+	s := putTestSegment(t, db, "a", 1000, 10)
+	putPlacement(t, db, newPlacement(s, "dst-a", ClassContinuous))
+	was := placementOf(t, db, s.ID, "dst-a")
+
+	next := newPlacement(s, "dst-a", ClassEventClip)
+	next.Bytes, next.Encrypt, next.RuleIDs = 11, true, "rule-1,rule-2"
+	if !putPlacement(t, db, next) {
+		t.Fatal("other bytes did not supersede the placement")
+	}
+	got := placementOf(t, db, s.ID, "dst-a")
+	want := was
+	want.Bytes, want.Encrypt, want.Class, want.RuleIDs = 11, true, ClassEventClip, "rule-1,rule-2"
+	if got != want {
+		t.Errorf("the superseded placement is %+v, want %+v", got, want)
+	}
+}
+
+// TestCatalog_PutPlacementTx_KeepsVerified (P03): a verified copy cannot be
+// replaced yet, so its placement stays as it is, whatever the bytes.
+func TestCatalog_PutPlacementTx_KeepsVerified(t *testing.T) {
+	db := openTest(t)
+	s := putTestSegment(t, db, "a", 1000, 10)
+	putPlacement(t, db, newPlacement(s, "dst-a", ClassEventClip))
+	setPlacement(t, db, Placement{ObjectID: s.ID, DestinationID: "dst-a", State: PlacementVerified, RemoteRef: "ref-1", RemoteHash: "h", Attempts: 1})
+	before := placementOf(t, db, s.ID, "dst-a")
+	for _, bytes := range []int64{10, 11} {
+		next := newPlacement(s, "dst-a", ClassEventClip)
+		next.Bytes = bytes
+		if putPlacement(t, db, next) {
+			t.Errorf("%d bytes on a verified placement say superseded", bytes)
+		}
+		if got := placementOf(t, db, s.ID, "dst-a"); got != before {
+			t.Errorf("%d bytes on a verified placement left %+v, want it unchanged: %+v", bytes, got, before)
+		}
+	}
+}
+
+// TestCatalog_DuePlacementsOrder (§9.7): event clips and thumbnails, then
+// continuous, then exports, the oldest first in each class; only pending
+// rows due now and failed rows due again by now, of complete segments.
+func TestCatalog_DuePlacementsOrder(t *testing.T) {
+	db := openTest(t)
+	ctx := t.Context()
+	at := func(hhmm string) int64 {
+		tm, err := time.Parse("2006-01-02 15:04", "2026-10-17 "+hhmm)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tm.UnixMilli()
+	}
+	now := at("12:00")
+	put := func(name, class, hhmm string, set Placement) string {
+		s := putTestSegment(t, db, name, at(hhmm), 10)
+		putPlacement(t, db, newPlacement(s, "dst-a", class))
+		if set.State != "" {
+			set.ObjectID, set.DestinationID = s.ID, "dst-a"
+			setPlacement(t, db, set)
+		}
+		return s.ID
+	}
+	export := put("export", ClassExport, "09:00", Placement{})
+	contLate := put("cont-late", ClassContinuous, "10:00", Placement{})
+	clipLate := put("clip-late", ClassEventClip, "10:05", Placement{})
+	contEarly := put("cont-early", ClassContinuous, "09:30", Placement{State: PlacementFailed, Attempts: 1, NextAttemptAtMs: now})
+	thumb := put("thumb", ClassThumbnail, "10:03", Placement{})
+	clipEarly := put("clip-early", ClassEventClip, "10:01", Placement{State: PlacementPending, NextAttemptAtMs: now - 1})
+	// Not due: a pending or failed row due later, a failed row never due
+	// again, rows in other states, a segment still being written or lost.
+	put("later", ClassEventClip, "08:00", Placement{State: PlacementPending, NextAttemptAtMs: now + 1})
+	put("failed-later", ClassEventClip, "08:00", Placement{State: PlacementFailed, NextAttemptAtMs: now + 1})
+	put("failed-never", ClassEventClip, "08:00", Placement{State: PlacementFailed})
+	put("uploading", ClassEventClip, "08:00", Placement{State: PlacementUploading})
+	put("verified", ClassEventClip, "08:00", Placement{State: PlacementVerified})
+	put("deleted", ClassEventClip, "08:00", Placement{State: PlacementDeleted})
+	writing := putTestSegment(t, db, "writing", at("08:00"), 10)
+	writing.State = StateWriting
+	if err := db.PutSegment(ctx, writing); err != nil {
+		t.Fatal(err)
+	}
+	putPlacement(t, db, newPlacement(writing, "dst-a", ClassEventClip))
+	lost := put("lost", ClassEventClip, "08:00", Placement{})
+	lostSeg := Segment{ID: lost, Cam: "c1", Profile: "main", Path: "c1/main/d/lost.mp4", StartMs: at("08:00"), EndMs: at("08:00") + 1000, Bytes: 10, State: StateLost}
+	if err := db.PutSegment(ctx, lostSeg); err != nil {
+		t.Fatal(err)
+	}
+
+	due, err := db.DuePlacements(ctx, now, []string{"dst-a"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{clipEarly, thumb, clipLate, contEarly, contLate, export}
+	if got := objectIDs(due); !slices.Equal(got, want) {
+		t.Errorf("DuePlacements order %q, want %q", got, want)
+	}
+	if due, err := db.DuePlacements(ctx, now, []string{"dst-a"}, 2); err != nil || !slices.Equal(objectIDs(due), want[:2]) {
+		t.Errorf("DuePlacements with limit 2 = %q, %v; want %q", objectIDs(due), err, want[:2])
+	}
+	if lostDue, err := db.LostPlacements(ctx, now, []string{"dst-a"}); err != nil || !slices.Equal(objectIDs(lostDue), []string{lost}) {
+		t.Errorf("LostPlacements = %q, %v; want only the lost segment's", objectIDs(lostDue), err)
+	}
+	if seg, err := db.SegmentByID(ctx, clipEarly); err != nil || seg.Path != "c1/main/d/clip-early.mp4" || seg.StartMs != at("10:01") {
+		t.Errorf("SegmentByID = %+v, %v", seg, err)
+	}
+	if _, err := db.SegmentByID(ctx, "no-such-segment"); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("SegmentByID of an unknown id = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func objectIDs(ps []Placement) []string {
+	ids := make([]string, 0, len(ps))
+	for _, p := range ps {
+		ids = append(ids, p.ObjectID)
+	}
+	return ids
+}
+
+// TestCatalog_DuePlacementsOnlyNamedDestinations: a queue reads only the
+// rows of the destinations it has.
+func TestCatalog_DuePlacementsOnlyNamedDestinations(t *testing.T) {
+	db := openTest(t)
+	s := putTestSegment(t, db, "a", 1000, 10)
+	for _, dest := range []string{"dst-a", "dst-gone"} {
+		putPlacement(t, db, newPlacement(s, dest, ClassContinuous))
+	}
+	due, err := db.DuePlacements(t.Context(), 2000, []string{"dst-a"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].DestinationID != "dst-a" {
+		t.Errorf("DuePlacements for [dst-a] = %+v, want only dst-a's row", due)
+	}
+	if due, err := db.DuePlacements(t.Context(), 2000, nil, 10); err != nil || len(due) != 0 {
+		t.Errorf("DuePlacements for no destination = %+v, %v; want none", due, err)
 	}
 }
