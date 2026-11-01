@@ -5,6 +5,7 @@ Monorepo cu mai multe proiecte independente. Fiecare proiect are propriul folder
 | Folder | Proiect | Stare |
 |---|---|---|
 | [`ipcam/`](ipcam/) | Aplicație pentru camere IP: live, înregistrare, control PTZ, stocare în Google Drive / OneDrive / local. Web, Android, iOS, Windows. | Design |
+| [`furniture-pro/`](furniture-pro/) | Furniture Pro: aplicație Windows pentru ateliere și fabrici de mobilă. Proiectare 3D, piese, canturi, feronerie, optimizarea debitării, costuri și oferte. | Design |
 
 ## Reguli de lucru
 
