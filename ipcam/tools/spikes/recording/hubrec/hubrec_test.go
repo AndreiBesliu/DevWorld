@@ -170,3 +170,39 @@ func TestWork_EndSaysWhenTheIdentityStays(t *testing.T) {
 		})
 	}
 }
+
+// TestRecord_TakesOnlyAFullLengthSegment (mis-6): a segment that closed
+// early (a source drop of more than 10 s, a restart of MediaMTX) is not
+// the probe's: Record waits, up to one more segment length, for the next
+// segment of the full length, and returns that one. When the next one
+// closes early too, it fails with a Romanian line that says how long the
+// segment lasted and asks to start the probe again.
+func TestRecord_TakesOnlyAFullLengthSegment(t *testing.T) {
+	t.Run("the first segment closes after 80 s", func(t *testing.T) {
+		dir := t.TempDir()
+		hub, _ := spiketest.InstallFakeHub(t, dir)
+		t.Setenv(spiketest.FakeHubSegmentsEnv, "80,300")
+		run := filepath.Join(dir, "run")
+		seg, err := Record(t.Context(), Options{Hub: hub, CameraURL: "rtsp://192.0.2.1:8554/cam01_main", Run: run, Name: FiveMin, SegmentSecs: 300})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := filepath.Join(run, FiveMin, RecordingDir, "rec", Camera, Profile, "2026-10-29", "120120_000000.mp4.age"); seg.Path != want {
+			t.Errorf("Record = %s, want the full segment after the short one, %s", seg.Path, want)
+		}
+	})
+	t.Run("the next one closes early too", func(t *testing.T) {
+		dir := t.TempDir()
+		hub, _ := spiketest.InstallFakeHub(t, dir)
+		t.Setenv(spiketest.FakeHubSegmentsEnv, "80,90")
+		start := time.Now()
+		_, err := Record(t.Context(), Options{Hub: hub, CameraURL: "rtsp://192.0.2.1:8554/cam01_main", Run: filepath.Join(dir, "run"),
+			Name: FiveMin, SegmentSecs: 300})
+		if err == nil || !strings.HasPrefix(err.Error(), "segmentul s-a închis după 90 s, nu după 5 min: porniți din nou proba") {
+			t.Errorf("Record = %v, want the Romanian line of a segment that closed after 90 s", err)
+		}
+		if waited := time.Since(start); waited > time.Minute {
+			t.Errorf("Record waited %v for a segment that could no longer be full", waited)
+		}
+	})
+}

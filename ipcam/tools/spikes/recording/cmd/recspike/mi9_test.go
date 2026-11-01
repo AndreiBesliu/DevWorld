@@ -21,13 +21,22 @@ import (
 )
 
 // The test binary stands in for ipcam-hub when spiketest.FakeHubEnv is set
-// (spiketest.FakeHub).
+// (spiketest.FakeHub), and runs recspike's main, as if installed at the
+// path that asMainEnv holds, when that is set (hangup_unix_test.go).
 func TestMain(m *testing.M) {
 	if os.Getenv(spiketest.FakeHubEnv) == "1" {
 		os.Exit(spiketest.FakeHub(os.Args[1:]))
 	}
+	if exe := os.Getenv(asMainEnv); exe != "" {
+		executable = func() (string, error) { return exe, nil }
+		main()
+	}
 	os.Exit(m.Run())
 }
+
+// asMainEnv, set to a path, makes the test binary run recspike's main as
+// the recspike installed at that path.
+const asMainEnv = "RECSPIKE_TEST_MAIN_EXE"
 
 // fakeController is the other device's reccontroller as MI9 sees it: it
 // gives the host its session, plays the host's recording with a Pion

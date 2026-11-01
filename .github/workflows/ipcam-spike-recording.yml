@@ -492,6 +492,15 @@ jobs:
         # before install, after it and after uninstall, and pass, goes out as a notice
         # either way (C32), at most 3,500 bytes after annotate.sh's escaping; a failure
         # also goes out as an error.
+        # security-1: install also protects the release folder, here the folder of
+        # recspike.exe and reccontroller.exe, and uninstall resets it. As icacls prints them,
+        # install must leave the folder without inherited entries, with Administrators and
+        # SYSTEM Full, the runner's user and OWNER RIGHTS Read & Execute and nobody else, the
+        # user's Modify on results and work, and the programs' entries inherited from the
+        # folder; uninstall must leave inherited entries only. A second notice, folder-acl,
+        # holds those lines and pass, under the same limits. (cmd/reccontroller's
+        # TestServe_InTheProtectedReleaseFolder runs reccontroller there from an administrator
+        # window and from a standard one.)
         id: w32time
         if: ${{ !cancelled() }}
         run: |
@@ -504,17 +513,34 @@ jobs:
           state() { sc.exe query w32time | tr -d '\r' | sed -n 's/^ *STATE *: *[0-9]* *//p' | sed 's/ *$//'; }
           triggers() { sc.exe qtriggerinfo w32time | tr -d '\r' | sed -e '1,/SERVICE_NAME/d' -e 's/^ *//' -e 's/ *$//' -e '/^$/d' | paste -sd ';' -; }
           snapshot() { jq -nc --arg s "$(start_type)" --arg r "$(state)" --arg t "$(triggers)" '{startType: $s, state: $r, triggers: $t}'; }
+          # A path's entries as icacls prints them, without the path, joined with ";".
+          acl() {
+            local path
+            path=$(cygpath -w "$1")
+            icacls "${path}" | tr -d '\r' | sed -e '/^Successfully processed/d' -e '/^$/d' |
+              ACL_PATH="${path}" awk '{
+                if (NR == 1 && index($0, ENVIRON["ACL_PATH"] " ") == 1) $0 = substr($0, length(ENVIRON["ACL_PATH"]) + 2)
+                sub(/^ +/, ""); print
+              }' | paste -sd ';' -
+          }
+          entries() { tr ';' '\n' <<< "$1"; }
           status=0
           {
             go build -o "${dir}/recspike.exe" ./tools/spikes/recording/cmd/recspike &&
+              go build -o "${dir}/reccontroller.exe" ./tools/spikes/recording/cmd/reccontroller &&
               image=$(snapshot) &&
               sc.exe config w32time start= demand &&
               sc.exe triggerinfo w32time start/domainjoin stop/domainleave &&
               before=$(snapshot) &&
               "${dir}/recspike.exe" install &&
               installed=$(snapshot) &&
+              acl_folder=$(acl "${dir}") &&
+              acl_results=$(acl "${dir}/results") &&
+              acl_work=$(acl "${dir}/work") &&
+              acl_program=$(acl "${dir}/reccontroller.exe") &&
               "${dir}/recspike.exe" uninstall &&
-              restored=$(snapshot)
+              restored=$(snapshot) &&
+              acl_restored=$(acl "${dir}")
           } >> "${log}" 2>&1 || status=$?
           pass=false
           # A trigger is a line with a colon (its type and GUID); the line that says that
@@ -525,19 +551,38 @@ jobs:
             jq -e --argjson b "${before}" '.startType == $b.startType and .triggers == $b.triggers' <<< "${restored}" > /dev/null; then
             pass=true
           fi
+          acl_pass=false
+          user="\\${USERNAME}:"
+          if [[ ${status} -eq 0 && "${acl_folder}" != *"(I)"* ]] &&
+            [[ "$(entries "${acl_folder}" | grep -vF "${user}" | LC_ALL=C sort | paste -sd ';' -)" == \
+              'BUILTIN\Administrators:(OI)(CI)(F);NT AUTHORITY\SYSTEM:(OI)(CI)(F);OWNER RIGHTS:(OI)(CI)(RX)' ]] &&
+            [[ $(entries "${acl_folder}" | grep -cF "${user}") -eq 1 && "${acl_folder}" == *"${user}(OI)(CI)(RX)"* ]] &&
+            [[ "${acl_results}" == *"${user}(OI)(CI)(M)"* && "${acl_work}" == *"${user}(OI)(CI)(M)"* ]] &&
+            [[ "${acl_program}" == *"${user}(I)(RX)"* && "${acl_program}" == *"OWNER RIGHTS:(I)(RX)"* ]] &&
+            [[ "${acl_restored}" == *"(I)"* && "${acl_restored}" != *"OWNER RIGHTS"* ]]; then
+            acl_pass=true
+          fi
           line=$(jq -nc --argjson image "${image:-null}" --argjson before "${before:-null}" --argjson installed "${installed:-null}" \
             --argjson restored "${restored:-null}" --argjson pass "${pass}" \
             '{image: $image, before: $before, installed: $installed, restored: $restored, pass: $pass}')
-          escaped="${line//%/%25}"
-          if (( $(printf '%s' "${escaped}" | LC_ALL=C wc -c) > 3500 )); then
-            echo "w32time: the notice is over 3,500 bytes after escaping" >> "${log}"
-            pass=false
-          fi
+          acl_line=$(jq -nc --arg folder "${acl_folder:-}" --arg results "${acl_results:-}" --arg work "${acl_work:-}" \
+            --arg program "${acl_program:-}" --arg restored "${acl_restored:-}" --argjson pass "${acl_pass}" \
+            '{folder: $folder, results: $results, work: $work, program: $program, restored: $restored, pass: $pass}')
+          for notice in "${line}" "${acl_line}"; do
+            escaped="${notice//%/%25}"
+            if (( $(printf '%s' "${escaped}" | LC_ALL=C wc -c) > 3500 )); then
+              echo "w32time: a notice is over 3,500 bytes after escaping" >> "${log}"
+              pass=false
+            fi
+          done
           printf '%s\n' "${line}" | tools/scripts/annotate.sh w32time 1 notice
-          if [[ ${pass} != true ]]; then
+          printf '%s\n' "${acl_line}" | tools/scripts/annotate.sh folder-acl 1 notice
+          if [[ ${pass} != true || ${acl_pass} != true ]]; then
             {
-              echo "w32time: exit ${status}; want install to leave AUTO_START, RUNNING and no trigger, and uninstall the start type and triggers of before:"
+              echo "w32time: exit ${status}; want install to leave AUTO_START, RUNNING and no trigger, and uninstall the start type and triggers of before;"
+              echo "and install to protect the release folder, and uninstall to reset it:"
               echo "${line}"
+              echo "${acl_line}"
               echo "The desktop's shortcuts:"
               shopt -s nullglob nocaseglob
               for shortcut in "$(cygpath -u "${USERPROFILE}")"/Desktop/*.lnk; do

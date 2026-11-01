@@ -2,7 +2,8 @@
 
 // Package cli holds what the spike's command lines (recspike and
 // reccontroller) share: flag parsing whose usage and errors reach the owner
-// in Romanian, never in the flag package's English.
+// in Romanian, never in the flag package's English, and their survival of a
+// terminal that goes away.
 package cli
 
 import (
@@ -10,7 +11,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os/signal"
+	"runtime"
 	"strings"
+	"syscall"
 )
 
 // ParseFlags parses args with flags. On -h it prints usage and returns
@@ -52,4 +56,19 @@ func FlagError(err error) string {
 		}
 	}
 	return "opțiuni greșite: " + msg
+}
+
+// IgnoreHangup keeps a command running when its terminal goes away (report-1):
+// an ssh window whose far end died, as the PC under test does at each
+// bugcheck and power cut, hangs up the session (SIGHUP), and the lines
+// written to its screen then fail. Go ends a process on SIGHUP, and on a
+// write to a broken pipe on its standard output (SIGPIPE); ignored, a
+// hangup changes nothing and a failed write is an error that the commands
+// already ignore, so the measurement goes on and the log keeps its lines.
+// The children that the command starts (ipcam-hub, MediaMTX) keep the
+// hangup ignored too. Windows has neither signal.
+func IgnoreHangup() {
+	if runtime.GOOS != "windows" {
+		signal.Ignore(syscall.SIGHUP, syscall.SIGPIPE)
+	}
 }

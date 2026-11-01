@@ -127,6 +127,43 @@ func TestMI9_RefusesAHostOnTheSameDevice(t *testing.T) {
 	}
 }
 
+// TestMI9_AnswerOfAHostThatLeftAtOnce (Windows CI, d4bd2ab, as MI3's): a
+// host that disconnects right after it sent its answer, before the
+// controller applied it, is a host that disconnected, whichever comes
+// first, the controller's playback or the closing of the connection's
+// playback peer: the controller says so, and refuses nothing.
+func TestMI9_AnswerOfAHostThatLeftAtOnce(t *testing.T) {
+	r := newRig(t)
+	api, err := mi9.NewAPI(mi9.LAN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.c.mi9API = api
+	const runs = 20
+	for i := range runs {
+		runID := fmt.Sprintf("mi9-%d", i+1)
+		conn := r.connectFrom("pi", &net.TCPAddr{IP: net.IPv4(192, 168, 1, 10), Port: link.Port}, &net.TCPAddr{IP: net.IPv4(192, 168, 1, 20), Port: 51000})
+		r.send(conn, link.Mi9Start{RunID: runID})
+		offer, ok := r.receive(conn).(link.Mi9Offer)
+		if !ok || offer.RunID != runID {
+			t.Fatalf("got %#v, want the playback peer's offer", offer)
+		}
+		r.send(conn, link.Mi9Answer{RunID: runID, Answer: deadAnswer(t, api, offer.Offer)})
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
+		left := "Proba MI9 " + runID + ": gazda s-a deconectat înainte de final."
+		for deadline := time.Now().Add(10 * time.Second); !strings.Contains(r.screen.String(), left); time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("the screen does not say that the host of %s disconnected:\n%s", runID, r.screen.String())
+			}
+		}
+	}
+	if screen := r.screen.String(); strings.Contains(screen, "nu a fost anunțată") || strings.Contains(screen, "redarea nu a reușit") {
+		t.Errorf("the controller refused a run of a host that left:\n%s", screen)
+	}
+}
+
 // slowHub is a hub side too slow for the measurement's wait: it answers
 // the playback peer's calls as mi9.Hub does, the info at once and a read
 // with its range of size bytes, but sends only the range's first sent

@@ -53,7 +53,7 @@ func WaitNTP(ctx context.Context, check NTPCheck, clock source.Clock) (waitMs in
 	}
 }
 
-// The failures of `w32tm /query /status` that the preflight names a remedy
+// The failures of `w32tm /query /source` that the preflight names a remedy
 // for: access denied, which waiting does not cure (the NTP wait ends at
 // once, unsynced), and the time service not running.
 var (
@@ -76,7 +76,7 @@ const (
 	hresultServiceNotStarted = 0x80070426
 )
 
-// w32tmError reads why `w32tm /query /status` failed, from its output or
+// w32tmError reads why `w32tm /query /source` failed, from its output or
 // its exit code.
 func w32tmError(out string, code uint32) error {
 	text := strings.TrimSpace(out)
@@ -89,7 +89,7 @@ func w32tmError(out string, code uint32) error {
 	case has(hresultServiceNotStarted):
 		return fmt.Errorf("%w: %s", ErrTimeServiceStopped, text)
 	}
-	return fmt.Errorf("w32tm /query /status: exit %#x: %s", code, text)
+	return fmt.Errorf("w32tm /query /source: exit %#x: %s", code, text)
 }
 
 // ntpFinal reports whether a failed NTP check ends the wait: its program
@@ -99,11 +99,14 @@ func ntpFinal(err error) bool {
 }
 
 // SystemNTP is the host's own answer: `timedatectl show -p NTPSynchronized
-// --value` on Linux, `w32tm /query /status` on Windows.
+// --value` on Linux, `w32tm /query /source` on Windows. The source alone
+// has no label: /query /status's labels are translated, and the console
+// writes them in its own code page (852 on a Romanian Windows), so matching
+// them refused every PC set there (mi1-2).
 func SystemNTP(goos string) NTPCheck {
 	return func(ctx context.Context) (bool, error) {
 		if goos == "windows" {
-			out, err := exec.CommandContext(ctx, "w32tm", "/query", "/status").Output()
+			out, err := runW32tm(ctx, "/query", "/source")
 			var exit *exec.ExitError
 			if errors.As(err, &exit) {
 				return false, w32tmError(string(out)+string(exit.Stderr), uint32(exit.ExitCode())) //nolint:gosec // a Windows exit code is a DWORD
@@ -121,32 +124,31 @@ func SystemNTP(goos string) NTPCheck {
 	}
 }
 
+// runW32tm runs w32tm with args and returns its output; tests replace it.
+var runW32tm = func(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "w32tm", args...).Output() //nolint:gosec // w32tm with recspike's own arguments
+}
+
 // timedatectlSynced reads timedatectl's answer: "yes" when synced.
 func timedatectlSynced(out string) bool { return strings.TrimSpace(out) == "yes" }
 
-// localSources are the sources that w32tm names when the clock is not
-// synced from the network.
+// localSources are the sources that w32tm names, in English in every
+// language, when the clock is not synced from the network.
 var localSources = []string{"local cmos clock", "free-running system clock"}
 
-// w32tmSynced reads w32tm's status: synced when its source, the value of
-// the line labelled Source (or Sursă, on a Romanian Windows), is not the
-// local clock.
+// w32tmSynced reads `w32tm /query /source`'s answer, the clock's source:
+// synced unless it is empty, the local clock, or an error that w32tm
+// printed instead, which carries its HRESULT, "(0x8…)". Its bytes are read
+// as they come: the console's code page changes none of these.
 func w32tmSynced(out string) bool {
-	for _, line := range strings.Split(strings.ReplaceAll(out, "\r", ""), "\n") {
-		label, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		switch strings.ToLower(strings.TrimSpace(label)) {
-		case "source", "sursă", "sursa":
-			v := strings.ToLower(strings.TrimSpace(value))
-			for _, local := range localSources {
-				if strings.Contains(v, local) {
-					return false
-				}
-			}
-			return v != ""
+	v := strings.ToLower(strings.TrimSpace(out))
+	if v == "" || strings.Contains(v, "(0x8") {
+		return false
+	}
+	for _, local := range localSources {
+		if strings.Contains(v, local) {
+			return false
 		}
 	}
-	return false
+	return true
 }

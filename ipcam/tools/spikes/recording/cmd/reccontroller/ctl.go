@@ -11,7 +11,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
-	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,6 +23,7 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi9"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
 )
@@ -89,6 +90,11 @@ type ctl struct {
 	judged  map[string]link.Verdict // the verdicts sent, for a report sent again
 	steps   map[string]*mi3Step     // MI3's steps in progress (mi3.go)
 	mi9Runs map[string]*mi9Run      // MI9's runs awaiting their answer (mi9.go)
+
+	// saveMu serialises saveResult: results.Create looks before it writes,
+	// so two connections that send one name at once could both pass the
+	// look, and the second would replace the first's envelope.
+	saveMu sync.Mutex
 }
 
 func newCtl(ctx context.Context, cfg ctlConfig) *ctl {
@@ -109,6 +115,11 @@ type runState struct {
 	start     link.RunStart
 	startMark controller.PacingMark
 	endMark   *controller.PacingMark // when its beacons went silent, near the stop
+	// sent is the send times of the run's streams from its first beacon to
+	// just after its stop, copied after its beacons went silent, once the
+	// send log's feed had caught up: the send log may have dropped them
+	// when a late report comes (mi1-1).
+	sent      *controller.SendTimes
 	cut       controller.Cut
 	scheduled bool       // its cut is scheduled: a repeated ready changes nothing
 	conn      *link.Conn // the host's latest connection that named the run
@@ -128,15 +139,22 @@ func (c *ctl) say(format string, args ...any) {
 }
 
 // serve handles one connection of a host until it ends: local is the
-// address that the host reached, remote the host's own.
+// address that the host reached, remote the host's own. The link takes any
+// peer on the LAN, so a connection whose first message is not a valid
+// hello (validHello) is closed with nothing done (security-2).
 func (c *ctl) serve(ctx context.Context, conn *link.Conn, local, remote net.Addr) {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
-	defer func() { _ = conn.Close() }()
-	defer c.dropSteps(conn)
-	defer c.dropMI9(conn)
+	defer func() {
+		stop()
+		// The connection's context ends before its MI3 steps and MI9 runs
+		// are dropped: a wait under it (mi3Answers, mi9Answer) that fails
+		// on a closed peer, or finds its step gone, knows that the host left.
+		cancel()
+		c.dropMI9(conn)
+		c.dropSteps(conn)
+		_ = conn.Close()
+	}()
 	host := ""
 	for {
 		m, err := conn.Receive()
@@ -144,6 +162,10 @@ func (c *ctl) serve(ctx context.Context, conn *link.Conn, local, remote net.Addr
 			if ctx.Err() == nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				slog.Warn("link ended", "err", err)
 			}
+			return
+		}
+		if hello, ok := m.(link.Hello); host == "" && (!ok || !validHello(hello)) {
+			slog.Warn("link closed: its first message is not a valid hello", "type", m.Type())
 			return
 		}
 		switch m := m.(type) {
@@ -207,6 +229,12 @@ func (c *ctl) bye(conn *link.Conn, host string) {
 		return
 	}
 	c.say("Am adus rezultatele Pi-ului în %s. Gazda s-a deconectat.", filepath.Join(c.results, "pi"))
+}
+
+// validHello reports whether m is a host's hello of this protocol, from
+// one of the probe's devices.
+func validHello(m link.Hello) bool {
+	return m.Role == "host" && m.Version == link.Version && pseudonym(m.Host) == m.Host
 }
 
 // pseudonym keeps a host name off the screen and the log (PH0-22).
@@ -283,18 +311,68 @@ func (c *ctl) startRun(conn *link.Conn, m link.RunStart) {
 	c.say("Rularea %s (%s, %s) a început.", m.RunID, m.Set, m.Kind)
 }
 
+// sentAfterStop is how long after its last beacon a run's copy of the
+// send times reaches: a host stops within a beacon interval of its last
+// beacon, and the copy is taken once the beacons have been silent this
+// long.
+const sentAfterStop = controller.BeaconSilence
+
+// feedCatchUp bounds the wait for the send log's feed to pass the end of a
+// run's copy: each simulator buffers about 12 s of its sends
+// (source.SentLog), so a feed further behind has dropped some of them
+// already.
+const feedCatchUp = 15 * time.Second
+
 // markEnd marks the end of the run's pacing when its beacons go silent,
-// shortly after the stop (R07).
+// shortly after the stop (R07), and copies the send times that the run's
+// judgement needs, from its first beacon to sentAfterStop after its last
+// (mi1-1). The send log's feed is asynchronous, so the copy waits until
+// the feed has passed the copy's end, at most feedCatchUp after it; a feed
+// that has not caught up by then is named on the screen, and the copy
+// holds what it has.
 func (c *ctl) markEnd(r *runState) {
-	if _, err := c.beacons.WaitSilence(r.ctx, r.start.RunID, c.clock); err != nil {
+	runID := r.start.RunID
+	last, err := c.beacons.WaitSilence(r.ctx, runID, c.clock)
+	if err != nil {
 		return // the run ended first
 	}
 	mark := c.pacer.MarkPacing()
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.runs[r.start.RunID] == r {
+	if c.runs[runID] == r {
 		r.endMark = &mark
 	}
+	c.mu.Unlock()
+	from, to := last.At, last.At.Add(sentAfterStop)
+	if first, ok := c.beacons.First(runID); ok {
+		from = first.At
+	}
+	caughtUp := c.waitFed(r, to)
+	if r.ctx.Err() != nil {
+		return // the run ended first, judged from the live log
+	}
+	if !caughtUp {
+		c.say("Rularea %s: jurnalul trimiterilor a rămas în urmă la oprire; orele de trimitere copiate pentru raport pot fi incomplete.", runID)
+	}
+	sent := c.sendLog.Times(r.start.Streams, from, to)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.runs[runID] == r {
+		r.sent = sent
+	}
+}
+
+// waitFed waits until the send log has every frame of the run's streams
+// sent up to to, at most until the clock passes to + feedCatchUp, and
+// reports whether it got them.
+func (c *ctl) waitFed(r *runState, to time.Time) bool {
+	ctx, cancel := context.WithCancel(r.ctx)
+	defer cancel()
+	go func() {
+		if sleepUntil(ctx, c.clock, to.Add(feedCatchUp)) == nil {
+			cancel()
+		}
+	}()
+	return c.sendLog.WaitFed(ctx, r.start.Streams, to)
 }
 
 // ready schedules the run's cut once; a repeated ready, on any connection,
@@ -547,13 +625,19 @@ func (c *ctl) judgeReport(r *runState, m link.Report) link.Verdict {
 		r.cut.BootAt = beacons[0].At // no cut was sent: the run's first beacon
 	}
 	cut, end := r.cut, r.endMark
+	// The run's copy, then the live log: the frames that reached the log
+	// after the copy are there, and a report before the copy has only it.
+	var sent controller.SendTimer = c.sendLog
+	if r.sent != nil {
+		sent = controller.SendTimers{r.sent, c.sendLog}
+	}
 	c.mu.Unlock()
 	if end == nil {
 		mark := c.pacer.MarkPacing() // the report came before the silence was seen
 		end = &mark
 	}
 	pacing := c.pacer.Pacing(r.startMark, *end, stopAt)
-	run := c.judge(r, m, cut, beaconsSeen{n: len(beacons), interrupted: interrupted, late: late}, errBound, pacing)
+	run := c.judge(r, m, cut, beaconsSeen{n: len(beacons), interrupted: interrupted, late: late}, errBound, pacing, sent)
 
 	// A lab smoke run's envelope goes under its own results set, apart from
 	// the set's counted envelopes. An envelope of the same run id, on disk
@@ -569,7 +653,7 @@ func (c *ctl) judgeReport(r *runState, m link.Report) link.Verdict {
 		c.say("Rularea %s: nu pot scrie rezultatul (%v); rularea nu contează.", m.RunID, written)
 		run.Valid, run.InvalidReason = false, addReason(run.InvalidReason, notWritten)
 	}
-	v := link.Verdict{Run: run, Timing: c.lossTiming(run, m, stopAt)}
+	v := link.Verdict{Run: run, Timing: lossTiming(run, m, stopAt, sent)}
 	c.mu.Lock()
 	r.cancel()
 	if c.runs[m.RunID] == r {
@@ -597,9 +681,9 @@ func (c *ctl) judgeReport(r *runState, m link.Report) link.Verdict {
 // lossTiming is the controller's side of the diagnostics of run, judged
 // from m, when one of its streams lost more than its limit (mi1.OverLimit):
 // the stop moment and the send times of those streams' last recorded
-// access units, on the controller's clock; nil when every stream kept
-// within its limit.
-func (c *ctl) lossTiming(run results.Run, m link.Report, stopAt time.Time) *link.Timing {
+// access units, from sent, on the controller's clock; nil when every
+// stream kept within its limit.
+func lossTiming(run results.Run, m link.Report, stopAt time.Time, sent controller.SendTimer) *link.Timing {
 	var timing *link.Timing
 	for _, s := range run.Streams {
 		if !mi1.OverLimit(s) {
@@ -612,8 +696,8 @@ func (c *ctl) lossTiming(run results.Run, m link.Report, stopAt time.Time) *link
 			if index.Stream != s.Stream {
 				continue
 			}
-			if sent, ok := c.sendLog.SendTime(s.Stream, index.LastRecordedIndex); ok {
-				timing.LastSentMs[s.Stream] = sent.UnixMilli()
+			if at, ok := sent.SendTime(s.Stream, index.LastRecordedIndex); ok {
+				timing.LastSentMs[s.Stream] = at.UnixMilli()
 			}
 		}
 	}
@@ -636,14 +720,14 @@ type beaconsSeen struct {
 	interrupted, late bool
 }
 
-// judge is the run as its envelope holds it. A stream that the host could
-// not read, or whose index has no send time, lost everything since the
-// run's first beacon. A run whose beacons came back after a silence
+// judge is the run as its envelope holds it, with the send times of sent.
+// A stream that the host could not read, or whose index has no send time,
+// lost everything since the run's first beacon. A run whose beacons came back after a silence
 // (interrupted) is invalid for that reason: its stop is not its last kept
 // beacon; so is a run whose start the controller missed (late), whose
 // timing is partial.
 func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons beaconsSeen, errBound time.Duration,
-	pacing controller.PacingStats) results.Run {
+	pacing controller.PacingStats, sent controller.SendTimer) results.Run {
 	valid := controller.Valid(cut)
 	if r.start.Smoke {
 		valid = controller.ValidWithin(cut, smokeValidFrom, smokeValidTo)
@@ -678,7 +762,7 @@ func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons beac
 			if s.Stream != stream {
 				continue
 			}
-			if l, ok := controller.Loss(cut.StopAt, stream, s.LastRecordedIndex, c.sendLog); ok {
+			if l, ok := controller.Loss(cut.StopAt, stream, s.LastRecordedIndex, sent); ok {
 				loss = l
 			}
 		}
@@ -697,35 +781,40 @@ func seconds(d time.Duration) string {
 	return strings.Replace(strconv.FormatFloat(d.Seconds(), 'f', 2, 64), ".", ",", 1)
 }
 
-// saveResult writes a results file that the host sent, under results/.
-func (c *ctl) saveResult(m link.Results) {
-	name := filepath.FromSlash(m.Name)
-	if !filepath.IsLocal(name) {
-		c.say("Am refuzat rezultatul cu numele nepermis %q.", m.Name)
-		return
-	}
-	if err := writeUnder(c.results, name, m.Data); err != nil {
-		c.say("Eroare la salvarea rezultatului %s: %v", m.Name, err)
-		return
-	}
-	c.say("Am primit %s.", m.Name)
-}
+// maxResultBytes bounds the one results file that a host sends: MI9's
+// LAN envelope, a few KiB.
+const maxResultBytes = 64 << 10
 
-// writeUnder writes data to dir/name through an os.Root, so that nothing
-// lands outside dir.
-func writeUnder(dir, name string, data []byte) error {
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
+// saveResult keeps a results file that the host sent, under results/: the
+// only one that a host sends, MI9's LAN envelope (mi9.LANSet), named
+// MI9/lan/<its run id>.json, at most maxResultBytes, and only when no
+// envelope of that name is there yet (security-2). Anything else is
+// refused: the link takes any peer on the LAN, and the counted envelopes
+// stay as they are. One connection saves at a time (saveMu).
+func (c *ctl) saveResult(m link.Results) {
+	refuse := func(why string) { c.say("Am refuzat un rezultat primit pe legătură: %s.", why) }
+	if len(m.Data) > maxResultBytes {
+		refuse("este mai mare de 64 KiB")
+		return
 	}
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return err
+	e, err := results.Parse(m.Data)
+	switch {
+	case err != nil:
+		refuse("nu este un rezultat al probei")
+		return
+	case e.Code != "MI9" || e.Set != mi9.LANSet || m.Name != path.Join("MI9", mi9.LANSet, e.RunID+".json"):
+		refuse("o gazdă trimite doar rezultatul MI9 pe LAN, cu numele lui")
+		return
 	}
-	defer func() { _ = root.Close() }()
-	if parent := filepath.Dir(name); parent != "." {
-		if err := root.MkdirAll(parent, 0o750); err != nil {
-			return err
-		}
+	c.saveMu.Lock()
+	err = results.Create(c.results, e)
+	c.saveMu.Unlock()
+	switch {
+	case errors.Is(err, results.ErrExists):
+		refuse("există deja un rezultat cu numele " + m.Name + ", care rămâne")
+	case err != nil:
+		c.say("Eroare la salvarea rezultatului %s: %v", m.Name, err)
+	default:
+		c.say("Am primit %s.", m.Name)
 	}
-	return root.WriteFile(name, data, 0o600)
 }

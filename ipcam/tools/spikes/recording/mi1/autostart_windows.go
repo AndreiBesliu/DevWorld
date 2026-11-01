@@ -53,6 +53,19 @@ func UserSID() (string, error) {
 	return user.User.Sid.String(), nil
 }
 
+// FileOwnerSID is the SID of the owner of the file or folder at path.
+func FileOwnerSID(path string) (string, error) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return "", err
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return "", err
+	}
+	return owner.String(), nil
+}
+
 // DesktopDir is the user's desktop, wherever Windows keeps it (OneDrive
 // included).
 func DesktopDir() (string, error) {

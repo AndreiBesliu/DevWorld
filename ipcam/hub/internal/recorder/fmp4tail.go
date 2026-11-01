@@ -24,6 +24,10 @@ const (
 	maxInitBox = 1 << 20  // an ftyp or moov larger than this is not MediaMTX's
 	maxMoofBox = 16 << 20 // MediaMTX's moof of a part is a few KB
 	maxPart    = 64 << 20 // MediaMTX's recordMaxPartSize is 50 MiB
+	// maxTrunSamples bounds a trun's sample count, as diag's walker does
+	// (cmd/ipcam-hub/diag_fmp4.go): a 1-s part holds tens of samples, so
+	// more is a corrupt box (hub-1).
+	maxTrunSamples = 1 << 20
 )
 
 // box is an ISO BMFF box header.
@@ -442,6 +446,9 @@ func (f *trackFrag) readTrun(b box, p []byte, base int64, defaultDuration, defau
 	}
 	flags := uint32(p[1])<<16 | uint32(p[2])<<8 | uint32(p[3])
 	count := int64(binary.BigEndian.Uint32(p[4:]))
+	if count > maxTrunSamples {
+		return errNotRecording // before a sample is allocated for each entry
+	}
 	at := 8
 	if flags&trunDataOffset != 0 {
 		if len(p) < at+4 {

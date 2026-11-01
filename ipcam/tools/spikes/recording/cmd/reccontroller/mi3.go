@@ -93,10 +93,16 @@ func (c *ctl) mi3Start(conn *link.Conn, m link.Mi3Start) {
 
 // mi3Answers applies the live load's answers and says so once every tile
 // of every peer is bound; it runs on its own goroutine, since the binds
-// take a moment, under ctx, the connection's: once the host is gone, the
-// step's peers are closed (dropSteps), and the wait ends with it.
+// take a moment, under ctx, the connection's: once the host is gone, ctx
+// ends, then the step's peers are closed (dropSteps), and the wait ends
+// with them. A step that fails then, or is gone, is the host's leaving,
+// never a refusal.
 func (c *ctl) mi3Answers(ctx context.Context, conn *link.Conn, m link.Mi3Answers) {
 	refuse := func(reason string) {
+		if ctx.Err() != nil {
+			c.say("Pasul MI3 %s: gazda s-a deconectat înainte ca sesiunile live să pornească.", m.RunID)
+			return
+		}
 		c.say("Pasul MI3 %s: %s.", m.RunID, reason)
 		c.reply(conn, link.Refused{RunID: m.RunID, Reason: reason})
 	}
@@ -115,10 +121,6 @@ func (c *ctl) mi3Answers(ctx context.Context, conn *link.Conn, m link.Mi3Answers
 	defer cancel()
 	for i, p := range st.peers {
 		if err := p.Accept(acceptCtx, m.Answers[i]); err != nil {
-			if ctx.Err() != nil {
-				c.say("Pasul MI3 %s: gazda s-a deconectat înainte ca sesiunile live să pornească.", m.RunID)
-				return
-			}
 			refuse(fmt.Sprintf("sesiunea live %d nu a pornit: %v", i+1, err))
 			return
 		}

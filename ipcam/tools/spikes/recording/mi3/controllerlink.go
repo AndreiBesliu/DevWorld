@@ -51,7 +51,7 @@ func dialController(ctx context.Context, addr, host string) (*controllerLink, er
 	}
 	l := &controllerLink{c: c, in: make(chan received, 16), done: make(chan struct{}), host: hostPart}
 	go l.read()
-	if err := c.Send(link.Hello{Role: "host", Host: host, Version: "c1"}); err != nil {
+	if err := c.Send(link.Hello{Role: "host", Host: host, Version: link.Version}); err != nil {
 		_ = l.close("", false)
 		return nil, err
 	}

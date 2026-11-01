@@ -115,6 +115,7 @@ Fiecare rând vine din judecata porții lui; „Sursa” spune unde s-a măsurat
 | MI1 real-pc: rulări eșuate | 0 din 5 | 0 | ✓ | pc |
 | MI2 pc: reluarea după kill -9 | 3,00 s (20 din 20) | ≤ 10 s | ✓ | pc |
 | MI2 pc: crash-uri ipcam-hub în 72 h | 0 (în 72,3 h) | 0 | ✓ | pc |
+| MI2 pc: timp fără înregistrare (camera cea mai afectată) | 0,0 min | ≤ 1 % din rulare (43,4 min) | ✓ | pc |
 | MI2 pc: reporniri MediaMTX (HUB-13) | 0 |  | – | pc |
 | MI2 pc: fereastra păstrată | 6,00 h |  | – | pc |
 | MI3 pc: nivel și camere | H3, 8 camere, 3 sesiuni live |  | – | pc |
@@ -163,6 +164,7 @@ Rezultatele Pi-ului de pe card SD, separat de celelalte (G16): avertismentul car
 | MI2 pi: reluarea după kill -9 | 3,00 s (20 din 20) | ≤ 10 s | ✓ | pi |
 | MI2 pi: starea cardului SD | OK → DEGRADAT |  | – | pi |
 | MI2 pi: crash-uri ipcam-hub în 72 h | 0 (în 72,3 h) | 0 | ✓ | pi |
+| MI2 pi: timp fără înregistrare (camera cea mai afectată) | 0,0 min | ≤ 1 % din rulare (43,4 min) | ✓ | pi |
 | MI2 pi: reporniri MediaMTX (HUB-13) | 0 |  | – | pi |
 | MI2 pi: fereastra păstrată | 6,00 h |  | – | pi |
 | MI3 pi: nivel și camere | H1b, 4 camere, 1 sesiune live |  | – | pi |
@@ -282,6 +284,7 @@ Fiecare element pornește când aprobați bugetul pentru el (OPN-09, OPN-16; pâ
 - Repornirea ipcam-hub făcută de recspike e o limită inferioară pentru recuperarea prin SCM (Windows) și systemd (Linux) din Faza 1 (C07).
 - „Primul cadru” (MI4 și MI9) e timpul de la cererea de salt până la sosirea octeților primului eșantion IDR de la țintă sau de după ea, pe calea de citire a hub-ului; în Chrome se adaugă primul cadru afișat (requestVideoFrameCallback) (G21, G26).
 - Rândul de pornire la rece e măsurat pe rulările MI1 cu repornire (pc-bugcheck pe PC, pi-sysrq pe Pi), cu camera lor, una singură (cam01_main), și include pornirea sistemului de operare.
+- Legătura dintre recspike și reccontroller nu are cod de asociere: se bazează pe rețeaua de acasă. Un alt dispozitiv din aceeași rețea s-ar putea da drept una dintre gazde; controlorul primește de la o gazdă doar rezultatul MI9 pe LAN și nu înlocuiește niciun rezultat pe care îl are (C1-R25).
 
 ## Date brute
 

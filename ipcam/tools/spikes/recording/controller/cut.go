@@ -88,15 +88,16 @@ func ValidWithin(c Cut, minBoot, maxBoot time.Duration) bool {
 
 // Loss is how much of stream the host lost at the stop: StopAt minus the
 // time when the controller sent the last frame that the host recorded, both
-// on the controller's clock (Review Focus 2). ok is false without a stop
-// moment or a send time for the index.
-func Loss(stopAt time.Time, stream string, lastRecordedIndex uint64, log *SendLog) (time.Duration, bool) {
+// on the controller's clock (Review Focus 2), from the send log or a run's
+// copy of it. ok is false without a stop moment or a send time for the
+// index.
+func Loss(stopAt time.Time, stream string, lastRecordedIndex uint64, sent SendTimer) (time.Duration, bool) {
 	if stopAt.IsZero() {
 		return 0, false
 	}
-	sent, ok := log.SendTime(stream, lastRecordedIndex)
+	at, ok := sent.SendTime(stream, lastRecordedIndex)
 	if !ok {
 		return 0, false
 	}
-	return stopAt.Sub(sent), true
+	return stopAt.Sub(at), true
 }

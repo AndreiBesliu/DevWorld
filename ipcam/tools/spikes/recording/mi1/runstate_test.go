@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -111,6 +112,27 @@ func TestRunState_OldFormat_SaysTheStateFolderCanBeDeleted(t *testing.T) {
 	}
 }
 
+// TestRunState_RunIDIsAFileName (Final fix A review, Minor 1): the run
+// state lies in results/, which the owner's own token may change, and the
+// elevated resume joins its run id to work/. A run id that is not one file
+// name refuses the load, as a damaged state does.
+func TestRunState_RunIDIsAFileName(t *testing.T) {
+	for _, id := range []string{`..\..\Windows\Temp\x`, "../../etc", "a/b", ""} {
+		path := filepath.Join(t.TempDir(), "state", "run-state.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		states := `{"active":"pc-bugcheck","sets":{"pc-bugcheck":{"set":"pc-bugcheck","mode":"automated","kind":"bugcheck","done":[],` +
+			`"current":{"runId":` + strconv.Quote(id) + `,"index":1,"attempt":1,"encrypted":false,"padLowBitrate":true,"streams":["cam01_main"],"phase":"recording"}}}}` + "\n"
+		if err := os.WriteFile(path, []byte(states), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if st, err := LoadRunState(path); err == nil || !strings.HasPrefix(err.Error(), "starea probelor nu se poate citi") {
+			t.Errorf("run id %q: LoadRunState = %+v, %v; want the Romanian refusal of a damaged state", id, st, err)
+		}
+	}
+}
+
 // recordSyncs records each file and folder that the driver syncs, and
 // still syncs them.
 func recordSyncs(t *testing.T) *[]string {
@@ -127,6 +149,32 @@ func recordSyncs(t *testing.T) *[]string {
 		return realDir(dir)
 	}
 	return &synced
+}
+
+// TestSaveRunState_FlushesTheRenamedFile (mi1-3): the run state is renamed
+// over the old one (with write-through on Windows), and the renamed file is
+// flushed before its folder: the state saved just before NotMyFault or
+// sysrq must be on disk when the host goes down.
+func TestSaveRunState_FlushesTheRenamedFile(t *testing.T) {
+	synced := recordSyncs(t)
+	path := filepath.Join(t.TempDir(), "state", "run-state.json")
+	st := &RunState{Set: SetPCBugcheck, Mode: ModeAutomated, Kind: "bugcheck",
+		Current: &CurrentRun{RunID: "pc-bugcheck-02-1", Index: 2, Attempt: 1, Streams: []string{MainStream}, Phase: PhaseStopping}}
+	realPath := syncPath
+	syncPath = func(p string) error {
+		if p == path {
+			if got, err := LoadRunState(path); err != nil || got == nil || got.Current == nil || got.Current.Phase != PhaseStopping {
+				t.Errorf("the file flushed holds %+v (%v), want the state just saved: the rename comes first", got, err)
+			}
+		}
+		return realPath(p)
+	}
+	if err := SaveRunState(path, st); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"file " + path, "folder " + filepath.Dir(path)}; !reflect.DeepEqual(*synced, want) {
+		t.Errorf("synced %q\nwant %q", *synced, want)
+	}
 }
 
 // TestWriteRun_TheRunsFilesOutliveAPowerCut (G09, G14): the run's run.json

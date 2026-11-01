@@ -10,7 +10,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"filippo.io/age"
@@ -127,19 +129,22 @@ func (r *stepRunner) measure(ctx context.Context, cameras, minutes, attempt int)
 	f, err := s.run(ctx)
 	s.cleanup()
 	// The recordings are measured, or of a step that failed: they would only
-	// take space. The logs stay.
-	if err := os.RemoveAll(filepath.Join(dir, "data")); err != nil {
-		r.o.say("Înregistrările pasului %d nu s-au putut șterge (%v); se șterg la următorul recspike mi3.", r.n, err)
+	// take space, and the RI_g identity and run.json, with the controller's
+	// RTSP login, go with them (mis-5). The logs stay.
+	if err := clearStep(dir); err != nil {
+		r.o.say("Înregistrările și cheile pasului %d nu s-au putut șterge (%v); se șterg la următorul recspike mi3.", r.n, err)
 	}
 	if err != nil {
 		return Figures{}, failed(dir, fmt.Errorf("pasul %d (%s): %w; jurnalele sunt în %s", r.n, camerasText(cameras), err, dir))
 	}
-	verdict := "nevalid (ritmul controlorului), se reface"
-	if Valid(f) {
-		verdict = "trece"
-		if !passes(r.tier, cameras, f) {
-			verdict = "pică"
-		}
+	verdict := "trece"
+	switch {
+	case !Valid(f):
+		why := invalidWhy(f.PacingP99Ms, f.SkippedAUs, f.Invalid)
+		logLine(dir, "pasul nu contează: "+why)
+		verdict = "nevalid (" + why + "), se reface"
+	case !passes(r.tier, cameras, f):
+		verdict = "pică"
 	}
 	r.o.say("Pasul %d: CPU total %s %%, RAM %s MB, latență p95 %s ms, ritm p99 %d ms, cadre sărite %d: %s.",
 		r.n, results.Decimal(f.CPUPctTotal, 1), results.Decimal(f.RAMMb, 0), results.Decimal(f.LatencyP95Ms, 0), f.PacingP99Ms, f.SkippedAUs, verdict)
@@ -185,20 +190,44 @@ func (e *stepError) Unwrap() error { return e.err }
 // it (finish), and it may hold English, a path or an address, which no
 // envelope holds (PH0-22).
 func failed(dir string, err error) error {
-	f, ferr := os.OpenFile(filepath.Join(dir, errorLog), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the step's own folder
-	if ferr == nil {
-		_, _ = fmt.Fprintln(f, err)
-		_ = f.Close()
-	}
+	logLine(dir, err.Error())
 	return &stepError{dir: dir, err: err}
 }
 
-// stepRun is one step's processes and what undoes them, last first.
+// logLine adds line to the errorLog of the step in dir.
+func logLine(dir, line string) {
+	f, err := os.OpenFile(filepath.Join(dir, errorLog), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the step's own folder
+	if err == nil {
+		_, _ = fmt.Fprintln(f, line)
+		_ = f.Close()
+	}
+}
+
+// clearStep removes what the step in dir left but its logs (stepLogs):
+// its recordings and ipcam-hub's catalog in data/, run.json and the RI_g
+// identity.
+func clearStep(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, e := range entries {
+		if !slices.Contains(stepLogs, e.Name()) {
+			errs = append(errs, os.RemoveAll(filepath.Join(dir, e.Name())))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// stepRun is one step's processes and what undoes them, last first, and
+// MediaMTX's restarts that its ipcam-hub reported (mis-2).
 type stepRun struct {
 	r                *stepRunner
 	runID, dir       string
 	cameras, minutes int
 	undo             []func()
+	childRestarts    atomic.Int32
 }
 
 // later adds f to what cleanup undoes.
@@ -246,7 +275,14 @@ func (s *stepRun) run(ctx context.Context) (Figures, error) {
 		}
 	})
 
-	hub, err := hubproc.Start(hubproc.Options{Binary: o.Hub, Config: config, Stderr: logFile})
+	// A restart of MediaMTX leaves the step with a camera that did not
+	// record for a while: the step does not count (mis-2).
+	onEvent := func(e hubproc.Event) {
+		if e.Type == "child_restart" {
+			s.childRestarts.Add(1)
+		}
+	}
+	hub, err := hubproc.Start(hubproc.Options{Binary: o.Hub, Config: config, Stderr: logFile, OnEvent: onEvent})
 	if err != nil {
 		return Figures{}, fmt.Errorf("nu pot porni ipcam-hub: %w", err)
 	}

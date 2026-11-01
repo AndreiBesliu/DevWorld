@@ -111,7 +111,8 @@ func limit(key, tier string, cameras int) float64 {
 // hub's processes and the loads together, in MB of 10^6 bytes, §4.8's
 // unit. DiskRatio is file bytes ÷ stream bytes, per mode, "clear" and
 // "encrypted". LoadCPUPct is each load's CPU, with its children's, as a
-// percentage of the whole machine (C1-R19).
+// percentage of the whole machine (C1-R19). Invalid says, in Romanian, why
+// the step's load did not run for its whole window (mis-2); "" when it did.
 type Figures struct {
 	CPUPctTotal        float64
 	TileSubPct         float64
@@ -126,6 +127,7 @@ type Figures struct {
 	SkippedAUs         int
 	DiskQueuePeakBytes int64
 	LoadCPUPct         map[string]float64
+	Invalid            string
 }
 
 // value is f's measurement of key; ok is false when f has none, as for
@@ -169,10 +171,11 @@ func Budgets(tier string, cameras int, f Figures) map[string]results.Budget {
 	return out
 }
 
-// Valid reports whether a step counts (R07): the controller's send p99 at
-// most 100 ms and no skipped access unit (validPacing). One that does not
-// is redone and never judged.
-func Valid(f Figures) bool { return validPacing(f.PacingP99Ms, f.SkippedAUs) }
+// Valid reports whether a step counts: the controller's send p99 at most
+// 100 ms and no skipped access unit (validPacing, R07), and its load ran
+// for its whole window (mis-2). One that does not is redone and never
+// judged.
+func Valid(f Figures) bool { return validPacing(f.PacingP99Ms, f.SkippedAUs) && f.Invalid == "" }
 
 // validPacing reports whether the controller sent a step evenly (R07): its
 // p99 at most 100 ms and no skipped access unit.
@@ -198,5 +201,6 @@ func dataOf(tier string, cameras int, f Figures) results.Mi3Data {
 		Tier: tier, Cameras: cameras, CPUPctTotal: f.CPUPctTotal, RAMMb: f.RAMMb, Budgets: Budgets(tier, cameras, f),
 		DiskRatio: f.DiskRatio, FsyncPerSecPerFile: f.FsyncPerSecPerFile, LatencyP95Ms: f.LatencyP95Ms,
 		PacingP99Ms: f.PacingP99Ms, SkippedAUs: f.SkippedAUs, DiskQueuePeakBytes: f.DiskQueuePeakBytes, LoadCPUPct: f.LoadCPUPct,
+		InvalidReason: f.Invalid,
 	}
 }

@@ -19,6 +19,9 @@ func RelaunchElevated([]string) (int, error) { return 0, errNotWindows }
 // UserSID is Windows-only: the boot task's user.
 func UserSID() (string, error) { return "", errNotWindows }
 
+// FileOwnerSID is Windows-only: the SID of a file's owner.
+func FileOwnerSID(string) (string, error) { return "", errNotWindows }
+
 // DesktopDir is Windows-only: the folder of the real cuts' shortcut.
 func DesktopDir() (string, error) { return "", errNotWindows }
 

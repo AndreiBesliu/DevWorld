@@ -77,8 +77,11 @@ type Options struct {
 // Record records the camera at CameraURL, encrypted for an ephemeral RI_g
 // and RK (PH0-22: RK's identity is never kept), through ipcam-hub (C01),
 // into one segment of SegmentSecs, and returns that segment once it has
-// closed. Run/Name holds the recording, run.json, RI_g's identity and
-// ipcam-hub's log.
+// closed. A segment that closed early (a source drop of more than 10 s, a
+// restart of MediaMTX) is not one: Record then waits, up to one more
+// segment length, for the next one of the full length, and fails with a
+// Romanian line when that one closes early too (mis-6). Run/Name holds the
+// recording, run.json, RI_g's identity and ipcam-hub's log.
 func Record(ctx context.Context, o Options) (Segment, error) {
 	dir := filepath.Join(o.Run, o.Name)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -109,7 +112,16 @@ func Record(ctx context.Context, o Options) (Segment, error) {
 		return Segment{}, err
 	}
 	defer func() { _ = logFile.Close() }()
-	hub, err := hubproc.Start(hubproc.Options{Binary: o.Hub, Config: config, Stderr: logFile})
+	closed := make(chan hubproc.Event, 8)
+	onEvent := func(e hubproc.Event) {
+		if e.Type == "segment_closed" && e.Cam == Camera && e.Profile == Profile {
+			select {
+			case closed <- e:
+			default: // a segment every few minutes: never full
+			}
+		}
+	}
+	hub, err := hubproc.Start(hubproc.Options{Binary: o.Hub, Config: config, Stderr: logFile, OnEvent: onEvent})
 	if err != nil {
 		return Segment{}, fmt.Errorf("nu pot porni ipcam-hub: %w", err)
 	}
@@ -126,14 +138,63 @@ func Record(ctx context.Context, o Options) (Segment, error) {
 	if err != nil {
 		return Segment{}, fmt.Errorf("ipcam-hub nu a început să înregistreze camera: %w; jurnalul este %s", err, logPath)
 	}
-	closeWait := time.Duration(o.SegmentSecs)*time.Second + closeSlack
-	waitCtx, cancel = context.WithTimeout(ctx, closeWait)
-	e, err := hub.WaitEvent(waitCtx, "segment_closed", func(e hubproc.Event) bool { return e.Cam == Camera && e.Profile == Profile })
-	cancel()
+	path, err := o.fullSegment(ctx, hub, closed)
 	if err != nil {
-		return Segment{}, fmt.Errorf("segmentul nu s-a închis în %v: %w; jurnalul este %s", closeWait, err, logPath)
+		return Segment{}, fmt.Errorf("%w; jurnalul este %s", err, logPath)
 	}
-	return Segment{Path: e.Path, Identity: identity}, nil
+	return Segment{Path: path, Identity: identity}, nil
+}
+
+// fullSegment waits for the first segment in closed that lasted at least
+// SegmentSecs − 1 s, and returns its path (mis-6): a segment's close waits
+// for the next keyframe, so a full one lasts its length or a little more.
+// After a shorter one, it waits up to one more segment length for the
+// next; when that one is short too, or none closes, it fails with the
+// Romanian line of the short one.
+func (o Options) fullSegment(ctx context.Context, hub *hubproc.Hub, closed <-chan hubproc.Event) (string, error) {
+	length := time.Duration(o.SegmentSecs) * time.Second
+	closeWait := length + closeSlack
+	timer := time.NewTimer(closeWait)
+	defer timer.Stop()
+	var short *hubproc.Event
+	tooShort := func(e hubproc.Event) error {
+		return fmt.Errorf("segmentul s-a închis după %d s, nu după %s: porniți din nou proba",
+			(e.EndMs-e.StartMs+500)/1000, durationText(o.SegmentSecs))
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-hub.Exited():
+			return "", fmt.Errorf("segmentul nu s-a închis: %w", hubproc.ErrExited)
+		case <-timer.C:
+			if short != nil {
+				return "", tooShort(*short)
+			}
+			return "", fmt.Errorf("segmentul nu s-a închis în %v", closeWait)
+		case e := <-closed:
+			if time.Duration(e.EndMs-e.StartMs)*time.Millisecond >= length-time.Second {
+				return e.Path, nil
+			}
+			if short != nil {
+				return "", tooShort(e)
+			}
+			if o.Say != nil {
+				o.Say("Segmentul s-a închis după %d s, mai devreme decât cele %s ale probei: aștept următorul segment.",
+					(e.EndMs-e.StartMs+500)/1000, durationText(o.SegmentSecs))
+			}
+			short = &e
+			timer.Reset(closeWait)
+		}
+	}
+}
+
+// durationText is secs in Romanian: «5 min», «2 min», «10 s».
+func durationText(secs int) string {
+	if secs%60 == 0 {
+		return fmt.Sprintf("%d min", secs/60)
+	}
+	return fmt.Sprintf("%d s", secs)
 }
 
 // ReadIdentity reads the RI_g identity in the file at path.

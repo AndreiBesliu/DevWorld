@@ -110,6 +110,9 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 	if st.Mode == ModeReal {
 		cur.Slot = p.Index
 	}
+	if boot, err := d.thisBoot(); err == nil {
+		cur.StartBoot = &boot
+	}
 	cur.trace = &cutTrace{}
 	vol, err := d.volumes().Prepare(ctx, cur.RunID, cur.Encrypted)
 	if err != nil {
@@ -120,8 +123,7 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 	// one is fresh (Images.Prepare refuses a leftover image). Once the run
 	// state holds it, a later recspike finishes it on this volume
 	// (finishAfterReboot), and its report releases it.
-	config, err := d.writeRun(cur, vol, s)
-	if err != nil {
+	if _, err := d.writeRun(cur, vol, s); err != nil {
 		return errors.Join(err, vol.Release())
 	}
 	st.Current, st.NextRun, st.Slot = cur, p.Index, cur.Slot
@@ -138,6 +140,10 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 		return err
 	}
 	defer func() { _ = log.Close() }()
+	config, err := d.ownMediaMTX(cur)
+	if err != nil {
+		return err
+	}
 	hub, err := hubproc.Start(hubproc.Options{Binary: d.Hub, Config: config, Stderr: log, OnEvent: cur.trace.event,
 		Beacon: &hubproc.Beacon{Addr: s.beaconAddr, RunID: cur.RunID}})
 	if err != nil {
@@ -322,6 +328,9 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 		if err := SaveRunState(d.statePath(), st); err != nil {
 			return err
 		}
+		if _, err := d.ownMediaMTX(cur); err != nil {
+			return err
+		}
 		again, err := hub.Restart()
 		if err != nil {
 			return err
@@ -396,10 +405,17 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 		return fmt.Errorf("rularea %s nu mai are dosarul de date: %w", cur.RunID, err)
 	}
 	// The host booted since the OS stop that recspike asked for: ColdBootMs
-	// is measured on its boot clock.
+	// is measured on its boot clock. A sysrq or bugcheck run still
+	// recording, on another boot than its start's, was stopped too: the
+	// stop's own save did not reach the disk before the stop (mi1-3).
+	kind := controller.ShutdownKind(st.Kind)
+	osStop := kind == controller.KindSysrq || kind == controller.KindBugcheck
 	booted := cur.Phase == PhaseStopping
-	if booted && !d.rebootedSince(cur) {
+	switch {
+	case booted && !d.bootedSince(cur.StopBoot):
 		return d.notRebooted(ctx, s, st, cur, vol)
+	case cur.Phase == PhaseRecording && osStop && d.bootedSince(cur.StartBoot):
+		booted = true
 	}
 	if cur.Phase != PhaseStopped {
 		if _, err := d.stopped(cur, vol, s.info.Needles); err != nil {
@@ -415,12 +431,15 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 		return err
 	}
 	defer func() { _ = log.Close() }()
-	hub, err := hubproc.Start(hubproc.Options{Binary: d.Hub, Config: filepath.Join(d.runDir(cur.RunID), "run.json"), Stderr: log})
+	config, err := d.ownMediaMTX(cur)
 	if err != nil {
 		return err
 	}
-	kind := controller.ShutdownKind(st.Kind)
-	coldBoot := booted && (kind == controller.KindSysrq || kind == controller.KindBugcheck)
+	hub, err := hubproc.Start(hubproc.Options{Binary: d.Hub, Config: config, Stderr: log})
+	if err != nil {
+		return err
+	}
+	coldBoot := booted && osStop
 	var coldBootMs *int64
 	if coldBoot {
 		waitCtx, cancel := context.WithTimeout(ctx, eventTimeout)
@@ -436,12 +455,12 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 	return d.finish(ctx, s, st, cur, vol, hub, coldBootMs)
 }
 
-// rebootedSince reports whether the host booted after recspike asked the
-// OS to stop for cur: its boot is not the stop's (Boot). A boot that is not
-// known, at the stop or now, is no reboot.
-func (d *Driver) rebootedSince(cur *CurrentRun) bool {
+// bootedSince reports whether the host booted after then, a boot that
+// recspike saved: its boot is not that one (Boot). A boot that is not
+// known, then or now, is no reboot.
+func (d *Driver) bootedSince(then *Boot) bool {
 	boot, err := d.thisBoot()
-	return err == nil && cur.StopBoot != nil && !boot.Same(*cur.StopBoot)
+	return err == nil && then != nil && !boot.Same(*then)
 }
 
 // notRebooted ends a run whose OS stop did not reboot the host (the stop
@@ -465,6 +484,9 @@ func (d *Driver) afterStop(ctx context.Context, s *session, st *RunState, cur *C
 	}
 	cur.Phase = PhaseStopped
 	if err := SaveRunState(d.statePath(), st); err != nil {
+		return err
+	}
+	if _, err := d.ownMediaMTX(cur); err != nil {
 		return err
 	}
 	again, err := hub.Restart()
@@ -684,6 +706,28 @@ func (d *Driver) writeRun(cur *CurrentRun, vol Volume, s *session) (string, erro
 	// entries of its folder and of the folder in work/, must be on the
 	// disk before the run starts, a stop 20 s later included.
 	return config, errors.Join(syncPath(config), syncDir(dir), syncDir(d.Work))
+}
+
+// ownMediaMTX returns the run's run.json once it names the release's own
+// MediaMTX, d.MediaMTX ("" for the one next to ipcam-hub), before every
+// start of ipcam-hub: the first, the resume after a reboot and the
+// restarts after a stop run elevated on the PC (the boot task, the
+// shortcut), while run.json lies in work/, which the owner's own token may
+// change, and ipcam-hub runs the binary that it names (Final fix A review,
+// Minor 1).
+func (d *Driver) ownMediaMTX(cur *CurrentRun) (string, error) {
+	config := filepath.Join(d.runDir(cur.RunID), "run.json")
+	cfg, err := hubproc.ReadConfig(config)
+	if err != nil {
+		return "", err
+	}
+	if cfg.MediaMTX != d.MediaMTX {
+		cfg.MediaMTX = d.MediaMTX
+		if err := hubproc.WriteConfig(config, cfg); err != nil {
+			return "", err
+		}
+	}
+	return config, nil
 }
 
 // identity reads the run's RI_g; nil for a clear run.

@@ -17,8 +17,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -592,6 +594,107 @@ func TestMTX1_FailedPartSyncKeepsPartName(t *testing.T) {
 	require.Zero(t, r.log.count("rename"), "events: %v", eventOps(events))
 	require.Zero(t, r.log.count("complete"), "events: %v", eventOps(events))
 	require.Equal(t, []string{"2008-05-20_22-15-25-000000.mp4.part"}, dirEntries(t, r.dir))
+}
+
+// fullDiskFile is a segment file whose write fails once limit bytes are in
+// it, as on a disk that is full for a moment: the write that crosses the
+// limit puts what fits and returns ENOSPC; the disk then has room again
+// (the hub's retention freed some), and later writes succeed. Only the
+// segment's own memory of the failure (partErr) then keeps the torn file
+// from its final name.
+type fullDiskFile struct {
+	*os.File
+	limit, written int64
+	failed         bool
+}
+
+func (f *fullDiskFile) Write(p []byte) (int, error) {
+	if room := f.limit - f.written; !f.failed && int64(len(p)) > room {
+		f.failed = true
+		n, _ := f.File.Write(p[:max(room, 0)])
+		f.written += int64(n)
+		return n, &os.PathError{Op: "write", Path: f.Name(), Err: syscall.ENOSPC}
+	}
+	n, err := f.File.Write(p)
+	f.written += int64(n)
+	return n, err
+}
+
+// TestMTX1_FailedWriteKeepsPartName (fork-2): when a segment's write fails,
+// as on a full disk, the segment keeps its .part name and fires no hook,
+// clear or encrypted, even when the disk has room again for its close:
+// the failure reaches the disk writer (diskFailed), the recorder restarts
+// and creates a new .part, and a failed encrypted .part holds no clear
+// ftyp or IDR (HUB-04).
+func TestMTX1_FailedWriteKeepsPartName(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		encrypted bool
+		limit     int64 // the bytes that fit: the second part's write fails
+		suffix    string
+	}{
+		{"clear", false, 30_000, ".mp4.part"},
+		{"encrypted", true, 100_000, ".mp4.age.part"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restartSoon := func(rec *Recorder) { rec.restartPause = 10 * time.Millisecond }
+			var r *testRecording
+			write := func() { r.writeFrames(1) }
+			if tc.encrypted {
+				r = startAgeRecording(t, newAgeKeys(t), true, restartSoon)
+				write = func() { r.writeAgeFrame(2000) }
+			} else {
+				r = startRecordingWith(t, time.Date(2008, 5, 20, 22, 15, 25, 0, time.UTC), test.FormatH264, restartSoon)
+			}
+
+			realCreateFile := createFile
+			t.Cleanup(func() { createFile = realCreateFile })
+			var created atomic.Int32
+			createFile = func(name string) (segmentFile, error) {
+				f, err := realCreateFile(name)
+				if err != nil || created.Add(1) > 1 {
+					return f, err
+				}
+				return &fullDiskFile{File: f.(*os.File), limit: tc.limit}, nil
+			}
+
+			// Frames go on until the restarted recorder has created its segment.
+			deadline := time.Now().Add(10 * time.Second)
+			for r.log.count("create") < 2 {
+				require.True(t, time.Now().Before(deadline), "no segment after the restart; events: %v", eventOps(r.log.snapshot()))
+				write()
+				time.Sleep(time.Millisecond)
+			}
+			r.stop()
+
+			events := r.log.snapshot()
+			require.Positive(t, r.log.count("diskFailed"), "events: %v", eventOps(events))
+			creates := eventsOf(events, "create")
+			failed := creates[0].path
+			require.True(t, strings.HasSuffix(failed, tc.suffix), failed)
+			require.True(t, strings.HasSuffix(creates[1].path, tc.suffix), "the restarted recorder's segment: %s", creates[1].path)
+			require.NotEqual(t, failed, creates[1].path)
+
+			final := strings.TrimSuffix(failed, partSuffix)
+			for _, ev := range eventsOf(events, "complete") {
+				require.NotEqual(t, final, ev.path, "the failed segment fired its hook; events: %v", eventOps(events))
+			}
+			entries := dirEntries(t, r.dir)
+			require.Contains(t, entries, filepath.Base(failed), "the failed segment's .part")
+			require.NotContains(t, entries, filepath.Base(final), "the failed segment's final name")
+
+			if tc.encrypted {
+				content, err := os.ReadFile(failed)
+				require.NoError(t, err)
+				require.Greater(t, int64(len(content)), int64(65536), "the failed .part holds its first part")
+				for name, needle := range map[string][]byte{
+					"ftyp": []byte("ftyp"), "SPS": mtx2Format.SPS[:16], "PPS": mtx2Format.PPS[:16], "IDR": []byte("MTX2-IDR"),
+				} {
+					require.False(t, bytes.Contains(content, needle), "the failed .part holds a clear %s", name)
+				}
+			}
+		})
+	}
 }
 
 // TestMTX1_SeamFailureFiresNoHook: when the close's syncFile, renameFinal, the

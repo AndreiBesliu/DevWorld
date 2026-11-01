@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -23,6 +24,21 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
 )
+
+// asMainEnv, set to a folder, makes the test binary run reccontroller's
+// main as if it were installed in that folder, listening on free loopback
+// ports: the child process of the hangup test (hangup_unix_test.go).
+const asMainEnv = "RECCONTROLLER_TEST_MAIN_DIR"
+
+func TestMain(m *testing.M) {
+	if dir := os.Getenv(asMainEnv); dir != "" {
+		executable = func() (string, error) { return filepath.Join(dir, "reccontroller"), nil }
+		listenConfig = func(bool) controller.ListenConfig { return controller.ListenConfig{Host: "127.0.0.1"} }
+		main()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 // manualClock is a source.Clock that moves only when the test sets it;
 // each move wakes every ticker.
@@ -377,13 +393,14 @@ func TestReport_WritesTheEnvelope(t *testing.T) {
 		stopAt = cut.PromptAt.Add(-10 * time.Millisecond)
 		r.beaconAt("pi-kill9-05-1", seq+1, stopAt)
 	}
+	// The send log has each frame from when it went out, before the stop.
+	r.c.sendLog.Record("cam01_main", 7000, stopAt.Add(-850*time.Millisecond))
+	r.c.sendLog.Record("cam02_main", 7001, stopAt.Add(-1200*time.Millisecond))
 	r.clock.set(stopAt.Add(controller.BeaconSilence + 100*time.Millisecond))
 	waitFor(t, "the pacing's end mark", func() bool {
 		marks := r.pacer.markTimes()
 		return len(marks) >= 2 && marks[len(marks)-1].After(stopAt.Add(controller.BeaconSilence))
 	})
-	r.c.sendLog.Record("cam01_main", 7000, stopAt.Add(-850*time.Millisecond))
-	r.c.sendLog.Record("cam02_main", 7001, stopAt.Add(-1200*time.Millisecond))
 	resume := int64(812)
 	report := link.Report{
 		RunID: "pi-kill9-05-1",
@@ -550,6 +567,27 @@ func TestSuperviseBeacons_ShowsAndRestarts(t *testing.T) {
 		t.Errorf("screen:\n%s\nwant the receiver stopped for good", screen.String())
 	}
 }
+
+// TestScreenAndLog_KeepsTheLinesOfADeadScreen (report-1): the controller's
+// screen lines also go to its log, and a screen that fails, as one whose
+// ssh window died does (EIO, EPIPE), loses none of them there.
+func TestScreenAndLog_KeepsTheLinesOfADeadScreen(t *testing.T) {
+	var log strings.Builder
+	w := screenAndLog{screen: failingWriter{}, log: &log}
+	for _, line := range []string{"Rularea pc-bugcheck-03-1: validă; …\n", "Gazda „pc” s-a conectat.\n"} {
+		if n, err := fmt.Fprint(w, line); err != nil || n != len(line) {
+			t.Errorf("writing %q = %d, %v; want it written whole, without an error", line, n, err)
+		}
+	}
+	if got := log.String(); got != "Rularea pc-bugcheck-03-1: validă; …\nGazda „pc” s-a conectat.\n" {
+		t.Errorf("the log holds %q, want both lines", got)
+	}
+}
+
+// failingWriter is a screen whose terminal went away.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, syscall.EIO }
 
 // TestFlags_RomanianUsageAndErrors: reccontroller's usage and its flag
 // errors are Romanian, never the flag package's English.
@@ -753,6 +791,16 @@ func (r *rig) validKill9Run(conn *link.Conn, id string) link.Report {
 // controller knew the run, which dropped them.
 func (r *rig) kill9RunFrom(conn *link.Conn, id string, first uint64) link.Report {
 	r.t.Helper()
+	report, stopAt := r.kill9RunUnlogged(conn, id, first)
+	r.c.sendLog.Record("cam01_main", 5000, stopAt.Add(-700*time.Millisecond))
+	return report
+}
+
+// kill9RunUnlogged is kill9RunFrom whose last recorded index, 5000, has
+// not reached the send log yet: the caller records it, 700 ms before the
+// returned stop. The clock is at the stop, the run's last beacon.
+func (r *rig) kill9RunUnlogged(conn *link.Conn, id string, first uint64) (link.Report, time.Time) {
+	r.t.Helper()
 	r.send(conn, link.RunStart{RunID: id, Set: "pc-kill9", Kind: "kill9", Encrypted: true, PadLowBitrate: true,
 		Streams: []string{"cam01_main"}, Host: "pc", OS: "windows", Storage: "ssd", Attempt: 1})
 	waitFor(r.t, "the run", func() bool {
@@ -772,13 +820,134 @@ func (r *rig) kill9RunFrom(conn *link.Conn, id string, first uint64) link.Report
 	}
 	stopAt := prompt.Add(-10 * time.Millisecond)
 	r.beaconAt(id, seq, stopAt)
-	r.c.sendLog.Record("cam01_main", 5000, stopAt.Add(-700*time.Millisecond))
 	return link.Report{
 		RunID:      id,
 		Streams:    []link.StreamIndex{{Stream: "cam01_main", LastRecordedIndex: 5000}},
 		Reconcile:  json.RawMessage(`{"type":"reconcile","seq":1,"final":true,"aborted":false,"unreadable":0,"tornParts":0,"catalogMismatches":0}`),
 		Verify:     json.RawMessage(`{"type":"verify","unreadable":0,"tornParts":0,"catalogMismatches":0}`),
 		Hub04Clear: true, NtpSynced: true, WriteCache: "unknown",
+	}, stopAt
+}
+
+// runCopied reports whether the controller holds run id's copy of its
+// send times.
+func (r *rig) runCopied(id string) bool {
+	r.c.mu.Lock()
+	defer r.c.mu.Unlock()
+	run := r.c.runs[id]
+	return run != nil && run.sent != nil
+}
+
+// TestReport_SendsLoggedAfterTheSilenceKeepTheirLoss (Final fix B, item
+// 0): the send log's feed is asynchronous (each simulator buffers about
+// 12 s of its sends), so a frame sent before the stop can reach the log
+// after the run's beacons went silent. Such a frame, the run's last
+// recorded one, must keep the run's real loss, never give it the whole
+// run: the controller copies the run's send times only once the feed has
+// caught up past the copy's window, and a report also finds the frames
+// that came after the copy in the live log. When the feed has not caught
+// up within its bound, the copy is taken anyway and the screen says so.
+func TestReport_SendsLoggedAfterTheSilenceKeepTheirLoss(t *testing.T) {
+	const id = "pc-kill9-05-1"
+	t.Run("the feed catches up after the silence", func(t *testing.T) {
+		r := newRig(t)
+		conn := r.connect("pc")
+		report, stopAt := r.kill9RunUnlogged(conn, id, 0)
+		r.clock.set(stopAt.Add(controller.BeaconSilence + 100*time.Millisecond))
+		waitFor(t, "the run's end mark", func() bool {
+			r.c.mu.Lock()
+			defer r.c.mu.Unlock()
+			return r.c.runs[id] != nil && r.c.runs[id].endMark != nil
+		})
+		// The feed catches up: the run's last recorded frame, then one sent
+		// after the copy's window.
+		r.c.sendLog.Record("cam01_main", 5000, stopAt.Add(-700*time.Millisecond))
+		at := stopAt.Add(controller.BeaconSilence + 150*time.Millisecond)
+		r.c.sendLog.Record("cam01_main", 5001, at)
+		waitFor(t, "the run's copy", func() bool { return r.runCopied(id) })
+		// The report comes late: only the copy still has index 5000.
+		for index := uint64(5002); ; index++ {
+			at = at.Add(50 * time.Millisecond)
+			r.c.sendLog.Record("cam01_main", index, at)
+			if _, ok := r.c.sendLog.SendTime("cam01_main", 5000); !ok {
+				break
+			}
+		}
+		r.clock.set(at)
+		r.send(conn, report)
+		if v, ok := r.receive(conn).(link.Verdict); !ok || !mi1.Counts(v.Run) || v.Run.LossMs != 700 {
+			t.Errorf("verdict %+v, want a counting run that lost 700 ms, from the copy taken once the feed caught up", v.Run)
+		}
+	})
+	t.Run("the feed has not caught up when its wait ends", func(t *testing.T) {
+		r := newRig(t)
+		conn := r.connect("pc")
+		report, stopAt := r.kill9RunUnlogged(conn, id, 0)
+		r.clock.set(stopAt.Add(controller.BeaconSilence + 100*time.Millisecond))
+		r.clock.set(stopAt.Add(controller.BeaconSilence + time.Minute))
+		waitFor(t, "the run's copy", func() bool { return r.runCopied(id) })
+		r.c.sendLog.Record("cam01_main", 5000, stopAt.Add(-700*time.Millisecond)) // after the copy
+		r.send(conn, report)
+		if v, ok := r.receive(conn).(link.Verdict); !ok || !mi1.Counts(v.Run) || v.Run.LossMs != 700 {
+			t.Errorf("verdict %+v, want a counting run that lost 700 ms, from the live log", v.Run)
+		}
+		if want := "Rularea " + id + ": jurnalul trimiterilor a rămas în urmă"; !strings.Contains(r.screen.String(), want) {
+			t.Errorf("screen %q, want %q", r.screen.String(), want)
+		}
+	})
+}
+
+// TestReport_LateReportKeepsItsLoss (mi1-1): the send log keeps each
+// stream's newest hour of indexes, while a run's report can come much
+// later: the boot task could not reach the controller, and the owner ran
+// the command again the next evening. The controller keeps the send times
+// of the run's streams from its first beacon to just after its stop when
+// its beacons go silent, so a report that comes after the log has dropped
+// the run's last recorded index gets the verdict and the loss of a prompt
+// one, never a loss of the whole run.
+func TestReport_LateReportKeepsItsLoss(t *testing.T) {
+	verdict := func(late bool) link.Verdict {
+		r := newRig(t)
+		conn := r.connect("pc")
+		report := r.validKill9Run(conn, "pc-kill9-05-1")
+		stopAt := r.clock.Now() // the run's last beacon
+		r.clock.set(stopAt.Add(controller.BeaconSilence + 100*time.Millisecond))
+		waitFor(t, "the run's end", func() bool {
+			r.c.mu.Lock()
+			defer r.c.mu.Unlock()
+			run := r.c.runs["pc-kill9-05-1"]
+			return run != nil && run.endMark != nil
+		})
+		if late {
+			// The cameras go on: more frames than the log keeps. The first
+			// one, past the copy's window, lets the controller take it.
+			at := r.clock.Now()
+			for index := uint64(5001); ; index++ {
+				at = at.Add(50 * time.Millisecond)
+				r.c.sendLog.Record("cam01_main", index, at)
+				if index == 5001 {
+					waitFor(t, "the run's copy", func() bool { return r.runCopied("pc-kill9-05-1") })
+				}
+				if _, ok := r.c.sendLog.SendTime("cam01_main", 5000); !ok {
+					break
+				}
+			}
+			r.clock.set(at)
+		}
+		r.send(conn, report)
+		v, ok := r.receive(conn).(link.Verdict)
+		if !ok {
+			t.Fatalf("late %v: no verdict", late)
+		}
+		return v
+	}
+	prompt, late := verdict(false), verdict(true)
+	if !mi1.Counts(prompt.Run) || prompt.Run.LossMs != 700 {
+		t.Fatalf("test setup: the prompt report's verdict %+v, want a counting run of 700 ms", prompt.Run)
+	}
+	if !reflect.DeepEqual(late.Run, prompt.Run) {
+		t.Errorf("the late report's verdict %+v (loss %d ms, valid %v), want the prompt one's %+v",
+			late.Run, late.Run.LossMs, late.Run.Valid, prompt.Run)
 	}
 }
 

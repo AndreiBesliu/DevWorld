@@ -79,6 +79,9 @@ const usage = `Folosire:
 `
 
 func main() {
+	// A set, MI2's 72 h and MI3's hours outlive an ssh window easily
+	// (report-1); every subcommand ignores the hangup alike.
+	cli.IgnoreHangup()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := report(run(ctx, os.Args[1:], bufio.NewReader(os.Stdin), os.Stdout), os.Stderr)
 	stop()
@@ -142,15 +145,11 @@ func run(ctx context.Context, args []string, in *bufio.Reader, out io.Writer) er
 		if err != nil {
 			return err
 		}
-		f, err := ownFolders()
-		if err != nil {
-			return err
-		}
-		a := systemAutostart(out, f.work)
+		a := systemAutostart(out)
 		if cmd == "install" {
 			return a.install(exe)
 		}
-		return a.uninstall()
+		return a.uninstall(exe)
 	}
 	_, _ = fmt.Fprint(out, usage)
 	return fmt.Errorf("comandă necunoscută: %s", cmd)
