@@ -252,9 +252,10 @@ func TestHubConfig_RefusesAJunctionForItsFolder(t *testing.T) {
 	}
 }
 
-// setDACL gives path the DACL of sddl, as its owner may, through a handle:
-// what a folder holds keeps its own DACL, and nothing reads path's new one,
-// which may hide itself.
+// setDACL gives path the DACL of sddl, as its owner may, through a handle
+// that may read and change it (SetSecurityInfo reads the DACL that it
+// replaces): what a folder holds keeps its own DACL, and nothing reads
+// path's new one, which may hide itself.
 func setDACL(t *testing.T, path, sddl string) {
 	t.Helper()
 	sd, err := windows.SecurityDescriptorFromString(sddl)
@@ -269,7 +270,7 @@ func setDACL(t *testing.T, path, sddl string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := windows.CreateFile(name, windows.WRITE_DAC, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+	h, err := windows.CreateFile(name, windows.READ_CONTROL|windows.WRITE_DAC, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
 		t.Fatalf("open %s to change its DACL: %v", path, err)
