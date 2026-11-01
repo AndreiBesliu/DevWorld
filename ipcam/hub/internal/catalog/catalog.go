@@ -84,8 +84,24 @@ type ReconcileDiff struct {
 // Count is the number of disagreements.
 func (d ReconcileDiff) Count() int { return len(d.Added) + len(d.Updated) + len(d.Lost) }
 
+// Options are a catalog's settings, which OpenWith takes.
+type Options struct {
+	// OnSegmentComplete, when set, runs inside the transaction that makes a
+	// segment row complete, or changes the bytes of a complete one:
+	// PutSegment's, and ReconcileFiles' for each such row. It gets the row
+	// as stored, with its id, and its error rolls the transaction back, the
+	// row with it. ipcam-hub enqueues the row's placements there (S3, P03),
+	// so the recorder's hook, its C1-R9 rewrite, its live repair and the
+	// startup reconcile all enqueue in the row's transaction, and the
+	// catalog imports no outbox.
+	OnSegmentComplete func(ctx context.Context, tx *sql.Tx, s Segment) error
+}
+
 // DB is an open catalog.
-type DB struct{ sql *sql.DB }
+type DB struct {
+	sql  *sql.DB
+	opts Options
+}
 
 // migrations are applied in order, each once; PRAGMA user_version counts
 // those applied. They only ever go forward.
@@ -154,15 +170,21 @@ var migrations = []string{
 }
 
 // Open opens the catalog at path, creating it if needed, and migrates it.
-// It refuses a catalog whose schema is newer than this code.
+// It refuses a catalog whose schema is newer than this code. It is OpenWith
+// with zero Options: a catalog that calls no callback.
 func Open(ctx context.Context, path string) (*DB, error) {
+	return OpenWith(ctx, path, Options{})
+}
+
+// OpenWith is Open with opts.
+func OpenWith(ctx context.Context, path string, opts Options) (*DB, error) {
 	// The pragmas run on every connection the pool opens.
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(10000)&_txlock=immediate"
 	sdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("catalog: open %s: %w", path, err)
 	}
-	db := &DB{sql: sdb}
+	db := &DB{sql: sdb, opts: opts}
 	if err := db.migrate(ctx); err != nil {
 		_ = sdb.Close()
 		return nil, fmt.Errorf("catalog: %s: %w", path, err)
@@ -215,37 +237,51 @@ func (db *DB) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return nil
 }
 
-// execer is what a segment upsert needs: the catalog or a transaction of it.
-type execer interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}
-
-// PutSegment writes s, by its path: a new path gets a row with a new UUIDv7
-// id (or s.ID when it is set), a known path is updated and keeps its id. A
-// row whose bytes or state change is no longer verified.
+// PutSegment writes s, by its path, in a transaction of its own: a new path
+// gets a row with a new UUIDv7 id (or s.ID when it is set), a known path is
+// updated and keeps its id. A row whose bytes or state change is no longer
+// verified. When the row's new state is complete and it was not complete
+// before, or its bytes changed, Options.OnSegmentComplete runs in that
+// transaction with the row as stored, its id the row's own, whatever s.ID
+// says.
 func (db *DB) PutSegment(ctx context.Context, s Segment) error {
-	return putSegment(ctx, db.sql, s)
+	return db.WithTx(ctx, func(tx *sql.Tx) error {
+		var wasState string
+		var wasBytes int64
+		err := tx.QueryRowContext(ctx, "SELECT local_state, bytes FROM segments WHERE local_path = ?", s.Path).Scan(&wasState, &wasBytes)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("catalog: put segment %s: %w", s.Path, err)
+		}
+		id, state, err := upsertSegment(ctx, tx, s)
+		if err != nil || state != StateComplete || (wasState == StateComplete && wasBytes == s.Bytes) {
+			return err
+		}
+		return db.completed(ctx, tx, id)
+	})
 }
 
 // PutSegmentTx is PutSegment on the caller's transaction tx, so that the row
 // and what the caller writes with it, such as its placements, commit
-// together (S3).
+// together (S3). It runs no callback: it is a function of no catalog.
 func PutSegmentTx(ctx context.Context, tx *sql.Tx, s Segment) error {
-	return putSegment(ctx, tx, s)
+	_, _, err := upsertSegment(ctx, tx, s)
+	return err
 }
 
-func putSegment(ctx context.Context, db execer, s Segment) error {
+// upsertSegment writes s on tx as PutSegment says, and returns the id that
+// the row keeps and the state that it takes.
+func upsertSegment(ctx context.Context, tx *sql.Tx, s Segment) (id, state string, err error) {
 	if s.State == "" {
 		s.State = StateComplete
 	}
 	if s.ID == "" {
-		id, err := uuid.NewV7()
+		uid, err := uuid.NewV7()
 		if err != nil {
-			return err
+			return "", "", err
 		}
-		s.ID = id.String()
+		s.ID = uid.String()
 	}
-	_, err := db.ExecContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO segments (id, camera_id, profile, local_path, start_ms, end_ms, bytes, encrypted, local_state)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (local_path) DO UPDATE SET
@@ -253,10 +289,27 @@ func putSegment(ctx context.Context, db execer, s Segment) error {
 			start_ms = excluded.start_ms, end_ms = excluded.end_ms,
 			verified_at_ms = CASE WHEN segments.bytes = excluded.bytes AND segments.local_state = excluded.local_state
 				THEN segments.verified_at_ms END,
-			bytes = excluded.bytes, encrypted = excluded.encrypted, local_state = excluded.local_state`,
-		s.ID, s.Cam, s.Profile, s.Path, s.StartMs, s.EndMs, s.Bytes, s.Encrypted, s.State)
+			bytes = excluded.bytes, encrypted = excluded.encrypted, local_state = excluded.local_state
+		RETURNING id`,
+		s.ID, s.Cam, s.Profile, s.Path, s.StartMs, s.EndMs, s.Bytes, s.Encrypted, s.State).Scan(&id)
 	if err != nil {
-		return fmt.Errorf("catalog: put segment %s: %w", s.Path, err)
+		return "", "", fmt.Errorf("catalog: put segment %s: %w", s.Path, err)
+	}
+	return id, s.State, nil
+}
+
+// completed runs Options.OnSegmentComplete, when set, on tx with the stored
+// row of the segment id, which tx has just made complete or given new bytes.
+func (db *DB) completed(ctx context.Context, tx *sql.Tx, id string) error {
+	if db.opts.OnSegmentComplete == nil {
+		return nil
+	}
+	s, err := scanSegment(tx.QueryRowContext(ctx, "SELECT "+segmentColumns+" FROM segments WHERE id = ?", id))
+	if err != nil {
+		return fmt.Errorf("catalog: read segment %s: %w", id, err)
+	}
+	if err := db.opts.OnSegmentComplete(ctx, tx, s); err != nil {
+		return fmt.Errorf("catalog: segment %s complete: %w", s.Path, err)
 	}
 	return nil
 }
@@ -454,7 +507,10 @@ func (db *DB) DiffFiles(ctx context.Context, files []FileFact) (ReconcileDiff, e
 // ReconcileFiles makes the rows match files, the segment files on disk: the
 // files win (§4.1 (5)). A file without a row gets one, a row whose file says
 // otherwise takes the file's facts, and a row without a file becomes lost.
-// It returns what it changed, all in one transaction.
+// It returns what it changed, all in one transaction, in which
+// Options.OnSegmentComplete runs for each Added row and each Updated row
+// that was not complete or whose bytes changed (PutSegment's rule), with
+// the row as stored.
 func (db *DB) ReconcileFiles(ctx context.Context, files []FileFact) (ReconcileDiff, error) {
 	segs, err := db.Segments(ctx)
 	if err != nil {
@@ -487,6 +543,9 @@ func (db *DB) ReconcileFiles(ctx context.Context, files []FileFact) (ReconcileDi
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id.String(), f.Cam, f.Profile, f.Path, f.StartMs, f.EndMs, f.Bytes, f.Encrypted, StateComplete); err != nil {
 			return ReconcileDiff{}, fmt.Errorf("catalog: add %s: %w", path, err)
 		}
+		if err := db.completed(ctx, tx, id.String()); err != nil {
+			return ReconcileDiff{}, err
+		}
 	}
 	for _, path := range d.Updated {
 		f, s := facts[path], rows[path]
@@ -497,6 +556,14 @@ func (db *DB) ReconcileFiles(ctx context.Context, files []FileFact) (ReconcileDi
 		if _, err := tx.ExecContext(ctx, `UPDATE segments SET start_ms = ?, end_ms = ?, bytes = ?, encrypted = ?, local_state = ?, verified_at_ms = NULL
 			WHERE local_path = ?`, start, end, f.Bytes, f.Encrypted, StateComplete, path); err != nil {
 			return ReconcileDiff{}, fmt.Errorf("catalog: update %s: %w", path, err)
+		}
+		// PutSegment's rule: the row turned complete, or its bytes changed.
+		// Diff also lists a complete row whose times or encryption alone
+		// changed, which keeps its placements.
+		if s.State != StateComplete || s.Bytes != f.Bytes {
+			if err := db.completed(ctx, tx, s.ID); err != nil {
+				return ReconcileDiff{}, err
+			}
 		}
 	}
 	for _, path := range d.Lost {

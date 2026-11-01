@@ -81,7 +81,9 @@ jobs:
       # 4, 7b, 9 and 10 each add theirs (P12). ./hub runs hub/spikeonly_test.go, which keeps
       # the spike marker out of the production module. The Lint and Cross steps lint the
       # trees under ./hub with hub/.golangci.yml and the others with the upload spike's.
-      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/...
+      # ipcam-hub's process tests that need the fork or the media skip here: c1's
+      # ipcam-spike-recording runs them, c2's included, with both (Task 7b).
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/...
     defaults:
       run:
         working-directory: ipcam
@@ -188,7 +190,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     env:
-      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/...
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/...
     defaults:
       run:
         working-directory: ipcam
@@ -212,10 +214,14 @@ jobs:
           set -o pipefail
           go test -count=1 ${TREES} 2>&1 | tee "${RUNNER_TEMP}/test.log"
       - name: Build
+        # ipcam-hub.exe at the path that Task 8's WanBlock smoke step reads.
         id: build
         run: |
           set -o pipefail
-          go build ${TREES} 2>&1 | tee "${RUNNER_TEMP}/build.log"
+          {
+            go build ${TREES} &&
+              go build -o "$RUNNER_TEMP/bin/ipcam-hub.exe" ./hub/cmd/ipcam-hub
+          } 2>&1 | tee "${RUNNER_TEMP}/build.log"
       - name: S4U smoke
         # The script must exit 0, and whoami must name the runner's user. Then two cheap
         # checks of its exit code: the program's own (cmd.exe /c exit 7 gives 7), and 124

@@ -259,3 +259,28 @@ func (db *DB) DeleteUploadSession(ctx context.Context, placementID string) error
 	}
 	return nil
 }
+
+// Folder returns the remote ID stored for path on the destination destID,
+// a folder's or a small file's, and whether there is one: the Drive driver's
+// FolderStore (C2-R11 (c)).
+func (db *DB) Folder(ctx context.Context, destID, path string) (string, bool, error) {
+	var id string
+	switch err := db.sql.QueryRowContext(ctx, "SELECT remote_id FROM remote_folders WHERE destination_id = ? AND path = ?", destID, path).Scan(&id); {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", false, nil
+	case err != nil:
+		return "", false, fmt.Errorf("catalog: read the remote ID of %s on %s: %w", path, destID, err)
+	}
+	return id, true, nil
+}
+
+// PutFolder stores remoteID for path on destID, unless an ID is stored for
+// it already: the first ID stays (g2-11), so two processes that both missed
+// it make one folder, the one whose ID was stored first.
+func (db *DB) PutFolder(ctx context.Context, destID, path, remoteID string) error {
+	if _, err := db.sql.ExecContext(ctx, `INSERT INTO remote_folders (destination_id, path, remote_id) VALUES (?, ?, ?)
+		ON CONFLICT (destination_id, path) DO NOTHING`, destID, path, remoteID); err != nil {
+		return fmt.Errorf("catalog: put the remote ID of %s on %s: %w", path, destID, err)
+	}
+	return nil
+}

@@ -1,9 +1,11 @@
 package catalog
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -898,5 +900,308 @@ func TestCatalog_UploadingPlacements(t *testing.T) {
 	}
 	if !slices.ContainsFunc(plan, func(d string) bool { return strings.Contains(d, "USING INDEX placements_queue") }) {
 		t.Errorf("the query plan %q reads no index of the placements' state", plan)
+	}
+}
+
+// callbackRecorder is an OnSegmentComplete that records each call, and fails
+// it with err when err is set.
+type callbackRecorder struct {
+	calls []Segment
+	err   error
+}
+
+func (c *callbackRecorder) onComplete(_ context.Context, _ *sql.Tx, s Segment) error {
+	c.calls = append(c.calls, s)
+	return c.err
+}
+
+// openWithTest opens a new catalog with opts, closed at the test's end.
+func openWithTest(t *testing.T, path string, opts Options) *DB {
+	t.Helper()
+	db, err := OpenWith(t.Context(), path, opts)
+	if err != nil {
+		t.Fatalf("OpenWith: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// TestCatalog_OpenEqualsOpenWithZero (P03): Open is OpenWith with zero
+// Options: the same schema, and a catalog that calls no callback, also on
+// a file that a catalog with a callback wrote.
+func TestCatalog_OpenEqualsOpenWithZero(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	zero := openWithTest(t, filepath.Join(dir, "zero.db"), Options{})
+	if got, want := dumpCatalog(t, zero), dumpCatalog(t, openTest(t)); !reflect.DeepEqual(got.schema, want.schema) {
+		t.Errorf("OpenWith(Options{}) schema %v, want Open's %v", got.schema, want.schema)
+	}
+	var c callbackRecorder
+	path := filepath.Join(dir, "catalog.db")
+	with := openWithTest(t, path, Options{OnSegmentComplete: c.onComplete})
+	if err := with.PutSegment(ctx, Segment{Cam: "c1", Profile: "main", Path: "c1/main/d/a.mp4", StartMs: 1, EndMs: 2, Bytes: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := with.Close(); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = plain.Close() })
+	if err := plain.PutSegment(ctx, Segment{Cam: "c1", Profile: "main", Path: "c1/main/d/b.mp4", StartMs: 3, EndMs: 4, Bytes: 6}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.ReconcileFiles(ctx, []FileFact{{Cam: "c1", Profile: "main", Path: "c1/main/d/c.mp4", StartMs: 5, EndMs: 6, Bytes: 7}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.calls) != 1 || c.calls[0].Path != "c1/main/d/a.mp4" {
+		t.Errorf("callback calls %+v, want the first catalog's one only", c.calls)
+	}
+}
+
+// TestCatalog_PutSegmentCallbackInSameTx (S3, P03): the callback runs in
+// PutSegment's transaction: what it writes commits with the row, and its
+// error rolls the row back, a new row and an update alike.
+func TestCatalog_PutSegmentCallbackInSameTx(t *testing.T) {
+	ctx := t.Context()
+	c := callbackRecorder{}
+	var db *DB
+	enqueue := func(ctx context.Context, tx *sql.Tx, s Segment) error {
+		if err := c.onComplete(ctx, tx, s); err != nil {
+			return err
+		}
+		_, err := PutPlacementTx(ctx, tx, newPlacement(s, "dst-a", ClassContinuous))
+		return err
+	}
+	db = openWithTest(t, filepath.Join(t.TempDir(), "catalog.db"), Options{OnSegmentComplete: enqueue})
+	s := Segment{Cam: "c1", Profile: "main", Path: "c1/main/d/a.mp4", StartMs: 1, EndMs: 2, Bytes: 5}
+	if err := db.PutSegment(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := db.Segments(ctx)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("Segments = %+v, %v", segs, err)
+	}
+	if p := placementOf(t, db, segs[0].ID, "dst-a"); p.Bytes != 5 || p.State != PlacementPending {
+		t.Errorf("the callback's placement %+v, want pending with 5 bytes", p)
+	}
+
+	c.err = errors.New("the callback failed")
+	if err := db.PutSegment(ctx, Segment{Cam: "c1", Profile: "main", Path: "c1/main/d/b.mp4", StartMs: 3, EndMs: 4, Bytes: 6}); !errors.Is(err, c.err) {
+		t.Errorf("PutSegment with a failing callback = %v, want its error", err)
+	}
+	s.Bytes = 50
+	if err := db.PutSegment(ctx, s); !errors.Is(err, c.err) {
+		t.Errorf("PutSegment of new bytes with a failing callback = %v, want its error", err)
+	}
+	if after, err := db.Segments(ctx); err != nil || len(after) != 1 || after[0] != segs[0] {
+		t.Errorf("after the failed callbacks, Segments = %+v, %v; want only %+v as it was", after, err, segs[0])
+	}
+}
+
+// TestCatalog_CallbackOnCompleteOrBytesChange (P03): PutSegment calls the
+// callback when the row becomes complete, or a complete row's bytes change:
+// once for writing → complete, never for complete with the same bytes, once
+// for complete with new bytes, never for lost.
+func TestCatalog_CallbackOnCompleteOrBytesChange(t *testing.T) {
+	ctx := t.Context()
+	var c callbackRecorder
+	db := openWithTest(t, filepath.Join(t.TempDir(), "catalog.db"), Options{OnSegmentComplete: c.onComplete})
+	s := Segment{Cam: "c1", Profile: "main", Path: "c1/main/d/a.mp4", StartMs: 1, EndMs: 2, Bytes: 5}
+	for _, step := range []struct {
+		name  string
+		state string
+		bytes int64
+		calls int
+	}{
+		{"writing", StateWriting, 5, 0},
+		{"writing → complete", StateComplete, 5, 1},
+		{"complete with the same bytes", StateComplete, 5, 1},
+		{"complete with new bytes", StateComplete, 9, 2},
+		{"lost", StateLost, 9, 2},
+		{"lost → complete with the same bytes", StateComplete, 9, 3},
+	} {
+		s.State, s.Bytes = step.state, step.bytes
+		if err := db.PutSegment(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+		if len(c.calls) != step.calls {
+			t.Errorf("%s: %d callback calls in all, want %d", step.name, len(c.calls), step.calls)
+		}
+	}
+	for _, got := range c.calls {
+		if got.State != StateComplete || got.Path != s.Path {
+			t.Errorf("the callback got %+v, want the complete row", got)
+		}
+	}
+}
+
+// TestCatalog_ReconcileFilesCallsCallback (P03, g2-06): ReconcileFiles calls
+// the callback, inside its transaction, for each Added row, and each Updated
+// row that was not complete or whose bytes changed: a lost row whose file
+// came back with the same bytes included. Lost rows get no call. A callback
+// that puts the returning row's placement makes its failed placement, never
+// due again, pending again.
+func TestCatalog_ReconcileFilesCallsCallback(t *testing.T) {
+	ctx := t.Context()
+	var c callbackRecorder
+	enqueue := func(ctx context.Context, tx *sql.Tx, s Segment) error {
+		if err := c.onComplete(ctx, tx, s); err != nil {
+			return err
+		}
+		_, err := PutPlacementTx(ctx, tx, newPlacement(s, "dst-a", ClassContinuous))
+		return err
+	}
+	db := openWithTest(t, filepath.Join(t.TempDir(), "catalog.db"), Options{OnSegmentComplete: enqueue})
+	rows := map[string]Segment{}
+	for _, name := range []string{"same", "grown", "back", "gone"} {
+		s := Segment{Cam: "c1", Profile: "main", Path: "c1/main/d/" + name + ".mp4", StartMs: 1, EndMs: 2, Bytes: 5, State: StateComplete}
+		if err := db.PutSegment(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	segs, err := db.Segments(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range segs {
+		rows[s.Path] = s
+	}
+	back := rows["c1/main/d/back.mp4"]
+	// back's file went away, and its placement failed for good.
+	if _, err := db.ReconcileFiles(ctx, []FileFact{
+		{Cam: "c1", Profile: "main", Path: "c1/main/d/same.mp4", Bytes: 5},
+		{Cam: "c1", Profile: "main", Path: "c1/main/d/grown.mp4", Bytes: 5},
+		{Cam: "c1", Profile: "main", Path: "c1/main/d/gone.mp4", Bytes: 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setPlacement(t, db, Placement{ObjectID: back.ID, DestinationID: "dst-a", State: PlacementFailed, Attempts: 2, NextAttemptAtMs: 0})
+	c.calls = nil
+
+	diff, err := db.ReconcileFiles(ctx, []FileFact{
+		{Cam: "c1", Profile: "main", Path: "c1/main/d/same.mp4", Bytes: 5},
+		{Cam: "c1", Profile: "main", Path: "c1/main/d/grown.mp4", StartMs: 1, EndMs: 3, Bytes: 9},
+		{Cam: "c1", Profile: "main", Path: "c1/main/d/back.mp4", Bytes: 5},
+		{Cam: "c1", Profile: "main", Path: "c1/main/d/new.mp4", StartMs: 4, EndMs: 5, Bytes: 7},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(diff.Lost, []string{"c1/main/d/gone.mp4"}) {
+		t.Fatalf("ReconcileFiles = %+v, want gone.mp4 lost", diff)
+	}
+	var called []string
+	for _, s := range c.calls {
+		called = append(called, s.Path)
+		if s.State != StateComplete {
+			t.Errorf("the callback got %+v, want a complete row", s)
+		}
+	}
+	slices.Sort(called)
+	if want := []string{"c1/main/d/back.mp4", "c1/main/d/grown.mp4", "c1/main/d/new.mp4"}; !slices.Equal(called, want) {
+		t.Errorf("callback calls for %q, want %q", called, want)
+	}
+	if p := placementOf(t, db, back.ID, "dst-a"); p.State != PlacementPending || p.Attempts != 0 {
+		t.Errorf("the returning row's placement is %+v, want pending at 0 attempts", p)
+	}
+
+	c.err = errors.New("the callback failed")
+	before := dumpCatalog(t, db)
+	if _, err := db.ReconcileFiles(ctx, []FileFact{{Cam: "c1", Profile: "main", Path: "c1/main/d/later.mp4", StartMs: 6, EndMs: 7, Bytes: 3}}); !errors.Is(err, c.err) {
+		t.Errorf("ReconcileFiles with a failing callback = %v, want its error", err)
+	}
+	if after := dumpCatalog(t, db); !reflect.DeepEqual(after, before) {
+		t.Error("a failing callback left ReconcileFiles' changes in the catalog")
+	}
+}
+
+// TestCatalog_CallbackGetsPersistedID (P03): the callback gets the row as
+// stored: a PutSegment with no ID on a known path, as every recorder call
+// site writes, and a ReconcileFiles Updated row pass the row's original id;
+// an Added row passes its new id.
+func TestCatalog_CallbackGetsPersistedID(t *testing.T) {
+	ctx := t.Context()
+	var c callbackRecorder
+	db := openWithTest(t, filepath.Join(t.TempDir(), "catalog.db"), Options{OnSegmentComplete: c.onComplete})
+	s := Segment{Cam: "c1", Profile: "main", Path: "c1/main/d/a.mp4", StartMs: 1, EndMs: 2, Bytes: 5, State: StateWriting}
+	if err := db.PutSegment(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := db.Segments(ctx)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("Segments = %+v, %v", segs, err)
+	}
+	id := segs[0].ID
+	s.State = StateComplete
+	if err := db.PutSegment(ctx, s); err != nil { // no ID, as the recorder writes it
+		t.Fatal(err)
+	}
+	if _, err := db.ReconcileFiles(ctx, []FileFact{
+		{Cam: "c1", Profile: "main", Path: "c1/main/d/a.mp4", StartMs: 1, EndMs: 3, Bytes: 8},
+		{Cam: "c1", Profile: "main", Path: "c1/main/d/b.mp4", StartMs: 4, EndMs: 5, Bytes: 9},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	segs, err = db.Segments(ctx)
+	if err != nil || len(segs) != 2 {
+		t.Fatalf("Segments = %+v, %v", segs, err)
+	}
+	byPath := map[string][]Segment{}
+	for _, call := range c.calls {
+		byPath[call.Path] = append(byPath[call.Path], call)
+	}
+	a, b := byPath["c1/main/d/a.mp4"], byPath["c1/main/d/b.mp4"]
+	if len(a) != 2 || a[0].ID != id || a[0].Bytes != 5 || a[1].ID != id || a[1].Bytes != 8 {
+		t.Errorf("the calls for a.mp4 got %+v, want two with the stored id %s, of 5 then 8 bytes", a, id)
+	}
+	if len(b) != 1 || b[0] != segs[1] {
+		t.Errorf("the Added row's calls got %+v, want one with the stored row %+v", b, segs[1])
+	}
+}
+
+// TestCatalog_PutFolderKeepsFirst (g2-11, C2-R11 (c)): the remote folder
+// store keeps the first ID stored for a destination and path, a folder's or
+// a small file's: a second PutFolder with another ID leaves it.
+func TestCatalog_PutFolderKeepsFirst(t *testing.T) {
+	ctx := t.Context()
+	db := openTest(t)
+	if id, ok, err := db.Folder(ctx, "dst-1", "ipcam"); err != nil || ok || id != "" {
+		t.Errorf("Folder of nothing stored = %q, %v, %v; want none", id, ok, err)
+	}
+	for _, put := range []struct{ dest, path, id string }{
+		{"dst-1", "ipcam", "first"},
+		{"dst-1", "ipcam", "second"},
+		{"dst-2", "ipcam", "other-dest"},
+		{"dst-1", "ipcam/.ipcam/H/README.txt", "file-id"},
+	} {
+		if err := db.PutFolder(ctx, put.dest, put.path, put.id); err != nil {
+			t.Fatalf("PutFolder(%+v): %v", put, err)
+		}
+	}
+	for _, want := range []struct{ dest, path, id string }{
+		{"dst-1", "ipcam", "first"},
+		{"dst-2", "ipcam", "other-dest"},
+		{"dst-1", "ipcam/.ipcam/H/README.txt", "file-id"},
+	} {
+		if id, ok, err := db.Folder(ctx, want.dest, want.path); err != nil || !ok || id != want.id {
+			t.Errorf("Folder(%s, %s) = %q, %v, %v; want %q", want.dest, want.path, id, ok, err, want.id)
+		}
+	}
+}
+
+// TestCatalog_ImportsNoOutbox (P03, §4.3): the catalog depends on neither
+// the outbox nor the storage drivers; ipcam-hub's main wires them together.
+func TestCatalog_ImportsNoOutbox(t *testing.T) {
+	out, err := exec.CommandContext(t.Context(), "go", "list", "-deps", ".").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list -deps: %v\n%s", err, out)
+	}
+	for dep := range strings.FieldsSeq(string(out)) {
+		if strings.HasSuffix(dep, "/hub/internal/outbox") || strings.Contains(dep, "/hub/internal/storage") {
+			t.Errorf("the catalog depends on %s", dep)
+		}
 	}
 }
