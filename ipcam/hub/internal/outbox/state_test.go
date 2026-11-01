@@ -578,3 +578,90 @@ func TestOutbox_BusyDestinationHoldsNoOther(t *testing.T) {
 		t.Errorf("dst-a's uploads waited 10 s for dst-b's %d times: dst-b's placement waited behind dst-a's", n)
 	}
 }
+
+// TestOutbox_NoUploadStartsOnceBlocked (CI run 41330085738's
+// TestOutbox_AuthExpiredBlocks): an upload that ends with ErrAuthExpired
+// while a poll reads the destination's due placements blocks the
+// destination, and that poll then starts none of them. The room is
+// decided again as each placement is taken, not only before the read: a
+// BeginUpload already in flight when the block lands is the only one.
+func TestOutbox_NoUploadStartsOnceBlocked(t *testing.T) {
+	h := newHarness(t)
+	f := newFakeDest(storage.KindGoogleDrive, h.clk.Now)
+	began := make(chan struct{}, 4)
+	release := make(chan struct{})
+	f.setFault(func(ctx context.Context, c fakeCall) error {
+		if c.Method != "BeginUpload" {
+			return nil
+		}
+		began <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return fmt.Errorf("fake: 401 invalid_grant: %w", storage.ErrAuthExpired)
+	})
+	first := h.enqueue(h.segment("a", 0, randomBytes(100, 1)), "dst-a", catalog.ClassContinuous)
+	q := h.newQueue(map[string]storage.Destination{"dst-a": f})
+	var mu sync.Mutex
+	var second string // the placement enqueued while the first one's BeginUpload is in flight
+	var once sync.Once
+	blocked := make(chan bool, 1)
+	q.dueRead = func(_ *destination, due []catalog.Placement) {
+		mu.Lock()
+		id := second
+		mu.Unlock()
+		if id == "" || !slices.ContainsFunc(due, func(p catalog.Placement) bool { return p.ID == id }) {
+			return
+		}
+		once.Do(func() {
+			// The first upload fails now, between the read and the take.
+			close(release)
+			deadline := time.Now().Add(10 * time.Second)
+			for q.State("dst-a") != StateBlockedAuth && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			blocked <- q.State("dst-a") == StateBlockedAuth
+		})
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- q.Run(ctx) }()
+	select {
+	case <-began:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the first upload did not begin")
+	}
+	p := h.enqueue(h.segment("b", 5*time.Minute, randomBytes(100, 2)), "dst-a", catalog.ClassContinuous)
+	mu.Lock()
+	second = p.ID
+	mu.Unlock()
+	q.signal()
+	select {
+	case ok := <-blocked:
+		if !ok {
+			t.Fatal("the first upload's ErrAuthExpired did not block the destination")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("no poll read the second placement")
+	}
+	// The poll that read the second placement has taken it or not by the
+	// time the queue is quiet again.
+	deadline := time.Now().Add(10 * time.Second)
+	for (!q.quiet() || q.held(first.ID)) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n := f.count("BeginUpload"); n != 1 {
+		t.Errorf("%d BeginUpload calls, want 1: an upload started once the destination was BLOCKED_AUTH", n)
+	}
+	for _, id := range []string{first.ObjectID, p.ObjectID} {
+		if got := h.placementOf(id, "dst-a"); got.State != catalog.PlacementPending {
+			t.Errorf("a blocked destination's placement is %+v, want pending", got)
+		}
+	}
+}

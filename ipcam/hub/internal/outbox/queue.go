@@ -105,7 +105,10 @@ type Queue struct {
 	// idle, when a test sets it, is called each time Run is about to wait
 	// with no upload or quota read in flight.
 	idle func()
-	wg   sync.WaitGroup // the uploads and quota reads in flight
+	// dueRead, when a test sets it, is called each time dispatch has read a
+	// destination's due placements, before it takes them.
+	dueRead func(d *destination, due []catalog.Placement)
+	wg      sync.WaitGroup // the uploads and quota reads in flight
 
 	// emitMu keeps the DestState calls in the order of the changes.
 	emitMu sync.Mutex
@@ -305,7 +308,9 @@ func (q *Queue) poll(ctx context.Context) {
 
 // dispatch starts uploads of d's due placements while d has room for them.
 // Each destination reads its own due placements, so another's backlog ahead
-// in the queue's order holds none of its workers back.
+// in the queue's order holds none of its workers back. The room is decided
+// again as each placement is taken: an upload that ended during the read
+// may have blocked, filled or paused d, and then none starts.
 func (q *Queue) dispatch(ctx context.Context, d *destination, now time.Time) {
 	q.mu.Lock()
 	slots, busy := d.slots(now, q.opts.Workers), d.busy
@@ -319,11 +324,15 @@ func (q *Queue) dispatch(ctx context.Context, d *destination, now time.Time) {
 	if q.catalogFailed(ctx, opDuePlacements, err) {
 		return
 	}
+	if q.dueRead != nil {
+		q.dueRead(d, due)
+	}
 	for _, p := range due {
-		if slots == 0 {
+		q.mu.Lock()
+		if d.slots(now, q.opts.Workers) == 0 {
+			q.mu.Unlock()
 			return
 		}
-		q.mu.Lock()
 		held := q.inflight[p.ID]
 		bytes, seen := q.seen[p.ID]
 		first := !held && (!seen || bytes != p.Bytes)
@@ -334,7 +343,6 @@ func (q *Queue) dispatch(ctx context.Context, d *destination, now time.Time) {
 			delete(q.mismatches, p.ID)
 		}
 		if !held {
-			slots--
 			q.inflight[p.ID] = true
 			d.busy++
 			q.active++
