@@ -154,7 +154,7 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 		},
 		userSID: func() (string, error) { return "S-1-5-21-1004336348-1177238915-682003330-1001", nil },
 		desktop: func() (string, error) { return desktop, nil },
-		shortcut: func(path, target, args, workDir string, runAsAdmin bool) error {
+		shortcut: func(path, target, args, workDir, _ string, runAsAdmin bool) error {
 			f.links = append(f.links, strings.Join([]string{path, target, args, workDir, strconv.FormatBool(runAsAdmin)}, "|"))
 			return os.WriteFile(path, []byte("lnk"), 0o600)
 		},
@@ -909,9 +909,11 @@ func TestInstall_TimeServiceSettingsAreAdministrators(t *testing.T) {
 	if err := a.install(`C:\proba-inregistrare\recspike.exe`); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	// The boot task's definition goes there too (TestInstall_TaskFileIsAdministrators).
-	if folder := filepath.Dir(a.savedStart); !slices.Equal(f.protected, []string{folder, folder}) {
-		t.Errorf("install protected %q, want %s, for the settings and for the boot task", f.protected, folder)
+	// The boot task's definition goes there too (TestInstall_TaskFileIsAdministrators),
+	// and the shortcut's TEMP is a folder of its own in it
+	// (TestInstall_ShortcutCompilesInTheProtectedFolder).
+	if folder := filepath.Dir(a.savedStart); !slices.Equal(f.protected, []string{folder, folder, filepath.Join(folder, "temp")}) {
+		t.Errorf("install protected %q, want %s, for the settings and for the boot task, then its temp folder for the shortcut", f.protected, folder)
 	}
 	if !slices.Equal(f.written, []string{a.savedStart, a.taskFile}) {
 		t.Errorf("install wrote %q as Administrators' own, want the saved settings %s and the boot task %s", f.written, a.savedStart, a.taskFile)
@@ -1119,5 +1121,69 @@ func TestUninstall_PiAfterAFailedInstallGivesTheFolderBack(t *testing.T) {
 	}
 	if _, err := os.Stat(a.savedModes); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the record of the modes of before is still there (%v)", err)
+	}
+}
+
+// TestInstall_TaskFileWriteErrorsSayWhy (Final fix D review, M3): a boot
+// task's definition that cannot be written says why, as the probes'
+// configs do (mi1.WriteError): a full disk, and a file that another program
+// holds open, each have their own Romanian line, and any other error
+// follows the line. No task is made from it.
+func TestInstall_TaskFileWriteErrorsSayWhy(t *testing.T) {
+	type writeCase struct {
+		name string
+		err  error
+		want string // after the line's start and the path
+	}
+	cases := []writeCase{
+		{"a full disk", diskFullErrno, ": discul este plin"},
+		{"another error", errors.New("the device is not ready"), ": write %s: the device is not ready"},
+	}
+	if inUseErrno != nil {
+		cases = append(cases, writeCase{"a file held open", inUseErrno, ": fișierul este folosit de alt program"})
+	}
+	for _, c := range cases {
+		a, f, _ := newAutostart(t, "windows", true)
+		write := a.writeProtected
+		a.writeProtected = func(path string, data []byte) error {
+			if path == a.taskFile {
+				return &os.PathError{Op: "write", Path: path, Err: c.err}
+			}
+			return write(path, data)
+		}
+		want := "nu pot scrie sarcina de pornire automată în " + a.taskFile + strings.ReplaceAll(c.want, "%s", a.taskFile)
+		if err := a.install(`C:\proba-inregistrare\recspike.exe`); err == nil || err.Error() != want {
+			t.Errorf("%s: install = %v, want %q", c.name, err, want)
+		}
+		if creates := slices.ContainsFunc(f.commands, func(c []string) bool { return slices.Contains(c, "/Create") }); creates {
+			t.Errorf("%s: install made the boot task from a definition that it could not write: %q", c.name, f.commands)
+		}
+	}
+}
+
+// TestInstall_ShortcutCompilesInTheProtectedFolder (Final fix D review,
+// M1): the shortcut's PowerShell compiles C# in its TEMP, inside the
+// elevated install, and loads what it built. Install gives it a TEMP of its
+// own in the protected folder, which it gives to Administrators and SYSTEM
+// alone before the shortcut, and removes afterwards.
+func TestInstall_ShortcutCompilesInTheProtectedFolder(t *testing.T) {
+	a, f, _ := newAutostart(t, "windows", true)
+	var temp string
+	var protectedFirst, there bool
+	shortcut := a.shortcut
+	a.shortcut = func(path, target, args, dir, tmp string, runAsAdmin bool) error {
+		temp, protectedFirst = tmp, slices.Contains(f.protected, tmp)
+		info, err := os.Stat(tmp)
+		there = err == nil && info.IsDir()
+		return shortcut(path, target, args, dir, tmp, runAsAdmin)
+	}
+	if err := a.install(`C:\proba-inregistrare\recspike.exe`); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if want := filepath.Join(a.protected, "temp"); temp != want || !protectedFirst || !there {
+		t.Errorf("the shortcut's TEMP is %q (protected before it: %v, there: %v); want %s, protected first", temp, protectedFirst, there, want)
+	}
+	if _, err := os.Stat(filepath.Join(a.protected, "temp")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the shortcut's TEMP is still there after install (%v)", err)
 	}
 }

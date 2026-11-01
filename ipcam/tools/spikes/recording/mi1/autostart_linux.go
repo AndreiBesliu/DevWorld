@@ -32,7 +32,7 @@ func ProgramData() (string, error) { return "", errNotWindows }
 func WindowsFolder() (string, error) { return "", errNotWindows }
 
 // CreateShortcut is Windows-only.
-func CreateShortcut(string, string, string, string, bool) error { return errNotWindows }
+func CreateShortcut(string, string, string, string, string, bool) error { return errNotWindows }
 
 // TimeService is Windows' time service, which only the PC's install
 // changes (C1-R16, C1-R16b).

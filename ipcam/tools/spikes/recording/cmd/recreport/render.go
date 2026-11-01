@@ -456,6 +456,12 @@ func limits(b *strings.Builder) {
 			"s-ar putea da drept una dintre gazde. De la o gazdă, controlorul primește rezultatul MI9 pe LAN, fără să înlocuiască vreun rezultat " +
 			"pe care îl are, iar de la dispozitivul care spune că e Pi-ul, folderul cu rezultatele Pi-ului: la finalul fiecărei sesiuni și la " +
 			"colectarea finală, îl despachetează în `results/pi`, peste fișierele cu același nume primite înainte (C1-R25).",
+		"Pe PC, programele probei pornite ca administrator găsesc uneltele Windows (`schtasks`, `sc`, `icacls`, `w32tm`, `powershell`) " +
+			"prin folderele de căutare ale contului dvs. (PATH), pe care un program din contul dvs. le poate schimba (C1-R27).",
+		"ipcam-hub, pornit ca administrator (pe Pi cu `sudo`), scrie înregistrările în `work\\<rulare>\\data`, pe care contul dvs. îl poate " +
+			"schimba (C1-R27).",
+		"Protecția probei vă apără de alte conturi și de greșeli, nu de un program dăunător care rulează deja în contul dvs.: cererea de " +
+			"permisiune de administrator a Windows (UAC) nu desparte contul dvs. de programele pe care le porniți ca administrator (C1-R27).",
 	} {
 		fmt.Fprintf(b, "- %s\n", l)
 	}

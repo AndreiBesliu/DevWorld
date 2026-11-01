@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // TestPaths_WindowsOwnFolders (Final fix C review, M3): on the PC, with
@@ -27,3 +29,10 @@ func TestPaths_WindowsOwnFolders(t *testing.T) {
 		}
 	}
 }
+
+// The system's errors of a full disk and of a file that another program
+// holds open, here.
+var (
+	diskFullErrno error = windows.ERROR_DISK_FULL
+	inUseErrno    error = windows.ERROR_SHARING_VIOLATION
+)

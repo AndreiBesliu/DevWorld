@@ -219,3 +219,68 @@ func TestExpandSystemFolders(t *testing.T) {
 		t.Error("a Windows folder without a drive letter gave a ProgramData")
 	}
 }
+
+// errHeld stands for what Windows answers, for a moment, at the name of a
+// file that it keeps from being replaced: a sharing violation while a
+// scanner holds the file, or a delete still pending (busy).
+var errHeld = errors.New("the process cannot access the file because it is being used by another process")
+
+// TestWriteProtected_RetriesWhileTheFileIsBusy (Final fix D review, M6):
+// Windows may refuse the new file at a config's name for a moment, while a
+// scanner still holds the old one or its delete is still pending. MI3's
+// steps and the MI4 and MI9 recordings write their configs there anew,
+// MI1's starts too, and such a refusal ended the probe. WriteProtected
+// tries again, five times over about 5 s, while the file is busy, and then
+// gives up with the last error; any other error ends it at once.
+func TestWriteProtected_RetriesWhileTheFileIsBusy(t *testing.T) {
+	held := func(err error) bool { return errors.Is(err, errHeld) }
+	for _, c := range []struct {
+		name      string
+		refusals  int  // the creates refused before one succeeds
+		other     bool // the refusal is not busy
+		wantTries int
+	}{
+		{"refused once", 1, false, 2},
+		{"refused twice", 2, false, 3},
+		{"refused every time", 100, false, 5},
+		{"another error", 1, true, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), HubConfigMI2)
+			if err := os.WriteFile(path, []byte("the config of the start before\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			refusal := errHeld
+			if c.other {
+				refusal = errors.New("the device is not ready")
+			}
+			tries := 0
+			create := func(p string) (*os.File, error) {
+				if tries++; tries <= c.refusals {
+					return nil, &os.PathError{Op: "create", Path: p, Err: refusal}
+				}
+				return createProtected(p)
+			}
+			var waits []time.Duration
+			err := writeAnew(create, held, func(d time.Duration) { waits = append(waits, d) }, path, []byte("the new config\n"))
+			var waited time.Duration
+			for _, w := range waits {
+				waited += w
+			}
+			if tries != c.wantTries || len(waits) != tries-1 || waited > 5*time.Second {
+				t.Errorf("WriteProtected created %d times, waiting %v (%v in all); want %d tries, a wait between each, at most 5 s in all",
+					tries, waits, waited, c.wantTries)
+			}
+			switch got, _ := os.ReadFile(path); { //nolint:gosec // the test's file
+			case c.refusals < c.wantTries:
+				if err != nil || string(got) != "the new config\n" {
+					t.Errorf("WriteProtected = %v, wrote %q; want the new config once the file was free", err, got)
+				}
+			case !errors.Is(err, refusal):
+				t.Errorf("WriteProtected = %v, want the last refusal, %v", err, refusal)
+			case !c.other && waited < 4*time.Second:
+				t.Errorf("WriteProtected gave up after %v, want about 5 s", waited)
+			}
+		})
+	}
+}

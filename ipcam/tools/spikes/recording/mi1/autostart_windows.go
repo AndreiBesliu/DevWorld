@@ -150,15 +150,21 @@ public static class RecspikeShortcut {
 }
 `
 
+// runShortcut runs CreateShortcut's PowerShell and returns its output;
+// tests see its command.
+var runShortcut = (*exec.Cmd).CombinedOutput
+
 // CreateShortcut writes a .lnk shortcut at path that runs target with args
-// in dir, through the shell's own link object (shellLinkCS); with
-// runAsAdmin, the target starts elevated (RunAsAdministrator).
-func CreateShortcut(path, target, args, dir string, runAsAdmin bool) error {
+// in dir, through the shell's own link object (shellLinkCS), which
+// PowerShell compiles in temp, a folder that only Administrators and SYSTEM
+// may write (shortcutEnv); with runAsAdmin, the target starts elevated
+// (RunAsAdministrator).
+func CreateShortcut(path, target, args, dir, temp string, runAsAdmin bool) error {
 	const script = "$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition $env:LNK_CS; " +
 		"[RecspikeShortcut]::Save($env:LNK_PATH, $env:LNK_TARGET, $env:LNK_ARGS, $env:LNK_DIR)"
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
-	cmd.Env = append(os.Environ(), "LNK_CS="+shellLinkCS, "LNK_PATH="+path, "LNK_TARGET="+target, "LNK_ARGS="+args, "LNK_DIR="+dir)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	cmd.Env = shortcutEnv(os.Environ(), temp, "LNK_CS="+shellLinkCS, "LNK_PATH="+path, "LNK_TARGET="+target, "LNK_ARGS="+args, "LNK_DIR="+dir)
+	if out, err := runShortcut(cmd); err != nil {
 		return fmt.Errorf("mi1: the shortcut: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	if runAsAdmin {

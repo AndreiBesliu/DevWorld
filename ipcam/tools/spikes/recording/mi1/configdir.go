@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubproc"
 )
@@ -69,17 +70,18 @@ func notAFolder(dir string, isDir, isLink bool) error {
 		`ștergeți-l dintr-o fereastră de administrator (del /f /a "%s"), %s`, dir, dir, again)
 }
 
-// WriteHubConfig writes cfg, the config of one start of ipcam-hub, as the
-// file name in dir, the protected folder of the owner's probes, and returns
-// its path, which that start reads. The guide runs every probe from an
+// WriteHubConfig writes cfg, the config of ipcam-hub's starts, as the file
+// name in dir, the protected folder of the owner's probes, and returns its
+// path, which those starts read: MI1 writes it before each start, MI2 once
+// for all the starts of its run. The guide runs every probe from an
 // administrator window, or with sudo, so ipcam-hub runs elevated, while
 // the probes' folders lie in work/, which the owner's own token may change
 // (Final fix C review, I2 and M9). So cfg holds only trusted values: the
 // release's MediaMTX, and the data folder and RI_g's file of the run's own
 // folder, whose name the probe made; dir is made, or taken, for
 // Administrators and SYSTEM alone, or root (ProtectConfigDir), and the file
-// is written anew (WriteProtected) before each start. Each probe has its
-// own name (HubConfigNames), so that two probes never share one file.
+// is written anew (WriteProtected). Each probe has its own name
+// (HubConfigNames), so that two probes never share one file.
 func WriteHubConfig(dir, name string, cfg hubproc.Config) (string, error) {
 	return writeHubConfig(ProtectConfigDir, WriteProtected, dir, name, cfg)
 }
@@ -99,25 +101,26 @@ func writeHubConfig(protect func(string) error, write func(string, []byte) error
 		return "", fmt.Errorf("nu pot proteja folderul %s, din care pornește ipcam-hub: %w", dir, err)
 	}
 	if err := write(path, data); err != nil {
-		return "", writeError(path, err)
+		return "", WriteError("nu pot scrie setările ipcam-hub în", path, err)
 	}
 	return path, nil
 }
 
-// writeError is the owner's line for err, the failed write of the config
-// at path into the protected folder: no failure of the folder's protection,
-// which would send the owner to the administrator window for nothing
-// (Final fix C review, minor). A full disk and a file that another program
-// holds open at path each have their own.
-func writeError(path string, err error) error {
-	const cannot = "nu pot scrie setările ipcam-hub în %s: "
+// WriteError is the owner's line for err, the failed write of the file at
+// path into the protected folder, after cannot, the line's start, which
+// names the file: no failure of the folder's protection, which would send
+// the owner to the administrator window for nothing (Final fix C review,
+// minor). A full disk and a file that another program holds open at path
+// each have their own; the boot task's definition says the same (Final fix
+// D review, M3).
+func WriteError(cannot, path string, err error) error {
 	switch {
 	case diskFull(err):
-		return fmt.Errorf(cannot+"discul este plin", path)
+		return fmt.Errorf("%s %s: discul este plin", cannot, path)
 	case inUse(err):
-		return fmt.Errorf(cannot+"fișierul este folosit de alt program", path)
+		return fmt.Errorf("%s %s: fișierul este folosit de alt program", cannot, path)
 	}
-	return fmt.Errorf(cannot+"%w", path, err)
+	return fmt.Errorf("%s %s: %w", cannot, path, err)
 }
 
 // WriteProtected writes data into a new file at path, in the folder that
@@ -128,11 +131,41 @@ func writeError(path string, err error) error {
 // its DACL, between this write and ipcam-hub's start, and a link would
 // carry the write to wherever it points. The new file is created, never
 // opened, so one put back at its name meanwhile makes the write fail.
+//
+// Windows may refuse the remove or the new file for a moment (busy), while
+// a scanner still holds the file that was there or its delete is still
+// pending: WriteProtected then tries again, after each of busyWaits (Final
+// fix D review, M6). A probe that writes its config anew, an MI3 step, an
+// MI4 or MI9 recording or an MI1 start, otherwise ends there.
 func WriteProtected(path string, data []byte) error {
+	return writeAnew(createProtected, busy, time.Sleep, path, data)
+}
+
+// busyWaits are WriteProtected's waits between its tries while the file is
+// busy: five tries over 5 s.
+var busyWaits = []time.Duration{500 * time.Millisecond, time.Second, 1500 * time.Millisecond, 2 * time.Second}
+
+// writeAnew is WriteProtected with create, busy and sleep in place of
+// createProtected, the system's busy and time.Sleep; tests replace them.
+func writeAnew(create func(string) (*os.File, error), busy func(error) bool, sleep func(time.Duration), path string, data []byte) error {
+	err := writeOnce(create, path, data)
+	for _, wait := range busyWaits {
+		if err == nil || !busy(err) {
+			break
+		}
+		sleep(wait)
+		err = writeOnce(create, path, data)
+	}
+	return err
+}
+
+// writeOnce removes the file at path, if there is one, and writes data
+// into a new one that create makes there, synced.
+func writeOnce(create func(string) (*os.File, error), path string, data []byte) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	f, err := createProtected(path)
+	f, err := create(path)
 	if err != nil {
 		return err
 	}

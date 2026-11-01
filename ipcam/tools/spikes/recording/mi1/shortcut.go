@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"strings"
 )
 
 // A .lnk file starts with its header (MS-SHLLINK 2.1): HeaderSize, 0x4C,
@@ -39,4 +40,22 @@ func RunAsAdministrator(path string) error {
 	flags := binary.LittleEndian.Uint32(data[lnkFlagsAt:])
 	binary.LittleEndian.PutUint32(data[lnkFlagsAt:], flags|lnkRunAsUser)
 	return os.WriteFile(path, data, info.Mode().Perm()) //nolint:gosec // the shortcut that recspike just wrote
+}
+
+// shortcutEnv is the environment of CreateShortcut's PowerShell: environ,
+// the elevated recspike's own, with TEMP and TMP set to temp, a folder that
+// only Administrators and SYSTEM may write, and vars after it. Its Add-Type
+// writes C# into TEMP, compiles it there and loads what it built, inside
+// the elevated install, and a program of the owner's user may change that
+// user's own %TEMP% meanwhile (Final fix D review, M1). Every TEMP and TMP
+// of environ goes, whatever the case of its name: Windows' names ignore
+// case.
+func shortcutEnv(environ []string, temp string, vars ...string) []string {
+	env := make([]string, 0, len(environ)+2+len(vars))
+	for _, kv := range environ {
+		if name, _, _ := strings.Cut(kv, "="); !strings.EqualFold(name, "TEMP") && !strings.EqualFold(name, "TMP") {
+			env = append(env, kv)
+		}
+	}
+	return append(append(env, "TEMP="+temp, "TMP="+temp), vars...)
 }

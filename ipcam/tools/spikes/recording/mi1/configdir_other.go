@@ -33,3 +33,8 @@ func diskFull(err error) bool { return errors.Is(err, syscall.ENOSPC) || errors.
 // inUse reports whether err is a file that another program holds: Linux
 // removes and replaces a file that is open.
 func inUse(error) bool { return false }
+
+// busy reports whether err is a write that another program keeps from
+// happening for a moment: none here, as Linux removes a file that is open
+// at once and lets a new one take its name.
+func busy(error) bool { return false }

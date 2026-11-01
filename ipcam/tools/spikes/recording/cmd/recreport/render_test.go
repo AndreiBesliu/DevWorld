@@ -384,6 +384,30 @@ func TestRender_ColdBootAndTimelineRows(t *testing.T) {
 	}
 }
 
+// TestRender_LimitsNameTheResidualRisks (C1-R25, C1-R27): «Limitări» says,
+// in short Romanian lines, what the probe's protection leaves: on the PC,
+// the programs started as administrator find Windows' tools through the
+// owner's PATH; ipcam-hub writes into the run's work folder, which the
+// owner's account may change; and the protection keeps out other accounts
+// and accidents, not a harmful program already running in the owner's
+// account, as UAC does not separate a user from that user's own elevated
+// programs. (The link's line, that it trusts the home network, is
+// TestRender_ColdBootAndTimelineRows'.)
+func TestRender_LimitsNameTheResidualRisks(t *testing.T) {
+	limits := section(t, markdownOf(t, passing(t)), "## Limitări ale măsurătorilor")
+	for _, want := range []string{
+		"Pe PC, programele probei pornite ca administrator găsesc uneltele Windows (`schtasks`, `sc`, `icacls`, `w32tm`, `powershell`) " +
+			"prin folderele de căutare ale contului dvs. (PATH)",
+		"ipcam-hub, pornit ca administrator (pe Pi cu `sudo`), scrie înregistrările în `work\\<rulare>\\data`, pe care contul dvs. îl poate schimba",
+		"Protecția probei vă apără de alte conturi și de greșeli, nu de un program dăunător care rulează deja în contul dvs.",
+		"cererea de permisiune de administrator a Windows (UAC) nu desparte contul dvs. de programele pe care le porniți ca administrator",
+	} {
+		if !strings.Contains(limits, want) {
+			t.Errorf("the limits do not say %q:\n%s", want, limits)
+		}
+	}
+}
+
 // TestRender_SdSetsSeparate (G16, T40; Task 8): the Pi's results on an SD
 // card have a table of their own, with the owner's confirmation, and the
 // resumes next to the card's states with what a card's fsync latency means

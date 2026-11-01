@@ -142,7 +142,7 @@ type autostart struct {
 	run         func(name string, args ...string) error
 	userSID     func() (string, error)
 	desktop     func() (string, error)
-	shortcut    func(path, target, args, dir string, runAsAdmin bool) error
+	shortcut    func(path, target, args, dir, temp string, runAsAdmin bool) error
 	unitPath    string
 	// taskFile is the boot task's definition, which schtasks reads, in
 	// the protected folder.
@@ -354,10 +354,19 @@ func (a autostart) install(exe string) error {
 	if err != nil {
 		return err
 	}
+	// The shortcut's PowerShell compiles C# in its TEMP and loads what it
+	// built, elevated: its TEMP is a folder of its own in the protected
+	// folder, not the owner's user's %TEMP%, which a program of that user
+	// may change meanwhile (Final fix D review, M1).
+	temp := filepath.Join(a.protected, "temp")
+	if err := a.protect(temp); err != nil {
+		return fmt.Errorf("nu pot proteja folderul %s, în care se pregătește scurtătura de pe desktop: %w", temp, err)
+	}
+	defer func() { _ = os.RemoveAll(temp) }()
 	// The shortcut runs recspike as administrator, as the boot task does:
 	// w32tm reports the clock's NTP state only to an elevated process, and
 	// the shortcut's preflight and every run's NTP wait read it (G14).
-	if err := a.shortcut(link, exe, shortcutArgs, dir, true); err != nil {
+	if err := a.shortcut(link, exe, shortcutArgs, dir, temp, true); err != nil {
 		return err
 	}
 	if err := a.startTimeService(); err != nil {
@@ -370,14 +379,15 @@ func (a autostart) install(exe string) error {
 
 // writeTaskFile writes the boot task's definition, xml, as taskFile: a new
 // file that only Administrators and SYSTEM may change (mi1.WriteProtected),
-// in its folder, which install protects first (mi1.ProtectConfigDir).
+// in its folder, which install protects first (mi1.ProtectConfigDir). A
+// write that fails says why, a full disk or a file in use as the probes'
+// configs do (mi1.WriteError, Final fix D review, M3).
 func (a autostart) writeTaskFile(xml string) error {
-	err := a.protect(filepath.Dir(a.taskFile))
-	if err == nil {
-		err = a.writeProtected(a.taskFile, utf16File(xml))
-	}
-	if err != nil {
+	if err := a.protect(filepath.Dir(a.taskFile)); err != nil {
 		return fmt.Errorf("nu pot scrie sarcina de pornire automată: %w", err)
+	}
+	if err := a.writeProtected(a.taskFile, utf16File(xml)); err != nil {
+		return mi1.WriteError("nu pot scrie sarcina de pornire automată în", a.taskFile, err)
 	}
 	return nil
 }

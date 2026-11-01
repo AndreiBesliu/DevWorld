@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -63,5 +64,24 @@ func TestShortcut_RunsAsAdministrator(t *testing.T) {
 		if got, _ := os.ReadFile(p); !bytes.Equal(got, data) { //nolint:gosec // the test's file
 			t.Errorf("%s: the file was changed", name)
 		}
+	}
+}
+
+// TestShortcutEnv_TempIsTheProtectedFolder (Final fix D review, M1): the
+// shortcut's PowerShell compiles C# in TEMP inside the elevated install,
+// and loads what it built from there. Its TEMP and TMP are the folder
+// given, which only Administrators and SYSTEM may write: every TEMP and
+// TMP of recspike's own environment goes, whatever the case of its name
+// (Windows' names ignore case), the rest stays, and the shortcut's values
+// follow.
+func TestShortcutEnv_TempIsTheProtectedFolder(t *testing.T) {
+	const temp = `C:\ProgramData\ipcam-recspike\temp`
+	environ := []string{`=C:=C:\proba-inregistrare`, `Path=C:\Windows\system32`, `TEMP=C:\Users\o\AppData\Local\Temp`,
+		`tmp=C:\Users\o\AppData\Local\Temp`, `Tmp=C:\Users\o\x`, `TEMPLATE=kept`}
+	got := shortcutEnv(environ, temp, `LNK_PATH=C:\Users\o\Desktop\Proba.lnk`)
+	want := []string{`=C:=C:\proba-inregistrare`, `Path=C:\Windows\system32`, `TEMPLATE=kept`, "TEMP=" + temp, "TMP=" + temp,
+		`LNK_PATH=C:\Users\o\Desktop\Proba.lnk`}
+	if !slices.Equal(got, want) {
+		t.Errorf("shortcutEnv = %q\nwant %q", got, want)
 	}
 }

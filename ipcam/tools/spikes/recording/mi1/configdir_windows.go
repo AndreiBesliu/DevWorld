@@ -177,3 +177,12 @@ func diskFull(err error) bool {
 func inUse(err error) bool {
 	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION)
 }
+
+// busy reports whether err is a write that another program keeps from
+// happening for a moment (Final fix D review, M6): a file in use (inUse),
+// such as one that a scanner holds open just after it was written, or a
+// delete still pending, which keeps the file's name until its last handle
+// closes. CreateFile reports that one as ERROR_ACCESS_DENIED, and so does
+// DeleteFile; in the protected folder, which the elevated recspike may
+// change, that is a delete pending.
+func busy(err error) bool { return inUse(err) || errors.Is(err, windows.ERROR_ACCESS_DENIED) }

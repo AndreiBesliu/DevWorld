@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -382,4 +383,56 @@ func sddl(path string) string {
 		return err.Error()
 	}
 	return sd.String()
+}
+
+// TestBusy_SharingLockAndPendingDelete (Final fix D review, M6): what
+// WriteProtected waits for is Windows' own refusal of a file that another
+// program holds for a moment: a sharing or lock violation, or the access
+// denied of a delete still pending. A full disk, or a file that is there
+// again, is not waited for.
+func TestBusy_SharingLockAndPendingDelete(t *testing.T) {
+	for _, c := range []struct {
+		err  windows.Errno
+		want bool
+	}{
+		{windows.ERROR_SHARING_VIOLATION, true},
+		{windows.ERROR_LOCK_VIOLATION, true},
+		{windows.ERROR_ACCESS_DENIED, true},
+		{windows.ERROR_DISK_FULL, false},
+		{windows.ERROR_FILE_EXISTS, false},
+	} {
+		if got := busy(&os.PathError{Op: "create", Path: `C:\ProgramData\ipcam-recspike\ipcam-hub-mi2.json`, Err: c.err}); got != c.want {
+			t.Errorf("busy(%v) = %v, want %v", c.err, got, c.want)
+		}
+	}
+}
+
+// TestWriteProtected_WaitsForAConfigHeldOpenForAMoment (Final fix D
+// review, M6): a config that another program holds open for a moment, as
+// a scanner does just after it was written, is replaced once that program
+// lets it go, within WriteProtected's 5 s.
+func TestWriteProtected_WaitsForAConfigHeldOpenForAMoment(t *testing.T) {
+	requireElevated(t)
+	d, st, cur, vol := hubConfigRig(t)
+	path, err := d.hubConfig(st, cur, vol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path) //nolint:gosec // the test's config; it shares reading and writing, not deleting
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		time.Sleep(time.Second)
+		_ = f.Close()
+	}()
+	if err := WriteProtected(path, plantedConfig); err != nil {
+		t.Errorf("WriteProtected over a config held open for 1 s: %v", err)
+	}
+	<-released
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, plantedConfig) { //nolint:gosec // the test's file
+		t.Errorf("the config is %q (%v), want the new one", got, err)
+	}
 }
