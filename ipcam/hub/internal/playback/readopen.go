@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -129,47 +130,55 @@ func readPart(ctx context.Context, path string, tail crypto.TailSealer) (OpenRea
 
 // countParts counts the whole parts, moof and mdat pairs, in the size bytes
 // of r, after the ftyp and the moov; free and skip boxes are padding. It
-// stops at the first box that ends past size: the torn tail.
+// stops at the first box that ends past size: the torn tail, whose type, when
+// its header is there, must still be one that belongs there.
 func countParts(r io.ReaderAt, size int64) (int, error) {
-	boxes, err := walk(r, size)
+	whole, torn, err := walk(r, size)
 	if err != nil {
 		return 0, err
 	}
-	if len(boxes) >= 1 && boxes[0] != "ftyp" || len(boxes) >= 2 && boxes[1] != "moov" {
-		return 0, fmt.Errorf("%w: it starts with %q", ErrNotFMP4, boxes[:min(len(boxes), 2)])
+	types := whole
+	if torn != "" {
+		types = append(slices.Clone(whole), torn)
+	}
+	for i, typ := range types {
+		switch {
+		case i == 0 && typ != "ftyp", i == 1 && typ != "moov":
+			return 0, fmt.Errorf("%w: a %q box at its start", ErrNotFMP4, typ)
+		case i >= 2 && !slices.Contains([]string{"moof", "mdat", "free", "skip"}, typ):
+			return 0, fmt.Errorf("%w: a %q box where a part should be", ErrNotFMP4, typ)
+		}
 	}
 	parts := 0
-	for i := 2; i < len(boxes); i++ {
-		switch boxes[i] {
-		case "free", "skip":
-		case "moof":
-			if i+1 < len(boxes) && boxes[i+1] == "mdat" {
-				parts++
-				i++
-			}
-		default:
-			return 0, fmt.Errorf("%w: a %q box where a part should start", ErrNotFMP4, boxes[i])
+	for i := 2; i+1 < len(whole); i++ {
+		if whole[i] == "moof" && whole[i+1] == "mdat" {
+			parts++
+			i++
 		}
 	}
 	return parts, nil
 }
 
 // walk returns the types of the whole boxes in the size bytes of r, in
-// order, up to the first box that ends past size.
-func walk(r io.ReaderAt, size int64) ([]string, error) {
-	var types []string
+// order, up to the first box that ends past size, and that box's type when
+// its header is within size.
+func walk(r io.ReaderAt, size int64) (whole []string, torn string, err error) {
 	for off := int64(0); off < size; {
 		b, err := ReadFMP4Box(r, off, size)
 		if errors.Is(err, ErrPastEnd) {
-			break
+			var h [8]byte
+			if size-off >= int64(len(h)) && ReadFullAt(r, h[:], off) == nil {
+				torn = string(h[4:])
+			}
+			return whole, torn, nil
 		}
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		types = append(types, b.Type)
+		whole = append(whole, b.Type)
 		off = b.End()
 	}
-	return types, nil
+	return whole, "", nil
 }
 
 // stripPath is err without the path of an *fs.PathError: ReadOpen's errors

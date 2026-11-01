@@ -155,3 +155,14 @@ func TestPlayback_ReadOpen_NoOpenSegment(t *testing.T) {
 		t.Errorf("ReadOpen of finished segments only = %v, want ErrNoOpenSegment", err)
 	}
 }
+
+// TestPlayback_ReadOpen_NotFMP4: an open segment that is not laid out as
+// MediaMTX writes one, its first box no ftyp, is an error of its own, not a
+// torn tail of no part.
+func TestPlayback_ReadOpen_NotFMP4(t *testing.T) {
+	recDir := t.TempDir()
+	writeFile(t, filepath.Join(streamDir(recDir), "101500_000000.mp4.part"), bytes.Repeat([]byte("not an fMP4 file "), 10))
+	if _, err := ReadOpen(t.Context(), recDir, "cam1", "sub", nil); !errors.Is(err, ErrNotFMP4) {
+		t.Errorf("ReadOpen of a file that is no fMP4 = %v, want ErrNotFMP4", err)
+	}
+}

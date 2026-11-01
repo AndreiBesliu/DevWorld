@@ -1,13 +1,18 @@
 // Command ipcam-hub is the hub's binary (§3.5), in its Phase 0 subset: it
 // records cameras through a supervised MediaMTX child, reconciles the
-// recordings after a crash or a cut, keeps the catalog, and reports what it
-// does as JSON lines on stdout (ruling C01).
+// recordings after a crash or a cut, keeps the catalog, uploads the
+// segments to the destinations of run.json's uploads section (Task 7b), and
+// reports what it does as JSON lines on stdout (ruling C01).
 //
 //	ipcam-hub run --config <run.json> [--stop-on-stdin-eof]
 //	ipcam-hub hook segment-complete      (run by MediaMTX)
 //	ipcam-hub diag host [--rec <dir>]    (the host, its Pi model and storage)
 //	ipcam-hub diag pimodel --raw <model> (§4.8's row for a model string)
 //	ipcam-hub diag cryptobench|readbench|seekbench … (ENC-08's benches)
+//	ipcam-hub diag readopen --config <run.json> --cam <cam> [--profile main]  (a read of the open segment, P14)
+//	ipcam-hub diag dest-probe --config <run.json> --dest <id> [--delete-segment] … (P35)
+//	ipcam-hub diag reach --hosts <host[:port],…> [--lan <host:port>] (what the WAN block lets through, P15)
+//	ipcam-hub diag uploads --config <run.json> [--list-remote] (the uploads' counts, OK14)
 //
 // The events are described with the events type (events.go). Exit codes: 0
 // after SIGTERM, Ctrl-C or Ctrl-Break (or the end of stdin, with
