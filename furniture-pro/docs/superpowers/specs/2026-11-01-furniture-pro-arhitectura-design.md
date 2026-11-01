@@ -1,6 +1,6 @@
 # Furniture Pro: arhitectură și plan de dezvoltare
 
-**Stare:** PROPUNERE, în așteptarea aprobării proprietarului. Nimic din acest document nu este încă aprobat. Nu se scrie cod de produs până la aprobarea acestei specificații și a planului de implementare.
+**Stare:** APROBAT de proprietar pe 2026-11-01, inclusiv Rust pentru nucleul de calcul, ordinea etapelor din secțiunea 8 și România ca piață de start. Codul de produs începe doar după aprobarea planului de implementare al fiecărei etape.
 
 **Data:** 2026-11-01
 **Cerințe:** [`../../brief.md`](../../brief.md)

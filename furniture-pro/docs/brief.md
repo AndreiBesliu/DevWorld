@@ -1,6 +1,6 @@
 # Brief: Furniture Pro
 
-Cerințele proprietarului, transcrise din mesajul inițial din 2026-11-01. Ipotezele și cerințele propuse de AI sunt separate mai jos și așteaptă confirmarea.
+Cerințele proprietarului, transcrise din mesajul inițial din 2026-11-01. Ipotezele și cerințele propuse de AI sunt separate mai jos; au fost acceptate odată cu specificația de arhitectură, pe 2026-11-01.
 
 ## Ce vrea proprietarul
 
@@ -101,15 +101,17 @@ Aplicația generează: necesar de materiale, listă de debitare, listă de cantu
 
 - **2026-11-01:** proiectul stă în depozitul `DevWorld`, în folderul `furniture-pro/`.
 - **2026-11-01:** comunicarea și documentele pentru proprietar sunt în română. Codul, comentariile din cod și mesajele de commit sunt în engleză.
+- **2026-11-01:** specificația de arhitectură este aprobată. Nucleul de calcul se scrie în **Rust** (nu în Python). Etapele se fac în ordinea din specificație, iar piața de start este România.
+- **2026-11-01:** atelierul proprietarului are toate mașinile de tâmplărie necesare. Ca produs comercial, aplicația suportă oricum toate tipurile de mașini; mașinile atelierului devin prima configurație de test, iar detaliile lor se colectează în Etapa 1.
 
-## Ipoteze (de confirmat)
+## Ipoteze (acceptate odată cu specificația)
 
 1. **Utilizatori:** proiectantul sau vânzătorul (face oferta) și șeful de atelier (folosește listele, planurile de debitare și etichetele).
 2. **Unitatea de lucru:** milimetrul.
 3. **Piața de start:** România (limba română, lei, TVA), apoi alte țări.
 4. **Criteriu de succes:** un atelier ajunge de la măsurătoare la ofertă și la piese debitate corect fără calcule manuale, cu rezultate cel puțin la nivelul programelor folosite azi.
 
-## Cerințe suplimentare propuse (de confirmat)
+## Cerințe suplimentare (acceptate odată cu specificația)
 
 Detaliate în specificația de arhitectură, secțiunea 2.
 
@@ -129,9 +131,6 @@ Detaliate în specificația de arhitectură, secțiunea 2.
 
 ## Încă deschise
 
-1. **Rust în loc de Python** pentru nucleul de calcul. Explicația diferenței este în specificație, secțiunea 3.4.
-2. **Programele și mașinile folosite azi:** fierăstrău cu masă glisantă, mașină automată de debitat sau CNC; mașina de cantuit are frezare prealabilă?
-3. **Corpuri de referință:** 3–5 corpuri reale, cu listele de debitare verificate în atelier.
-4. **Ordinea etapelor:** debitarea ca prim produs livrabil sau ordinea standard.
-5. **Piața de start:** doar România sau și alte țări de la început.
-6. **Vizibilitatea depozitului:** `DevWorld` este public, deci oricine poate vedea codul.
+1. **Detaliile mașinilor (pentru Etapa 1):** tipul fierăstrăului (cu masă glisantă sau automat), grosimea pânzei, dacă mașina de cantuit are frezare prealabilă și cât scoate, dacă există CNC.
+2. **Corpuri de referință (pentru Etapa 1):** 3–5 corpuri reale, cu listele de debitare verificate în atelier.
+3. **Vizibilitatea depozitului:** `DevWorld` este public, deci oricine poate vedea codul.
