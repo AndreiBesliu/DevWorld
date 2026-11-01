@@ -1,0 +1,6 @@
+module: c2sp.org/CCTV/age
+version: v0.0.0-20260829155415-4448f2097b2d
+vectors: vectors/ holds every file of the module's testdata/, unchanged
+license: README.md, from the module root; its "License" section puts the vectors under
+  0BSD, CC0 1.0 or the Unlicense. The module has no LICENSE file.
+update: go test ./hub/internal/crypto -run TestRecording_CCTVVectors -update-cctv

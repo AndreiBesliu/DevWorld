@@ -1,0 +1,6 @@
+# This test data (age files, the C2SP CCTV vectors and the files that describe
+# them) stays byte-identical in every checkout: most of these files have no
+# NUL byte, so Git would take them for text, and a CRLF checkout (Git for
+# Windows sets core.autocrlf) would change the bytes the tests decrypt and
+# compare.
+* -text

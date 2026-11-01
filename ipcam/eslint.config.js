@@ -32,6 +32,9 @@ export default defineConfig(
     'apps/desktop/src-tauri/target/**',
     // A local spikehub build copies the spike app's dist/ there (gitignored), as CI does.
     'tools/spikes/video/cmd/spikehub/web/**',
+    // The vendored MediaMTX fork: its web pages' scripts (hls.min.js among them) are
+    // upstream's code, kept as upstream wrote them so that a re-vendor stays a copy.
+    'hub/third_party/mediamtx/**',
   ]),
   js.configs.recommended,
   tseslint.configs.recommended,

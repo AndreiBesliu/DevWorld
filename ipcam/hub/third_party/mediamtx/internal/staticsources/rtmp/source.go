@@ -1,0 +1,195 @@
+// Package rtmp contains the RTMP static source.
+package rtmp
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"net/url"
+	"sync"
+	"time"
+
+	"github.com/bluenviron/gortmplib"
+	"github.com/bluenviron/gortsplib/v5/pkg/description"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/conf"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/defs"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/logger"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/packetdumper"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/protocols/rtmp"
+	ptls "github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/protocols/tls"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/third_party/mediamtx/internal/stream"
+)
+
+type parent interface {
+	logger.Writer
+	SetReady(req defs.PathSourceStaticSetReadyReq) defs.PathSourceStaticSetReadyRes
+	SetNotReady(req defs.PathSourceStaticSetNotReadyReq)
+}
+
+// Source is a RTMP static source.
+type Source struct {
+	DumpPackets  bool
+	ReadTimeout  conf.Duration
+	WriteTimeout conf.Duration
+	Parent       parent
+
+	mutex  sync.RWMutex
+	client *gortmplib.Client
+}
+
+// Log implements logger.Writer.
+func (s *Source) Log(level logger.Level, format string, args ...any) {
+	s.Parent.Log(level, "[RTMP source] "+format, args...)
+}
+
+// Info returns runtime information.
+func (s *Source) Info() defs.StaticSourceInfo {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	if s.client == nil {
+		return defs.StaticSourceInfo{}
+	}
+
+	return defs.StaticSourceInfo{
+		TypeSpecific: &defs.APIStaticSourceTypeSpecificRTMP{
+			RemoteAddr:    s.client.NetConn().RemoteAddr().String(),
+			InboundBytes:  s.client.BytesReceived(),
+			OutboundBytes: s.client.BytesSent(),
+		},
+	}
+}
+
+// Run implements StaticSource.
+func (s *Source) Run(params defs.StaticSourceRunParams) error {
+	s.Log(logger.Debug, "connecting")
+
+	u, err := url.Parse(params.ResolvedSource)
+	if err != nil {
+		return err
+	}
+
+	// add default port
+	_, _, err = net.SplitHostPort(u.Host)
+	if err != nil {
+		if u.Scheme == "rtmp" {
+			u.Host = net.JoinHostPort(u.Host, "1935")
+		} else {
+			u.Host = net.JoinHostPort(u.Host, "1936")
+		}
+	}
+
+	connectCtx, connectCtxCancel := context.WithTimeout(params.Context, time.Duration(s.ReadTimeout))
+
+	conn := &gortmplib.Client{
+		URL:     u,
+		Publish: false,
+	}
+
+	tlsConfig := ptls.MakeConfig(params.Conf.SourceFingerprint)
+
+	if s.DumpPackets {
+		conn.DialContext = (&packetdumper.DialContext{
+			Prefix: u.Scheme + "_source_conn",
+		}).Do
+
+		conn.DialTLSContext = (&packetdumper.DialTLSContext{
+			DialContext: conn.DialContext,
+			TLSConfig:   tlsConfig,
+		}).Do
+	} else {
+		conn.TLSConfig = tlsConfig
+	}
+
+	err = conn.Initialize(connectCtx)
+	connectCtxCancel()
+	if err != nil {
+		return err
+	}
+
+	s.mutex.Lock()
+	s.client = conn
+	s.mutex.Unlock()
+
+	defer func() {
+		s.mutex.Lock()
+		s.client = nil
+		s.mutex.Unlock()
+	}()
+
+	readDone := make(chan error)
+	go func() {
+		readDone <- s.runReader(conn)
+	}()
+
+	for {
+		select {
+		case err = <-readDone:
+			conn.Close()
+			return err
+
+		case <-params.ReloadConf:
+
+		case <-params.Context.Done():
+			conn.Close()
+			<-readDone
+			return nil
+		}
+	}
+}
+
+func (s *Source) runReader(conn *gortmplib.Client) error {
+	conn.NetConn().SetReadDeadline(time.Now().Add(time.Duration(s.ReadTimeout)))
+	conn.NetConn().SetWriteDeadline(time.Now().Add(time.Duration(s.WriteTimeout)))
+
+	r := &gortmplib.Reader{
+		Conn: conn,
+	}
+	err := r.Initialize()
+	if err != nil {
+		return err
+	}
+
+	var subStream *stream.SubStream
+
+	medias, err := rtmp.ToStream(r, &subStream)
+	if err != nil {
+		return err
+	}
+
+	if len(medias) == 0 {
+		return fmt.Errorf("no supported tracks found")
+	}
+
+	res := s.Parent.SetReady(defs.PathSourceStaticSetReadyReq{
+		Desc:          &description.Session{Medias: medias},
+		UseRTPPackets: false,
+		ReplaceNTP:    true,
+	})
+	if res.Err != nil {
+		return res.Err
+	}
+
+	defer s.Parent.SetNotReady(defs.PathSourceStaticSetNotReadyReq{})
+
+	subStream = res.SubStream
+
+	conn.NetConn().SetWriteDeadline(time.Time{})
+
+	for {
+		conn.NetConn().SetReadDeadline(time.Now().Add(time.Duration(s.ReadTimeout)))
+		err = r.Read()
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// APISourceDescribe implements StaticSource.
+func (*Source) APISourceDescribe() *defs.APIPathSource {
+	return &defs.APIPathSource{
+		Type: defs.APIPathSourceTypeRTMPSource,
+		ID:   "",
+	}
+}

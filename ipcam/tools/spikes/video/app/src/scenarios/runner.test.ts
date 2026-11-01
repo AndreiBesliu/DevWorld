@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { finish, setup } from './fakes';
 import { runScenario } from './index';
+import { runDefinition, type ScenarioDefinition } from './runner';
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -91,6 +92,32 @@ describe('runner', () => {
 
     expect(result.interruption).toEqual({ kind: 'session-lost', atS: 8, how: 'connection disconnected for more than 3 s' });
     expect(result.samples).toEqual({});
+  });
+
+  it('runner_figures_areAtTheTopOfTheResult_andDroppedWithALostSession', async () => {
+    // A figure is one number at the top of the result (AGE's mbps, bytes and
+    // ms); like the samples, none is kept when the hub session is lost (R49).
+    const t = setup();
+    const definition: ScenarioDefinition = {
+      async run(run) {
+        run.figure('bytes', 4096);
+        await run.session(1);
+        run.figure('ms', 20);
+        await run.sleep(60_000);
+        run.figure('mbps', 1.6);
+      },
+    };
+
+    const kept = await finish(runDefinition('AGE', definition, t.env));
+    expect(kept).toMatchObject({ scenario: 'AGE', bytes: 4096, ms: 20, mbps: 1.6, samples: {} });
+
+    const lost = setup();
+    const running = runDefinition('AGE', definition, lost.env);
+    await vi.advanceTimersByTimeAsync(5000);
+    lost.session().setState('failed');
+    const result = await finish(running);
+    expect(result.interruption?.kind).toBe('session-lost');
+    expect(Object.keys(result).filter((key) => ['mbps', 'bytes', 'ms'].includes(key))).toEqual([]);
   });
 
   it('runner_theRunsOwnTeardown_isNotALoss', async () => {

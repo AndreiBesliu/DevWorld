@@ -22,6 +22,8 @@ on:
       - 'ipcam/docs/research/*phase0*-results.md'
       - 'ipcam/docs/research/phase0-data/**'
       - '.github/workflows/ipcam-spikes.yml'
+      # The recorder spike has its own workflow (ipcam-spike-recording.yml).
+      - '!ipcam/tools/spikes/recording/**'
   pull_request:
     paths:
       - 'ipcam/tools/spikes/video/**'
@@ -39,6 +41,8 @@ on:
       - 'ipcam/docs/research/*phase0*-results.md'
       - 'ipcam/docs/research/phase0-data/**'
       - '.github/workflows/ipcam-spikes.yml'
+      # The recorder spike has its own workflow (ipcam-spike-recording.yml).
+      - '!ipcam/tools/spikes/recording/**'
 
 permissions:
   contents: read
@@ -140,7 +144,8 @@ jobs:
             ipcam/tools/go.sum
             ipcam/tools/spikes/video/go.sum
       - name: Build
-        run: go build ./tools/...
+        # The tools module and the video spike, by name: ./tools/... stops at the go.mod of each nested module.
+        run: go build ./tools ./tools/spikes/video/...
       - name: Lint
         run: go tool golangci-lint run ./tools/spikes/video/...
       - name: Test

@@ -8,7 +8,7 @@ import { simCameras, type HubCamera } from '../cameras';
 import { ConnectError } from '../hubhttp';
 import type { MessageKey } from '../i18n';
 import { readNativeMetrics, type NativeMetrics } from '../native';
-import { scrubText, type InterruptReason, type ScenarioId, type ScenarioResult } from '../results';
+import { scrubText, type Figures, type InterruptReason, type ScenarioId, type ScenarioResult } from '../results';
 import type { SpikeSession } from '../session';
 import type { ScenarioEnv } from './context';
 
@@ -62,6 +62,8 @@ export interface Run {
   /** Calls `fn` every `ms` until the returned function or the end of the run stops it. */
   every(ms: number, fn: () => void): () => void;
   sample(key: string, value: number): void;
+  /** One of the result's top-level numbers (Figures); the last value of a key is kept. */
+  figure(key: keyof Figures, value: number): void;
   /** A note for the result. URLs and IP literals are removed (PH0-22). */
   note(text: string): void;
   /**
@@ -135,6 +137,7 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
   const startedAt = new Date().toISOString();
   const start = env.clock.now();
   const samples: Record<string, number[]> = {};
+  const figures: Figures = {};
   const notes: string[] = [];
   const hubJitterMs: number[] = [];
   const endings: (() => void)[] = [];
@@ -237,6 +240,9 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
     },
     sample(key, value) {
       (samples[key] ??= []).push(value);
+    },
+    figure(key, value) {
+      figures[key] = value;
     },
     note(text) {
       notes.push(scrubText(text));
@@ -341,6 +347,7 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
   const lost = interruption?.kind === 'session-lost';
   return {
     scenario: id,
+    ...(lost ? {} : figures),
     device,
     startedAt,
     durationS: Math.round(env.clock.now() - start) / 1000,

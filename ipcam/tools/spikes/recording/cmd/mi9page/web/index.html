@@ -1,0 +1,215 @@
+<!-- SPIKE-ONLY: ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md -->
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<title>MI9: redare prin canalul de date</title>
+</head>
+<body>
+<!--
+  MI9's Chrome leg (G26, CTR-12's «afișează»): the playback client of the
+  recorder spike's harness in a browser. It offers a PeerConnection with an
+  rpc channel to mi9page's hub side, asks for the recording's info and init,
+  and makes 20 timeline seeks. Each seek asks for the part of the first IDR
+  at or after a uniform target; the hub side sends its plaintext fMP4 on
+  bulk/<call>, which the page appends to MSE. seekMs is the time from the
+  request until the IDR's bytes arrived, displayMs until the first
+  requestVideoFrameCallback of a frame at the seek's time. The result is
+  window.__mi9Result, or why there is none, window.__mi9Error
+  (tools/spikes/video/e2e/mi9.spec.ts reads them).
+-->
+<video id="video" muted playsinline></video>
+<pre id="log"></pre>
+<script type="module">
+const SEEKS = 20;
+const video = document.getElementById('video');
+const say = (line) => { document.getElementById('log').textContent += `${line}\n`; };
+const round = (ms) => Math.round(ms * 10) / 10;
+
+/** Resolves on target's next event, or rejects on its error event. */
+function next(target, event) {
+  return new Promise((resolve, reject) => {
+    target.addEventListener(event, resolve, { once: true });
+    target.addEventListener('error', () => reject(new Error(`${event}: error`)), { once: true });
+  });
+}
+
+/**
+ * Resolves when ICE gathering is complete, 250 ms after the latest candidate,
+ * or after 3 s, as the video spike's app waits (app/src/session.ts): Chrome
+ * may report gathering complete only seconds after its host candidates.
+ */
+function gathered(pc) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => {
+    let settle;
+    const timer = setTimeout(resolve, 3000);
+    const finish = () => {
+      clearTimeout(timer);
+      clearTimeout(settle);
+      resolve();
+    };
+    pc.addEventListener('icegatheringstatechange', () => pc.iceGatheringState === 'complete' && finish());
+    pc.addEventListener('icecandidate', ({ candidate }) => {
+      if (candidate === null) return;
+      clearTimeout(settle);
+      settle = setTimeout(finish, 250);
+    });
+  });
+}
+
+/** Connects to the hub side; returns call(request), which sends one call on rpc. */
+async function connect() {
+  const pc = new RTCPeerConnection();
+  const rpc = pc.createDataChannel('rpc');
+  const calls = new Map();
+  let last = 0;
+  pc.ondatachannel = ({ channel }) => {
+    const match = /^bulk\/(\d+)$/.exec(channel.label);
+    const c = match && calls.get(Number(match[1]));
+    if (!c) {
+      channel.close();
+      return;
+    }
+    c.attach(channel);
+    channel.binaryType = 'arraybuffer';
+    channel.onmessage = ({ data }) => c.received(new Uint8Array(data));
+    channel.onclose = () => c.closed();
+  };
+  rpc.onmessage = ({ data }) => {
+    const reply = JSON.parse(data);
+    calls.get(reply.call)?.replied(reply);
+  };
+  pc.onconnectionstatechange = () => say(`conexiune: ${pc.connectionState}`);
+  const candidates = gathered(pc);
+  await pc.setLocalDescription(await pc.createOffer());
+  await candidates;
+  say('oferta e gata');
+  const res = await fetch('offer', { method: 'POST', body: pc.localDescription.sdp });
+  if (!res.ok) throw new Error(`offer: HTTP ${res.status}: ${await res.text()}`);
+  await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() });
+  say('răspunsul hub-ului e aplicat');
+  if (rpc.readyState !== 'open') await next(rpc, 'open');
+  say('canalul rpc e deschis');
+
+  /**
+   * Sends request as a call. reply resolves with the hub side's reply; for a
+   * range, idr resolves with the time its IDR's last byte arrived, and done
+   * with all its bytes.
+   */
+  return function call(request) {
+    const id = ++last;
+    const chunks = [];
+    let got = 0;
+    let range = null;
+    let idrSeen = false;
+    let bulk = null;
+    const settle = {};
+    const reply = new Promise((resolve, reject) => Object.assign(settle, { replyOK: resolve, replyFail: reject }));
+    const idr = new Promise((resolve) => Object.assign(settle, { idrOK: resolve }));
+    const done = new Promise((resolve, reject) => Object.assign(settle, { doneOK: resolve, doneFail: reject }));
+    const progress = () => {
+      if (range === null) return;
+      if (range.idrSize && !idrSeen && got >= range.idrOff + range.idrSize - range.off) {
+        idrSeen = true;
+        settle.idrOK(performance.now());
+      }
+      if (got >= range.n) {
+        calls.delete(id);
+        const bytes = new Uint8Array(got);
+        let at = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, at);
+          at += chunk.length;
+        }
+        settle.doneOK(bytes);
+        bulk?.close();
+      }
+    };
+    calls.set(id, {
+      attach(channel) {
+        bulk = channel;
+      },
+      replied(r) {
+        if (r.t === 'error') {
+          calls.delete(id);
+          const error = new Error(`${request.t}: ${r.code}: ${r.message}`);
+          settle.replyFail(error);
+          settle.doneFail(error);
+          return;
+        }
+        range = r.t === 'range' ? r : null;
+        settle.replyOK(r);
+        progress();
+      },
+      received(bytes) {
+        chunks.push(bytes);
+        got += bytes.length;
+        progress();
+      },
+      closed() {
+        if (range === null || got < range.n) settle.doneFail(new Error(`${request.t}: the bulk channel closed after ${got} bytes`));
+      },
+    });
+    done.catch(() => {});
+    rpc.send(JSON.stringify({ ...request, call: id }));
+    return { reply, idr, done };
+  };
+}
+
+async function main() {
+  const call = await connect();
+  const info = await call({ t: 'info' }).reply;
+  const type = `video/mp4; codecs="${info.codec}"`;
+  if (!info.codec || !MediaSource.isTypeSupported(type)) throw new Error(`MSE cannot play ${type}`);
+  const source = new MediaSource();
+  video.src = URL.createObjectURL(source);
+  await next(source, 'sourceopen');
+  const buffer = source.addSourceBuffer(type);
+  const append = async (bytes) => {
+    buffer.appendBuffer(bytes);
+    await next(buffer, 'updateend');
+  };
+  await append(await call({ t: 'read', off: 0, n: info.initBytes }).done);
+  say(`init ${info.initBytes} B, ${info.codec}, ultimul IDR la ${info.lastIdrMs} ms`);
+
+  const seekMs = [];
+  const displayMs = [];
+  for (let i = 0; i < SEEKS; i++) {
+    video.pause();
+    if (buffer.buffered.length > 0) {
+      buffer.remove(0, Infinity);
+      await next(buffer, 'updateend');
+    }
+    const target = Math.floor(Math.random() * (info.lastIdrMs + 1));
+    const start = performance.now();
+    const seek = call({ t: 'seek', ms: target });
+    const [idrAt, part] = await Promise.all([seek.idr, seek.done]);
+    await append(part);
+    if (buffer.buffered.length === 0) throw new Error(`seek ${i + 1} to ${target} ms: nothing buffered`);
+    const at = buffer.buffered.start(0);
+    const shown = new Promise((resolve) => {
+      const onFrame = (_now, frame) => {
+        if (Math.abs(frame.mediaTime - at) < 0.5) resolve(performance.now());
+        else video.requestVideoFrameCallback(onFrame);
+      };
+      video.requestVideoFrameCallback(onFrame);
+    });
+    video.currentTime = at;
+    video.play().catch(() => {});
+    const shownAt = await shown;
+    seekMs.push(round(idrAt - start));
+    displayMs.push(round(shownAt - start));
+    say(`salt ${i + 1} la ${target} ms: IDR în ${seekMs[i]} ms, afișat în ${displayMs[i]} ms`);
+  }
+  video.pause();
+  window.__mi9Result = { seekMs, displayMs };
+}
+
+main().catch((error) => {
+  window.__mi9Error = String(error?.stack ?? error);
+  say(`eroare: ${window.__mi9Error}`);
+});
+</script>
+</body>
+</html>

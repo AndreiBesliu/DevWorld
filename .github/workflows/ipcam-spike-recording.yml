@@ -1,0 +1,1062 @@
+name: ipcam-spike-recording
+
+# The Phase 0 (c1) recorder spike (ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md):
+# the hub module, the MediaMTX fork in hub/third_party/mediamtx (a nested module outside
+# go.work, built, tested and checked with GOWORK=off from its directory) and the spike
+# module tools/spikes/recording, mi1-smoke, MI1's lab shards in small (Task 7), and mi9,
+# MI9's playback over the data channel in CI (Task 11).
+
+on:
+  push:
+    # Branch pushes only, as in the other ipcam workflows: a tag push ignores path filters.
+    branches: ['**']
+    paths:
+      - 'ipcam/hub/**'
+      - 'ipcam/tools/spikes/recording/**'
+      # The recording module imports the video module, and the media job runs its mediagen.
+      - 'ipcam/tools/spikes/video/**'
+      # The pinned tools (golangci-lint, govulncheck, go-licenses), the scripts the jobs
+      # run, and the license allowlist that the license checks read.
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      - 'ipcam/tools/scripts/**'
+      - 'ipcam/tools/licenses/**'
+      - 'ipcam/go.work'
+      - 'ipcam/go.work.sum'
+      # The line endings of the checkout on the windows job (the fork's files are -text).
+      - 'ipcam/.gitattributes'
+      # The mi9 job's Playwright, from the workspace's lockfile.
+      - 'ipcam/package.json'
+      - 'ipcam/pnpm-*.yaml'
+      - '.github/workflows/ipcam-spike-recording.yml'
+  pull_request:
+    paths:
+      - 'ipcam/hub/**'
+      - 'ipcam/tools/spikes/recording/**'
+      # The recording module imports the video module, and the media job runs its mediagen.
+      - 'ipcam/tools/spikes/video/**'
+      # The pinned tools (golangci-lint, govulncheck, go-licenses), the scripts the jobs
+      # run, and the license allowlist that the license checks read.
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      - 'ipcam/tools/scripts/**'
+      - 'ipcam/tools/licenses/**'
+      - 'ipcam/go.work'
+      - 'ipcam/go.work.sum'
+      # The line endings of the checkout on the windows job (the fork's files are -text).
+      - 'ipcam/.gitattributes'
+      # The mi9 job's Playwright, from the workspace's lockfile.
+      - 'ipcam/package.json'
+      - 'ipcam/pnpm-*.yaml'
+      - '.github/workflows/ipcam-spike-recording.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipcam-spike-recording-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Go version comes from go.work alone; never switch toolchains silently.
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+# Every step that runs a command writes its output to ${RUNNER_TEMP}/<step id>.log. Job
+# logs cannot be read from everywhere, check-run annotations can (gh api
+# repos/<owner>/<repo>/check-runs/<job id>/annotations), so the last step of each job
+# turns the log of each failed step into one error annotation: the failure and compile
+# error lines of a go test, else the end of the log.
+
+jobs:
+  media:
+    # G02: the video spike's media and sub-256k.h264, the 256 kbps stream of HUB-07's
+    # low-bitrate runs. They are generated here and never committed.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+      - name: Install ffmpeg
+        # ffmpeg with libx264 only generates the test media in CI. It is never shipped and
+        # never part of a release asset (Global Constraints, Licenses).
+        id: ffmpeg
+        run: |
+          set -o pipefail
+          {
+            sudo apt-get update &&
+              sudo apt-get install --yes --no-install-recommends ffmpeg &&
+              ffmpeg -version | sed -n 1p
+          } 2>&1 | tee "${RUNNER_TEMP}/ffmpeg.log"
+      - name: Generate media
+        id: generate
+        run: |
+          set -o pipefail
+          {
+            go run ./tools/spikes/video/cmd/mediagen -out "${RUNNER_TEMP}/media" &&
+              go run ./tools/spikes/recording/cmd/recmediagen -out "${RUNNER_TEMP}/media"
+          } 2>&1 | tee "${RUNNER_TEMP}/generate.log"
+      - name: Check the recording media
+        # Tests the files that the upload step uploads. A missing ffmpeg fails instead of skipping.
+        id: check
+        env:
+          MEDIAGEN_DIR: ${{ runner.temp }}/media
+          MEDIAGEN_REQUIRE_FFMPEG: '1'
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run TestRecMediagen ./tools/spikes/recording/cmd/recmediagen/... 2>&1 |
+            tee "${RUNNER_TEMP}/check.log"
+      - name: Upload media
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spike-recording-media
+          path: ${{ runner.temp }}/media
+          if-no-files-found: error
+          retention-days: 7
+          # H.264, H.265 and fMP4 do not compress further.
+          compression-level: 0
+      - name: Show failures as annotations
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            fi
+          done
+
+  recorder:
+    needs: media
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # The crypto tests that need the age tools fail instead of skipping. The
+      # tools' paths depend on RUNNER_TEMP, which a job's env cannot read, so the
+      # age-tools step exports RECSPIKE_AGE_BINS and RECSPIKE_RAGE_BIN to the
+      # steps after it.
+      RECSPIKE_REQUIRE_AGE_TOOLS: '1'
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
+      - name: Download media
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-recording-media
+          path: ${{ runner.temp }}/media
+      - name: Install age and rage
+        # ENC-06 (G01): the age CLI v1.0.0 and v1.3.2, the newest age release at least 14
+        # days old (proxy.golang.org: 2026-08-29), and rage 0.12.1, the newest rage release
+        # at least 14 days old (crates.io: 2026-07-14). Each comes from its GitHub release
+        # archive, checked against the SHA-256 below. Lab tools only: never shipped.
+        id: age-tools
+        run: |
+          set -o pipefail
+          tools="${RUNNER_TEMP}/age-tools"
+          # fetch <url> <sha256> <directory>: unpacks the checked archive into ${tools}/<directory>.
+          fetch() {
+            local url="$1" sha256="$2" dir="${tools}/$3" archive="${tools}/${1##*/}"
+            mkdir -p "${dir}" &&
+              curl -fsSL --retry 3 -o "${archive}" "${url}" &&
+              echo "${sha256}  ${archive}" | sha256sum --check --strict &&
+              tar -xzf "${archive}" -C "${dir}" --strip-components=1
+          }
+          {
+            fetch https://github.com/FiloSottile/age/releases/download/v1.0.0/age-v1.0.0-linux-amd64.tar.gz \
+              6414f71ce947fbbea1314f6e9786c5d48436ebc76c3fd6167bf018e432b3b669 age-v1.0.0 &&
+              fetch https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz \
+                cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10 age-v1.3.2 &&
+              fetch https://github.com/str4d/rage/releases/download/v0.12.1/rage-v0.12.1-x86_64-linux.tar.gz \
+                c5d7ab41fbf1213590e89721fd2b8eb122e84518c155ce35866f1c5759a3a29f rage-v0.12.1 &&
+              "${tools}/age-v1.0.0/age" --version &&
+              "${tools}/age-v1.3.2/age" --version &&
+              "${tools}/rage-v0.12.1/rage" --version
+          } 2>&1 | tee "${RUNNER_TEMP}/age-tools.log"
+          # For the Test and ENC-06 steps (agecli_test.go reads them).
+          {
+            echo "RECSPIKE_AGE_BINS=${tools}/age-v1.0.0/age:${tools}/age-v1.3.2/age"
+            echo "RECSPIKE_RAGE_BIN=${tools}/rage-v0.12.1/rage"
+          } >> "${GITHUB_ENV}"
+      - name: Build
+        id: build
+        run: |
+          set -o pipefail
+          go build ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: Build the MediaMTX fork
+        # For Linux, which the tests below run, and for Windows (C02).
+        id: fork-build
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          {
+            go build -o "${RUNNER_TEMP}/bin/mediamtx" . &&
+              GOOS=windows GOARCH=amd64 go build -o "${RUNNER_TEMP}/bin/mediamtx.exe" . &&
+              "${RUNNER_TEMP}/bin/mediamtx" --version
+          } 2>&1 | tee "${RUNNER_TEMP}/fork-build.log"
+      - name: Lint
+        # The fork is never linted: ./hub/... stops at its go.mod.
+        id: lint
+        run: |
+          set -o pipefail
+          go tool golangci-lint run ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${RUNNER_TEMP}/lint.log"
+      - name: Video build list
+        # R04: the modules that join the workspace must not move a dependency of the video spike.
+        id: build-list
+        run: |
+          set -o pipefail
+          tools/scripts/check-video-build-list.sh 2>&1 | tee "${RUNNER_TEMP}/build-list.log"
+      - name: Test
+        # -count=1: a result restored from the Go build cache would hide a flaky test. The
+        # variables make the tests that need the fork or the media fail instead of skipping;
+        # the job's env and the age-tools step do the same for the age tools. A run of the MI1
+        # smoke whose stream lost more than its limit prints one "mi1-diag: <json>" line that
+        # explains it (Task 7.2d); each goes out as a notice, at most 10 (C32). The lab image's
+        # test needs the runner's loop devices through sudo, and fails instead of skipping.
+        id: test
+        env:
+          MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx
+          RECSPIKE_REQUIRE_MEDIAMTX: '1'
+          MEDIAGEN_DIR: ${{ runner.temp }}/media
+          SPIKE_REQUIRE_MEDIA: '1'
+          RECSPIKE_REQUIRE_LOOP: '1'
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/test.log"
+          status=0
+          go test -count=1 -race ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${log}" || status=$?
+          sed -n 's/^mi1-diag: //p' "${log}" | head -n 10 | while IFS= read -r line; do
+            printf '%s\n' "${line}" | tools/scripts/annotate.sh mi1-diag 1 notice
+          done || true
+          exit "${status}"
+      - name: ENC-06
+        # The golden files and a resealed torn file decrypt with each age CLI and with rage,
+        # using only the recovery key (ENC-06). The test prints one "enc06: <json>" line,
+        # pass true or false, which goes out as a notice either way (C32). It runs whenever
+        # the age tools are installed, so that a failure in another step does not hide it.
+        id: enc06
+        if: ${{ !cancelled() && steps.age-tools.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/enc06.log"
+          status=0
+          go test -count=1 -v -run '^TestRecording_DecryptsWithAgeCLIAndRage$' ./hub/internal/crypto/ 2>&1 |
+            tee "${log}" || status=$?
+          if ! grep -q '^enc06: ' "${log}"; then
+            echo "ENC-06: the test printed no enc06 line" | tee -a "${log}"
+            exit 1
+          fi
+          sed -n 's/^enc06: //p' "${log}" | tools/scripts/annotate.sh ENC-06 1 notice
+          exit "${status}"
+      - name: Test the MediaMTX fork
+        # Its patch tests (TestMTX*) and the recorder's own tests only (C03). The -run
+        # pattern still compiles the tests of every package. TestMTX2_WorstCaseLoss is
+        # single-threaded, so -race adds nothing to it: the mtx2-loss step runs it.
+        id: fork-test
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          {
+            go test -count=1 -race -skip '^TestMTX2_WorstCaseLoss$' ./internal/recorder/... &&
+              go test -count=1 -race -run '^TestMTX' -skip '^TestMTX2_WorstCaseLoss$' ./...
+          } 2>&1 | tee "${RUNNER_TEMP}/fork-test.log"
+      - name: MTX-2 loss
+        # R01, O17: TestMTX2_WorstCaseLoss prints one "mtx2-loss: <json>" line, the median and
+        # maximum loss at a cut and the disk overhead of encrypted recording per bitrate, with
+        # the low-bitrate padding on and off, and pass true or false. It goes out as a notice
+        # either way (C32). It runs even when an earlier step failed, so that the failure does
+        # not hide it.
+        id: mtx2-loss
+        if: ${{ !cancelled() }}
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/mtx2-loss.log"
+          status=0
+          go test -count=1 -v -run '^TestMTX2_WorstCaseLoss$' ./internal/recorder/ 2>&1 |
+            tee "${log}" || status=$?
+          if ! grep -q '^mtx2-loss: ' "${log}"; then
+            echo "MTX-2: the test printed no mtx2-loss line" | tee -a "${log}"
+            exit 1
+          fi
+          sed -n 's/^mtx2-loss: //p' "${log}" | ../../../tools/scripts/annotate.sh mtx2-loss 1 notice
+          exit "${status}"
+      - name: Vulnerabilities of the hub
+        # govulncheck needs a directory that holds a go.mod.
+        id: vuln-hub
+        working-directory: ipcam/hub
+        run: |
+          set -o pipefail
+          go tool govulncheck ./... 2>&1 | tee "${RUNNER_TEMP}/vuln-hub.log"
+      - name: Vulnerabilities of the recorder spike
+        id: vuln-recording
+        working-directory: ipcam/tools/spikes/recording
+        run: |
+          set -o pipefail
+          go tool govulncheck ./... 2>&1 | tee "${RUNNER_TEMP}/vuln-recording.log"
+      - name: Vulnerabilities of the MediaMTX fork
+        # The tools module's govulncheck, run outside the workspace like the fork itself.
+        id: vuln-fork
+        working-directory: ipcam/tools
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          go tool govulncheck -C ../hub/third_party/mediamtx ./... 2>&1 | tee "${RUNNER_TEMP}/vuln-fork.log"
+      - name: Licenses
+        id: licenses
+        run: |
+          set -o pipefail
+          tools/scripts/check-licenses.sh ./hub/... ./tools/spikes/recording/... 2>&1 | tee "${RUNNER_TEMP}/licenses.log"
+      - name: Licenses of the MediaMTX fork
+        # G35: go-licenses on the fork's dependencies; MediaMTX's own MIT license and the
+        # hls.js in hls.min.js are named in the release notices (hub/third_party/mediamtx/SOURCE.md).
+        id: fork-licenses
+        run: |
+          set -o pipefail
+          tools/scripts/check-licenses.sh -C hub/third_party/mediamtx ./... 2>&1 | tee "${RUNNER_TEMP}/fork-licenses.log"
+      - name: Show failures as annotations
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              # go-licenses warns about every package with assembly; those lines hide its verdict.
+              grep -vE '^(W[0-9]{4} |/)' "${log}" | tail -n 60 | tools/scripts/annotate.sh "${id}" 60
+            fi
+          done
+
+  windows:
+    # On windows-latest: the hub's tests, the process tests among them, with a Windows
+    # build of the fork as MEDIAMTX_BIN and the media, so that they cannot skip
+    # (G06): the restart after a kill, the Job Object that ends MediaMTX with the
+    # hub, MoveFileEx. Then the fork's patch tests (MTX-1 on Windows, ruling C14),
+    # where the directory sync is a no-op and the rename is MoveFileEx with
+    # MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH. Without -race, which needs a
+    # C compiler there; the recorder job runs the same tests with it.
+    needs: media
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
+      - name: Download media
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-recording-media
+          path: ${{ runner.temp }}/media
+      - name: Build the MediaMTX fork
+        id: fork-build
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          {
+            go build -o "${RUNNER_TEMP}/bin/mediamtx.exe" . &&
+              "${RUNNER_TEMP}/bin/mediamtx.exe" --version
+          } 2>&1 | tee "${RUNNER_TEMP}/fork-build.log"
+      - name: Test the hub
+        id: hub-test
+        env:
+          MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx.exe
+          RECSPIKE_REQUIRE_MEDIAMTX: '1'
+          MEDIAGEN_DIR: ${{ runner.temp }}/media
+          SPIKE_REQUIRE_MEDIA: '1'
+        run: |
+          set -o pipefail
+          go test -count=1 ./hub/... 2>&1 | tee "${RUNNER_TEMP}/hub-test.log"
+      - name: Test the recorder spike
+        # The recording module's Windows paths, which a cross-compile only builds: hubproc's
+        # TerminateProcess and graceful stop, the run state's lock, the keep-awake, and the lab
+        # kill9 smoke on loopback with the fork and the media. A test that needs Linux tools
+        # (ffmpeg's band check, loop devices) skips. A smoke run whose stream lost more than its
+        # limit prints a "mi1-diag: <json>" line; each goes out as a notice, at most 10 (C32).
+        id: recording-test
+        if: ${{ !cancelled() && steps.fork-build.outcome == 'success' }}
+        env:
+          MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx.exe
+          RECSPIKE_REQUIRE_MEDIAMTX: '1'
+          MEDIAGEN_DIR: ${{ runner.temp }}/media
+          SPIKE_REQUIRE_MEDIA: '1'
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/recording-test.log"
+          status=0
+          go test -count=1 ./tools/spikes/recording/... 2>&1 | tee "${log}" || status=$?
+          sed -n 's/^mi1-diag: //p' "${log}" | head -n 10 | while IFS= read -r line; do
+            printf '%s\n' "${line}" | tools/scripts/annotate.sh mi1-diag 1 notice
+          done || true
+          exit "${status}"
+      - name: Test the MediaMTX fork's patches
+        # Every patch test, MTX-0's in the root package included: ipcam/.gitattributes
+        # checks the fork out without line-ending changes. The -run pattern still
+        # compiles the tests of every package.
+        id: fork-test
+        if: ${{ !cancelled() && steps.fork-build.outcome == 'success' }}
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          go test -count=1 -run '^TestMTX' ./... 2>&1 | tee "${RUNNER_TEMP}/fork-test.log"
+      - name: diag host
+        # What ipcam-hub reads about a Windows host (R07, G09): one ipcam.diag.host/1 line,
+        # which must be valid JSON with "os":"windows" and at most 3,500 bytes after
+        # annotate.sh's escaping, goes out as a notice (C32). It runs even when an earlier
+        # step failed, and turns its own failure into an error annotation.
+        id: diag-host
+        if: ${{ !cancelled() }}
+        run: |
+          out="${RUNNER_TEMP}/diag-host.json"
+          log="${RUNNER_TEMP}/diag-host.log"
+          status=0
+          go run ./hub/cmd/ipcam-hub diag host > "${out}" 2> "${log}" || status=$?
+          line=$(cat "${out}")
+          escaped="${line//%/%25}"
+          # shellcheck disable=SC2016 # the $ of the PowerShell check are PowerShell's
+          if [[ ${status} -ne 0 || $(wc -l < "${out}") -ne 1 ]] ||
+            (( $(printf '%s' "${escaped}" | LC_ALL=C wc -c) > 3500 )) ||
+            ! OUT="${out}" pwsh -NoProfile -NonInteractive -Command \
+              '$j = Get-Content -Raw -LiteralPath $env:OUT | ConvertFrom-Json; if ($j.schema -ne "ipcam.diag.host/1" -or $j.os -ne "windows") { exit 1 }' \
+              >> "${log}" 2>&1; then
+            {
+              echo "diag host: exit ${status}; want one line of JSON, ipcam.diag.host/1 with \"os\":\"windows\", of at most 3,500 bytes after escaping:"
+              cat "${out}"
+            } >> "${log}"
+            tail -n 60 "${log}" | tools/scripts/annotate.sh diag-host 60
+            exit 1
+          fi
+          tools/scripts/annotate.sh diag-host 1 notice < "${out}"
+      - name: W32Time install and uninstall
+        # C1-R16, C1-R16b: the runner is elevated, so `recspike install` changes the real
+        # Windows Time service. W32Time is first set as on a PC outside a domain (start on
+        # demand, started when the PC joins a domain and stopped when it is not in one).
+        # Then install must leave it AUTO_START, RUNNING and without triggers, and uninstall
+        # must give back the start type and the triggers exactly, as sc qc and sc
+        # qtriggerinfo print them. One line of JSON with the image's own settings, those
+        # before install, after it and after uninstall, and pass, goes out as a notice
+        # either way (C32), at most 3,500 bytes after annotate.sh's escaping; a failure
+        # also goes out as an error.
+        # security-1: install also protects the release folder, here the folder of
+        # recspike.exe and reccontroller.exe, and uninstall resets it. As icacls prints them,
+        # install must leave the folder without inherited entries, with Administrators and
+        # SYSTEM Full, the runner's user and OWNER RIGHTS Read & Execute and nobody else, the
+        # user's Modify on results and work, and the programs' entries inherited from the
+        # folder; uninstall must leave inherited entries only. A second notice, folder-acl,
+        # holds those lines and pass, under the same limits. (cmd/reccontroller's
+        # TestServe_InTheProtectedReleaseFolder runs reccontroller there from an administrator
+        # window and from a standard one.)
+        id: w32time
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/w32time.log"
+          dir="${RUNNER_TEMP}/recspike"
+          # W32Time's start type and state as sc names them, and its triggers: the lines
+          # after SERVICE_NAME of sc qtriggerinfo, joined with ";".
+          start_type() { sc.exe qc w32time | tr -d '\r' | sed -n 's/^ *START_TYPE *: *[0-9]* *//p' | sed 's/ *$//'; }
+          state() { sc.exe query w32time | tr -d '\r' | sed -n 's/^ *STATE *: *[0-9]* *//p' | sed 's/ *$//'; }
+          triggers() { sc.exe qtriggerinfo w32time | tr -d '\r' | sed -e '1,/SERVICE_NAME/d' -e 's/^ *//' -e 's/ *$//' -e '/^$/d' | paste -sd ';' -; }
+          snapshot() { jq -nc --arg s "$(start_type)" --arg r "$(state)" --arg t "$(triggers)" '{startType: $s, state: $r, triggers: $t}'; }
+          # A path's entries as icacls prints them, without the path, joined with ";".
+          acl() {
+            local path
+            path=$(cygpath -w "$1")
+            icacls "${path}" | tr -d '\r' | sed -e '/^Successfully processed/d' -e '/^$/d' |
+              ACL_PATH="${path}" awk '{
+                if (NR == 1 && index($0, ENVIRON["ACL_PATH"] " ") == 1) $0 = substr($0, length(ENVIRON["ACL_PATH"]) + 2)
+                sub(/^ +/, ""); print
+              }' | paste -sd ';' -
+          }
+          entries() { tr ';' '\n' <<< "$1"; }
+          status=0
+          {
+            go build -o "${dir}/recspike.exe" ./tools/spikes/recording/cmd/recspike &&
+              go build -o "${dir}/reccontroller.exe" ./tools/spikes/recording/cmd/reccontroller &&
+              image=$(snapshot) &&
+              sc.exe config w32time start= demand &&
+              sc.exe triggerinfo w32time start/domainjoin stop/domainleave &&
+              before=$(snapshot) &&
+              "${dir}/recspike.exe" install &&
+              installed=$(snapshot) &&
+              acl_folder=$(acl "${dir}") &&
+              acl_results=$(acl "${dir}/results") &&
+              acl_work=$(acl "${dir}/work") &&
+              acl_program=$(acl "${dir}/reccontroller.exe") &&
+              "${dir}/recspike.exe" uninstall &&
+              restored=$(snapshot) &&
+              acl_restored=$(acl "${dir}")
+          } >> "${log}" 2>&1 || status=$?
+          pass=false
+          # A trigger is a line with a colon (its type and GUID); the line that says that
+          # there are none has none.
+          if [[ ${status} -eq 0 ]] &&
+            jq -e '.triggers | test(":")' <<< "${before}" > /dev/null &&
+            jq -e '(.startType | startswith("AUTO_START")) and .state == "RUNNING" and (.triggers | test(":") | not)' <<< "${installed}" > /dev/null &&
+            jq -e --argjson b "${before}" '.startType == $b.startType and .triggers == $b.triggers' <<< "${restored}" > /dev/null; then
+            pass=true
+          fi
+          acl_pass=false
+          user="\\${USERNAME}:"
+          if [[ ${status} -eq 0 && "${acl_folder}" != *"(I)"* ]] &&
+            [[ "$(entries "${acl_folder}" | grep -vF "${user}" | LC_ALL=C sort | paste -sd ';' -)" == \
+              'BUILTIN\Administrators:(OI)(CI)(F);NT AUTHORITY\SYSTEM:(OI)(CI)(F);OWNER RIGHTS:(OI)(CI)(RX)' ]] &&
+            [[ $(entries "${acl_folder}" | grep -cF "${user}") -eq 1 && "${acl_folder}" == *"${user}(OI)(CI)(RX)"* ]] &&
+            [[ "${acl_results}" == *"${user}(OI)(CI)(M)"* && "${acl_work}" == *"${user}(OI)(CI)(M)"* ]] &&
+            [[ "${acl_program}" == *"${user}(I)(RX)"* && "${acl_program}" == *"OWNER RIGHTS:(I)(RX)"* ]] &&
+            [[ "${acl_restored}" == *"(I)"* && "${acl_restored}" != *"OWNER RIGHTS"* ]]; then
+            acl_pass=true
+          fi
+          line=$(jq -nc --argjson image "${image:-null}" --argjson before "${before:-null}" --argjson installed "${installed:-null}" \
+            --argjson restored "${restored:-null}" --argjson pass "${pass}" \
+            '{image: $image, before: $before, installed: $installed, restored: $restored, pass: $pass}')
+          acl_line=$(jq -nc --arg folder "${acl_folder:-}" --arg results "${acl_results:-}" --arg work "${acl_work:-}" \
+            --arg program "${acl_program:-}" --arg restored "${acl_restored:-}" --argjson pass "${acl_pass}" \
+            '{folder: $folder, results: $results, work: $work, program: $program, restored: $restored, pass: $pass}')
+          for notice in "${line}" "${acl_line}"; do
+            escaped="${notice//%/%25}"
+            if (( $(printf '%s' "${escaped}" | LC_ALL=C wc -c) > 3500 )); then
+              echo "w32time: a notice is over 3,500 bytes after escaping" >> "${log}"
+              pass=false
+            fi
+          done
+          printf '%s\n' "${line}" | tools/scripts/annotate.sh w32time 1 notice
+          printf '%s\n' "${acl_line}" | tools/scripts/annotate.sh folder-acl 1 notice
+          if [[ ${pass} != true || ${acl_pass} != true ]]; then
+            {
+              echo "w32time: exit ${status}; want install to leave AUTO_START, RUNNING and no trigger, and uninstall the start type and triggers of before;"
+              echo "and install to protect the release folder, and uninstall to reset it:"
+              echo "${line}"
+              echo "${acl_line}"
+              echo "The desktop's shortcuts:"
+              shopt -s nullglob nocaseglob
+              for shortcut in "$(cygpath -u "${USERPROFILE}")"/Desktop/*.lnk; do
+                echo "${shortcut##*/}"
+              done
+            } >> "${log}"
+            tail -n 60 "${log}" | tools/scripts/annotate.sh w32time 60
+            exit 1
+          fi
+      - name: Show failures as annotations
+        # As in the other jobs, plus testify's Error, Messages, expected and actual
+        # lines: a Windows failure cannot be rerun anywhere else.
+        if: failure()
+        env:
+          OUTCOMES: >-
+            fork-build=${{ steps.fork-build.outcome }}
+            hub-test=${{ steps.hub-test.outcome }}
+            recording-test=${{ steps.recording-test.outcome }}
+            fork-test=${{ steps.fork-test.outcome }}
+        run: |
+          for step in ${OUTCOMES}; do
+            id="${step%%=*}"
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ "${step#*=}" == failure && -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:|\s+(Error|Messages|expected|actual)\s*:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            fi
+          done
+
+  mi1-smoke:
+    # MI1's lab shards in small (R03, Task 7): the first two runs of each kind's shard 1, an
+    # encrypted run and a clear one, with --smoke (the prompt 20 to 40 s after the first beacon,
+    # a cut valid 10 to 60 s after it), the lab workflow's own way (tools/scripts/mi1-lab.sh with
+    # the built binaries): Linux kill9, each encrypted run on an image of its own (G08); Linux
+    # qemu-reset, in a guest under KVM that QMP resets at each cut; Windows kill9. Each run that
+    # counts goes out as a notice and must pass G11. The Linux leg also checks with ffmpeg that
+    # the SEI index of a clear run's last recorded frame is the frame of its band (C15).
+    needs: media
+    name: mi1-smoke ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: linux, runner: ubuntu-24.04, kinds: kill9 qemu-reset}
+          - {os: windows, runner: windows-latest, kinds: kill9}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    env:
+      EXE: ${{ matrix.os == 'windows' && '.exe' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
+      - name: Download media
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-recording-media
+          path: ${{ runner.temp }}/media
+      - name: Prepare the runner
+        # LAB and MEDIA for the steps after it, as bash paths: on Windows a glob does not match
+        # under RUNNER_TEMP's backslashes. On Linux: ffmpeg for the band check (lab tools only,
+        # never shipped), and QEMU, cloud-localds and KVM for the qemu-reset smoke (TST-09),
+        # as the lab's qemu-reset shards get them (tools/scripts/mi1-qemu-setup.sh).
+        id: prepare
+        run: |
+          set -o pipefail
+          tmp="${RUNNER_TEMP}"
+          if [[ "${RUNNER_OS}" == Windows ]]; then
+            tmp=$(cygpath -u "${RUNNER_TEMP}")
+          fi
+          {
+            echo "LAB=${tmp}/lab"
+            echo "MEDIA=${tmp}/media"
+          } >> "${GITHUB_ENV}"
+          if [[ "${RUNNER_OS}" == Linux ]]; then
+            {
+              tools/scripts/mi1-qemu-setup.sh ffmpeg &&
+                ffmpeg -version | sed -n 1p
+            } 2>&1 | tee "${RUNNER_TEMP}/prepare.log"
+          fi
+      - name: Build
+        # As the lab workflow's build job builds them.
+        id: build
+        run: |
+          set -o pipefail
+          {
+            go build -o "${LAB}/" ./hub/cmd/ipcam-hub ./tools/spikes/recording/cmd/recspike \
+              ./tools/spikes/recording/cmd/reccontroller &&
+              (cd hub/third_party/mediamtx && GOWORK=off go build -o "${LAB}/mediamtx${EXE}" .)
+          } 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: Band check
+        # C15: TestMI1_SmokeBandCrossCheck, which fails instead of skipping without ffmpeg.
+        id: band
+        if: ${{ matrix.os == 'linux' }}
+        env:
+          RECSPIKE_REQUIRE_FFMPEG: '1'
+          RECSPIKE_REQUIRE_MEDIAMTX: '1'
+          SPIKE_REQUIRE_MEDIA: '1'
+        run: |
+          set -o pipefail
+          MEDIAMTX_BIN="${LAB}/mediamtx" MEDIAGEN_DIR="${MEDIA}" \
+            go test -count=1 -v -run '^TestMI1_SmokeBandCrossCheck$' ./tools/spikes/recording/mi1/ 2>&1 |
+            tee "${RUNNER_TEMP}/band.log"
+      - name: Smoke runs
+        # Each kind's smoke, one after the other on the same loopback ports; recspike's output
+        # stays as it is, so that its mi1-diag lines start a line.
+        id: smoke
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/smoke.log"
+          status=0
+          for kind in ${{ matrix.kinds }}; do
+            echo "== ${kind}" | tee -a "${log}"
+            tools/scripts/mi1-lab.sh "${LAB}" "${MEDIA}" "${kind}" 1 --smoke 2>&1 | tee -a "${log}" || status=1
+          done
+          exit "${status}"
+      - name: Smoke results
+        # Each kind's runs that count, as the lab sends them (recspike annotate split): one
+        # notice per run, and each must pass G11 (reconciled, HUB-04 clear, nothing unreadable
+        # or torn, every stream's loss under 2 s, as TestMI1_LabKill9Smoke: the smoke streams
+        # are 4 Mbps, and the stored limitMs is never trusted); two must count.
+        id: results
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/results.log"
+          status=0
+          for kind in ${{ matrix.kinds }}; do
+            set="lab-${{ matrix.os }}-${kind}-smoke"
+            lines="${LAB}/lines/${set}"
+            if ! "${LAB}/recspike${EXE}" annotate split "${LAB}/results/MI1/${set}"/*.json --first 1 --out "${lines}" 2>&1 |
+              tee -a "${log}"; then
+              status=1
+              continue
+            fi
+            count=0
+            for line in "${lines}"/*.json; do
+              tools/scripts/annotate.sh "${set}" 1 notice < "${line}"
+              count=$((count + 1))
+              if ! jq -e '.runs[0] | .reconciled and .hub04Clear and .unreadable == 0 and .tornParts == 0 and
+                (.streams | length > 0) and all(.streams[]; .lossMs < 2000)' "${line}" > /dev/null; then
+                echo "${set}: run $(jq -r .runId "${line}") fails G11: $(cat "${line}")" | tee -a "${log}"
+                status=1
+              fi
+            done
+            if [[ ${count} -ne 2 ]]; then
+              echo "${set}: ${count} runs count, want 2" | tee -a "${log}"
+              status=1
+            fi
+          done
+          exit "${status}"
+      - name: Explain the losses over their limit
+        # A run whose stream lost more than its limit printed one "mi1-diag: <json>" line
+        # (Task 7.2d); each goes out as a notice, at most 10, in a step of its own (C32). It
+        # never changes the job's result.
+        if: always()
+        run: |
+          cat "${RUNNER_TEMP}/band.log" "${RUNNER_TEMP}/smoke.log" 2> /dev/null |
+            sed -n 's/^mi1-diag: //p' | head -n 10 | while IFS= read -r line; do
+              printf '%s\n' "${line}" | tools/scripts/annotate.sh mi1-diag 1 notice
+            done || true
+      - name: Show failures as annotations
+        # The failed step's log, testify's lines of a go test first; for the smoke runs, also
+        # the controller's screen and the end of the guest's console.
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            fi
+            if [[ ${id} == smoke ]]; then
+              [[ -f "${LAB}/reccontroller.out" ]] && tail -n 40 "${LAB}/reccontroller.out" | tools/scripts/annotate.sh reccontroller 40
+              console="${LAB}/work/qemu/console.log"
+              [[ -f "${console}" ]] && tail -n 60 "${console}" | tools/scripts/annotate.sh "guest console" 60
+            fi
+          done
+          true
+
+  mi9:
+    # MI9, playback over the data channel (G18, CTR-12, Task 11), its CI legs (G26): ipcam-hub
+    # records a 5-min encrypted segment of main.h264 (mi9page record); the live Go tests play it
+    # over loopback (information only) and relayed through coturn's TLS listener on 443 at 50 ms
+    # round trip (the relay verdict); Google Chrome plays it through MSE (CTR-12's «afișează»).
+    # Each leg prints one "mi9: <json>" line, which goes out as a notice (C32).
+    needs: media
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ipcam
+    env:
+      # The relay's address on the job's own Docker network: coturn's container, and the
+      # bridge's name on the runner, whose veth to the container netem delays.
+      TURN_IP: 172.30.0.2
+      BRIDGE: br-mi9
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
+      # The pnpm version comes from "packageManager" in ipcam/package.json alone.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ipcam/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ipcam/pnpm-lock.yaml
+      - name: Install
+        id: install
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee "${RUNNER_TEMP}/install.log"
+      - name: Download media
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-recording-media
+          path: ${{ runner.temp }}/media
+      - name: Build
+        id: build
+        run: |
+          set -o pipefail
+          {
+            go build -o "${RUNNER_TEMP}/bin/" ./hub/cmd/ipcam-hub ./tools/spikes/recording/cmd/mi9page &&
+              (cd hub/third_party/mediamtx && GOWORK=off go build -o "${RUNNER_TEMP}/bin/mediamtx" .)
+          } 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: Record the segment
+        # The 4 Mbps main.h264 served as cam01_main on 127.0.0.1 and recorded through ipcam-hub
+        # (C01), encrypted for an ephemeral RI_g, into one closed 5-min segment. Its path and
+        # RI_g's identity file go to the steps after it as MI9_SEGMENT and MI9_IDENTITY.
+        id: record
+        run: |
+          set -o pipefail
+          out="${RUNNER_TEMP}/mi9-rec.json"
+          "${RUNNER_TEMP}/bin/mi9page" record -media "${RUNNER_TEMP}/media" -hub "${RUNNER_TEMP}/bin/ipcam-hub" \
+            -mediamtx "${RUNNER_TEMP}/bin/mediamtx" -out "${RUNNER_TEMP}/mi9-rec" 2>&1 > "${out}" |
+            tee "${RUNNER_TEMP}/record.log"
+          segment=$(jq -r .segment "${out}")
+          identity=$(jq -r .identity "${out}")
+          if [[ ! -s "${segment}" || ! -s "${identity}" ]]; then
+            echo "mi9page record printed no segment and identity: $(cat "${out}")" | tee -a "${RUNNER_TEMP}/record.log"
+            exit 1
+          fi
+          echo "segment: $(stat -c %s "${segment}") bytes" | tee -a "${RUNNER_TEMP}/record.log"
+          {
+            echo "MI9_SEGMENT=${segment}"
+            echo "MI9_IDENTITY=${identity}"
+          } >> "${GITHUB_ENV}"
+      - name: Start coturn
+        # G36: coturn 4.18.0, the newest coturn/coturn release at least 14 days old, pinned by
+        # the digest of its image index, as hub.docker.com/v2/repositories/coturn/coturn/tags
+        # gives them (digest, last_updated 2026-09-08); never apt's 4.6.1. It listens for TURN
+        # over TLS on 443 on a Docker network of the job's own, with a self-signed certificate
+        # for its address (and 127.0.0.1, for the TCP proxy of the fallback) and long-term
+        # credentials (--lt-cred-mech) made for this run, and relays between its own
+        # allocations only. MI9_TURN_* go to the steps after it.
+        id: coturn
+        env:
+          COTURN_VERSION: 4.18.0
+          COTURN_DIGEST: sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3
+          COTURN_DATE: '2026-09-08'
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/coturn.log"
+          certs="${RUNNER_TEMP}/turn-certs"
+          pass=$(openssl rand -hex 16)
+          echo "::add-mask::${pass}"
+          {
+            mkdir -p "${certs}" &&
+              openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj /CN=mi9-turn \
+                -addext "subjectAltName=IP:${TURN_IP},IP:127.0.0.1" -keyout "${certs}/turn.key" -out "${certs}/turn.pem" &&
+              # coturn runs as nobody in its container; the key is this run's alone.
+              chmod 755 "${certs}" && chmod 644 "${certs}/turn.key" &&
+              docker network create --subnet 172.30.0.0/24 -o com.docker.network.bridge.name="${BRIDGE}" mi9 &&
+              docker run -d --name coturn --network mi9 --ip "${TURN_IP}" --sysctl net.ipv4.ip_unprivileged_port_start=0 \
+                -v "${certs}:/certs:ro" "coturn/coturn:${COTURN_VERSION}@${COTURN_DIGEST}" \
+                -n --log-file=stdout --lt-cred-mech --realm=mi9.test --user="mi9:${pass}" \
+                --listening-ip="${TURN_IP}" --relay-ip="${TURN_IP}" --tls-listening-port=443 \
+                --cert=/certs/turn.pem --pkey=/certs/turn.key --no-cli --fingerprint \
+                --allowed-peer-ip="${TURN_IP}"
+          } 2>&1 | tee "${log}"
+          # coturn 4.18 starts no DTLS listener unless --dtls is given (its --no-dtls is gone).
+          ready=false
+          for _ in $(seq 30); do
+            if openssl s_client -connect "${TURN_IP}:443" -CAfile "${certs}/turn.pem" -verify_ip "${TURN_IP}" \
+              -verify_return_error < /dev/null > /dev/null 2> "${RUNNER_TEMP}/coturn-probe.log"; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ ${ready} != true ]]; then
+            {
+              echo "coturn: no verified TLS handshake on 443 in 30 s; the last attempt:"
+              tail -n 5 "${RUNNER_TEMP}/coturn-probe.log"
+              docker ps -a --filter name=coturn --format '{{.Status}}'
+            } | tee -a "${log}"
+            exit 1
+          fi
+          jq -nc --arg v "${COTURN_VERSION}" --arg d "${COTURN_DIGEST}" --arg t "${COTURN_DATE}" \
+            '{coturn: $v, digest: $d, lastUpdated: $t, listener: "TLS/443", auth: "lt-cred-mech"}' |
+            tools/scripts/annotate.sh coturn 1 notice
+          {
+            echo "MI9_TURN_URL=turns:${TURN_IP}:443?transport=tcp"
+            echo "MI9_TURN_USER=mi9"
+            echo "MI9_TURN_PASS=${pass}"
+            echo "MI9_TURN_CA=${certs}/turn.pem"
+          } >> "${GITHUB_ENV}"
+      - name: Delay the relay by 25 ms
+        # R06: netem delays the traffic from the runner into coturn's container by 25 ms, on the
+        # egress of the veth's runner end only. Each direction of the relayed path between two
+        # peers crosses it once, so the round trip is 50 ms (on both ends it would be 100). It
+        # installs linux-modules-extra for sch_netem if needed. Without netem,
+        # TestMeasureBulk_Coturn443 puts a TCP proxy that delays by 25 ms in front of coturn
+        # instead (MI9_TURN_DELAY=proxy). Which one goes out as a notice.
+        id: netem
+        run: |
+          log="${RUNNER_TEMP}/netem.log"
+          veth=$(ip -o link show master "${BRIDGE}" | awk -F': ' '{print $2}' | cut -d@ -f1 | head -n 1)
+          status=0
+          {
+            echo "veth: ${veth}"
+            [[ -n "${veth}" ]] &&
+              {
+                sudo modprobe sch_netem ||
+                  {
+                    sudo apt-get update &&
+                      sudo apt-get install --yes --no-install-recommends "linux-modules-extra-$(uname -r)" &&
+                      sudo modprobe sch_netem
+                  }
+              } &&
+              sudo tc qdisc add dev "${veth}" root netem delay 25ms &&
+              tc qdisc show dev "${veth}" | tee "${RUNNER_TEMP}/netem.qdisc"
+          } >> "${log}" 2>&1 || status=$?
+          delay=proxy
+          if [[ ${status} -eq 0 ]] && grep -q 'netem.*delay 25ms' "${RUNNER_TEMP}/netem.qdisc"; then
+            delay=netem
+          fi
+          cat "${log}"
+          echo "MI9_TURN_DELAY=${delay}" >> "${GITHUB_ENV}"
+          jq -nc --arg d "${delay}" --argjson s "${status}" '{delay: $d, oneWayMs: 25, netemProbe: (if $s == 0 then "ok" else "failed" end)}' |
+            tools/scripts/annotate.sh netem 1 notice
+      - name: Live Go tests
+        # G26 leg 1: TestMeasureBulk_LiveLoopback over host candidates on the runner (information
+        # only) and TestMeasureBulk_Coturn443, the relay verdict's leg, which fails when the
+        # measured round trip is outside 45–60 ms. Each prints one "mi9: <envelope json>" line,
+        # which goes out as a notice even when a test fails; the relay's round trip goes out as a
+        # notice of its own, and the step checks its range too. A step keeps at most 10 notices
+        # (C32), so at most 9 mi9 lines go out beside the RTT notice: those that decide verdicts
+        # first, ci-relay's, then ci-loopback's.
+        id: go-live
+        if: ${{ !cancelled() && steps.record.outcome == 'success' && steps.coturn.outcome == 'success' }}
+        env:
+          MI9_REQUIRE_TURN: '1'
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/go-live.log"
+          status=0
+          go test -count=1 -timeout 30m -v -run '^(TestMeasureBulk_LiveLoopback|TestMeasureBulk_Coturn443)$' \
+            ./tools/spikes/recording/mi9/ 2>&1 | tee "${log}" || status=$?
+          sed -n 's/^mi9: //p' "${log}" |
+            jq -Rrs 'def rank: (try (fromjson | .set) catch null) as $s | ["ci-relay", "ci-loopback"] | index($s) // 2;
+              split("\n") | map(select(length > 0)) | sort_by(rank) | .[:9][]' |
+            while IFS= read -r line; do
+              printf '%s\n' "${line}" | tools/scripts/annotate.sh mi9 1 notice
+            done || true
+          relay=$(sed -n 's/^mi9: //p' "${log}" | jq -c 'select(.set == "ci-relay") | .mi9.legs[0]' 2> /dev/null | head -n 1) || true
+          if [[ -z "${relay}" ]]; then
+            echo "mi9: the relay test printed no ci-relay line" | tee -a "${log}"
+            exit 1
+          fi
+          rtt=$(jq -r .rttMs <<< "${relay}")
+          jq -nc --argjson r "${rtt}" --arg d "${MI9_TURN_DELAY}" '{relayRttMs: $r, delay: $d, wantMs: [45, 60]}' |
+            tools/scripts/annotate.sh 'mi9 relay RTT' 1 notice
+          if ! jq -e '.rttMs >= 45 and .rttMs <= 60' <<< "${relay}" > /dev/null; then
+            echo "mi9: the relay's round trip is ${rtt} ms, want 45–60 ms" | tee -a "${log}"
+            status=1
+          fi
+          exit "${status}"
+      - name: Chrome
+        # G26 leg 2: mi9page serves the page and its hub side on 127.0.0.1; the spec plays the
+        # segment in Google Chrome (installed on the runner, with H.264) over bulk/<id> channels
+        # into MSE, and times the first requestVideoFrameCallback after each of 20 seeks
+        # (CTR-12's «afișează»). Its "mi9: {"transport":"chrome",…}" line goes out as a notice;
+        # the step fails without it.
+        id: chrome
+        if: ${{ !cancelled() && steps.record.outcome == 'success' && steps.install.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/chrome.log"
+          page=http://127.0.0.1:7090/
+          "${RUNNER_TEMP}/bin/mi9page" serve -segment "${MI9_SEGMENT}" -identity "${MI9_IDENTITY}" -listen 127.0.0.1:7090 \
+            > "${RUNNER_TEMP}/mi9page.log" 2>&1 &
+          server=$!
+          for _ in $(seq 30); do
+            curl -fsS -o /dev/null "${page}" 2> /dev/null && break
+            sleep 1
+          done
+          google-chrome --version | tee "${log}"
+          status=0
+          MI9_PAGE="${page}" pnpm --filter spike-video-e2e exec playwright test mi9.spec.ts --project chrome 2>&1 |
+            tee -a "${log}" || status=$?
+          kill "${server}" 2> /dev/null || true
+          sed -n 's/^mi9: //p' "${log}" | head -n 10 | while IFS= read -r line; do
+            printf '%s\n' "${line}" | tools/scripts/annotate.sh mi9 1 notice
+          done || true
+          if ! grep -q '^mi9: {"transport":"chrome"' "${log}"; then
+            echo 'mi9: the spec printed no mi9: {"transport":"chrome",…} line' | tee -a "${log}"
+            exit 1
+          fi
+          exit "${status}"
+      - name: Show failures as annotations
+        # The failed step's log, a go test's failure lines first; then the logs of what that
+        # step ran: ipcam-hub's for the recording, coturn's (its start, where a bad option is
+        # named, and its end) for coturn and the relay, mi9page's for Chrome.
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
+              grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+                tools/scripts/annotate.sh "${id}" 60
+            else
+              tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            fi
+          done
+          failed() { jq -e --arg id "$1" '.[$id].outcome == "failure"' <<< "${STEPS}" > /dev/null; }
+          if failed record && [[ -f "${RUNNER_TEMP}/mi9-rec/ipcam-hub.log" ]]; then
+            tail -n 40 "${RUNNER_TEMP}/mi9-rec/ipcam-hub.log" | tools/scripts/annotate.sh 'ipcam-hub log' 40
+          fi
+          if { failed coturn || failed go-live; } && docker container inspect coturn > /dev/null 2>&1; then
+            {
+              docker logs coturn 2>&1 | head -n 30
+              echo '…'
+              docker logs coturn 2>&1 | tail -n 30
+            } | tools/scripts/annotate.sh 'coturn log' 61
+          fi
+          if failed chrome && [[ -f "${RUNNER_TEMP}/mi9page.log" ]]; then
+            tail -n 40 "${RUNNER_TEMP}/mi9page.log" | tools/scripts/annotate.sh 'mi9page log' 40
+          fi
+          true

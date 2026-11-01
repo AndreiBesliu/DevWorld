@@ -1,0 +1,1 @@
+{"schema":"ipcam.phase0c1.result/1","code":"MI9","runId":"pc-mi9-1","set":"lan","host":"pc","os":"windows","storage":"ssd","runs":null,"mi9":{"legs":[{"transport":"lan","throughputMbps":92.4,"seekMs":[180,180,180,180,180,180,180,180,180,180,180,180,180,180,180,180,180,180,180,180],"rttMs":1.2,"source":"lan"}]}}

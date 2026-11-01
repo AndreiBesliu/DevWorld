@@ -1,0 +1,4 @@
+24 1 259:2 / / rw,noatime shared:1 - ext4 /dev/nvme0n1p2 rw
+25 24 0:5 / /dev rw,relatime shared:2 - devtmpfs udev rw,size=3995652k,nr_inodes=998913,mode=755
+33 24 259:1 / /boot/firmware rw,relatime shared:17 - vfat /dev/nvme0n1p1 rw,fmask=0022,dmask=0022
+34 24 0:30 / /tmp rw,nosuid,nodev shared:18 - tmpfs tmpfs rw,size=4046360k

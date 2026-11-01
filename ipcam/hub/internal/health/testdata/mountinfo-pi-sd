@@ -1,0 +1,10 @@
+22 1 179:2 / / rw,noatime shared:1 - ext4 /dev/mmcblk0p2 rw
+23 22 0:5 / /dev rw,relatime shared:2 - devtmpfs udev rw,size=1801440k,nr_inodes=450360,mode=755
+24 22 0:22 / /proc rw,relatime shared:12 - proc proc rw
+25 22 0:23 / /sys rw,nosuid,nodev,noexec,relatime shared:7 - sysfs sysfs rw
+26 22 0:24 / /run rw,nosuid,nodev,noexec,relatime shared:5 - tmpfs tmpfs rw,size=777000k,mode=755
+31 22 179:1 / /boot/firmware rw,relatime shared:17 - vfat /dev/mmcblk0p1 rw,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,shortname=mixed,errors=remount-ro
+40 22 8:1 / /mnt/ssd rw,relatime shared:25 - ext4 /dev/sda1 rw
+41 22 8:1 /ipcam /srv/ipcam rw,relatime shared:25 - ext4 /dev/sda1 rw
+42 40 179:2 /home/pi/card /mnt/ssd/card rw,noatime shared:1 - ext4 /dev/mmcblk0p2 rw
+43 22 259:2 / /mnt/my\040disk rw,relatime shared:26 - ext4 /dev/nvme0n1p2 rw

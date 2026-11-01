@@ -13,6 +13,8 @@ on:
       - 'ipcam/tools/spikes/video/e2e/**'
       # The spike app's band tests read the shared test vectors.
       - 'ipcam/tools/spikes/video/band/vectors.json'
+      # @ipcam/core's agerange tests read the Go golden files and the CCTV vectors there.
+      - 'ipcam/hub/internal/crypto/testdata/**'
       # The Android metrics plugin's TypeScript is typechecked and linted here.
       - 'ipcam/tools/spikes/video/android-metrics/**'
       # The native line counter; its test is in ipcam/apps/mobile/test.
@@ -31,6 +33,8 @@ on:
       - 'ipcam/tools/spikes/video/e2e/**'
       # The spike app's band tests read the shared test vectors.
       - 'ipcam/tools/spikes/video/band/vectors.json'
+      # @ipcam/core's agerange tests read the Go golden files and the CCTV vectors there.
+      - 'ipcam/hub/internal/crypto/testdata/**'
       # The Android metrics plugin's TypeScript is typechecked and linted here.
       - 'ipcam/tools/spikes/video/android-metrics/**'
       # The native line counter; its test is in ipcam/apps/mobile/test.

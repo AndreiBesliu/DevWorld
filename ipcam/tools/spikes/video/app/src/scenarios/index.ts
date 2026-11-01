@@ -1,5 +1,6 @@
 // The scenarios by id, and the entry point that runs one.
 import type { ScenarioId, ScenarioResult } from '../results';
+import { AGE } from './age';
 import type { ScenarioEnv } from './context';
 import { runDefinition, type ScenarioDefinition } from './runner';
 import { S1 } from './s1';
@@ -26,6 +27,7 @@ export const SCENARIOS: Record<ScenarioId, ScenarioDefinition> = {
   S8,
   S9,
   S10,
+  AGE,
 };
 
 /** Runs scenario `id`; see runDefinition. */
