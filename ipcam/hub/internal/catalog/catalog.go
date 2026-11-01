@@ -16,7 +16,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite" // the database/sql driver "sqlite"
@@ -190,6 +193,61 @@ func OpenWith(ctx context.Context, path string, opts Options) (*DB, error) {
 		return nil, fmt.Errorf("catalog: %s: %w", path, err)
 	}
 	return db, nil
+}
+
+// OpenReadOnly opens the catalog at path read-only (diag scan-secrets, P45):
+// SQLite's mode=ro with the busy timeout, no journal_mode pragma and no
+// migration, so it never takes the write lock, and never waits behind the
+// hub's (Open's migration would: its DSN begins every transaction
+// immediate). It refuses a missing catalog, which it never creates, and one
+// whose schema version is not this hub's. While the hub runs, a read-only
+// open of its WAL catalog creates no file; on a closed one SQLite creates
+// the -wal and -shm files it needs, which on Linux, run as root, it gives to
+// the database file's owner (os_unix.c robustFchown), and leaves them.
+func OpenReadOnly(ctx context.Context, path string) (*DB, error) {
+	return openExisting(ctx, path, "ro")
+}
+
+// OpenExisting opens the catalog at path read-write as Open does, but only
+// when it exists with this hub's schema version: it creates nothing and
+// migrates nothing, so it never takes the write lock to open, and writes
+// only what its caller writes, in short transactions. diag visibility uses
+// it beside a running hub: it stores a rotated refresh token (SwapSecret)
+// and its probe file's remote IDs (PutFolder).
+func OpenExisting(ctx context.Context, path string) (*DB, error) {
+	return openExisting(ctx, path, "rw")
+}
+
+// openExisting opens the existing catalog at path in SQLite's mode (ro or
+// rw, which never creates the file) through a file: URI, so that a space, a
+// '?' or a '#' in the path stays a file name.
+func openExisting(ctx context.Context, path, mode string) (*DB, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: open %s: %w", path, err)
+	}
+	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}
+	if !strings.HasPrefix(uri.Path, "/") {
+		uri.Path = "/" + uri.Path // a Windows path: file:///C:/…
+	}
+	query := "mode=" + mode + "&_pragma=busy_timeout(10000)"
+	if mode == "rw" {
+		query += "&_pragma=synchronous(FULL)&_txlock=immediate"
+	}
+	sdb, err := sql.Open("sqlite", uri.String()+"?"+query)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: open %s: %w", path, err)
+	}
+	var version int
+	if err := sdb.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		_ = sdb.Close()
+		return nil, fmt.Errorf("catalog: %s: %w", path, err)
+	}
+	if version != len(migrations) {
+		_ = sdb.Close()
+		return nil, fmt.Errorf("catalog: %s: the catalog's schema version %d is not this hub's %d", path, version, len(migrations))
+	}
+	return &DB{sql: sdb}, nil
 }
 
 func (db *DB) migrate(ctx context.Context) error {

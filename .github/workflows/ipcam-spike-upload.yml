@@ -83,7 +83,7 @@ jobs:
       # trees under ./hub with hub/.golangci.yml and the others with the upload spike's.
       # ipcam-hub's process tests that need the fork or the media skip here: c1's
       # ipcam-spike-recording runs them, c2's included, with both (Task 7b).
-      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/...
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/... ./hub/internal/crypto/...
     defaults:
       run:
         working-directory: ipcam
@@ -186,11 +186,12 @@ jobs:
     # checkout here), without -race, which needs a C compiler there; the upload job runs
     # the tests with it. Then the S4U smoke (P49): ci/s4u-run.ps1 runs whoami.exe in a
     # temporary Task Scheduler task with an S4U logon, the logon of uploadspike's
-    # autostart, where Task 9 unseals a token.
+    # autostart, and the sealer's round trip in it: sealed in a normal step, unsealed in the S4U
+    # task (Task 9).
     runs-on: windows-latest
     timeout-minutes: 30
     env:
-      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/...
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/... ./hub/internal/crypto/...
     defaults:
       run:
         working-directory: ipcam
@@ -254,6 +255,32 @@ jobs:
           echo "ping -n 30 127.0.0.1 with -TimeoutSec 2 in the S4U task: s4u-run.ps1 exited ${status}, want 124" |
             tee -a "${log}"
           [[ ${status} -eq 124 ]] || exit 1
+      - name: S4U seal round trip
+        # P49, P19: the machine-scope DPAPI sealer seals in this normal step and unseals inside
+        # an S4U task, the logon of uploadspike's autostart. The -Arguments value starts with
+        # '-', which pwsh -File would take for a parameter name, so it is bound with the colon
+        # form, -Arguments:<value>, as one argument.
+        id: s4u-seal
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/s4u-seal.log"
+          exe="${RUNNER_TEMP}/bin/crypto.test.exe"
+          blob="${RUNNER_TEMP}/sealed.bin"
+          out="${RUNNER_TEMP}/s4u-unseal.txt"
+          {
+            go test -c -o "${exe}" ./hub/internal/crypto &&
+              "${exe}" -test.run '^TestSealer_SealToFile$' -test.v -sealer-blob "${blob}"
+          } 2>&1 | tee "${log}"
+          status=0
+          pwsh -File tools/spikes/upload/ci/s4u-run.ps1 -Exe "${exe}" \
+            "-Arguments:-test.run ^TestSealer_UnsealFromFile\$ -test.v -sealer-blob ${blob}" -Out "${out}" 2>&1 |
+            tee -a "${log}" || status=$?
+          echo "s4u-run.ps1 exited ${status}; the S4U task printed:" | tee -a "${log}"
+          cat "${out}" 2> /dev/null | tee -a "${log}"
+          if [[ ${status} -ne 0 ]] || ! grep -qF -- '--- PASS: TestSealer_UnsealFromFile' "${out}"; then
+            echo "S4U seal round trip: want exit 0 and '--- PASS: TestSealer_UnsealFromFile' in the S4U output" | tee -a "${log}"
+            exit 1
+          fi
       - name: Show failures as annotations
         if: failure()
         env:
