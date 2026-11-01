@@ -820,11 +820,17 @@ func TestCatalog_DuePlacementsOrder(t *testing.T) {
 	if got := objectIDs(due); !slices.Equal(got, want) {
 		t.Errorf("DuePlacements order %q, want %q", got, want)
 	}
+	// Each row carries its segment's stream and start (Task 7b review M4).
+	if p := due[0]; p.Cam != "c1" || p.Profile != "main" || p.StartMs != at("10:01") {
+		t.Errorf("DuePlacements' first row %+v, want the stream c1/main and the start of clip-early", p)
+	}
 	if due, err := db.DuePlacements(ctx, now, []string{"dst-a"}, 2); err != nil || !slices.Equal(objectIDs(due), want[:2]) {
 		t.Errorf("DuePlacements with limit 2 = %q, %v; want %q", objectIDs(due), err, want[:2])
 	}
 	if lostDue, err := db.LostPlacements(ctx, now, []string{"dst-a"}); err != nil || !slices.Equal(objectIDs(lostDue), []string{lost}) {
 		t.Errorf("LostPlacements = %q, %v; want only the lost segment's", objectIDs(lostDue), err)
+	} else if p := lostDue[0]; p.Cam != "c1" || p.Profile != "main" || p.StartMs != at("08:00") {
+		t.Errorf("LostPlacements' row %+v, want the stream c1/main and the lost segment's start", p)
 	}
 	if seg, err := db.SegmentByID(ctx, clipEarly); err != nil || seg.Path != "c1/main/d/clip-early.mp4" || seg.StartMs != at("10:01") {
 		t.Errorf("SegmentByID = %+v, %v", seg, err)

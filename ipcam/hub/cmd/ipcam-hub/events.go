@@ -1,11 +1,9 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
@@ -158,7 +156,15 @@ func (o *observer) Gap(g catalog.Gap) {
 }
 
 func (o *observer) Error(err error) {
-	o.ev.emit("error", map[string]any{"message": err.Error()})
+	o.errorEvent(err)
+	o.cardError(err)
+}
+
+// errorEvent emits err as an error event.
+func (o *observer) errorEvent(err error) { o.ev.emit("error", map[string]any{"message": err.Error()}) }
+
+// cardError gives err to the card monitor, while rec/ is on an SD card.
+func (o *observer) cardError(err error) {
 	if o.card != nil {
 		o.card.hubError(err)
 	}
@@ -166,34 +172,43 @@ func (o *observer) Error(err error) {
 
 // uploadEvents turns what the outbox reports into the uploads' events
 // (outbox.Observer); the outbox writes nothing to stderr itself. Its local
-// errors go through obs.Error, so the card monitor counts an I/O error of
+// errors go through the observer, so the card monitor counts an I/O error of
 // the spool or the catalog.
 type uploadEvents struct {
 	ev  *events
 	obs *observer
-	cat *catalog.DB // the queued placements' segments
+	// mu orders the events against the stop: an event is emitted with mu
+	// held, and stop takes mu, so once stop has returned no event goes out.
+	mu sync.Mutex
 	// stopped is set once the uploads stopped on a failed card: nothing more
 	// goes out.
-	stopped atomic.Bool
+	stopped bool
 }
 
 var _ outbox.Observer = (*uploadEvents)(nil)
 
+// stop makes every later event a no-op. The card sampler calls it at the
+// FAILED transition, before the card's failed event (g2-04): an event
+// already on its way goes out before that one.
+func (u *uploadEvents) stop() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.stopped = true
+}
+
 func (u *uploadEvents) emit(typ string, fields map[string]any) {
-	if !u.stopped.Load() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if !u.stopped {
 		u.ev.emit(typ, fields)
 	}
 }
 
 // Queued emits upload_queued with the stream and the start of p's segment,
-// which the catalog holds; a segment it cannot read leaves them out, and
-// the worker's own read reports the catalog's error.
+// which the queue read with p (Task 7b review M4).
 func (u *uploadEvents) Queued(p catalog.Placement) {
-	fields := map[string]any{"placementId": p.ID, "dest": p.DestinationID, "class": p.Class, "bytes": p.Bytes}
-	if s, err := u.cat.SegmentByID(context.Background(), p.ObjectID); err == nil {
-		fields["cam"], fields["profile"], fields["startMs"] = s.Cam, s.Profile, s.StartMs
-	}
-	u.emit("upload_queued", fields)
+	u.emit("upload_queued", map[string]any{"placementId": p.ID, "cam": p.Cam, "profile": p.Profile, "startMs": p.StartMs,
+		"dest": p.DestinationID, "class": p.Class, "bytes": p.Bytes})
 }
 
 func (u *uploadEvents) Resumed(p catalog.Placement, offset int64) {
@@ -220,8 +235,17 @@ func (u *uploadEvents) DestState(destID string, s outbox.DestState, alert string
 	u.emit("dest_state", map[string]any{"dest": destID, "state": s, "alert": alert})
 }
 
+// LocalError emits err as an error event, then gives it to the card monitor
+// outside u.mu: the monitor may reach FAILED there, and its hook, stop,
+// takes u.mu.
 func (u *uploadEvents) LocalError(err error) {
-	if !u.stopped.Load() {
-		u.obs.Error(err)
+	u.mu.Lock()
+	stopped := u.stopped
+	if !stopped {
+		u.obs.errorEvent(err)
+	}
+	u.mu.Unlock()
+	if !stopped {
+		u.obs.cardError(err)
 	}
 }

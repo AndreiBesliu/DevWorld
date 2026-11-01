@@ -99,6 +99,10 @@ type cardSampler struct {
 	stalled int
 	// ended is set once run has returned: nothing goes out after.
 	ended bool
+
+	// onFailed runs at the FAILED transition, before the card's failed event
+	// goes out (onFailedRun).
+	onFailed []func()
 }
 
 func newCardSampler(recDir, mountInfo string, ev *events) *cardSampler {
@@ -122,6 +126,21 @@ func (s *cardSampler) begin() {
 // failedC is closed once the card has failed: the uploads stop then
 // (g2-04).
 func (s *cardSampler) failedC() <-chan struct{} { return s.failed }
+
+// onFailedRun makes fn run at the card's FAILED transition, before the
+// card's failed event goes out, or now when the card has failed already.
+// It runs with the sampler's lock held, so it must not call the sampler.
+// The uploads set their stop flag there, so no upload event follows the
+// card's failed event (Task 7b review M2).
+func (s *cardSampler) onFailedRun(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == health.CardFailed {
+		fn()
+		return
+	}
+	s.onFailed = append(s.onFailed, fn)
+}
 
 // attach gives the sampler the recorder, which a failed write and a failed
 // card go to.
@@ -323,6 +342,11 @@ func (s *cardSampler) observe(ev health.IoEvent) {
 	state, raised := s.mon.Observe(ev, s.now())
 	if state != s.state {
 		s.state = state
+		if state == health.CardFailed {
+			for _, fn := range s.onFailed {
+				fn()
+			}
+		}
 		s.ev.emit("card", map[string]any{"state": state.String()})
 		if state == health.CardFailed {
 			close(s.failed) // FAILED lasts: this happens once

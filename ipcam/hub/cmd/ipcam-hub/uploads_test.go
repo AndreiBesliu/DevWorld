@@ -153,8 +153,10 @@ func readHubIDFile(t *testing.T, dataDir string) string {
 // field, an unknown kind, a route to an unknown destination, a duplicate
 // destination id, a partSize without baseUrl, a partSize off the driver's
 // alignment or over OneDrive's largest request, a LOCAL destination with a
-// partSize, a baseUrl or an uploadBaseUrl, or a folder that is not absolute,
-// a cloud destination with no tokenRef, a route of an unknown class and a
+// partSize, a baseUrl, an uploadBaseUrl or a tokenRef, or a folder that is
+// not absolute, a OneDrive destination with an uploadBaseUrl or a folder
+// (fix round 1's concern 2: each kind takes only its own fields), a cloud
+// destination with no tokenRef, a route of an unknown class and a
 // route whose non-zero untilMs is not after its fromMs. diag uploads, which
 // reads the same section, refuses it alike, and neither makes the data
 // directory or the LOCAL folder. A route from fromMs on with no end is valid.
@@ -197,10 +199,10 @@ func TestRun_UploadsSection_Validates(t *testing.T) {
 			d["baseUrl"], d["partSize"] = "http://127.0.0.1:1", 1000
 		})}, route(nil))},
 		{"a OneDrive partSize off the alignment", "partSize 524288 is not a positive multiple of 327680", uploads([]any{drive(func(d map[string]any) {
-			d["kind"], d["baseUrl"], d["partSize"] = "ONEDRIVE_PERSONAL", "http://127.0.0.1:1", 512<<10
+			d["kind"], d["folder"], d["baseUrl"], d["partSize"] = "ONEDRIVE_PERSONAL", "", "http://127.0.0.1:1", 512<<10
 		})}, route(nil))},
 		{"a OneDrive partSize over its largest request", "partSize 62914560 is over the driver's largest request, 62914559 bytes", uploads([]any{drive(func(d map[string]any) {
-			d["kind"], d["baseUrl"], d["partSize"] = "ONEDRIVE_PERSONAL", "http://127.0.0.1:1", 192*(320<<10)
+			d["kind"], d["folder"], d["baseUrl"], d["partSize"] = "ONEDRIVE_PERSONAL", "", "http://127.0.0.1:1", 192*(320<<10)
 		})}, route(nil))},
 		{"a LOCAL partSize", "a LOCAL destination takes no partSize", uploads([]any{localDest(func(d map[string]any) {
 			d["baseUrl"], d["partSize"] = "http://127.0.0.1:1", 512<<10
@@ -215,6 +217,15 @@ func TestRun_UploadsSection_Validates(t *testing.T) {
 			d["folder"] = "rel/dir"
 		})}, route(nil))},
 		{"a cloud destination with no tokenRef", "no tokenRef", uploads([]any{drive(func(d map[string]any) { d["tokenRef"] = "" })}, route(nil))},
+		{"a LOCAL tokenRef", "a LOCAL destination takes no tokenRef", uploads([]any{localDest(func(d map[string]any) {
+			d["tokenRef"] = "dst-1"
+		})}, route(nil))},
+		{"a OneDrive uploadBaseUrl", "a ONEDRIVE_PERSONAL destination takes no uploadBaseUrl", uploads([]any{drive(func(d map[string]any) {
+			d["kind"], d["folder"], d["baseUrl"], d["uploadBaseUrl"] = "ONEDRIVE_PERSONAL", "", "http://127.0.0.1:1", "http://127.0.0.1:2"
+		})}, route(nil))},
+		{"a OneDrive folder", "a ONEDRIVE_PERSONAL destination takes no folder", uploads([]any{drive(func(d map[string]any) {
+			d["kind"] = "ONEDRIVE_PERSONAL"
+		})}, route(nil))},
 		{"a route of an unknown class", `unknown class "BOGUS"`, uploads([]any{drive(nil)}, route(func(r map[string]any) { r["class"] = "BOGUS" }))},
 		{"a route whose untilMs is not after its fromMs", "untilMs 5000 is not after its fromMs 5000", uploads([]any{drive(nil)}, route(func(r map[string]any) {
 			r["fromMs"], r["untilMs"] = 5000, 5000
@@ -258,7 +269,7 @@ func TestRun_UploadsSection_Validates(t *testing.T) {
 					d["id"], d["baseUrl"], d["uploadBaseUrl"], d["partSize"] = "dst-g", "http://127.0.0.1:1", "http://127.0.0.1:2", 256<<10
 				}),
 				drive(func(d map[string]any) {
-					d["id"], d["kind"], d["baseUrl"], d["partSize"] = "dst-o", "ONEDRIVE_PERSONAL", "http://127.0.0.1:1", 191*(320<<10)
+					d["id"], d["kind"], d["folder"], d["baseUrl"], d["partSize"] = "dst-o", "ONEDRIVE_PERSONAL", "", "http://127.0.0.1:1", 191*(320<<10)
 				}),
 			}, route(func(r map[string]any) { r["destinations"] = []string{"dst-l", "dst-g", "dst-o"} }))})
 		if _, _, _, err := loadRunConfig(config); err != nil {
@@ -361,6 +372,7 @@ func sameKeys(a, b map[string]bool) bool {
 // finalised file, its SHA-256 verified. A clear job: C1-R9 rewrites only
 // encrypted files.
 func TestRun_TornSegmentFinalisedAtStartupIsUploaded(t *testing.T) {
+	requireLocalRoom(t)
 	dir := t.TempDir()
 	dataDir, root := filepath.Join(dir, "data"), filepath.Join(dir, "local")
 	start := time.Now().Add(-time.Hour)
@@ -606,6 +618,7 @@ func TestRun_StopDuringUploadEmitsNoError(t *testing.T) {
 // with an I/O error, as on a dying card, until FAILED; then they would
 // succeed.
 func TestRun_CardFailedStopsUploads(t *testing.T) {
+	requireLocalRoom(t)
 	var catalogPath, fakeOut string
 	h, _ := sdCardHubWith(t, "eio-on-signal:3", false, func(dataDir, out string, config map[string]any) {
 		fakeOut, catalogPath = out, filepath.Join(dataDir, "state", "catalog.db")
@@ -719,6 +732,7 @@ func placementRows(t *testing.T, db *sql.DB) []string {
 // segment's bytes. The test waits for the first two segments' upload_verified,
 // then stops; the segments that close during the stop do not count.
 func TestRun_SegmentClosedIsUploadedToLocalDest(t *testing.T) {
+	requireLocalRoom(t)
 	bin := rtsptest.MediaMTX(t)
 	srv := rtsptest.Start(t, rtsptest.MainH264(t))
 	dir := t.TempDir()

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -118,4 +120,39 @@ func mustAtoi(t *testing.T, s string) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// TestDiagReach_ResolverTimeoutIsTimeout (Task 7b review M7): a resolution
+// that times out, as when the WAN block also blocks DNS, or whose context
+// is done, is a timeout, not no-address, which means a family the host
+// lacks; a name that resolves to nothing stays no-address.
+func TestDiagReach_ResolverTimeoutIsTimeout(t *testing.T) {
+	was := lookupNetIP
+	t.Cleanup(func() { lookupNetIP = was })
+	probe := reachProbe{target: targetProvider, host: "provider.example", family: "v4", port: 443}
+	for _, tc := range []struct {
+		name, want string
+		lookup     func(context.Context, string, string) ([]netip.Addr, error)
+	}{
+		{"a resolver timeout", reachTimedOut, func(context.Context, string, string) ([]netip.Addr, error) {
+			return nil, &net.DNSError{Err: "i/o timeout", Name: "provider.example", IsTimeout: true}
+		}},
+		{"a context that ends", reachTimedOut, func(ctx context.Context, _, _ string) ([]netip.Addr, error) {
+			<-ctx.Done()
+			return nil, &net.DNSError{Err: ctx.Err().Error(), Name: "provider.example"}
+		}},
+		{"no address of the family", reachNoAddress, func(context.Context, string, string) ([]netip.Addr, error) {
+			return nil, &net.DNSError{Err: "no such host", Name: "provider.example", IsNotFound: true}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lookupNetIP = tc.lookup
+			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			defer cancel()
+			line := probe.run(ctx)
+			if line.Err != tc.want || !line.Blocked || line.OK {
+				t.Errorf("line %+v, want err %q, blocked", line, tc.want)
+			}
+		})
+	}
 }

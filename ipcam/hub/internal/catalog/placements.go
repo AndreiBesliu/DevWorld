@@ -45,6 +45,12 @@ type Placement struct {
 	Bytes                                                   int64
 	Attempts                                                int
 	NextAttemptAtMs                                         int64
+	// Cam, Profile and StartMs are its segment's stream and start, which
+	// DuePlacements and LostPlacements read with the row, so the queue's
+	// upload_queued event needs no second read (Task 7b review M4). The
+	// other reads leave them zero, and no write takes them.
+	Cam, Profile string
+	StartMs      int64
 }
 
 // ErrStalePlacement means the placement row changed since the worker read
@@ -60,6 +66,18 @@ func scanPlacement(row rowScanner) (Placement, error) {
 	var p Placement
 	err := row.Scan(&p.ID, &p.ObjectKind, &p.ObjectID, &p.DestinationID, &p.Class, &p.RuleIDs, &p.Encrypt, &p.RetainUntilMs,
 		&p.State, &p.RemoteRef, &p.RemoteHash, &p.Bytes, &p.Attempts, &p.NextAttemptAtMs)
+	return p, err
+}
+
+// streamColumns are the columns of the segment under the alias s that
+// scanPlacementStream reads after placementColumns.
+const streamColumns = `s.camera_id, s.profile, s.start_ms`
+
+// scanPlacementStream reads placementColumns, then streamColumns.
+func scanPlacementStream(row rowScanner) (Placement, error) {
+	var p Placement
+	err := row.Scan(&p.ID, &p.ObjectKind, &p.ObjectID, &p.DestinationID, &p.Class, &p.RuleIDs, &p.Encrypt, &p.RetainUntilMs,
+		&p.State, &p.RemoteRef, &p.RemoteHash, &p.Bytes, &p.Attempts, &p.NextAttemptAtMs, &p.Cam, &p.Profile, &p.StartMs)
 	return p, err
 }
 
@@ -139,7 +157,7 @@ func (db *DB) duePlacements(ctx context.Context, segState string, nowMs int64, d
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.sql.QueryContext(ctx, `SELECT `+placementColumns+` FROM placements p JOIN segments s ON p.object_id = s.id
+	rows, err := db.sql.QueryContext(ctx, `SELECT `+placementColumns+`, `+streamColumns+` FROM placements p JOIN segments s ON p.object_id = s.id
 		WHERE p.object_kind = 'segment' AND s.local_state = ? AND p.destination_id IN (SELECT value FROM json_each(?))
 			AND ((p.state = 'pending' AND p.next_attempt_at_ms <= ?) OR (p.state = 'failed' AND p.next_attempt_at_ms BETWEEN 1 AND ?))
 		ORDER BY CASE p.class WHEN 'EVENT_CLIP' THEN 0 WHEN 'THUMBNAIL' THEN 0 WHEN 'CONTINUOUS' THEN 1 ELSE 2 END, s.start_ms, p.id
@@ -147,7 +165,7 @@ func (db *DB) duePlacements(ctx context.Context, segState string, nowMs int64, d
 	if err != nil {
 		return nil, fmt.Errorf("catalog: list the due placements: %w", err)
 	}
-	return collectPlacements(rows)
+	return collectPlacementsWith(rows, scanPlacementStream)
 }
 
 // uploadingQuery reads the uploading placements of the destinations in a
@@ -183,10 +201,15 @@ func (db *DB) Placements(ctx context.Context) ([]Placement, error) {
 }
 
 func collectPlacements(rows *sql.Rows) ([]Placement, error) {
+	return collectPlacementsWith(rows, scanPlacement)
+}
+
+// collectPlacementsWith reads every row of rows with scan, and closes rows.
+func collectPlacementsWith(rows *sql.Rows, scan func(rowScanner) (Placement, error)) ([]Placement, error) {
 	defer func() { _ = rows.Close() }()
 	var ps []Placement
 	for rows.Next() {
-		p, err := scanPlacement(rows)
+		p, err := scan(rows)
 		if err != nil {
 			return nil, fmt.Errorf("catalog: list placements: %w", err)
 		}

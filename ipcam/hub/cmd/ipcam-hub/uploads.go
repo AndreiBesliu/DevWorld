@@ -59,8 +59,9 @@ type uploadsConfig struct {
 // absolute directory, or Drive's folder in My Drive ("ipcam" when empty);
 // TokenRef names its sealed token row. BaseURL and UploadBaseURL override
 // the provider's endpoints, for the fakes only, and PartSize (0: the
-// driver's own) is accepted only with BaseURL. A LOCAL destination takes
-// none of the three.
+// driver's own) is accepted only with BaseURL. Each kind takes only its own
+// fields: a LOCAL destination takes none of the three nor a tokenRef, and a
+// OneDrive one neither an uploadBaseUrl nor a folder.
 type destDef struct {
 	ID            string       `json:"id"`
 	Kind          storage.Kind `json:"kind"`
@@ -137,7 +138,7 @@ func (d destDef) validate() error {
 	case storage.KindGoogleDrive:
 		return d.validateCloud(driveAlign, 0)
 	case storage.KindOneDrivePersonal:
-		return d.validateCloud(oneDriveAlign, oneDriveMaxPart)
+		return d.validateOneDrive()
 	}
 	return fmt.Errorf("unknown kind %q", d.Kind)
 }
@@ -154,8 +155,23 @@ func (d destDef) validateLocal() error {
 		return errors.New("a LOCAL destination takes no baseUrl")
 	case d.UploadBaseURL != "":
 		return errors.New("a LOCAL destination takes no uploadBaseUrl")
+	case d.TokenRef != "":
+		return errors.New("a LOCAL destination takes no tokenRef")
 	}
 	return nil
+}
+
+// validateOneDrive checks a OneDrive destination: the cloud fields, and
+// neither uploadBaseUrl, since its upload URLs come from its sessions, nor
+// folder, since its root is the app folder; onedrive.New has neither.
+func (d destDef) validateOneDrive() error {
+	switch {
+	case d.UploadBaseURL != "":
+		return fmt.Errorf("a %s destination takes no uploadBaseUrl", storage.KindOneDrivePersonal)
+	case d.Folder != "":
+		return fmt.Errorf("a %s destination takes no folder: its root is the app folder", storage.KindOneDrivePersonal)
+	}
+	return d.validateCloud(oneDriveAlign, oneDriveMaxPart)
 }
 
 // validateCloud checks a cloud destination whose driver sends parts that are
@@ -274,7 +290,7 @@ func (u *uploads) build(cat *catalog.DB, ev *events, obs *observer, recDir strin
 	if err != nil {
 		ram = 0 // unknown: the default
 	}
-	u.events = &uploadEvents{ev: ev, obs: obs, cat: cat}
+	u.events = &uploadEvents{ev: ev, obs: obs}
 	u.q = outbox.New(cat, dests, outbox.Options{
 		Workers: uploadWorkers(ram), RecDir: recDir, HubID: u.hubID, HubName: u.cfg.HubName, Observer: u.events,
 	})
@@ -303,6 +319,7 @@ func (u *uploads) start(card *cardSampler) {
 	u.cancel, u.done = cancel, make(chan struct{})
 	var failed <-chan struct{}
 	if card != nil {
+		card.onFailedRun(u.events.stop) // before the card's failed event (Task 7b review M2)
 		failed = card.failedC()
 	}
 	go func() {
@@ -331,7 +348,7 @@ func (u *uploads) start(card *cardSampler) {
 // (g2-04). One error event says so.
 func (u *uploads) cardFailed() {
 	u.halt.Do(func() {
-		u.events.stopped.Store(true)
+		u.events.stop()
 		u.cancel()
 		u.events.ev.emit("error", map[string]any{"message": uploadsStoppedMessage})
 	})

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/google/uuid"
@@ -31,8 +32,14 @@ var errNoHubID = errors.New("no hub id")
 // errHubRunning is the refusal of a second holder of the hub lock.
 var errHubRunning = errors.New("another ipcam-hub holds the hub lock of this data directory")
 
+// hubIDWritten, when a test sets it, runs once the temporary file holds the
+// ID, before its fsync and rename: its error stops the write there, as a
+// cut would.
+var hubIDWritten func() error
+
 // readOrCreateHubID returns the hub's ID in stateDir, which it writes first
-// when there is none.
+// when there is none. The caller holds the hub lock, so no other process
+// writes it meanwhile.
 func readOrCreateHubID(stateDir string) (string, error) {
 	id, err := readHubID(stateDir)
 	if !errors.Is(err, errNoHubID) {
@@ -42,15 +49,26 @@ func readOrCreateHubID(stateDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(stateDir, hubIDName)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: under the data directory
-	if errors.Is(err, fs.ErrExist) {
-		return readHubID(stateDir) // another process wrote it first
-	}
-	if err != nil {
+	if err := writeHubID(stateDir, uid.String()); err != nil {
 		return "", fmt.Errorf("the hub id: %w", err)
 	}
-	_, err = f.WriteString(uid.String() + "\n")
+	return uid.String(), nil
+}
+
+// writeHubID writes id to stateDir's hub_id through hub_id.tmp, which it
+// truncates first, fsyncs and renames into place, then fsyncs stateDir
+// (Task 7b review M1): a cut leaves the whole file or none, never an empty
+// one, and a temporary file that a cut left is replaced.
+func writeHubID(stateDir, id string) error {
+	path := filepath.Join(stateDir, hubIDName)
+	f, err := os.OpenFile(path+".tmp", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // G304: under the data directory
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(id + "\n")
+	if err == nil && hubIDWritten != nil {
+		err = hubIDWritten()
+	}
 	if err == nil {
 		err = f.Sync()
 	}
@@ -58,9 +76,30 @@ func readOrCreateHubID(stateDir string) (string, error) {
 		err = cerr
 	}
 	if err != nil {
-		return "", fmt.Errorf("the hub id: %w", err)
+		return err
 	}
-	return uid.String(), nil
+	if err := os.Rename(path+".tmp", path); err != nil {
+		return err
+	}
+	return syncDir(stateDir)
+}
+
+// syncDir fsyncs dir, so that a file renamed into it keeps its name after a
+// power cut. Windows has no directory fsync: NTFS journals the directory
+// entries.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir) //nolint:gosec // G304: under the data directory
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // readHubID returns the hub's ID in stateDir, or errNoHubID when there is

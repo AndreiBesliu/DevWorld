@@ -2,12 +2,18 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/health"
 )
 
 // heldWriter is ipcam-hub's stderr on a card that holds its writes: each
@@ -133,4 +139,109 @@ func TestObserver_StderrDropsAndCountsLinesWhenFull(t *testing.T) {
 func tail(s string, n int) string {
 	lines := strings.SplitAfter(s, "\n")
 	return strings.Join(lines[max(0, len(lines)-n-1):], "")
+}
+
+// cardLineWriter records the events' lines. At the card's failed line it
+// waits hold before it returns, with the events' lock held, so that an
+// upload event emitted meanwhile waits behind that line.
+type cardLineWriter struct {
+	hold  time.Duration
+	mu    sync.Mutex
+	lines []string
+}
+
+func (w *cardLineWriter) Write(p []byte) (int, error) {
+	line := strings.TrimSpace(string(p))
+	if strings.Contains(line, `"type":"card"`) && strings.Contains(line, `"state":"failed"`) {
+		time.Sleep(w.hold)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lines = append(w.lines, line)
+	return len(p), nil
+}
+
+func (w *cardLineWriter) snapshot() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.lines)
+}
+
+// TestUploads_NoUploadEventAfterCardFailed (g2-04, Task 7b review M2): the
+// uploads' stop flag is set at the card's FAILED transition, before the
+// card's failed event goes out, so an upload worker in flight emits nothing
+// after that event, also when its event was on its way as the card failed.
+func TestUploads_NoUploadEventAfterCardFailed(t *testing.T) {
+	w := &cardLineWriter{hold: 200 * time.Millisecond}
+	ev := &events{out: w}
+	card := newCardSampler(t.TempDir(), "", ev)
+	cat, err := catalog.Open(t.Context(), filepath.Join(t.TempDir(), "catalog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+	obs := newObserver(ev, io.Discard, card)
+	t.Cleanup(obs.close)
+	u := &uploads{cfg: &uploadsConfig{HubName: "hub"}, hubID: testHubID, unlock: func() {}}
+	if err := u.build(cat, ev, obs, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	u.start(card)
+	t.Cleanup(u.stop)
+	// A worker in flight reports its progress until the test ends.
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		p := catalog.Placement{ID: "p1", DestinationID: "dst-1"}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				u.events.Progress(p, 1, 2)
+			}
+		}
+	}()
+	time.Sleep(20 * time.Millisecond)
+	card.mu.Lock()
+	card.observe(health.IoEvent{Kind: health.IoEROFS})
+	card.mu.Unlock()
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	<-done
+	lines := w.snapshot()
+	failedAt := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, `"state":"failed"`) })
+	if failedAt < 0 {
+		t.Fatalf("no card failed event in %d lines", len(lines))
+	}
+	for _, l := range lines[failedAt+1:] {
+		if strings.Contains(l, `"type":"upload_`) {
+			t.Fatalf("upload event %s after the card failed", l)
+		}
+	}
+	if !strings.Contains(strings.Join(lines[:failedAt], "\n"), `"type":"upload_progress"`) {
+		t.Error("no upload_progress before the card failed: the worker never ran")
+	}
+}
+
+// TestUploadEvents_QueuedKeepsTheStream (Task 7b review M4): upload_queued
+// takes cam, profile and startMs from the placement that the queue read
+// with its segment's row, so a catalog that fails to read the segment again
+// takes none of them away.
+func TestUploadEvents_QueuedKeepsTheStream(t *testing.T) {
+	w := &cardLineWriter{}
+	u := &uploadEvents{ev: &events{out: w}}
+	u.Queued(catalog.Placement{ID: "p1", DestinationID: "dst-1", Class: catalog.ClassContinuous, Bytes: 10,
+		Cam: testCam, Profile: testProfile, StartMs: 1234})
+	lines := w.snapshot()
+	if len(lines) != 1 {
+		t.Fatalf("lines %q, want one upload_queued", lines)
+	}
+	var e map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &e); err != nil {
+		t.Fatal(err)
+	}
+	if e["type"] != "upload_queued" || e["cam"] != testCam || e["profile"] != testProfile || e["startMs"] != float64(1234) {
+		t.Errorf("event %v, want upload_queued of %s/%s at 1234", e, testCam, testProfile)
+	}
 }

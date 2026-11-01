@@ -157,9 +157,9 @@ func (p reachProbe) run(ctx context.Context) reachLine {
 		return line
 	}
 	network := map[string]string{"v4": "ip4", "v6": "ip6"}[p.family]
-	addr, ok := p.address(ctx, network)
-	if !ok {
-		return finish(reachNoAddress)
+	addr, kind := p.address(ctx, network)
+	if kind != "" {
+		return finish(kind)
 	}
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp"+p.family[1:], netip.AddrPortFrom(addr, uint16(p.port)).String()) //nolint:gosec // G115: a checked port
@@ -170,18 +170,31 @@ func (p reachProbe) run(ctx context.Context) reachLine {
 	return finish("")
 }
 
+// lookupNetIP resolves a host's addresses in a network; tests replace it.
+var lookupNetIP = net.DefaultResolver.LookupNetIP
+
 // address is the first address of the probe's host in network, ip4 or ip6:
-// the host itself when it is an address.
-func (p reachProbe) address(ctx context.Context, network string) (netip.Addr, bool) {
+// the host itself when it is an address. Without one, it returns why:
+// timeout when the resolution timed out or ctx ended first (the WAN block
+// may block DNS too, Task 7b review M7), no-address otherwise.
+func (p reachProbe) address(ctx context.Context, network string) (netip.Addr, string) {
 	if addr, err := netip.ParseAddr(p.host); err == nil {
 		addr = addr.Unmap()
-		return addr, addr.Is4() == (network == "ip4")
+		if addr.Is4() != (network == "ip4") {
+			return netip.Addr{}, reachNoAddress
+		}
+		return addr, ""
 	}
-	addrs, err := net.DefaultResolver.LookupNetIP(ctx, network, p.host)
-	if err != nil || len(addrs) == 0 {
-		return netip.Addr{}, false
+	addrs, err := lookupNetIP(ctx, network, p.host)
+	var dnsErr *net.DNSError
+	switch {
+	case ctx.Err() != nil, errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled),
+		errors.As(err, &dnsErr) && dnsErr.IsTimeout:
+		return netip.Addr{}, reachTimedOut
+	case err != nil || len(addrs) == 0:
+		return netip.Addr{}, reachNoAddress
 	}
-	return addrs[0].Unmap(), true
+	return addrs[0].Unmap(), ""
 }
 
 // reachErr is the kind of a connection's error.
