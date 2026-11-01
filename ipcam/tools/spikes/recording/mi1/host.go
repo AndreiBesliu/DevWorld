@@ -724,8 +724,8 @@ const HubConfigName = "ipcam-hub-run.json"
 // folder when the run state says that the run is encrypted. The owner's
 // runs write the config into d.ConfigDir, which only Administrators and
 // SYSTEM, or root, may write, as a new file that no one else may change
-// (WriteProtected): whatever was planted in that folder before install
-// keeps no entry in its DACL, and a file planted at the config's name is
+// (WriteProtected): a folder that another account made there before
+// install is refused (ProtectConfigDir), and a file at the config's name is
 // replaced, not written through (Final fix C review, I2). The lab's runs,
 // and a driver without a ConfigDir, write it back into run.json.
 func (d *Driver) hubConfig(st *RunState, cur *CurrentRun, vol Volume) (string, error) {

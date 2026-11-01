@@ -10,10 +10,10 @@ import (
 
 // WriteProtected writes data into a new file at path, in the folder that
 // ProtectConfigDir protects, which only Administrators and SYSTEM, or root,
-// may change. A file already at path is removed, never written through: on
-// the PC another account may have put it there before install (Final fix C
-// review, I2), and its owner, whoever that is, could then change its DACL,
-// and the file, between this write and ipcam-hub's start; a link would
+// may change. A file already at path is removed, never written through
+// (Final fix C review, I2): the new file has no owner, DACL or link of the
+// one that was there, which on the PC another account might change, with
+// its DACL, between this write and ipcam-hub's start, and a link would
 // carry the write to wherever it points. The new file is created, never
 // opened, so one put back at its name meanwhile makes the write fail.
 func WriteProtected(path string, data []byte) error {

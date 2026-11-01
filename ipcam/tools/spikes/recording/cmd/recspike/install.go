@@ -509,11 +509,12 @@ func (a autostart) saveTimeService() error {
 	return nil
 }
 
-// protectSavedStart makes the folder of savedStart and gives it to
-// Administrators, with a protected DACL of Administrators and SYSTEM alone:
-// %ProgramData% lets any user create a folder in it first, and give itself
-// an entry in its DACL, and the elevated uninstall applies what the folder
-// holds to the time service (Final fix C review, I2).
+// protectSavedStart makes the folder of savedStart, or gives it again, to
+// Administrators, with a protected DACL of Administrators and SYSTEM alone,
+// and refuses one that another account made: %ProgramData% lets any user
+// create a folder in it first, and keep rights to it, and the elevated
+// uninstall applies what the folder holds to the time service (Final fix C
+// review, I2).
 func (a autostart) protectSavedStart() error {
 	return a.protect(filepath.Dir(a.savedStart))
 }

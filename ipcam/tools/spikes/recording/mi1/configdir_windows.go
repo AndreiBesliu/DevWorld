@@ -3,8 +3,10 @@
 package mi1
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"unsafe"
 
@@ -21,18 +23,27 @@ const (
 	protectedFileSDDL   = "O:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)"
 )
 
-// ProtectConfigDir makes dir, recspike's folder under %ProgramData%, and
-// gives it to Administrators with the protected DACL of
-// protectedFolderSDDL. Any user may make that folder first, give itself an
-// entry in its DACL or deny Administrators one, and leave files in it
-// (Final fix C review, I2). So the owner and the whole DACL are replaced
+// ProtectConfigDir makes dir, recspike's folder under %ProgramData%, with
+// the security descriptor of protectedFolderSDDL from its first moment, or
+// gives it that owner and DACL again when it is already recspike's.
+//
+// Any user may make that folder first (Final fix C review, I2), give
+// itself an entry in its DACL or deny Administrators one, leave files in
+// it, and keep a handle to it open with the right to change its DACL:
+// Windows checks a handle's rights when it is opened, so no later change
+// of the DACL takes them back, and that handle could give the folder back
+// to its maker after any change made here. So a folder that exists and
+// that neither Administrators nor SYSTEM own, which therefore another
+// account made, is refused, with the line that tells the owner to delete
+// it; so is a folder that is a link or a junction to another place. A
+// folder that they own was made by an elevated program, as here, with no
+// right for any other account; its owner and its whole DACL are replaced
 // in one change, which leaves no other entry, through a handle that keeps
-// the folder from being renamed or deleted meanwhile and that the restore
-// privilege opens whatever the planted DACL says. A folder that is a link
-// or a junction to another place is refused. WriteProtected writes the
-// files in it anew.
+// the folder from being renamed or deleted meanwhile and that the backup
+// and restore privileges open whatever its DACL says. WriteProtected
+// writes the files in it anew.
 func ProtectConfigDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return err
 	}
 	name, err := windows.UTF16PtrFromString(dir)
@@ -51,7 +62,15 @@ func ProtectConfigDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	return withPrivileges([]string{"SeRestorePrivilege", "SeTakeOwnershipPrivilege"}, func() error {
+	sa := windows.SecurityAttributes{SecurityDescriptor: sd}
+	sa.Length = uint32(unsafe.Sizeof(sa))
+	switch err := windows.CreateDirectory(name, &sa); {
+	case err == nil:
+		return nil
+	case !errors.Is(err, windows.ERROR_ALREADY_EXISTS):
+		return &os.PathError{Op: "mkdir", Path: dir, Err: err}
+	}
+	return withPrivileges([]string{"SeBackupPrivilege", "SeRestorePrivilege", "SeTakeOwnershipPrivilege"}, func() error {
 		// Without FILE_SHARE_DELETE, nothing renames or deletes the folder,
 		// or puts a junction at its name, while it is open.
 		h, err := windows.CreateFile(name, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER,
@@ -67,6 +86,18 @@ func ProtectConfigDir(dir string) error {
 		}
 		if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 			return fmt.Errorf("%s nu este un folder obișnuit, ci o legătură spre alt loc, pe care poate a pus-o alt cont", dir)
+		}
+		current, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+		if err != nil {
+			return err
+		}
+		made, _, err := current.Owner()
+		if err != nil {
+			return err
+		}
+		if made == nil || !AdministratorsOwned(made.String()) {
+			return fmt.Errorf("folderul %s a fost făcut de alt cont, nu de probă, deci nu îl folosesc: "+
+				`ștergeți-l dintr-o fereastră de administrator (rd /s /q "%s"), apoi porniți din nou comanda`, dir, dir)
 		}
 		return windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT,
 			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,

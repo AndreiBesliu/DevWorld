@@ -811,9 +811,10 @@ func TestInstall_PiReleaseBelongsToRoot(t *testing.T) {
 // So install gives the folder to Administrators, with a protected DACL of
 // Administrators and SYSTEM alone (mi1.ProtectConfigDir), before it saves
 // the settings there in a new file that only they may change
-// (mi1.WriteProtected); and install and uninstall refuse a saved file that
-// Administrators or SYSTEM do not own: settings that another account
-// planted are never applied to the time service.
+// (mi1.WriteProtected); install stops when mi1.ProtectConfigDir refuses a
+// folder that another account made; and install and uninstall refuse a
+// saved file that Administrators or SYSTEM do not own: settings that
+// another account planted are never applied to the time service.
 func TestInstall_TimeServiceSettingsAreAdministrators(t *testing.T) {
 	a, f, _ := newAutostart(t, "windows", true)
 	if err := a.install(`C:\proba-inregistrare\recspike.exe`); err != nil {
@@ -852,6 +853,19 @@ func TestInstall_TimeServiceSettingsAreAdministrators(t *testing.T) {
 		if len(f.time.asked) != 0 {
 			t.Errorf("owner %q: uninstall applied the planted settings: %q", owner, f.time.asked)
 		}
+	}
+
+	// mi1.ProtectConfigDir's refusal of a folder that another account made
+	// (TestHubConfig_RefusesAFolderThatAnotherAccountMade).
+	a, f, _ = newAutostart(t, "windows", true)
+	refusal := errors.New(`folderul C:\ProgramData\ipcam-recspike a fost făcut de alt cont, nu de probă, deci nu îl folosesc`)
+	a.protect = func(string) error { return refusal }
+	if err := a.install(`C:\proba-inregistrare\recspike.exe`); !errors.Is(err, refusal) ||
+		!strings.HasPrefix(err.Error(), "nu pot salva setările de dinainte ale serviciului de timp Windows") {
+		t.Errorf("install in a folder that another account made = %v, want the Romanian refusal", err)
+	}
+	if len(f.time.asked) != 0 || len(named(f.commands, "schtasks")) != 0 || len(f.written) != 0 {
+		t.Errorf("after the refusal, time service %q, commands %q, written %q; want nothing installed", f.time.asked, f.commands, f.written)
 	}
 }
 
