@@ -130,6 +130,12 @@ jobs:
         run: |
           set -o pipefail
           go test -count=1 -race ${TREES} 2>&1 | tee "${RUNNER_TEMP}/test.log"
+      - name: Test times
+        # g2-12: each package's -race test time on this runner, as a notice, since the job
+        # log cannot be read; c1's ipcam-spike-recording jobs run these tests too.
+        run: |
+          grep -E '^(ok|FAIL)\s' "${RUNNER_TEMP}/test.log" | sed 's|github.com/AndreiBesliu/DevWorld/ipcam/||' |
+            tools/scripts/annotate.sh test-times 60 notice
       - name: Video build list
         # R04: the modules that join the workspace must not move a dependency of the video spike.
         id: build-list

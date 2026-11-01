@@ -75,8 +75,8 @@ jobs:
         run: echo "::error title=gate::Reading the head commit's subject failed; the lab jobs did not run."
 
   build:
-    # ipcam-hub, the MediaMTX fork and reccontroller for linux/amd64, for the lab jobs of the
-    # same run. Task 7 adds fakeproviders, Task 8 uploadspike.
+    # ipcam-hub, the MediaMTX fork, reccontroller and fakeproviders (the fake storage
+    # providers) for linux/amd64, for the lab jobs of the same run. Task 8 adds uploadspike.
     needs: gate
     if: needs.gate.outputs.lab == 'true'
     runs-on: ubuntu-24.04
@@ -106,7 +106,8 @@ jobs:
         run: |
           set -o pipefail
           {
-            go build -o "${RUNNER_TEMP}/bin/" ./hub/cmd/ipcam-hub ./tools/spikes/recording/cmd/reccontroller &&
+            go build -o "${RUNNER_TEMP}/bin/" ./hub/cmd/ipcam-hub ./hub/internal/storage/fakes/cmd/fakeproviders \
+              ./tools/spikes/recording/cmd/reccontroller &&
               (cd hub/third_party/mediamtx && GOWORK=off go build -o "${RUNNER_TEMP}/bin/mediamtx" .) &&
               ls -l "${RUNNER_TEMP}/bin"
           } 2>&1 | tee "${RUNNER_TEMP}/build.log"
