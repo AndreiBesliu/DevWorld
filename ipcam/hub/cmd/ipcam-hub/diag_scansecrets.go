@@ -44,8 +44,12 @@ type scanSecretsLine struct {
 // it opens read-only, so it never migrates and never takes the write lock,
 // and adds the values of stdin's JSON lines {"value":"…"}. Every file under
 // --dir that holds a value raw, URL-encoded (QueryEscape, PathEscape),
-// base64 (Std, URL, Raw) or hex (lower, upper) is removed. It creates no
-// file: the sealer only unseals, so it makes no key.
+// base64 (Std, URL, Raw), hex (lower, upper), or as a JSON string's body
+// that encoding/json writes (with and without its HTML escaping, Task 9A
+// review M4) is removed. It creates no file of its own: the sealer only
+// unseals, so it makes no key. SQLite's read-only open of a closed WAL
+// catalog creates catalog.db-wal and -shm, which belong to the catalog
+// file's owner, not to the scan's (robustFchown, C2-R15 (a)).
 func diagScanSecretsCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("diag scan-secrets", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -136,8 +140,11 @@ func sealedValues(ctx context.Context, path string) ([]string, error) {
 	return oauth.KnownSecrets(ctx, cat, sealer)
 }
 
-// encodedNeedles are values in each of the eight encodings, without
-// duplicates.
+// encodedNeedles are values in each of the encodings, without duplicates:
+// the brief's eight, and the two JSON string bodies, which differ from the
+// raw value when it holds a quote, a backslash, a control character, or
+// (HTML-escaped) one of &, < and >: a typed camera password in a JSON
+// results file.
 func encodedNeedles(values []string) [][]byte {
 	seen := map[string]bool{}
 	var needles [][]byte
@@ -147,6 +154,7 @@ func encodedNeedles(values []string) [][]byte {
 			v, url.QueryEscape(v), url.PathEscape(v),
 			base64.StdEncoding.EncodeToString(b), base64.URLEncoding.EncodeToString(b), base64.RawStdEncoding.EncodeToString(b),
 			hex.EncodeToString(b), strings.ToUpper(hex.EncodeToString(b)),
+			jsonStringBody(v, true), jsonStringBody(v, false),
 		} {
 			if e != "" && !seen[e] {
 				seen[e] = true
@@ -155,6 +163,17 @@ func encodedNeedles(values []string) [][]byte {
 		}
 	}
 	return needles
+}
+
+// jsonStringBody is v as encoding/json writes it as a JSON string, without
+// its quotes, its HTML characters (&, <, >) escaped or not.
+func jsonStringBody(v string, escapeHTML bool) string {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(escapeHTML)
+	_ = enc.Encode(v) // a string always encodes
+	quoted := strings.TrimSuffix(b.String(), "\n")
+	return quoted[1 : len(quoted)-1]
 }
 
 // scanAndRemove removes every regular file under dir that holds a needle,

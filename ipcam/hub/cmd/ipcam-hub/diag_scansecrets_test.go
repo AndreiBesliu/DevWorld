@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -18,17 +20,42 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/oauth"
 )
 
-// encodings are the eight forms in which diag scan-secrets finds a value
-// (P45, §16.2.3).
+// encodings are the forms in which diag scan-secrets finds a value (P45,
+// §16.2.3): the eight of the brief, and a JSON string's body as Go's
+// encoding/json writes it, with and without its HTML escaping (Task 9A
+// review M4).
 var encodings = map[string]func(string) string{
-	"raw":       func(v string) string { return v },
-	"query":     url.QueryEscape,
-	"path":      url.PathEscape,
-	"base64":    func(v string) string { return base64.StdEncoding.EncodeToString([]byte(v)) },
-	"base64url": func(v string) string { return base64.URLEncoding.EncodeToString([]byte(v)) },
-	"base64raw": func(v string) string { return base64.RawStdEncoding.EncodeToString([]byte(v)) },
-	"hex":       func(v string) string { return hex.EncodeToString([]byte(v)) },
-	"hexupper":  func(v string) string { return strings.ToUpper(hex.EncodeToString([]byte(v))) },
+	"raw":        func(v string) string { return v },
+	"query":      url.QueryEscape,
+	"path":       url.PathEscape,
+	"base64":     func(v string) string { return base64.StdEncoding.EncodeToString([]byte(v)) },
+	"base64url":  func(v string) string { return base64.URLEncoding.EncodeToString([]byte(v)) },
+	"base64raw":  func(v string) string { return base64.RawStdEncoding.EncodeToString([]byte(v)) },
+	"hex":        func(v string) string { return hex.EncodeToString([]byte(v)) },
+	"hexupper":   func(v string) string { return strings.ToUpper(hex.EncodeToString([]byte(v))) },
+	"json":       func(v string) string { return jsonBody(v, true) },
+	"jsonnohtml": func(v string) string { return jsonBody(v, false) },
+}
+
+// jsonBody is v as a JSON string written by encoding/json, without its
+// quotes, its HTML characters escaped or not.
+func jsonBody(v string, escapeHTML bool) string {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(escapeHTML)
+	if err := enc.Encode(v); err != nil {
+		panic(err)
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(strings.TrimSuffix(b.String(), "\n"), `"`), `"`)
+}
+
+// stdinLine is the JSON line {"value":v} of diag scan-secrets' stdin.
+func stdinLine(v string) string {
+	b, err := json.Marshal(map[string]string{"value": v})
+	if err != nil {
+		panic(err)
+	}
+	return string(b) + "\n"
 }
 
 // runScan runs diag scan-secrets with args and stdin, and returns its exit
@@ -63,13 +90,20 @@ func refreshTokenOf(t *testing.T, f *oauthFixture) string {
 
 // TestDiagScanSecrets_AllEncodings (P45, ARH-08, §16.2.3): a client secret
 // and a refresh token that the catalog holds sealed, and a value given on
-// stdin, each planted in each of the eight encodings in its own file under
+// stdin, each planted in each of the encodings in its own file under
 // --dir, are found and their files removed; a clean file stays; the output
-// counts the values and names the removed files, and holds no value.
+// counts the values and names the removed files, and holds no value. The
+// stdin value, a typed camera password, holds characters that JSON
+// escapes, so only the JSON needles find its JSON forms.
 func TestDiagScanSecrets_AllEncodings(t *testing.T) {
 	f := newOAuthFixture(t)
 	f.logIn(t, "g-windows", oauth.PlatformWindows, "acct-1")
-	stdinValue := "SENT" + "INEL-camera-password"
+	stdinValue := "SENT" + "INEL-cam&ra<pass>\"w\\rd"
+	for _, enc := range []string{"json", "jsonnohtml"} {
+		if strings.Contains(encodings[enc](stdinValue), stdinValue) {
+			t.Fatalf("the %s form of the stdin value holds it raw: the test would prove nothing", enc)
+		}
+	}
 	values := map[string]string{"secret": secretDesktop, "refresh": refreshTokenOf(t, f), "stdin": stdinValue}
 	dir := filepath.Join(t.TempDir(), "results")
 	var want []string
@@ -89,7 +123,7 @@ func TestDiagScanSecrets_AllEncodings(t *testing.T) {
 		t.Fatal(err)
 	}
 	slices.Sort(want)
-	code, lines, out, stderr := runScan(t, `{"value":"`+stdinValue+`"}`+"\n\n", "--config", f.config, "--dir", dir)
+	code, lines, out, stderr := runScan(t, stdinLine(stdinValue)+"\n", "--config", f.config, "--dir", dir)
 	if code != exitOK || len(lines) != 1 {
 		t.Fatalf("scan-secrets = %d, %q (%s); want one line, exit 0", code, out, stderr)
 	}
@@ -124,7 +158,7 @@ func TestDiagScanSecrets_AllEncodings(t *testing.T) {
 	}
 	// Without --config, only stdin's values; a line that is no {"value"}
 	// object is refused without its text.
-	if code, lines, _, _ := runScan(t, `{"value":"`+stdinValue+`"}`, "--dir", dir); code != exitOK || lines[0]["values"] != float64(1) {
+	if code, lines, _, _ := runScan(t, stdinLine(stdinValue), "--dir", dir); code != exitOK || lines[0]["values"] != float64(1) {
 		t.Errorf("scan-secrets without --config = %d, %v; want 1 value", code, lines)
 	}
 	if code, _, out, stderr := runScan(t, "not-json "+stdinValue+"\n", "--dir", dir); code != exitFatal || out != "" || strings.Contains(stderr, stdinValue) {
@@ -180,6 +214,101 @@ func TestDiagScanSecrets_OpensCatalogReadOnly(t *testing.T) {
 	if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil || version != catalogVersion(t) {
 		t.Errorf("user_version %d (%v), want the hub's", version, err)
 	}
+}
+
+// TestDiagScanSecrets_ClosedCatalog (C2-R15 (a), Task 9A review M5): with
+// no hub running, the catalog is closed and state/ holds no -wal or -shm
+// file. SQLite's read-only open of a WAL catalog then creates catalog.db-wal
+// and catalog.db-shm and leaves them; they belong to the catalog file's
+// owner, never to the scan's: run as root on Linux, as uploadspike runs it
+// on the Pi, beside a catalog of another user (nobody here, ipcam-spike on
+// the Pi), they are that user's (SQLite's robustFchown), so the hub opens
+// them at its next start. The scan creates no other file, and the hub's
+// next open works.
+func TestDiagScanSecrets_ClosedCatalog(t *testing.T) {
+	f := newOAuthFixture(t)
+	f.logIn(t, "g-windows", oauth.PlatformWindows, "acct-1")
+	if err := f.cat.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(f.dataDir, "state")
+	before := treeNames(t, stateDir)
+	for _, name := range before {
+		if strings.HasPrefix(name, "catalog.db-") {
+			t.Fatalf("a closed catalog leaves %q", before)
+		}
+	}
+	owner := -1
+	if os.Geteuid() == 0 && runtime.GOOS != "windows" {
+		owner = 65534 // nobody: the hub's own user stands apart from root
+		root, err := os.OpenRoot(stateDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = root.Close() }()
+		if err := fs.WalkDir(root.FS(), ".", func(rel string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			return root.Lchown(rel, owner, owner)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, _, out, stderr := runScan(t, "", "--config", f.config, "--dir", t.TempDir())
+	if code != exitOK {
+		t.Fatalf("scan-secrets = %d, %q, %s", code, out, stderr)
+	}
+	after := treeNames(t, stateDir)
+	t.Logf("state/ after a scan of the closed catalog, as uid %d, the catalog's owner %d: %q", os.Geteuid(), owner, after)
+	for _, name := range after {
+		if !slices.Contains(before, name) && name != "catalog.db-wal" && name != "catalog.db-shm" {
+			t.Errorf("the scan left state/%s", name)
+		}
+	}
+	catalogInfo, err := os.Stat(filepath.Join(stateDir, "catalog.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, known := fileUID(catalogInfo)
+	if owner >= 0 && want != owner {
+		t.Fatalf("catalog.db is owned by %d, want %d", want, owner)
+	}
+	for _, name := range after {
+		info, err := os.Lstat(filepath.Join(stateDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if uid, ok := fileUID(info); known && ok && uid != want {
+			t.Errorf("state/%s is owned by %d, want the catalog's owner %d", name, uid, want)
+		}
+	}
+	cat, err := catalog.Open(t.Context(), filepath.Join(stateDir, "catalog.db"))
+	if err != nil {
+		t.Fatalf("the hub's open after the scan: %v", err)
+	}
+	if _, _, ok, err := cat.Secret(t.Context(), "oauth:g-windows"); err != nil || !ok {
+		t.Errorf("the login's row after the scan: %v, %v", ok, err)
+	}
+	_ = cat.Close()
+}
+
+// treeNames lists the paths under dir, relative to it with "/", sorted.
+func treeNames(t *testing.T, dir string) []string {
+	t.Helper()
+	var names []string
+	if err := filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
+		if err != nil || path == dir {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		names = append(names, filepath.ToSlash(rel))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(names)
+	return names
 }
 
 // dirNames lists dir's names, sorted.
