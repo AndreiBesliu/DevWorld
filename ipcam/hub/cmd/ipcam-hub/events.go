@@ -87,7 +87,9 @@ import (
 //     state, transient when the provider did not answer, error otherwise).
 //   - oauth_refresh: destId, day, attempt, outcome ("ok", "failed" or
 //     "expected-expiry"), rotated; a day of the daily refresh, once decided
-//     (P53).
+//     (P53). A day that was ok goes out once, a hub restart included; a
+//     restart inside a failed or expected-expiry day attempts it again, so
+//     that day may go out again, ok after a success (C2-R16 (d′)).
 type events struct {
 	mu  sync.Mutex
 	out io.Writer

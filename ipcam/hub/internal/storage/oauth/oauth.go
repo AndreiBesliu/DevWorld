@@ -19,7 +19,8 @@
 //     storage.ErrAuthExpired; a network error, a timeout, a 429 or a 5xx
 //     wrap storage.ErrTransient.
 //   - RunDaily refreshes each login once a day, counted from its issuance
-//     (P53).
+//     (P53), and records each daily success in the login's sealed row, so
+//     a restart neither attempts nor reports again a day that was ok.
 //
 // No error text, and nothing this package returns, holds a token, a client
 // secret, a code, a verifier, a request URL or a provider's own words
