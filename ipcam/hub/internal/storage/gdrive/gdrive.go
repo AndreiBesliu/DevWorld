@@ -171,13 +171,14 @@ func (f driveFile) ref(key storage.ObjectKey) storage.ObjectRef {
 // BeginUpload makes the folders of key that the store does not hold, then
 // opens a resumable session for a file named key's base in the last of
 // them (files.create.resumable, which takes a create slot). The state's
-// Calls count those calls too.
+// Calls count those calls too. An upload of 0 bytes is refused before any
+// call (storage.Destination).
 func (d *Drive) BeginUpload(ctx context.Context, key storage.ObjectKey, size int64, meta storage.Meta) (storage.UploadState, error) {
 	if err := checkKey(key); err != nil {
 		return storage.UploadState{}, err
 	}
-	if size < 0 {
-		return storage.UploadState{}, fmt.Errorf("gdrive: upload of %s: size %d: %w", key, size, storage.ErrPermanent)
+	if size <= 0 {
+		return storage.UploadState{}, fmt.Errorf("gdrive: upload of %s: size %d: an object holds one byte at least: %w", key, size, storage.ErrPermanent)
 	}
 	st := storage.UploadState{Key: key, Size: size, Calls: storage.CallCounts{}}
 	err := d.into(ctx, key, st.Calls, func(parent string) error {

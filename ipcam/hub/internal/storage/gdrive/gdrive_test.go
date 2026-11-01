@@ -827,6 +827,25 @@ func TestDrive_ErrorMapping(t *testing.T) {
 	}
 }
 
+// TestDrive_EmptyObjectRefused (C2-R12): an object holds one byte at least,
+// as on every destination: BeginUpload of 0 bytes and PutSmall of none are
+// ErrPermanent before any call, so no folder, session or file is made.
+func TestDrive_EmptyObjectRefused(t *testing.T) {
+	e := newEnv(t)
+	d := e.drive()
+	if st, err := d.BeginUpload(t.Context(), "c1/empty.mp4", 0, storage.Meta{}); !errors.Is(err, storage.ErrPermanent) {
+		t.Errorf("BeginUpload of 0 bytes = %+v, %v; want ErrPermanent", st, err)
+	}
+	for _, data := range [][]byte{nil, {}} {
+		if ref, err := d.PutSmall(t.Context(), "c1/empty.json", data); !errors.Is(err, storage.ErrPermanent) {
+			t.Errorf("PutSmall of %#v = %+v, %v; want ErrPermanent", data, ref, err)
+		}
+	}
+	if counts := e.fake.Counts(); len(counts) != 0 {
+		t.Errorf("the refused writes sent %v; want no call", counts)
+	}
+}
+
 // TestDrive_PartSizeOverrideOnlyWithBaseURL: another PartSize is taken only
 // with BaseURL set and as a multiple of 256 KiB, and the chunks follow it.
 func TestDrive_PartSizeOverrideOnlyWithBaseURL(t *testing.T) {

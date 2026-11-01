@@ -174,10 +174,12 @@ func (o *OneDrive) itemURL(id string) string {
 	return o.base + "/v1.0/me/drive/items/" + url.PathEscape(id)
 }
 
-// absoluteURL reports whether u is an absolute http or https URL, as an
-// uploadUrl and a download URL are, so that a session in the catalog that is
-// not one is never sent to.
-func absoluteURL(u string) bool {
+// preauthURL reports whether u is a pre-authenticated URL that the driver
+// may use, as an uploadUrl or a download URL: an absolute https URL with no
+// user info, so that a session in the catalog that is not one is never sent
+// to. An http one is taken only with Options.BaseURL set, for the fakes,
+// which serve plain HTTP; the live API's are https (Task 6 review minor 6).
+func (o *OneDrive) preauthURL(u string) bool {
 	parsed, err := url.Parse(u)
-	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Host != "" && parsed.User == nil
+	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http" && o.plainHTTP) && parsed.Host != "" && parsed.User == nil
 }

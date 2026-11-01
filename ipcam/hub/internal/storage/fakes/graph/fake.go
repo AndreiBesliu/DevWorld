@@ -5,15 +5,16 @@
 // folder (/special/approot), whose missing parents an upload creates. Upload
 // sessions are strict (§9.2): fragments in order, each but the last a
 // multiple of 320 KiB, each under 60 MiB, and a 401 for any request to an
-// uploadUrl that carries Authorization; a completed or cancelled session's
-// uploadUrl answers 404, as Graph's does. conflictBehavior fail, replace and
-// rename are honoured. A deleted item goes to a recycle bin that keeps
-// occupying the quota (quota.deleted) until EmptyBin. Every item and drive
-// answer follows $select, and refuses a property that the fake does not
-// know. Content downloads redirect to a pre-authenticated URL. Tests inject
-// answers (with Retry-After) with FailNext, a quota with SetQuota and a token
-// check with AcceptToken. It is permanent test infrastructure, as the drivers
-// are (P04).
+// uploadUrl that carries Authorization; a completed, cancelled or expired
+// session's uploadUrl answers 404, as Graph's does. A session expires, with
+// the bytes it held, a day after its last request. conflictBehavior fail,
+// replace and rename are honoured. A deleted item goes to a recycle bin that
+// keeps occupying the quota (quota.deleted) until EmptyBin. Every item and
+// drive answer follows $select, and refuses a property that the fake does
+// not know. Content downloads redirect to a pre-authenticated URL. Tests
+// inject answers (with Retry-After) with FailNext, a quota with SetQuota and
+// a token check with AcceptToken. It is permanent test infrastructure, as
+// the drivers are (P04).
 package fakegraph
 
 import (
@@ -44,8 +45,8 @@ const (
 	maxFragment = 60<<20 - 1
 	// maxBody bounds the body of a request that is not a fragment.
 	maxBody = 1 << 20
-	// sessionLife is the expirationDateTime that the fake answers, after the
-	// session's last request. The fake does not expire sessions.
+	// sessionLife is how long a session lasts after its last request, as the
+	// expirationDateTime that the fake answers says; the fake then drops it.
 	sessionLife = 24 * time.Hour
 	// defaultTotal is a new fake's quota: a free OneDrive's 5 GiB.
 	defaultTotal = 5 << 30
@@ -113,9 +114,10 @@ type item struct {
 // session is an upload session of an item at path.
 type session struct {
 	path     string
-	conflict string // fail, replace or rename
-	size     int64  // the total that the first fragment named; -1 before it
-	data     []byte // the bytes received
+	conflict string    // fail, replace or rename
+	size     int64     // the total that the first fragment named; -1 before it
+	data     []byte    // the bytes received
+	last     time.Time // the session's last request, from which it expires
 }
 
 // failure is an answer that FailNext injected.
@@ -199,6 +201,7 @@ func (f *Fake) EmptyBin() {
 func (f *Fake) PendingBytes() int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.expire()
 	var n int64
 	for _, s := range f.sessions {
 		n += int64(len(s.data))
@@ -319,6 +322,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	base := baseURL(r)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.expire()
 	switch method {
 	case methodCreateSession:
 		f.createSession(w, base, name, body)
@@ -400,7 +404,7 @@ func (f *Fake) createSession(w http.ResponseWriter, base, key string, body []byt
 		return
 	}
 	id := f.newID("session")
-	f.sessions[id] = &session{path: key, conflict: conflict, size: -1}
+	f.sessions[id] = &session{path: key, conflict: conflict, size: -1, last: f.clock()}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"uploadUrl": base + "/up/" + id, "expirationDateTime": f.expiration(), "nextExpectedRanges": []string{"0-"},
 	})
@@ -417,6 +421,7 @@ func (f *Fake) putFragment(w http.ResponseWriter, r *http.Request, id string, bo
 		writeError(w, http.StatusNotFound, "itemNotFound", 0)
 		return
 	}
+	s.last = f.clock()
 	first, last, total, ok := parseContentRange(r.Header.Get("Content-Range"))
 	held := int64(len(s.data))
 	switch {
@@ -522,6 +527,7 @@ func (f *Fake) status(w http.ResponseWriter, id string) {
 		writeError(w, http.StatusNotFound, "itemNotFound", 0)
 		return
 	}
+	s.last = f.clock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"expirationDateTime": f.expiration(), "nextExpectedRanges": []string{fmt.Sprintf("%d-", len(s.data))},
 	})
@@ -745,7 +751,19 @@ func bytesOf(items []*item) int64 {
 	return n
 }
 
-// expiration is the expirationDateTime that a session's answers carry.
+// expire drops the sessions whose last request is sessionLife ago or more,
+// with the bytes they held: their uploadUrls answer 404 from then on.
+func (f *Fake) expire() {
+	now := f.clock()
+	for id, s := range f.sessions {
+		if !now.Before(s.last.Add(sessionLife)) {
+			delete(f.sessions, id)
+		}
+	}
+}
+
+// expiration is the expirationDateTime that a session's answers carry: a
+// session's request answers it, so it is sessionLife after that request.
 func (f *Fake) expiration() string {
 	return f.clock().Add(sessionLife).UTC().Format(time.RFC3339Nano)
 }

@@ -24,10 +24,14 @@ import (
 // files.generateIds, stores it and creates the file with it (a multipart
 // files.create); a later one updates the file's bytes (files.update), which
 // Drive keeps as the file's new revision, a reader seeing the old bytes or
-// the new. Either takes a create slot first.
+// the new. Either takes a create slot first. No data is refused before any
+// call (storage.Destination).
 func (d *Drive) PutSmall(ctx context.Context, key storage.ObjectKey, data []byte) (storage.ObjectRef, error) {
 	if err := checkKey(key); err != nil {
 		return storage.ObjectRef{}, err
+	}
+	if len(data) == 0 {
+		return storage.ObjectRef{}, fmt.Errorf("gdrive: small write of %s: no data: an object holds one byte at least: %w", key, storage.ErrPermanent)
 	}
 	var ref storage.ObjectRef
 	err := d.into(ctx, key, nil, func(parent string) error {

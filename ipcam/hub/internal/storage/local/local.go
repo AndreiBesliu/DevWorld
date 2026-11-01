@@ -83,7 +83,8 @@ func (*Local) Capabilities() storage.Caps {
 
 // BeginUpload creates key's directories and an empty <key>.part, the
 // upload's session, truncating a .part left by an earlier upload of key. It
-// syncs the directory, so that the session survives a power cut.
+// syncs the directory, so that the session survives a power cut. An upload
+// of 0 bytes is refused (storage.Destination).
 func (l *Local) BeginUpload(ctx context.Context, key storage.ObjectKey, size int64, _ storage.Meta) (storage.UploadState, error) {
 	if err := ctx.Err(); err != nil {
 		return storage.UploadState{}, err
@@ -92,8 +93,8 @@ func (l *Local) BeginUpload(ctx context.Context, key storage.ObjectKey, size int
 	if err != nil {
 		return storage.UploadState{}, err
 	}
-	if size < 0 {
-		return storage.UploadState{}, fmt.Errorf("local: upload of %s: size %d: %w", key, size, storage.ErrPermanent)
+	if size <= 0 {
+		return storage.UploadState{}, fmt.Errorf("local: upload of %s: size %d: an object holds one byte at least: %w", key, size, storage.ErrPermanent)
 	}
 	if err := l.makeKeyDirs(key); err != nil {
 		return storage.UploadState{}, fmt.Errorf("local: upload of %s: %w", key, quotaFull(err))
@@ -303,7 +304,8 @@ func (l *Local) Quota(ctx context.Context) (storage.Quota, error) {
 
 // PutSmall creates key's directories, writes data to <key>.tmp, fsyncs it and
 // renames it over the object, then syncs the directory: a reader sees the
-// old object or the new one, never a part of either.
+// old object or the new one, never a part of either. No data is refused
+// (storage.Destination).
 func (l *Local) PutSmall(ctx context.Context, key storage.ObjectKey, data []byte) (storage.ObjectRef, error) {
 	if err := ctx.Err(); err != nil {
 		return storage.ObjectRef{}, err
@@ -311,6 +313,9 @@ func (l *Local) PutSmall(ctx context.Context, key storage.ObjectKey, data []byte
 	file, err := l.file(key)
 	if err != nil {
 		return storage.ObjectRef{}, err
+	}
+	if len(data) == 0 {
+		return storage.ObjectRef{}, fmt.Errorf("local: write of %s: no data: an object holds one byte at least: %w", key, storage.ErrPermanent)
 	}
 	if err := l.makeKeyDirs(key); err != nil {
 		return storage.ObjectRef{}, fmt.Errorf("local: write of %s: %w", key, quotaFull(err))

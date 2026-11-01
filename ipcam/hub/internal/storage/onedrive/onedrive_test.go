@@ -380,6 +380,88 @@ func TestOneDrive_PlainClientOnUploadURL(t *testing.T) {
 	}
 }
 
+// liveGraph is a transport that answers the live API's requests, to
+// graph.microsoft.com, in Graph's place, with an uploadUrl and a download
+// URL of its scheme, and records the host of every request. Any other host
+// is an error: the test has no network.
+type liveGraph struct {
+	mu     sync.Mutex
+	scheme string
+	hosts  []string
+}
+
+func (g *liveGraph) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		_, _ = io.Copy(io.Discard, req.Body)
+		_ = req.Body.Close()
+	}
+	g.mu.Lock()
+	g.hosts = append(g.hosts, req.URL.Host)
+	scheme := g.scheme
+	g.mu.Unlock()
+	answer := func(status int, body string) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(body)), Request: req,
+		}, nil
+	}
+	switch {
+	case req.URL.Host != "graph.microsoft.com":
+		return nil, errors.New("this test has no network")
+	case strings.HasSuffix(req.URL.Path, ":/createUploadSession"):
+		return answer(http.StatusOK, `{"uploadUrl":"`+scheme+`://up.example/s1","nextExpectedRanges":["0-"]}`)
+	case strings.HasPrefix(req.URL.Path, "/v1.0/me/drive/items/"):
+		return answer(http.StatusOK, `{"id":"i1","@microsoft.graph.downloadUrl":"`+scheme+`://dl.example/i1"}`)
+	}
+	return answer(http.StatusNotFound, `{"error":{"code":"itemNotFound"}}`)
+}
+
+// TestOneDrive_LiveAPITakesHTTPSURLsOnly (Task 6 review minor 6): with the
+// live API (no BaseURL), an uploadUrl or a download URL that is not https is
+// refused: createUploadSession's is ErrTransient, a stored session's is
+// ErrSessionExpired with no request sent to it, and a playback link falls
+// back to the hub's proxy. https ones are taken; the fakes' http ones only
+// with BaseURL set (the other tests).
+func TestOneDrive_LiveAPITakesHTTPSURLsOnly(t *testing.T) {
+	graph := &liveGraph{scheme: "http"}
+	d, err := New(Options{DestID: "dst-od", HubID: "H", HTTPClient: &http.Client{Transport: graph}, Tokens: &tokenSource{token: "tok-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := storage.ObjectRef{ID: "i1", Key: "a.mp4", Size: 10}
+	if _, err := d.BeginUpload(t.Context(), "a.mp4", 10, storage.Meta{}); !errors.Is(err, storage.ErrTransient) {
+		t.Errorf("BeginUpload with an http uploadUrl: %v, want ErrTransient", err)
+	}
+	if link, err := d.PlaybackURL(t.Context(), ref, time.Minute); !errors.Is(err, storage.ErrProxyRequired) {
+		t.Errorf("PlaybackURL with an http download URL = %q, %v, want ErrProxyRequired", link, err)
+	}
+	st := storage.UploadState{Key: "a.mp4", Size: 10, Session: "http://up.example/s1"}
+	if err := d.PutChunk(t.Context(), &st, 0, strings.NewReader("0123456789"), 10); !errors.Is(err, storage.ErrSessionExpired) {
+		t.Errorf("PutChunk to an http session: %v, want ErrSessionExpired", err)
+	}
+	if _, err := d.Resume(t.Context(), &st); !errors.Is(err, storage.ErrSessionExpired) {
+		t.Errorf("Resume of an http session: %v, want ErrSessionExpired", err)
+	}
+	if err := d.Abort(t.Context(), &st); err != nil {
+		t.Errorf("Abort of an http session: %v, want nil", err)
+	}
+	graph.mu.Lock()
+	for _, host := range graph.hosts {
+		if host != "graph.microsoft.com" {
+			t.Errorf("a request went to %s, the host of an http URL", host)
+		}
+	}
+	graph.scheme = "https"
+	graph.mu.Unlock()
+	st, err = d.BeginUpload(t.Context(), "a.mp4", 10, storage.Meta{})
+	if err != nil || st.Session != "https://up.example/s1" {
+		t.Errorf("BeginUpload with an https uploadUrl: session %q, %v, want it", st.Session, err)
+	}
+	if link, err := d.PlaybackURL(t.Context(), ref, time.Minute); err != nil || link != "https://dl.example/i1" {
+		t.Errorf("PlaybackURL with an https download URL = %q, %v, want it", link, err)
+	}
+}
+
 // TestOneDrive_ResumeFromNextExpectedRanges: an upload cut after two
 // fragments resumes, in a new driver from the session alone, at 2 × 10 MiB,
 // from the uploadUrl's nextExpectedRanges, and commits once.
@@ -686,7 +768,9 @@ func TestOneDrive_Probe(t *testing.T) {
 
 // TestOneDrive_ErrorMapping: every status and code maps to its typed error,
 // and no error's text holds the uploadUrl, a download URL, a request URL or
-// a token, a reset connection included.
+// a token, a reset connection included. On an uploadUrl, 404 and 410 are
+// ErrSessionExpired and 416 is ErrTransient; off one, 416 is ErrPermanent
+// as any other 4xx (C2-R12).
 func TestOneDrive_ErrorMapping(t *testing.T) {
 	type step func(t *testing.T, e *testEnv, d *OneDrive, st *storage.UploadState) func() error
 	data := randomBytes(700*kib, 7)
@@ -796,6 +880,8 @@ func TestOneDrive_ErrorMapping(t *testing.T) {
 		{name: "429 without Retry-After", method: "drive.get", status: 429, code: "activityLimitReached", op: opQuota, wantLimit: limit(0)},
 		{name: "404 on a fragment", method: "upload.put", status: 404, code: "itemNotFound", op: opPut, want: storage.ErrSessionExpired},
 		{name: "404 on the status, no item at the key", method: "upload.status", status: 404, code: "itemNotFound", op: opResume, want: storage.ErrSessionExpired},
+		{name: "410 on a fragment", method: "upload.put", status: 410, code: "itemNotFound", op: opPut, want: storage.ErrSessionExpired},
+		{name: "410 on the status", method: "upload.status", status: 410, code: "itemNotFound", op: opResume, want: storage.ErrSessionExpired},
 		{name: "500 on the item at the key", method: "items.getByPath", status: 500, code: "generalException", op: opResumeDone, want: storage.ErrTransient},
 		{name: "404 on an item", method: "items.get", status: 404, code: "itemNotFound", op: opStat, want: storage.ErrNotFound},
 		{name: "404 on a delete", method: "items.delete", status: 404, code: "itemNotFound", op: opDelete, want: storage.ErrNotFound},
@@ -804,6 +890,7 @@ func TestOneDrive_ErrorMapping(t *testing.T) {
 		{name: "503", method: "drive.get", status: 503, code: "serviceNotAvailable", op: opQuota, want: storage.ErrTransient},
 		{name: "500 on Abort's cancel", method: "upload.cancel", status: 500, code: "generalException", op: opAbort, want: storage.ErrTransient},
 		{name: "416 on a fragment", method: "upload.put", status: 416, code: "invalidRange", op: opPut, want: storage.ErrTransient},
+		{name: "416 off an uploadUrl", method: "items.content", status: 416, code: "invalidRange", op: opRead, want: storage.ErrPermanent},
 		{name: "400 on a fragment", method: "upload.put", status: 400, code: "invalidRange", op: opPut, want: storage.ErrPermanent},
 		{name: "403 on a read", method: "items.content", status: 403, code: "accessDenied", op: opRead, want: storage.ErrPermanent},
 		{name: "410 on the download URL", method: "download", status: 410, code: "", op: opRead, want: storage.ErrPermanent},
@@ -860,6 +947,26 @@ func TestOneDrive_ErrorMapping(t *testing.T) {
 				t.Errorf("no %s call reached the fake", tc.method)
 			}
 		})
+	}
+}
+
+// TestOneDrive_EmptyObjectRefused (C2-R12): an object holds one byte at
+// least, as on every destination (an upload session takes no empty file):
+// BeginUpload of 0 bytes and PutSmall of none are ErrPermanent before any
+// call.
+func TestOneDrive_EmptyObjectRefused(t *testing.T) {
+	e := newEnv(t)
+	d := e.driver()
+	if st, err := d.BeginUpload(t.Context(), "c1/empty.mp4", 0, storage.Meta{}); !errors.Is(err, storage.ErrPermanent) {
+		t.Errorf("BeginUpload of 0 bytes = %+v, %v; want ErrPermanent", st, err)
+	}
+	for _, data := range [][]byte{nil, {}} {
+		if ref, err := d.PutSmall(t.Context(), "c1/empty.json", data); !errors.Is(err, storage.ErrPermanent) {
+			t.Errorf("PutSmall of %#v = %+v, %v; want ErrPermanent", data, ref, err)
+		}
+	}
+	if counts := e.fake.Counts(); len(counts) != 0 {
+		t.Errorf("the refused writes sent %v; want no call", counts)
 	}
 }
 

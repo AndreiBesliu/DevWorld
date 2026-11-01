@@ -33,7 +33,13 @@ type client struct {
 
 func newClient(t *testing.T) *client {
 	t.Helper()
-	f := New(Options{Clock: func() time.Time { return time.Date(2026, 10, 17, 8, 0, 0, 0, time.UTC) }})
+	return newClockedClient(t, func() time.Time { return time.Date(2026, 10, 17, 8, 0, 0, 0, time.UTC) })
+}
+
+// newClockedClient is newClient with a fake whose clock is clock.
+func newClockedClient(t *testing.T, clock func() time.Time) *client {
+	t.Helper()
+	f := New(Options{Clock: clock})
 	srv := httptest.NewServer(guard(t, f.Handler()))
 	t.Cleanup(srv.Close)
 	return &client{t: t, f: f, srv: srv, token: "tok-1"}
@@ -357,6 +363,57 @@ func TestFake_CancelFreesTheSession(t *testing.T) {
 	c.want(resp, body, http.StatusNotFound)
 	resp, body = c.do(http.MethodDelete, u, nil, nil)
 	c.want(resp, body, http.StatusNotFound)
+}
+
+// TestFake_SessionExpiresAfterItsLastRequest: as Graph's, a session expires
+// a day (sessionLife) after its last request, each of which moves its
+// expirationDateTime on, and its bytes are freed then; its uploadUrl
+// answers 404 from then on. A long lab run so does not keep every abandoned
+// upload in memory.
+func TestFake_SessionExpiresAfterItsLastRequest(t *testing.T) {
+	var now atomic.Int64
+	start := time.Date(2026, 10, 17, 8, 0, 0, 0, time.UTC)
+	now.Store(start.UnixNano())
+	advance := func(d time.Duration) { now.Add(int64(d)) }
+	c := newClockedClient(t, func() time.Time { return time.Unix(0, now.Load()).UTC() })
+	data := pattern(3*fragment, 5)
+	expiration := func(body []byte) time.Time {
+		t.Helper()
+		var s struct {
+			Expiration time.Time `json:"expirationDateTime"`
+		}
+		if err := json.Unmarshal(body, &s); err != nil {
+			t.Fatalf("the session's answer %s: %v", body, err)
+		}
+		return s.Expiration
+	}
+	u := c.session("a.bin", "replace")
+	advance(23 * time.Hour)
+	resp, body := c.put(u, data, 0, fragment)
+	c.want(resp, body, http.StatusAccepted)
+	if got, want := expiration(body), start.Add(23*time.Hour+sessionLife); !got.Equal(want) {
+		t.Errorf("expirationDateTime after a fragment = %s, want %s", got, want)
+	}
+	advance(sessionLife - time.Second)
+	resp, body = c.do(http.MethodGet, u, nil, nil)
+	c.want(resp, body, http.StatusOK)
+	advance(sessionLife - time.Second)
+	if n := c.f.PendingBytes(); n != fragment {
+		t.Errorf("PendingBytes() = %d a second before the expiry, want %d", n, fragment)
+	}
+	resp, body = c.put(u, data, fragment, 2*fragment)
+	c.want(resp, body, http.StatusAccepted)
+	advance(sessionLife)
+	if n := c.f.PendingBytes(); n != 0 {
+		t.Errorf("PendingBytes() = %d a day after the last request, want 0", n)
+	}
+	resp, body = c.do(http.MethodGet, u, nil, nil)
+	c.want(resp, body, http.StatusNotFound)
+	resp, body = c.put(u, data, 2*fragment, 3*fragment)
+	c.want(resp, body, http.StatusNotFound)
+	if objects := c.f.Objects(); len(objects) != 0 {
+		t.Errorf("Objects() = %d objects, want none", len(objects))
+	}
 }
 
 // quota is the drive's quota as the fake answers $select=quota.

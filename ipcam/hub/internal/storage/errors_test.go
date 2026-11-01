@@ -8,6 +8,8 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -75,11 +77,12 @@ func TestErrors_ProxyRequiredIs(t *testing.T) {
 }
 
 // TestErrors_IsTypedKnowsEveryTypedError: IsTyped finds each typed error of
-// errors.go, bare and wrapped, the struct errors as values and as non-nil
-// pointers, and no other error. The table must name every Err sentinel and
-// Err type that errors.go declares, so a typed error added there fails this
-// test until the table, and with it IsTyped, knows it: a driver's token
-// errors rely on IsTyped to keep their kind (rest.TokenError).
+// package storage, bare and wrapped, the struct errors as values and as
+// non-nil pointers, and no other error. The table must name every Err
+// sentinel and Err type that the package's non-test files declare, so a
+// typed error added to any of them fails this test until the table, and with
+// it IsTyped, knows it: a driver's token errors rely on IsTyped to keep their
+// kind (rest.TokenError).
 func TestErrors_IsTypedKnowsEveryTypedError(t *testing.T) {
 	typed := map[string][]error{
 		"ErrAuthExpired":    {storage.ErrAuthExpired},
@@ -92,14 +95,14 @@ func TestErrors_IsTypedKnowsEveryTypedError(t *testing.T) {
 		"ErrRateLimited":    {storage.ErrRateLimited{}, &storage.ErrRateLimited{RetryAfter: time.Second}},
 		"ErrDailyCap":       {storage.ErrDailyCap{ResetAfter: time.Hour}, &storage.ErrDailyCap{}},
 	}
-	declared := declaredErrors(t, "errors.go")
+	declared := declaredErrors(t, ".")
 	var named []string
 	for name := range typed {
 		named = append(named, name)
 	}
 	slices.Sort(named)
 	if !slices.Equal(named, declared) {
-		t.Errorf("errors.go declares the typed errors %v, and this test names %v: add the new one here and to IsTyped", declared, named)
+		t.Errorf("package storage declares the typed errors %v, and this test names %v: add the new one here and to IsTyped", declared, named)
 	}
 	for name, errs := range typed {
 		for _, err := range errs {
@@ -121,30 +124,41 @@ func TestErrors_IsTypedKnowsEveryTypedError(t *testing.T) {
 }
 
 // declaredErrors returns, sorted, the names of the package-level variables
-// and types of file whose names start with Err.
-func declaredErrors(t *testing.T, file string) []string {
+// and types whose names start with Err in the non-test .go files of dir,
+// package storage's directory.
+func declaredErrors(t *testing.T, dir string) []string {
 	t.Helper()
-	f, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.SkipObjectResolution)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("parse %s: %v", file, err)
+		t.Fatal(err)
 	}
 	var names []string
-	for _, decl := range f.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok {
+	for _, e := range entries {
+		file := e.Name()
+		if e.IsDir() || !strings.HasSuffix(file, ".go") || strings.HasSuffix(file, "_test.go") {
 			continue
 		}
-		for _, spec := range gen.Specs {
-			switch spec := spec.(type) {
-			case *ast.ValueSpec:
-				for _, id := range spec.Names {
-					if strings.HasPrefix(id.Name, "Err") {
-						names = append(names, id.Name)
+		f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, file), nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		for _, decl := range f.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				switch spec := spec.(type) {
+				case *ast.ValueSpec:
+					for _, id := range spec.Names {
+						if strings.HasPrefix(id.Name, "Err") {
+							names = append(names, id.Name)
+						}
 					}
-				}
-			case *ast.TypeSpec:
-				if strings.HasPrefix(spec.Name.Name, "Err") {
-					names = append(names, spec.Name.Name)
+				case *ast.TypeSpec:
+					if strings.HasPrefix(spec.Name.Name, "Err") {
+						names = append(names, spec.Name.Name)
+					}
 				}
 			}
 		}

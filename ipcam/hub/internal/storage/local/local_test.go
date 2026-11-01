@@ -492,6 +492,25 @@ func TestLocal_DiskFullIsQuotaFull(t *testing.T) {
 }
 
 // newLocal returns the driver on root.
+// TestLocal_EmptyObjectRefused (C2-R12): an object holds one byte at least,
+// as on every destination: BeginUpload of 0 bytes and PutSmall of none are
+// ErrPermanent, and leave nothing under the root.
+func TestLocal_EmptyObjectRefused(t *testing.T) {
+	root := t.TempDir()
+	dst := newLocal(t, root)
+	if st, err := dst.BeginUpload(t.Context(), "cam-1/empty.mp4", 0, storage.Meta{}); !errors.Is(err, storage.ErrPermanent) {
+		t.Errorf("BeginUpload of 0 bytes = %+v, %v; want ErrPermanent", st, err)
+	}
+	for _, data := range [][]byte{nil, {}} {
+		if ref, err := dst.PutSmall(t.Context(), "cam-1/empty.json", data); !errors.Is(err, storage.ErrPermanent) {
+			t.Errorf("PutSmall of %#v = %+v, %v; want ErrPermanent", data, ref, err)
+		}
+	}
+	if got := entriesUnder(t, root); len(got) != 0 {
+		t.Errorf("the root holds %q after the refused writes; want it empty", got)
+	}
+}
+
 func newLocal(t *testing.T, root string) storage.Destination {
 	t.Helper()
 	dst, err := local.New(root)

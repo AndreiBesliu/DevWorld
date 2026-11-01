@@ -79,6 +79,9 @@ type OneDrive struct {
 	base     string
 	partSize int64
 	clock    func() time.Time
+	// plainHTTP is true when Options.BaseURL was set, for the fakes: their
+	// uploadUrls and download URLs may then be http (preauthURL).
+	plainHTTP bool
 
 	mu sync.Mutex
 	// done holds the item that each complete session made, by uploadUrl,
@@ -122,7 +125,7 @@ func New(opts Options) (*OneDrive, error) {
 	}
 	return &OneDrive{
 		hubID: opts.HubID, client: opts.HTTPClient, tokens: opts.Tokens, base: base,
-		partSize: part, clock: clock, done: map[string]driveItem{},
+		partSize: part, clock: clock, plainHTTP: opts.BaseURL != "", done: map[string]driveItem{},
 	}, nil
 }
 
@@ -141,7 +144,8 @@ func (o *OneDrive) Capabilities() storage.Caps {
 
 // BeginUpload opens an upload session of key (createUploadSession), whose
 // item replaces the one at the key when the last fragment arrives. An upload
-// session holds one byte at least.
+// session holds one byte at least, so one of 0 bytes is refused before any
+// call (storage.Destination).
 func (o *OneDrive) BeginUpload(ctx context.Context, key storage.ObjectKey, size int64, _ storage.Meta) (storage.UploadState, error) {
 	if err := checkKey(key); err != nil {
 		return storage.UploadState{}, err
@@ -162,8 +166,8 @@ func (o *OneDrive) BeginUpload(ctx context.Context, key storage.ObjectKey, size 
 	if err := a.Decode(methodCreateSession, &s); err != nil {
 		return storage.UploadState{}, err
 	}
-	if !absoluteURL(s.UploadURL) {
-		return storage.UploadState{}, fmt.Errorf("onedrive: %s: no uploadUrl in the answer: %w", methodCreateSession, storage.ErrTransient)
+	if !o.preauthURL(s.UploadURL) {
+		return storage.UploadState{}, fmt.Errorf("onedrive: %s: no uploadUrl that the driver may use in the answer: %w", methodCreateSession, storage.ErrTransient)
 	}
 	st.Session = s.UploadURL
 	return st, nil
@@ -178,7 +182,7 @@ func (o *OneDrive) PutChunk(ctx context.Context, st *storage.UploadState, off in
 	if off < 0 || n <= 0 || off+n > st.Size || n > maxRequest {
 		return fmt.Errorf("onedrive: upload of %s: bytes [%d, %d) of %d: %w", st.Key, off, off+n, st.Size, storage.ErrPermanent)
 	}
-	if !absoluteURL(st.Session) {
+	if !o.preauthURL(st.Session) {
 		return sessionGone(methodUploadPut)
 	}
 	if st.Calls == nil {
@@ -229,7 +233,7 @@ func (o *OneDrive) Resume(ctx context.Context, st *storage.UploadState) (int64, 
 // status queries st's session and sets st.Offset, and returns the item that
 // the upload made, or nil while the session expects more bytes.
 func (o *OneDrive) status(ctx context.Context, st *storage.UploadState) (*driveItem, error) {
-	if !absoluteURL(st.Session) {
+	if !o.preauthURL(st.Session) {
 		return nil, sessionGone(methodUploadStatus)
 	}
 	if st.Calls == nil {
@@ -336,7 +340,7 @@ func (o *OneDrive) Commit(ctx context.Context, st *storage.UploadState) (storage
 // delete would only move it to the recycle bin, where it would occupy the
 // quota for 30 days. A session that is gone needs nothing.
 func (o *OneDrive) Abort(ctx context.Context, st *storage.UploadState) error {
-	if st.Session == "" || !absoluteURL(st.Session) {
+	if st.Session == "" || !o.preauthURL(st.Session) {
 		return nil
 	}
 	if _, ok := o.made(st); ok {
@@ -408,8 +412,8 @@ func (o *OneDrive) PlaybackURL(ctx context.Context, ref storage.ObjectRef, _ tim
 	if err != nil {
 		return "", err
 	}
-	if !absoluteURL(it.DownloadURL) {
-		return "", fmt.Errorf("onedrive: playback of %s: no download URL: %w", ref.Key, storage.ErrProxyRequired)
+	if !o.preauthURL(it.DownloadURL) {
+		return "", fmt.Errorf("onedrive: playback of %s: no download URL that the driver may use: %w", ref.Key, storage.ErrProxyRequired)
 	}
 	return it.DownloadURL, nil
 }
@@ -454,7 +458,8 @@ func (o *OneDrive) Quota(ctx context.Context) (storage.Quota, error) {
 
 // PutSmall writes data to key, or atomically replaces the item there, in an
 // upload session of one fragment: the item's bytes change when the fragment
-// completes, so a reader sees the old bytes or the new.
+// completes, so a reader sees the old bytes or the new. No data is refused
+// before any call, as BeginUpload refuses 0 bytes (storage.Destination).
 func (o *OneDrive) PutSmall(ctx context.Context, key storage.ObjectKey, data []byte) (storage.ObjectRef, error) {
 	if len(data) > maxRequest {
 		return storage.ObjectRef{}, fmt.Errorf("onedrive: small write of %s: %d bytes, more than one request takes: %w", key, len(data), storage.ErrPermanent)
@@ -484,10 +489,10 @@ func (o *OneDrive) List(_ context.Context, prefix storage.ObjectKey) iter.Seq2[s
 	}
 }
 
-// sessionGone is the error of a call on a session that is no uploadUrl: a
-// new upload starts.
+// sessionGone is the error of a call on a session that is no uploadUrl that
+// the driver may use (preauthURL): a new upload starts.
 func sessionGone(method string) error {
-	return fmt.Errorf("onedrive: %s: the session is not an uploadUrl: %w", method, storage.ErrSessionExpired)
+	return fmt.Errorf("onedrive: %s: the session is not an uploadUrl that the driver may use: %w", method, storage.ErrSessionExpired)
 }
 
 // checkKey refuses a key that is not a clean relative path with '/'
@@ -509,27 +514,4 @@ func checkKey(key storage.ObjectKey) error {
 // takes: not empty, "." or "..", without the characters that it refuses.
 func validName(name string) bool {
 	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `"*:<>?/\|`)
-}
-
-// Probe checks the destination (§8.7 step 6, P35) in the app folder, where
-// it creates no folder: it writes .ipcam/<hubID>/README.txt, uploads 1 MiB
-// through a session, reads a range of it back and deletes it
-// (storage.ProbeObject, with quickXorHash), and reads the quota. The deleted
-// 1 MiB goes to the recycle bin, as every delete does, and the report's
-// quota counts it in InBin. The report holds the steps that passed, and the
-// error is the first step that failed. A probe whose read fails deletes its
-// object, best effort. OneDrive has no create bucket, so Probe never waits.
-func (o *OneDrive) Probe(ctx context.Context) (storage.ProbeReport, error) {
-	var report storage.ProbeReport
-	if _, err := o.PutSmall(ctx, storage.ProbeReadmeKey(o.hubID), []byte(storage.ProbeReadme)); err != nil {
-		return report, err
-	}
-	err := storage.ProbeObject(ctx, o, storage.ProbeParams{
-		Driver: driverName, HubID: o.hubID, Hash: storage.HashQuickXor, PartSize: o.partSize,
-	}, &report)
-	if err != nil {
-		return report, err
-	}
-	report.Quota, err = o.Quota(ctx)
-	return report, err
 }

@@ -49,12 +49,13 @@ func (e ErrDailyCap) Error() string {
 	return fmt.Sprintf("storage: daily upload cap reached, resets after %s", e.ResetAfter)
 }
 
-// IsTyped reports whether err wraps one of this file's typed errors: a
+// IsTyped reports whether err wraps one of this package's typed errors: a
 // sentinel above, or ErrRateLimited or ErrDailyCap as a value or a non-nil
 // pointer. A driver passes such an error through, as rest.TokenError does a
 // token source's that already names its kind, and makes any other its own.
-// A typed error added to this file must be added here too;
-// TestErrors_IsTypedKnowsEveryTypedError fails until it is.
+// A typed error added to package storage, in this file or another, must be
+// added here too; TestErrors_IsTypedKnowsEveryTypedError, which reads every
+// Err name that the package's non-test files declare, fails until it is.
 func IsTyped(err error) bool {
 	for _, target := range []error{
 		ErrAuthExpired, ErrQuotaFull, ErrSessionExpired, ErrNotFound, ErrTransient, ErrPermanent, ErrProxyRequired,

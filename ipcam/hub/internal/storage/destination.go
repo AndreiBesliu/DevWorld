@@ -27,6 +27,11 @@ const (
 // Destination that passes the conformance suite (STO-01), with no change to
 // the rules, the outbox or the UI. Its errors are the typed errors of this
 // package (errors.go), which Reason maps to §7.7's reasons.
+//
+// An object holds one byte at least (C2-R12): BeginUpload of 0 bytes and
+// PutSmall of no data are ErrPermanent on every destination, before any
+// call. A OneDrive upload session takes no empty file, and the hub writes
+// none: a segment and the catalog have bytes.
 type Destination interface {
 	// Kind is the provider type.
 	Kind() Kind
@@ -36,7 +41,7 @@ type Destination interface {
 	// Probe writes, reads and deletes a test object, and reads the quota
 	// and the permissions.
 	Probe(ctx context.Context) (ProbeReport, error)
-	// BeginUpload starts an upload of size bytes to key.
+	// BeginUpload starts an upload of size bytes to key; size is 1 at least.
 	BeginUpload(ctx context.Context, key ObjectKey, size int64, meta Meta) (UploadState, error)
 	// PutChunk sends the n bytes that r holds for offset off of st's object.
 	PutChunk(ctx context.Context, st *UploadState, off int64, r io.Reader, n int64) error
@@ -60,7 +65,7 @@ type Destination interface {
 	// Quota reads the destination's quota, as Capabilities().Quota says.
 	Quota(ctx context.Context) (Quota, error)
 	// PutSmall writes or atomically replaces a small object: the catalog,
-	// a README.
+	// a README. data holds one byte at least.
 	PutSmall(ctx context.Context, key ObjectKey, data []byte) (ObjectRef, error)
 	// List yields the objects under prefix. It serves reconciliation and
 	// import only, never normal operation.
