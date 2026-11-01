@@ -103,3 +103,59 @@ func TestRefresh_RetriesEvery15MinWithinDay(t *testing.T) {
 		t.Errorf("day 2 failed at %v, want %v, its last attempt", at[0], want)
 	}
 }
+
+// TestRefresh_RestartKeepsADecidedDay (Task 9A review I2, C2-R16 (d′),
+// P53): a day that was ok stays decided across a hub restart. The new
+// store, on the same catalog, neither attempts that day again nor emits
+// it, even when the token endpoint fails for the rest of the day, so the
+// day is never reported failed after ok; the next day is attempted as
+// usual. Another process's rotation keeps the record, and a refresh outside
+// RunDaily (the control endpoint's, the uploads' TokenSource) decides no
+// day: RunDaily still attempts and emits it.
+func TestRefresh_RestartKeepsADecidedDay(t *testing.T) {
+	e := newEnv(t, fakeoauth.Options{})
+	s := e.store()
+	issued := e.login(s, "g-windows", storage.KindGoogleDrive, PlatformWindows, "").IssuedAt
+	results, _ := runDays(t, e, s, 15*time.Minute, issued.Add(24*time.Hour+time.Minute))
+	if want := (DailyResult{DestID: "g-windows", Day: 1, Attempt: 1, Outcome: OutcomeOK, Rotated: true}); len(results) != 1 || results[0] != want {
+		t.Fatalf("day 1 before the restart: %+v, want %+v", results, want)
+	}
+	// diag visibility, in its own process, refreshes the login and the
+	// fake rotates its token.
+	if res, err := e.store(func(c *Config) { c.Secrets = e.openCatalog() }).Refresh(t.Context(), "g-windows"); err != nil || !res.Rotated {
+		t.Fatalf("another process's refresh: %+v, %v; want rotated", res, err)
+	}
+	// The hub restarts late in day 1, and the token endpoint fails for the
+	// rest of the day and the start of day 2.
+	e.clk.Add(23*time.Hour + 30*time.Minute)
+	restarted := e.store(func(c *Config) { c.Secrets = e.openCatalog() })
+	refreshes := e.fake.Counts()["refresh_token"]
+	for range 10 {
+		e.fake.FailNext(fakeoauth.PathGoogleToken, http.StatusServiceUnavailable, "temporarily_unavailable")
+	}
+	results, _ = runDays(t, e, restarted, 5*time.Minute, issued.Add(48*time.Hour-time.Minute))
+	if len(results) != 0 {
+		t.Errorf("after the restart in day 1: %+v, want nothing: day 1 was ok", results)
+	}
+	if n := e.fake.Counts()["refresh_token"] - refreshes; n != 0 {
+		t.Errorf("%d refreshes after the restart in day 1, want none: the day was decided", n)
+	}
+	results, _ = runDays(t, e, restarted, 5*time.Minute, issued.Add(72*time.Hour-time.Minute))
+	if want := (DailyResult{DestID: "g-windows", Day: 2, Attempt: 11, Outcome: OutcomeOK, Rotated: true}); len(results) != 1 || results[0] != want {
+		t.Errorf("day 2: %+v, want %+v: ten failures, then ok", results, want)
+	}
+	// Day 3: the control endpoint's refresh comes first, then the hub
+	// restarts again.
+	e.clk.Add(issued.Add(72*time.Hour + time.Minute).Sub(e.clk.Now()))
+	if _, err := restarted.Refresh(t.Context(), "g-windows"); err != nil {
+		t.Fatalf("the control endpoint's refresh: %v", err)
+	}
+	if _, err := restarted.TokenSource(t.Context(), "g-windows").Token(); err != nil {
+		t.Fatalf("the uploads' token: %v", err)
+	}
+	again := e.store(func(c *Config) { c.Secrets = e.openCatalog() })
+	results, _ = runDays(t, e, again, 5*time.Minute, issued.Add(96*time.Hour-time.Minute))
+	if want := (DailyResult{DestID: "g-windows", Day: 3, Attempt: 1, Outcome: OutcomeOK, Rotated: true}); len(results) != 1 || results[0] != want {
+		t.Errorf("day 3 after a refresh outside RunDaily: %+v, want %+v", results, want)
+	}
+}

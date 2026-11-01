@@ -29,8 +29,11 @@ type dailyState struct {
 // 15 min until IssuedAt + (N+1)·24 h. A day is ok at its first success and
 // failed only when every attempt failed; a Google invalid_grant at or after
 // IssuedAt + TestingExpiry is expected-expiry, never failed. emit gets each
-// day once it is decided. A restart forgets the days decided before it, so
-// the day it falls in is refreshed again.
+// day once it is decided. Each daily success is recorded in the login's
+// sealed row (login.DailyRefreshedAtMs), so after a restart a day that was
+// ok is neither attempted nor emitted again (C2-R16 (d′)). A day that was
+// failed or expected-expiry is attempted again when a restart falls in it,
+// and a success then makes it ok: a success within its window.
 func (s *Store) RunDaily(ctx context.Context, emit func(DailyResult)) error {
 	for {
 		next := s.dailyStep(ctx, emit)
@@ -65,41 +68,50 @@ func (s *Store) dailyStep(ctx context.Context, emit func(DailyResult)) time.Time
 	}
 	for _, id := range ids {
 		ref := strings.TrimPrefix(id, loginPrefix)
-		info, ok, err := s.Login(ctx, ref)
+		_, l, ok, err := s.readLogin(ctx, ref)
 		if err != nil || !ok {
 			continue
 		}
-		if t, ok := s.dailyAttempt(ctx, ref, info, emit); ok {
+		if t, ok := s.dailyAttempt(ctx, ref, l, emit); ok {
 			soonest(t)
 		}
 	}
 	return next
 }
 
-// dailyAttempt makes ref's attempt when one is due now, and returns when
-// its next one is due, if ever.
-func (s *Store) dailyAttempt(ctx context.Context, ref string, info Completion, emit func(DailyResult)) (time.Time, bool) {
+// dailyAttempt makes the attempt of ref, whose row holds l, when one is due
+// now, and returns when its next one is due, if ever.
+func (s *Store) dailyAttempt(ctx context.Context, ref string, l login, emit func(DailyResult)) (time.Time, bool) {
 	now := s.cfg.Clock()
+	issued := time.UnixMilli(l.IssuedAtMs).UTC()
 	s.mu.Lock()
 	st := s.daily[ref]
-	if st == nil || !st.issued.Equal(info.IssuedAt) {
-		st = &dailyState{issued: info.IssuedAt} // a new login starts its days again
+	if st == nil || !st.issued.Equal(issued) {
+		st = &dailyState{issued: issued} // a new login starts its days again
 		s.daily[ref] = st
 	}
 	s.mu.Unlock()
 	n := int(now.Sub(st.issued) / day)
+	following := func() (time.Time, bool) {
+		if n == dailyDays {
+			return time.Time{}, false
+		}
+		return st.issued.Add(time.Duration(n+1) * day), true
+	}
 	switch {
 	case n < 1:
 		return st.issued.Add(day), true
 	case n > dailyDays:
 		return time.Time{}, false
 	case st.decided[n]:
-		if n == dailyDays {
-			return time.Time{}, false
-		}
-		return st.issued.Add(time.Duration(n+1) * day), true
+		return following()
 	}
 	first := st.issued.Add(time.Duration(n) * day)
+	if at := time.UnixMilli(l.DailyRefreshedAtMs); l.DailyRefreshedAtMs != 0 && !at.Before(first) && at.Before(first.Add(day)) {
+		// An earlier run of the hub refreshed this day and emitted it ok.
+		st.decided[n] = true
+		return following()
+	}
 	if st.next[n].IsZero() {
 		st.next[n] = first
 	}
@@ -107,12 +119,12 @@ func (s *Store) dailyAttempt(ctx context.Context, ref string, info Completion, e
 		return st.next[n], true
 	}
 	st.attempts[n]++
-	res, err := s.Refresh(ctx, ref)
+	res, err := s.refresh(ctx, ref, true)
 	result := DailyResult{DestID: ref, Day: n, Attempt: st.attempts[n], Rotated: res.Rotated}
 	switch {
 	case err == nil:
 		result.Outcome = OutcomeOK
-	case info.Provider == storage.KindGoogleDrive && s.cfg.TestingExpiry > 0 && isInvalidGrant(err) &&
+	case l.Provider == storage.KindGoogleDrive && s.cfg.TestingExpiry > 0 && isInvalidGrant(err) &&
 		!now.Before(st.issued.Add(s.cfg.TestingExpiry)):
 		result.Outcome = OutcomeExpectedExpiry
 	default:
@@ -125,8 +137,5 @@ func (s *Store) dailyAttempt(ctx context.Context, ref string, info Completion, e
 	}
 	st.decided[n] = true
 	emit(result)
-	if n == dailyDays {
-		return time.Time{}, false
-	}
-	return st.issued.Add(time.Duration(n+1) * day), true
+	return following()
 }

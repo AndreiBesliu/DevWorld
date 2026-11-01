@@ -41,6 +41,12 @@ type login struct {
 	ClientType   ClientType   `json:"clientType"`
 	Plan         string       `json:"plan"`
 	IssuedAtMs   int64        `json:"issuedAtMs"`
+	// DailyRefreshedAtMs is the time of the login's last successful daily
+	// refresh (P53), which RunDaily writes with it, so that a day that was
+	// ok stays decided across a restart (C2-R16 (d′)); 0: none yet. Only
+	// RunDaily's refreshes write it: a day is decided where its outcome went
+	// out as an event.
+	DailyRefreshedAtMs int64 `json:"dailyRefreshedAtMs,omitempty"`
 }
 
 // sealLogin seals l under ref's label.
@@ -222,23 +228,32 @@ func isInvalidGrant(err error) bool {
 // Refresh refreshes the login of ref now, whatever its access token's
 // expiry: the daily refresh (P53) and the control endpoint's.
 func (s *Store) Refresh(ctx context.Context, ref string) (RefreshResult, error) {
+	return s.refresh(ctx, ref, false)
+}
+
+// refresh refreshes ref now; daily records the success in ref's row as its
+// last daily refresh (RunDaily's).
+func (s *Store) refresh(ctx context.Context, ref string, daily bool) (RefreshResult, error) {
 	src := s.source(ref)
 	src.mu.Lock()
 	defer src.mu.Unlock()
-	return s.refreshLocked(ctx, ref, src)
+	return s.refreshLocked(ctx, ref, src, daily)
 }
 
 // refreshLocked is the refresh of ref (P27), with src.mu held:
 //  1. read the sealed row and unseal its refresh token;
 //  2. call the token endpoint, in no transaction, within tokenTimeout;
-//  3. when the provider rotated the token, seal the new one and write it
-//     with SwapSecret before the access token is used.
+//  3. when the provider rotated the token, or the refresh is daily (its
+//     time is recorded), seal the row anew and write it with SwapSecret
+//     before the access token is used.
 //
 // An invalid_grant, or a swap that another writer won, re-reads the row
 // once: a token that another process rotated meanwhile is refreshed again,
 // so no process keeps a revoked one. An invalid_grant on a row that stays
-// as it was, also rotationGrace later, is ErrAuthExpired.
-func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource) (RefreshResult, error) {
+// as it was, also rotationGrace later, is ErrAuthExpired. A row written
+// anew keeps every field it does not change, so a rotation keeps the last
+// daily refresh's time, and a daily refresh keeps the token.
+func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource, daily bool) (RefreshResult, error) {
 	row, l, ok, err := s.readLogin(ctx, ref)
 	switch {
 	case err != nil:
@@ -266,9 +281,14 @@ func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource)
 		}
 		now := s.cfg.Clock()
 		rotated := tok.RefreshToken != "" && tok.RefreshToken != l.RefreshToken
-		if rotated {
+		if rotated || daily {
 			next := l
-			next.RefreshToken = tok.RefreshToken
+			if rotated {
+				next.RefreshToken = tok.RefreshToken
+			}
+			if daily {
+				next.DailyRefreshedAtMs = now.UnixMilli()
+			}
 			sealed, err := s.sealLogin(ctx, ref, next)
 			if err != nil {
 				return RefreshResult{}, err
@@ -276,7 +296,7 @@ func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource)
 			swapped, err := s.cfg.Secrets.SwapSecret(ctx, loginPrefix+ref, row, sealed, s.cfg.Sealer.Backend())
 			switch {
 			case err != nil:
-				return RefreshResult{}, fmt.Errorf("oauth: store the rotated login %s: %w", ref, storage.ErrTransient)
+				return RefreshResult{}, fmt.Errorf("oauth: store the refreshed login %s: %w", ref, storage.ErrTransient)
 			case !swapped && !again:
 				// Another writer changed the row: refresh with its token.
 				if row, l, ok, err = s.readLogin(ctx, ref); err != nil {
@@ -379,7 +399,7 @@ func (t *tokenSource) Token() (*oauth2.Token, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.access == "" || !t.s.cfg.Clock().Before(t.expiry.Add(-expiryMargin)) {
-		if _, err := t.s.refreshLocked(ctx, t.ref, t); err != nil {
+		if _, err := t.s.refreshLocked(ctx, t.ref, t, false); err != nil {
 			return nil, err
 		}
 	}

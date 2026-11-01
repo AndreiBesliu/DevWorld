@@ -333,7 +333,9 @@ func (s *Store) Complete(ctx context.Context, state, code string) (Completion, e
 	if err != nil {
 		return named, err
 	}
-	c, err := s.completed(ctx, p, tok)
+	// The code is used up: the login is stored even when the caller goes
+	// away meanwhile, or the user's consent would be lost.
+	c, err := s.completed(context.WithoutCancel(ctx), p, tok)
 	if err != nil {
 		return named, err
 	}
@@ -347,9 +349,11 @@ func (p *pending) named() Completion {
 
 // DeviceStatus is the B1 login of state: its Completion once the user
 // approved, ErrAuthorizationPending until then, while the hub polls the
-// provider's token endpoint no faster than its interval; the provider's
-// refusal (access_denied, expired_token) ends it. On an error past an
-// unknown state, the Completion names the login, with no IssuedAt.
+// provider's token endpoint no faster than its interval, and while an
+// approved login is being stored; the provider's refusal (access_denied,
+// expired_token), or a store of the approved login that failed, ends it. On
+// an error past an unknown state, the Completion names the login, with no
+// IssuedAt.
 func (s *Store) DeviceStatus(ctx context.Context, state string) (Completion, error) {
 	now := s.cfg.Clock()
 	s.mu.Lock()
@@ -379,6 +383,9 @@ func (s *Store) DeviceStatus(ctx context.Context, state string) (Completion, err
 	s.mu.Unlock()
 	form := url.Values{"grant_type": {grantDeviceCode}, "device_code": {p.device}}
 	tok, err := s.tokenCall(ctx, p.req.Provider, p.client, form)
+	if err == nil {
+		return s.deviceApproved(ctx, p, tok)
+	}
 	s.mu.Lock()
 	p.polling = false
 	var pe *ProviderError
@@ -396,16 +403,29 @@ func (s *Store) DeviceStatus(ctx context.Context, state string) (Completion, err
 		p.failed = err
 		s.mu.Unlock()
 		return named, err
-	case err != nil:
-		p.nextPoll = now.Add(p.interval)
-		s.mu.Unlock()
-		return named, err
 	}
-	p.used = true
+	p.nextPoll = now.Add(p.interval)
 	s.mu.Unlock()
-	c, err := s.completed(ctx, p, tok)
+	return named, err
+}
+
+// deviceApproved stores the device login p that the provider approved with
+// tok. The device code is used up: p stays polling until the login is
+// stored, so a DeviceStatus or Status meanwhile is pending and never
+// redeems the code again (its invalid_grant would end a login that
+// completes). The login is stored even when the caller goes away meanwhile;
+// a store that fails ends the login, failed, since no poll can redeem the
+// code again.
+func (s *Store) deviceApproved(ctx context.Context, p *pending, tok tokenAnswer) (Completion, error) {
+	c, err := s.completed(context.WithoutCancel(ctx), p, tok)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p.used, p.polling = true, false
 	if err != nil {
-		return named, err
+		// %v, not %w: an ended login is failed, never pending, whatever
+		// the store's error was.
+		p.failed = fmt.Errorf("oauth: the provider approved the login %s, and the hub could not store it: %v", p.req.DestID, err)
+		return p.named(), p.failed
 	}
 	return c, nil
 }
@@ -419,8 +439,8 @@ const (
 )
 
 // Status is the login of state: pending, completed with its Completion,
-// expired, or failed when the provider ended a device login, with its
-// error. A device login is polled as DeviceStatus does. The Completion
+// expired, or failed when the provider ended a device login or the hub
+// could not store an approved one, with its error. A device login is polled as DeviceStatus does. The Completion
 // names the login whatever the status.
 func (s *Store) Status(ctx context.Context, state string) (string, Completion, error) {
 	s.mu.Lock()
