@@ -9,13 +9,17 @@
 // (STO-07). A session that the client cancels, or that is a week old, is
 // gone with the bytes it held. Tests inject answers with FailNext, Drive's
 // daily upload cap with DailyCapAfter, a quota with SetQuota and a token
-// check with AcceptToken. It is permanent test infrastructure, as the
-// drivers are (P04).
+// check with AcceptToken. With IdentifyTokens it scopes drive.file as
+// Drive does (P21): each file remembers the client that created it, the
+// clients of its project and account see it, HideFrom hides one creator's
+// files from one reader, and about.user.permissionId is the account's. It
+// is permanent test infrastructure, as the drivers are (P04).
 package fakegdrive
 
 import (
 	"bytes"
 	"crypto/md5" //nolint:gosec // G501: Drive's md5Checksum, which the fake reproduces
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -68,6 +72,18 @@ type Options struct {
 	Clock func() time.Time
 }
 
+// Identity is who a request acts for, as its bearer token says: the OAuth
+// client the token was issued to, that client's Google Cloud project, and
+// the account that consented.
+type Identity struct{ Client, Project, Account string }
+
+// PermissionID is the fake's about.user.permissionId of account: the same
+// for every client of the account.
+func PermissionID(account string) string {
+	sum := sha256.Sum256([]byte("fakegdrive-permission:" + account))
+	return "fake-perm-" + hex.EncodeToString(sum[:8])
+}
+
 // Object is a file or a folder that the fake holds.
 type Object struct {
 	ID, Name, MimeType string
@@ -96,17 +112,21 @@ type Fake struct {
 	capSent  int64       // the bytes uploaded toward the cap
 	capHit   time.Time   // when the cap was reached; zero while it is not
 	accept   func(token string) bool
+	identify func(token string) (Identity, bool) // nil: one identity, no scoping
+	hidden   map[[2]string]bool                  // [creator client, reader client]
 }
 
 type file struct {
 	Object
-	seq int // creation order
+	seq   int      // creation order
+	owner Identity // who created it
 }
 
 // session is a resumable upload.
 type session struct {
 	size    int64
 	meta    metadata
+	owner   Identity
 	started time.Time
 	data    []byte // the bytes held, until the upload is complete or cancelled
 	// cancelled is set once the client cancelled the session, which answers
@@ -149,6 +169,7 @@ func New(opts Options) *Fake {
 		fails:    map[string][]failure{},
 		limit:    defaultLimit,
 		capBytes: -1,
+		hidden:   map[[2]string]bool{},
 	}
 }
 
@@ -236,6 +257,45 @@ func (f *Fake) AcceptToken(accept func(token string) bool) {
 	f.accept = accept
 }
 
+// IdentifyTokens makes the fake scope its files by drive.file (P21):
+// identify tells who each bearer token acts for, and a token that it does
+// not know answers 401. A file is then seen, listed, read, updated and
+// deleted only by the clients of its creator's project and account, unless
+// HideFrom hides it from one; a create needs a parent that its client
+// sees. It runs with the fake unlocked, so it may call other fakes. nil
+// removes the scoping.
+func (f *Fake) IdentifyTokens(identify func(token string) (Identity, bool)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.identify = identify
+}
+
+// HideFrom hides the files that the client creator creates, those it holds
+// already included, from the client reader, as a drive.file grant that does
+// not reach across those two clients would.
+func (f *Fake) HideFrom(creator, reader string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hidden[[2]string{creator, reader}] = true
+}
+
+// visible reports whether the request of id sees fl. f.mu is held.
+func (f *Fake) visible(fl *file, id Identity) bool {
+	if f.identify == nil {
+		return true
+	}
+	return fl.owner.Account == id.Account && fl.owner.Project == id.Project && !f.hidden[[2]string{fl.owner.Client, id.Client}]
+}
+
+// seen returns the file id when the request of reader sees it, else nil.
+// f.mu is held.
+func (f *Fake) seen(fileID string, reader Identity) *file {
+	if fl := f.files[fileID]; fl != nil && f.visible(fl, reader) {
+		return fl
+	}
+	return nil
+}
+
 // MaxCreatesPerSec returns the most creates (files.create.resumable and
 // files.create) that arrived within any 1-s window (t − 1 s, t] of the
 // fake's clock.
@@ -304,7 +364,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "notFound", 0)
 		return
 	}
-	fail, failed, authorized := f.arrive(method, r)
+	fail, failed, authorized, who := f.arrive(method, r)
 	switch {
 	case failed && fail.status == Reset:
 		reset(w)
@@ -332,35 +392,36 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	f.expire()
 	switch method {
 	case "files.create.resumable":
-		f.createSession(w, r, body)
+		f.createSession(w, r, body, who)
 	case "upload.put", "upload.status":
 		f.putSession(w, r, body)
 	case "upload.cancel":
 		f.cancelSession(w, r)
 	case "files.create":
-		f.create(w, r, body)
+		f.create(w, r, body, who)
 	case "files.update":
-		f.update(w, r, id, body)
+		f.update(w, r, id, body, who)
 	case "files.get":
-		f.get(w, r, id)
+		f.get(w, r, id, who)
 	case "files.get.media":
-		f.media(w, r, id)
+		f.media(w, r, id, who)
 	case "files.delete":
-		f.delete(w, id)
+		f.delete(w, id, who)
 	case "files.generateIds":
 		f.generateIDs(w, r)
 	case "files.list":
-		f.list(w, r)
+		f.list(w, r, who)
 	case "about.get":
-		f.about(w, r)
+		f.about(w, r, who)
 	}
 }
 
 // arrive counts r as a request of method, meters it when it is a create,
-// and returns the failure that FailNext queued for it, if any, and whether
-// its bearer token is accepted. AcceptToken's check runs with the fake
-// unlocked, so it may call the fake.
-func (f *Fake) arrive(method string, r *http.Request) (fail failure, failed, authorized bool) {
+// and returns the failure that FailNext queued for it, if any, whether its
+// bearer token is accepted, and who it acts for. AcceptToken's and
+// IdentifyTokens' checks run with the fake unlocked, so they may call the
+// fake.
+func (f *Fake) arrive(method string, r *http.Request) (fail failure, failed, authorized bool, who Identity) {
 	f.mu.Lock()
 	f.counts[method]++
 	if method == "files.create.resumable" || method == "files.create" {
@@ -369,25 +430,28 @@ func (f *Fake) arrive(method string, r *http.Request) (fail failure, failed, aut
 	if queued := f.fails[method]; len(queued) > 0 {
 		fail, f.fails[method] = queued[0], queued[1:]
 		f.mu.Unlock()
-		return fail, true, false
+		return fail, true, false, Identity{}
 	}
-	accept := f.accept
+	accept, identify := f.accept, f.identify
 	f.mu.Unlock()
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	authorized = ok && token != "" && (accept == nil || accept(token))
-	return failure{}, false, authorized
+	if authorized && identify != nil {
+		who, authorized = identify(token)
+	}
+	return failure{}, false, authorized, who
 }
 
 // createSession opens a resumable upload of X-Upload-Content-Length bytes,
 // whose file the body describes, and answers its session URI in Location,
 // under the path that the request came to.
-func (f *Fake) createSession(w http.ResponseWriter, r *http.Request, body []byte) {
+func (f *Fake) createSession(w http.ResponseWriter, r *http.Request, body []byte, who Identity) {
 	size, err := strconv.ParseInt(r.Header.Get("X-Upload-Content-Length"), 10, 64)
 	if err != nil || size < 0 {
 		writeError(w, http.StatusBadRequest, "badContentLength", 0)
 		return
 	}
-	meta, status, reason := f.newFile(body)
+	meta, status, reason := f.newFile(body, who)
 	if status == 0 {
 		status, reason = f.uploadRefused(size, 0)
 	}
@@ -405,7 +469,7 @@ func (f *Fake) createSession(w http.ResponseWriter, r *http.Request, body []byte
 		scheme = "https"
 	}
 	id := f.newID("session")
-	f.sessions[id] = &session{size: size, meta: meta, started: f.clock(), data: []byte{}}
+	f.sessions[id] = &session{size: size, meta: meta, owner: who, started: f.clock(), data: []byte{}}
 	w.Header().Set("Location", scheme+"://"+r.Host+reqURL.EscapedPath()+"?uploadType=resumable&upload_id="+id)
 	w.WriteHeader(http.StatusOK)
 }
@@ -451,7 +515,7 @@ func (f *Fake) putSession(w http.ResponseWriter, r *http.Request, body []byte) {
 		writeError(w, status, reason, 0)
 		return
 	}
-	id := f.add(s.meta, s.data)
+	id := f.add(s.meta, s.data, s.owner)
 	s.made, s.data = resource(f.files[id], ""), nil // the file keeps its own copy of the bytes
 	writeJSON(w, http.StatusOK, s.made)
 }
@@ -500,7 +564,7 @@ func (f *Fake) storeChunk(s *session, rng string, body []byte) (int, string) {
 
 // create is a metadata-only create (a folder) or a multipart create of a
 // small file.
-func (f *Fake) create(w http.ResponseWriter, r *http.Request, body []byte) {
+func (f *Fake) create(w http.ResponseWriter, r *http.Request, body []byte, who Identity) {
 	var data []byte
 	if r.URL.Query().Get("uploadType") == "multipart" {
 		var err error
@@ -509,7 +573,7 @@ func (f *Fake) create(w http.ResponseWriter, r *http.Request, body []byte) {
 			return
 		}
 	}
-	meta, status, reason := f.newFile(body)
+	meta, status, reason := f.newFile(body, who)
 	if status == 0 {
 		status, reason = f.claim(meta.ID)
 	}
@@ -520,12 +584,12 @@ func (f *Fake) create(w http.ResponseWriter, r *http.Request, body []byte) {
 		writeError(w, status, reason, 0)
 		return
 	}
-	f.writeFile(w, http.StatusOK, f.add(meta, data), r.URL.Query().Get("fields"))
+	f.writeFile(w, http.StatusOK, f.add(meta, data, who), r.URL.Query().Get("fields"))
 }
 
 // update replaces the bytes of a small file with body.
-func (f *Fake) update(w http.ResponseWriter, r *http.Request, id string, body []byte) {
-	fl := f.files[id]
+func (f *Fake) update(w http.ResponseWriter, r *http.Request, id string, body []byte, who Identity) {
+	fl := f.seen(id, who)
 	switch {
 	case fl == nil:
 		writeError(w, http.StatusNotFound, "notFound", 0)
@@ -542,8 +606,8 @@ func (f *Fake) update(w http.ResponseWriter, r *http.Request, id string, body []
 	f.writeFile(w, http.StatusOK, id, r.URL.Query().Get("fields"))
 }
 
-func (f *Fake) get(w http.ResponseWriter, r *http.Request, id string) {
-	if f.files[id] == nil {
+func (f *Fake) get(w http.ResponseWriter, r *http.Request, id string, who Identity) {
+	if f.seen(id, who) == nil {
 		writeError(w, http.StatusNotFound, "notFound", 0)
 		return
 	}
@@ -552,8 +616,8 @@ func (f *Fake) get(w http.ResponseWriter, r *http.Request, id string) {
 
 // media serves a file's bytes, or the Range of them that the request asks
 // for (bytes=a-b or bytes=a-) with 206.
-func (f *Fake) media(w http.ResponseWriter, r *http.Request, id string) {
-	fl := f.files[id]
+func (f *Fake) media(w http.ResponseWriter, r *http.Request, id string, who Identity) {
+	fl := f.seen(id, who)
 	switch {
 	case fl == nil:
 		writeError(w, http.StatusNotFound, "notFound", 0)
@@ -585,8 +649,8 @@ func (f *Fake) media(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 // delete deletes a file, or a folder and everything in it, for good.
-func (f *Fake) delete(w http.ResponseWriter, id string) {
-	if f.files[id] == nil {
+func (f *Fake) delete(w http.ResponseWriter, id string, who Identity) {
+	if f.seen(id, who) == nil {
 		writeError(w, http.StatusNotFound, "notFound", 0)
 		return
 	}
@@ -630,9 +694,9 @@ func (f *Fake) generateIDs(w http.ResponseWriter, r *http.Request) {
 }
 
 // list answers a q of the form "'<folder>' in parents and trashed = false"
-// with the folder's children in creation order, pageSize (100 by default)
-// at a time.
-func (f *Fake) list(w http.ResponseWriter, r *http.Request) {
+// with the folder's children that the request's client sees, in creation
+// order, pageSize (100 by default) at a time.
+func (f *Fake) list(w http.ResponseWriter, r *http.Request, who Identity) {
 	q := r.URL.Query()
 	parent, ok := parseQuery(q.Get("q"))
 	pageSize, from := 100, 0
@@ -656,7 +720,7 @@ func (f *Fake) list(w http.ResponseWriter, r *http.Request) {
 	}
 	var children []*file
 	for _, fl := range f.files {
-		if fl.Parent == parent {
+		if fl.Parent == parent && f.visible(fl, who) {
 			children = append(children, fl)
 		}
 	}
@@ -673,24 +737,33 @@ func (f *Fake) list(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, answer)
 }
 
-// about answers the storage quota; Drive refuses about.get without fields.
-func (f *Fake) about(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("fields") == "" {
+// about answers the fields asked: the storage quota, and the user's
+// permissionId (P21); Drive refuses about.get without fields.
+func (f *Fake) about(w http.ResponseWriter, r *http.Request, who Identity) {
+	fields := r.URL.Query().Get("fields")
+	if fields == "" {
 		writeError(w, http.StatusBadRequest, "required", 0)
 		return
 	}
-	usage := strconv.FormatInt(f.usage(), 10)
-	quota := map[string]string{"usage": usage, "usageInDrive": usage, "usageInDriveTrash": "0"}
-	if f.limit > 0 {
-		quota["limit"] = strconv.FormatInt(f.limit, 10)
+	answer := map[string]any{}
+	if strings.Contains(fields, "storageQuota") {
+		usage := strconv.FormatInt(f.usage(), 10)
+		quota := map[string]string{"usage": usage, "usageInDrive": usage, "usageInDriveTrash": "0"}
+		if f.limit > 0 {
+			quota["limit"] = strconv.FormatInt(f.limit, 10)
+		}
+		answer["storageQuota"] = quota
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"storageQuota": quota})
+	if strings.Contains(fields, "user") {
+		answer["user"] = map[string]any{"kind": "drive#user", "permissionId": PermissionID(who.Account)}
+	}
+	writeJSON(w, http.StatusOK, answer)
 }
 
 // newFile reads a create's metadata, or returns the status and reason that
 // refuse it: no name, more than one parent, or a parent that is not a
-// folder of the fake. No parent is My Drive's root.
-func (f *Fake) newFile(body []byte) (metadata, int, string) {
+// folder of the fake that who sees. No parent is My Drive's root.
+func (f *Fake) newFile(body []byte, who Identity) (metadata, int, string) {
 	var meta metadata
 	if err := json.Unmarshal(body, &meta); err != nil || meta.Name == "" || len(meta.Parents) > 1 {
 		return meta, http.StatusBadRequest, "badRequest"
@@ -698,7 +771,7 @@ func (f *Fake) newFile(body []byte) (metadata, int, string) {
 	if len(meta.Parents) == 0 {
 		meta.Parents = []string{rootID}
 	}
-	if p := meta.Parents[0]; p != rootID && (f.files[p] == nil || !f.files[p].Folder) {
+	if p := meta.Parents[0]; p != rootID && (f.seen(p, who) == nil || !f.files[p].Folder) {
 		return meta, http.StatusNotFound, "notFound"
 	}
 	return meta, 0, ""
@@ -754,14 +827,14 @@ func (f *Fake) usage() int64 {
 }
 
 // add stores a new file of meta with data (a folder when meta's MIME type
-// is one) and returns its ID.
-func (f *Fake) add(meta metadata, data []byte) string {
+// is one), created by owner, and returns its ID.
+func (f *Fake) add(meta metadata, data []byte, owner Identity) string {
 	id := meta.ID
 	if id == "" {
 		id = f.newID("id")
 	}
 	f.seq++
-	fl := &file{seq: f.seq, Object: Object{
+	fl := &file{seq: f.seq, owner: owner, Object: Object{
 		ID: id, Name: meta.Name, MimeType: meta.MimeType, Parent: meta.Parents[0],
 		Folder: meta.MimeType == FolderMimeType, Modified: f.clock(),
 	}}

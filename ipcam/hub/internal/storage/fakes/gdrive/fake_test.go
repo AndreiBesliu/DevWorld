@@ -635,3 +635,69 @@ func TestFake_AbandonedSessionsAreFreed(t *testing.T) {
 		t.Errorf("Objects() = %d objects, want none", len(objects))
 	}
 }
+
+// TestFakeGdrive_ScopesDriveFilePerClient (P21): with IdentifyTokens, the
+// fake scopes drive.file by the client that created each file. Every client
+// of the creator's project and account lists and reads its files by
+// default; HideFrom(creator, reader) hides one creator's files from one
+// reader, both from files.list and from files.get, and from no other
+// reader; a client of another project, or another account, sees none of
+// them; and about.user.permissionId is its account's, the same for every
+// client of the account and another for another account.
+func TestFakeGdrive_ScopesDriveFilePerClient(t *testing.T) {
+	ids := map[string]Identity{
+		"tok-desktop": {Client: "desktop", Project: "p1", Account: "acct-1"},
+		"tok-tv":      {Client: "tv", Project: "p1", Account: "acct-1"},
+		"tok-android": {Client: "android", Project: "p1", Account: "acct-1"},
+		"tok-other":   {Client: "other", Project: "p2", Account: "acct-1"},
+		"tok-acct2":   {Client: "tv", Project: "p1", Account: "acct-2"},
+	}
+	c := newClient(t)
+	c.f.IdentifyTokens(func(token string) (Identity, bool) {
+		id, ok := ids[token]
+		return id, ok
+	})
+	c.token = "tok-desktop"
+	dir := c.generateID()
+	resp, body := c.folder(dir, "ipcam", "root")
+	c.want(resp, body, http.StatusOK)
+	data := []byte("ipcam-visibility")
+	s := c.session("vis-desktop.txt", dir, "", len(data))
+	resp, body = c.put(s, data, 0, len(data))
+	c.want(resp, body, http.StatusOK)
+	var file struct{ ID string }
+	if err := json.Unmarshal(body, &file); err != nil {
+		t.Fatal(err)
+	}
+	c.f.HideFrom("desktop", "tv")
+	q := "/drive/v3/files?fields=files(id)&q=" + strings.ReplaceAll("'"+dir+"' in parents and trashed = false", " ", "%20")
+	sees := func(token string) (listed, read bool, listStatus int) {
+		c.token = token
+		resp, body := c.do(http.MethodGet, q, nil, nil)
+		listed = resp.StatusCode == http.StatusOK && strings.Contains(string(body), file.ID)
+		resp, body = c.do(http.MethodGet, "/drive/v3/files/"+file.ID+"?alt=media", map[string]string{"Range": "bytes=0-15"}, nil)
+		read = resp.StatusCode == http.StatusPartialContent && string(body) == string(data)
+		return listed, read, resp.StatusCode
+	}
+	for token, want := range map[string]bool{"tok-desktop": true, "tok-android": true, "tok-tv": false, "tok-other": false, "tok-acct2": false} {
+		if listed, read, status := sees(token); listed != want || read != want {
+			t.Errorf("%s: listed %v, read %v (HTTP %d); want %v", token, listed, read, status, want)
+		}
+	}
+	c.token = "tok-unknown"
+	resp, body = c.do(http.MethodGet, q, nil, nil)
+	c.want(resp, body, http.StatusUnauthorized)
+	perm := func(token string) string {
+		c.token = token
+		resp, body := c.do(http.MethodGet, "/drive/v3/about?fields=user(permissionId)", nil, nil)
+		c.want(resp, body, http.StatusOK)
+		var about struct{ User struct{ PermissionID string } }
+		if err := json.Unmarshal(body, &about); err != nil || about.User.PermissionID == "" {
+			t.Fatalf("about.get answered %s (%v), want user.permissionId", body, err)
+		}
+		return about.User.PermissionID
+	}
+	if a, b, other := perm("tok-desktop"), perm("tok-tv"), perm("tok-acct2"); a != b || a == other || a != PermissionID("acct-1") {
+		t.Errorf("permission IDs %q, %q (same account) and %q (another), want the account's", a, b, other)
+	}
+}

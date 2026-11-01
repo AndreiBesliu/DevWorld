@@ -1,13 +1,17 @@
 // Command fakeproviders serves the hub's fake storage providers over plain
 // HTTP, for the upload spike's lab (P04, Task 8): fakegdrive under /gdrive/
 // (the Drive API) and /gdrive-upload/ (its upload URL, a BaseURL apart as the
-// live API's), and fakegraph under /graph/.
+// live API's), fakegraph under /graph/, and fakeoauth under /oauth/ (Task
+// 9), which approves every login at once, as the lab's login rig does, and
+// takes its clients over HTTP (/oauth/fake/clients). fakegdrive scopes the
+// files of fakeoauth's access tokens by drive.file (P21); any other bearer
+// token acts for one anonymous client, as before.
 //
 //	fakeproviders -listen <ip:port> [-throttle <bytes/s>]
 //
 // At start it prints one line, the URLs to give the drivers:
 //
-//	{"schema":"ipcam.fakeproviders/1","gdrive":"http://…/gdrive","gdriveUpload":"http://…/gdrive-upload","graph":"http://…/graph"}
+//	{"schema":"ipcam.fakeproviders/1","gdrive":"http://…/gdrive","gdriveUpload":"http://…/gdrive-upload","graph":"http://…/graph","oauth":"http://…/oauth"}
 //
 // and then serves until SIGTERM or an interrupt, when it exits 0. With
 // -throttle it reads each request's body at that many bytes a second, the
@@ -32,6 +36,7 @@ import (
 
 	fakegdrive "github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/fakes/gdrive"
 	fakegraph "github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/fakes/graph"
+	fakeoauth "github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/fakes/oauth"
 )
 
 const (
@@ -50,6 +55,7 @@ type urls struct {
 	GDrive       string `json:"gdrive"`
 	GDriveUpload string `json:"gdriveUpload"`
 	Graph        string `json:"graph"`
+	OAuth        string `json:"oauth"`
 }
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -76,7 +82,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	base := "http://" + ln.Addr().String()
-	line, err := json.Marshal(urls{Schema: schema, GDrive: base + "/gdrive", GDriveUpload: base + "/gdrive-upload", Graph: base + "/graph"})
+	line, err := json.Marshal(urls{Schema: schema, GDrive: base + "/gdrive", GDriveUpload: base + "/gdrive-upload", Graph: base + "/graph",
+		OAuth: base + "/oauth"})
 	if err == nil {
 		_, err = fmt.Fprintf(stdout, "%s\n", line)
 	}
@@ -98,15 +105,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// handler serves a fakegdrive under /gdrive/ and /gdrive-upload/, and a
-// fakegraph under /graph/, each request's body read at throttle bytes a
-// second when throttle is positive.
+// handler serves a fakegdrive under /gdrive/ and /gdrive-upload/, a
+// fakegraph under /graph/ and a fakeoauth under /oauth/, each request's body
+// read at throttle bytes a second when throttle is positive.
 func handler(throttle int64) http.Handler {
-	drive := fakegdrive.New(fakegdrive.Options{}).Handler()
+	login := fakeoauth.New(fakeoauth.Options{AutoApprove: true})
+	gd := fakegdrive.New(fakegdrive.Options{})
+	gd.IdentifyTokens(func(token string) (fakegdrive.Identity, bool) {
+		tok, ok := login.Lookup(token)
+		if !ok {
+			return fakegdrive.Identity{}, true // a token of no login: the anonymous client
+		}
+		return fakegdrive.Identity{Client: tok.ClientID, Project: tok.Project, Account: tok.Account}, !tok.Expired
+	})
+	drive := gd.Handler()
 	mux := http.NewServeMux()
 	mux.Handle("/gdrive/", http.StripPrefix("/gdrive", drive))
 	mux.Handle("/gdrive-upload/", http.StripPrefix("/gdrive-upload", drive))
 	mux.Handle("/graph/", http.StripPrefix("/graph", fakegraph.New(fakegraph.Options{}).Handler()))
+	mux.Handle("/oauth/", http.StripPrefix("/oauth", login.Handler()))
 	if throttle == 0 {
 		return mux
 	}

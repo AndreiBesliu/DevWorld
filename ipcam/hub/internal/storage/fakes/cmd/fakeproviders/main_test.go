@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
@@ -217,7 +219,10 @@ func randomBytes(n int, seed byte) []byte {
 // TestFakeProviders_ServesBothAndPrintsURLs: started on 127.0.0.1:0,
 // fakeproviders prints its schema line with the URLs of the port it took,
 // a resumable upload succeeds through each, with the Drive API and its
-// upload URL apart as the live API's are, and SIGTERM ends it with exit 0.
+// upload URL apart as the live API's are, fakeoauth answers under /oauth
+// (Task 9, which uploadspike mi5 --fakes reads) and auto-approves a device
+// login of a client registered over HTTP, whose access token fakegdrive
+// then scopes, and SIGTERM ends it with exit 0.
 func TestFakeProviders_ServesBothAndPrintsURLs(t *testing.T) {
 	p := start(t, "-listen", "127.0.0.1:0")
 	keys := slices.Sorted(func(yield func(string) bool) {
@@ -227,7 +232,7 @@ func TestFakeProviders_ServesBothAndPrintsURLs(t *testing.T) {
 			}
 		}
 	})
-	if want := []string{"gdrive", "gdriveUpload", "graph", "schema"}; !reflect.DeepEqual(keys, want) {
+	if want := []string{"gdrive", "gdriveUpload", "graph", "oauth", "schema"}; !reflect.DeepEqual(keys, want) {
 		t.Fatalf("the schema line's keys %q, want %q", keys, want)
 	}
 	if p.urls["schema"] != "ipcam.fakeproviders/1" {
@@ -237,7 +242,7 @@ func TestFakeProviders_ServesBothAndPrintsURLs(t *testing.T) {
 	if !strings.HasPrefix(base, "http://127.0.0.1:") || strings.HasSuffix(base, ":0") {
 		t.Fatalf("graph URL %q, want http://127.0.0.1:<port>/graph", p.urls["graph"])
 	}
-	for name, path := range map[string]string{"gdrive": "/gdrive", "gdriveUpload": "/gdrive-upload", "graph": "/graph"} {
+	for name, path := range map[string]string{"gdrive": "/gdrive", "gdriveUpload": "/gdrive-upload", "graph": "/graph", "oauth": "/oauth"} {
 		if p.urls[name] != base+path {
 			t.Errorf("%s URL %q, want %s%s", name, p.urls[name], base, path)
 		}
@@ -246,6 +251,22 @@ func TestFakeProviders_ServesBothAndPrintsURLs(t *testing.T) {
 	// keeps its creates within the driver's 2 a second.
 	uploadResumable(t, p.drive(t, 256*kib), "a.mp4", randomBytes(600*kib, 1), 256*kib)
 	uploadResumable(t, p.graph(t), "c1/a.mp4", randomBytes(700*kib, 2), 320*kib)
+	access := deviceLogin(t, p.urls["oauth"])
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, p.urls["gdrive"]+"/drive/v3/files?q="+
+		url.QueryEscape("'root' in parents and trashed = false"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+access)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || strings.Contains(string(listed), "ipcam") {
+		t.Errorf("fakeoauth's token listed My Drive with HTTP %d: %s; want 200 and none of the static token's files", resp.StatusCode, listed)
+	}
 	if code, signalled := p.stop(t); signalled && code != 0 {
 		t.Errorf("fakeproviders exited %d after SIGTERM, want 0; stderr:\n%s", code, p.stderr)
 	}
@@ -283,4 +304,45 @@ func TestFakeProviders_Usage(t *testing.T) {
 			t.Errorf("run(%q) = %d with stdout %q, want 2 and nothing", args, code, stdout.String())
 		}
 	}
+}
+
+// deviceLogin registers a TV client with the fakeoauth at base, runs its
+// device flow, which fakeproviders approves at once, and returns the access
+// token.
+func deviceLogin(t *testing.T, base string) string {
+	t.Helper()
+	secret := "SENT" + "INEL-tv"
+	client, err := json.Marshal(map[string]any{"provider": "google", "type": "tv", "id": "tv.apps", "secret": secret, "project": "p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(base+"/fake/clients", "application/json", bytes.NewReader(client)) //nolint:noctx // a test of the fake
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("registering a client: HTTP %d", resp.StatusCode)
+	}
+	form := func(path string, v url.Values) map[string]any {
+		t.Helper()
+		resp, err := http.PostForm(base+path, v) //nolint:noctx // a test of the fake
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	dev := form("/google/device/code", url.Values{"client_id": {"tv.apps"}, "scope": {"https://www.googleapis.com/auth/drive.file"}})
+	tok := form("/google/token", url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "client_id": {"tv.apps"},
+		"client_secret": {secret}, "device_code": {fmt.Sprint(dev["device_code"])}})
+	access, _ := tok["access_token"].(string)
+	if access == "" {
+		t.Fatalf("the device flow answered %v, want an access token", tok)
+	}
+	return access
 }
