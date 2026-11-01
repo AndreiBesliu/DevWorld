@@ -97,8 +97,12 @@ type file struct {
 type session struct {
 	size int64
 	meta metadata
-	data []byte
-	file string // the ID of the file that the upload created, once complete
+	data []byte // the bytes held, until the upload is complete
+	// made is the answer of the last chunk, the resource of the file that
+	// the upload created, once complete. The session answers it to every
+	// later request, after that file is deleted too, as Google's upload
+	// server keeps a finished upload's answer.
+	made map[string]any
 }
 
 // failure is an answer that FailNext injected.
@@ -372,15 +376,17 @@ func (f *Fake) createSession(w http.ResponseWriter, r *http.Request, body []byte
 
 // putSession stores a chunk of a session (Content-Range: bytes a-b/size) or
 // answers a status query (bytes */size): 308 with the Range of the bytes
-// held, or 200 with the file once the session holds every byte.
+// held, or 200 with the file once the session holds every byte. A complete
+// session answers the file as its last chunk did, whether or not the file
+// still exists.
 func (f *Fake) putSession(w http.ResponseWriter, r *http.Request, body []byte) {
 	s := f.sessions[r.URL.Query().Get("upload_id")]
 	if s == nil {
 		writeError(w, http.StatusNotFound, "notFound", 0)
 		return
 	}
-	if s.file != "" {
-		f.writeFile(w, http.StatusOK, s.file, "")
+	if s.made != nil {
+		writeJSON(w, http.StatusOK, s.made)
 		return
 	}
 	spec, ok := strings.CutPrefix(r.Header.Get("Content-Range"), "bytes ")
@@ -406,8 +412,9 @@ func (f *Fake) putSession(w http.ResponseWriter, r *http.Request, body []byte) {
 		writeError(w, status, reason, 0)
 		return
 	}
-	s.file = f.add(s.meta, s.data)
-	f.writeFile(w, http.StatusOK, s.file, "")
+	id := f.add(s.meta, s.data)
+	s.made, s.data = resource(f.files[id], ""), nil // the file keeps its own copy of the bytes
+	writeJSON(w, http.StatusOK, s.made)
 }
 
 // storeChunk stores body as the bytes rng ("a-b") of s, or returns the

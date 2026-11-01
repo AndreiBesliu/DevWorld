@@ -56,9 +56,25 @@ func newClient(t *testing.T) *client {
 	t.Helper()
 	clock := newTestClock()
 	f := New(Options{Clock: clock.Now})
-	srv := httptest.NewServer(f.Handler())
+	srv := httptest.NewServer(guard(t, f.Handler()))
 	t.Cleanup(srv.Close)
 	return &client{t: t, f: f, srv: srv, clock: clock, token: "tok-1"}
+}
+
+// guard serves h and fails t when h panics: the server alone would only
+// log the panic and drop the connection, which a client sees as a reset.
+func guard(t *testing.T, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if p := recover(); p != nil {
+				if p != http.ErrAbortHandler {
+					t.Errorf("the fake panicked serving %s %s: %v", r.Method, r.URL.Path, p)
+				}
+				panic(http.ErrAbortHandler)
+			}
+		}()
+		h.ServeHTTP(w, r)
+	})
 }
 
 // do sends a request to url (the server's URL is added to a path) and
@@ -210,6 +226,45 @@ func TestFake_ResumableUpload(t *testing.T) {
 	if fmt.Sprint(counts) != fmt.Sprint(wantCounts) {
 		t.Errorf("Counts() = %v, want %v", counts, wantCounts)
 	}
+}
+
+// TestFake_CompleteSessionOutlivesItsFile: a session that holds every byte
+// answers a status query, and its last chunk sent again, with the answer
+// that its last chunk had, after the file that it made was deleted too, as
+// Google's upload server keeps a finished upload's answer. The outbox's P34
+// mismatch path asks so: it deletes the copy, then aborts the session. The
+// fake makes no second file.
+func TestFake_CompleteSessionOutlivesItsFile(t *testing.T) {
+	c := newClient(t)
+	data := pattern(chunk+100, 3)
+	id := c.generateID()
+	session := c.session("a.mp4", "root", id, len(data))
+	resp, body := c.put(session, data, 0, chunk)
+	c.want(resp, body, http.StatusPermanentRedirect)
+	resp, body = c.put(session, data, chunk, len(data))
+	c.want(resp, body, http.StatusOK)
+	made := string(body)
+	if !strings.Contains(made, id) {
+		t.Fatalf("the last chunk answered %s, want the file %s", made, id)
+	}
+	resp, body = c.do(http.MethodDelete, "/drive/v3/files/"+id, nil, nil)
+	c.want(resp, body, http.StatusNoContent)
+
+	resp, body = c.status(session, len(data))
+	c.want(resp, body, http.StatusOK)
+	if string(body) != made {
+		t.Errorf("the status query after the delete answered %s, want the last chunk's answer %s", body, made)
+	}
+	resp, body = c.put(session, data, chunk, len(data))
+	c.want(resp, body, http.StatusOK)
+	if string(body) != made {
+		t.Errorf("the last chunk sent again after the delete answered %s, want %s", body, made)
+	}
+	if objects := c.f.Objects(); len(objects) != 0 {
+		t.Errorf("Objects() = %d objects after the delete, want none", len(objects))
+	}
+	resp, body = c.do(http.MethodGet, "/drive/v3/files/"+id+"?fields=id", nil, nil)
+	c.want(resp, body, http.StatusNotFound)
 }
 
 // TestFake_ChunkRules: a chunk other than the last must be a multiple of

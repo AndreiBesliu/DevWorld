@@ -179,6 +179,17 @@ func newEnv(t *testing.T) *testEnv {
 		if hook != nil {
 			hook(r)
 		}
+		// A panic of the fake fails the test: the server alone would only
+		// log it and drop the connection, which the driver maps to
+		// ErrTransient.
+		defer func() {
+			if p := recover(); p != nil {
+				if p != http.ErrAbortHandler {
+					t.Errorf("the fake panicked serving %s %s: %v", r.Method, r.URL.Path, p)
+				}
+				panic(http.ErrAbortHandler)
+			}
+		}()
 		e.fake.Handler().ServeHTTP(w, r)
 	}))
 	t.Cleanup(e.srv.Close)
@@ -1050,6 +1061,52 @@ func TestDrive_ListWalksStoredFolders(t *testing.T) {
 	}
 }
 
+// TestDrive_AbortAfterDelete (P34): the outbox deletes a copy that does not
+// match the spool file, then aborts its session, which Commit has already
+// left. Abort asks the session for its file. Whether the session still
+// answers the file that it made (the fake, as Google's upload server keeps a
+// finished upload's answer) or 404 (which the live API may answer instead),
+// Abort returns nil and leaves no file, and the fake does not panic.
+func TestDrive_AbortAfterDelete(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		gone      bool           // the session answers 404
+		wantCalls map[string]int // Abort's calls at the fake
+	}{
+		{name: "the session answers its file", wantCalls: map[string]int{"upload.status": 1, "files.delete": 1}},
+		{name: "the session answers 404", gone: true, wantCalls: map[string]int{"upload.status": 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.clock.SetStep(time.Second)
+			d := e.drive(func(o *Options) { o.PartSize = 256 * kib })
+			ref, st := uploadAll(t, d, "c1/a.mp4", randomBytes(600*kib, 1))
+			if _, err := d.Delete(t.Context(), ref); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+			if tc.gone {
+				e.fake.FailNext("upload.status", http.StatusNotFound, "notFound", 0)
+			}
+			before := e.fake.Counts()
+			if err := d.Abort(t.Context(), &st); err != nil {
+				t.Errorf("Abort after Delete: %v, want nil", err)
+			}
+			calls := map[string]int{}
+			for method, n := range e.fake.Counts() {
+				if n != before[method] {
+					calls[method] = n - before[method]
+				}
+			}
+			if !reflect.DeepEqual(calls, tc.wantCalls) {
+				t.Errorf("Abort made the calls %v, want %v", calls, tc.wantCalls)
+			}
+			if files := e.objects(false); len(files) != 0 {
+				t.Errorf("files at the fake after Delete and Abort %s, want none", describe(files))
+			}
+		})
+	}
+}
+
 // TestDrive_SupersededUploadLeavesOneObject (Task 4 report concern 5): a
 // placement superseded after its last chunk, or after its Commit, keeps no
 // copy at Drive, where names do not identify files: the outbox aborts the
@@ -1057,11 +1114,24 @@ func TestDrive_ListWalksStoredFolders(t *testing.T) {
 // the new bytes' upload leaves exactly one object at the key.
 func TestDrive_SupersededUploadLeavesOneObject(t *testing.T) {
 	for _, during := range []string{"the last chunk", "Commit"} {
-		t.Run("during "+during, func(t *testing.T) { testSuperseded(t, during) })
+		t.Run("during "+during, func(t *testing.T) { testRewritten(t, during, true) })
 	}
 }
 
-func testSuperseded(t *testing.T, during string) {
+// TestDrive_MismatchLeavesOneObject (P34): a spool file whose bytes change
+// in place, same size, while its upload is at Commit fails verification.
+// The outbox deletes the copy and aborts the session (Abort's status query
+// answers the deleted file, and Abort's delete gets 404), then uploads the
+// new bytes after Backoff. Exactly one object stays, and Abort costs the
+// two calls that the Task 5 report names.
+func TestDrive_MismatchLeavesOneObject(t *testing.T) { testRewritten(t, "Commit", false) }
+
+// testRewritten runs the real outbox and catalog with the driver on the
+// fake, and rewrites the segment's spool file while its upload is at during:
+// with supersede, as the recorder does (new bytes and size, the placement
+// changed in the same transaction); without, in place (same size, the
+// placement unchanged), so that the copy fails P34's verification.
+func testRewritten(t *testing.T, during string, supersede bool) {
 	e := newEnv(t)
 	e.clock.SetStep(time.Second)
 	d := e.drive(func(o *Options) { o.PartSize = 256 * kib })
@@ -1074,6 +1144,9 @@ func testSuperseded(t *testing.T, during string) {
 	t.Cleanup(func() { _ = cat.Close() })
 	recDir := filepath.Join(dir, "rec")
 	old, newer := randomBytes(600*kib, 1), randomBytes(500*kib, 2)
+	if !supersede {
+		newer = randomBytes(len(old), 2)
+	}
 	start := time.Date(2026, 10, 17, 8, 15, 0, 0, time.UTC).UnixMilli()
 	seg := catalog.Segment{Cam: "c1", Profile: "main", Path: "c1/main/2026-10-17/a.mp4",
 		StartMs: start, EndMs: start + 300_000, Bytes: int64(len(old)), State: catalog.StateComplete}
@@ -1092,7 +1165,9 @@ func testSuperseded(t *testing.T, during string) {
 		t.Fatalf("segments %+v, %v", segs, err)
 	}
 	seg = segs[0]
-	q := outbox.New(cat, map[string]storage.Destination{"dst-1": d}, outbox.Options{RecDir: recDir, HubID: "H", HubName: "hub"})
+	// No jitter: a mismatch's retry comes after Backoff's first second.
+	q := outbox.New(cat, map[string]storage.Destination{"dst-1": d},
+		outbox.Options{RecDir: recDir, HubID: "H", HubName: "hub", Rand: func() float64 { return 0 }})
 	enqueue := func(s catalog.Segment) error {
 		return cat.WithTx(ctx, func(tx *sql.Tx) error {
 			if s.Bytes != int64(len(old)) {
@@ -1120,7 +1195,7 @@ func testSuperseded(t *testing.T, during string) {
 		if hit {
 			once.Do(func() {
 				defer close(rewritten)
-				if hookErr = os.WriteFile(spool, newer, 0o600); hookErr == nil {
+				if hookErr = os.WriteFile(spool, newer, 0o600); hookErr == nil && supersede {
 					s := seg
 					s.Bytes = int64(len(newer))
 					hookErr = enqueue(s)
@@ -1132,6 +1207,7 @@ func testSuperseded(t *testing.T, during string) {
 	done := make(chan error, 1)
 	go func() { done <- q.Run(runCtx) }()
 	deadline := time.Now().Add(30 * time.Second)
+	wantHash := md5Of(t, newer)
 	var p catalog.Placement
 	for {
 		all, err := cat.Placements(ctx)
@@ -1141,7 +1217,7 @@ func testSuperseded(t *testing.T, during string) {
 		if len(all) == 1 {
 			p = all[0]
 		}
-		if p.State == catalog.PlacementVerified && p.Bytes == int64(len(newer)) {
+		if p.State == catalog.PlacementVerified && p.Bytes == int64(len(newer)) && p.RemoteHash == wantHash {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -1168,7 +1244,17 @@ func testSuperseded(t *testing.T, during string) {
 	if len(files) != 1 || files[0].Name != name || !bytes.Equal(files[0].Data, newer) || p.RemoteRef != files[0].ID {
 		t.Errorf("files at the fake %s (the placement's %s), want one: %s with the new %d bytes", describe(files), p.RemoteRef, name, len(newer))
 	}
-	if n := e.fake.Counts()["files.delete"]; n != 1 {
+	counts := e.fake.Counts()
+	if !supersede {
+		// Delete of the bad copy, then Abort's status query, which answers
+		// that copy, and Abort's delete of it, which answers 404.
+		if counts["files.delete"] != 2 || counts["upload.status"] != 1 {
+			t.Errorf("%d files.delete and %d upload.status calls, want 2 and 1: the outbox's Delete, then Abort's status query and delete",
+				counts["files.delete"], counts["upload.status"])
+		}
+		return
+	}
+	if n := counts["files.delete"]; n != 1 {
 		t.Errorf("%d files.delete calls, want 1: the old copy", n)
 	}
 }
