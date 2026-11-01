@@ -1,8 +1,9 @@
 // Package catalog is the hub's SQLite catalog (§4.6), in its Phase 0 subset:
-// the recorded segments and the gaps between them (ruling G07), and the
-// reason of each lost tail that a .part's repair will write (T40). The files
-// under rec/ are the source of truth (§4.1 (5)); ReconcileFiles makes the
-// rows match them.
+// the recorded segments and the gaps between them (ruling G07), the reason
+// of each lost tail that a .part's repair will write (T40), and the
+// placements of segments on destinations with their upload sessions (P03).
+// The files under rec/ are the source of truth (§4.1 (5)); ReconcileFiles
+// makes the rows match them.
 //
 // It uses modernc.org/sqlite (pure Go) with journal_mode=WAL and
 // synchronous=FULL on every connection, so a committed row survives a power
@@ -15,7 +16,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite" // the database/sql driver "sqlite"
@@ -83,8 +87,24 @@ type ReconcileDiff struct {
 // Count is the number of disagreements.
 func (d ReconcileDiff) Count() int { return len(d.Added) + len(d.Updated) + len(d.Lost) }
 
+// Options are a catalog's settings, which OpenWith takes.
+type Options struct {
+	// OnSegmentComplete, when set, runs inside the transaction that makes a
+	// segment row complete, or changes the bytes of a complete one:
+	// PutSegment's, and ReconcileFiles' for each such row. It gets the row
+	// as stored, with its id, and its error rolls the transaction back, the
+	// row with it. ipcam-hub enqueues the row's placements there (S3, P03),
+	// so the recorder's hook, its C1-R9 rewrite, its live repair and the
+	// startup reconcile all enqueue in the row's transaction, and the
+	// catalog imports no outbox.
+	OnSegmentComplete func(ctx context.Context, tx *sql.Tx, s Segment) error
+}
+
 // DB is an open catalog.
-type DB struct{ sql *sql.DB }
+type DB struct {
+	sql  *sql.DB
+	opts Options
+}
 
 // migrations are applied in order, each once; PRAGMA user_version counts
 // those applied. They only ever go forward.
@@ -132,23 +152,102 @@ var migrations = []string{
 		local_path TEXT PRIMARY KEY,
 		reason     TEXT NOT NULL CHECK (reason IN ('restart', 'hub_stopped', 'disk_full', 'card', 'camera_offline'))
 	);`,
+	// c2's upload tables, after c1's migrations (§4.6 L552, L557; P03): the
+	// placements of segments on destinations, their upload sessions, the
+	// sealed secrets and the destinations' remote folder IDs. A catalog that
+	// holds them is refused by a hub without this migration.
+	`CREATE TABLE placements (
+		id TEXT PRIMARY KEY,
+		object_kind TEXT NOT NULL CHECK (object_kind IN ('segment')),
+		object_id TEXT NOT NULL, destination_id TEXT NOT NULL,
+		class TEXT NOT NULL CHECK (class IN ('EVENT_CLIP','THUMBNAIL','CONTINUOUS','EXPORT')),
+		rule_ids TEXT NOT NULL DEFAULT '', encrypt INTEGER NOT NULL, retain_until_ms INTEGER NOT NULL DEFAULT 0,
+		state TEXT NOT NULL CHECK (state IN ('pending','uploading','verified','failed','deleted')),
+		remote_ref TEXT NOT NULL DEFAULT '', remote_hash TEXT NOT NULL DEFAULT '',
+		bytes INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at_ms INTEGER NOT NULL DEFAULT 0,
+		UNIQUE (object_id, destination_id));
+	CREATE INDEX placements_queue ON placements (state, next_attempt_at_ms);
+	CREATE TABLE upload_sessions (placement_id TEXT PRIMARY KEY REFERENCES placements(id), state_json BLOB NOT NULL, offset INTEGER NOT NULL);
+	CREATE TABLE secrets (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('camera','oauth','s3','webdav','sftp','smb')), sealed_blob BLOB NOT NULL, sealer TEXT NOT NULL);
+	CREATE TABLE remote_folders (destination_id TEXT NOT NULL, path TEXT NOT NULL, remote_id TEXT NOT NULL, PRIMARY KEY (destination_id, path));`,
 }
 
 // Open opens the catalog at path, creating it if needed, and migrates it.
-// It refuses a catalog whose schema is newer than this code.
+// It refuses a catalog whose schema is newer than this code. It is OpenWith
+// with zero Options: a catalog that calls no callback.
 func Open(ctx context.Context, path string) (*DB, error) {
+	return OpenWith(ctx, path, Options{})
+}
+
+// OpenWith is Open with opts.
+func OpenWith(ctx context.Context, path string, opts Options) (*DB, error) {
 	// The pragmas run on every connection the pool opens.
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=busy_timeout(10000)&_txlock=immediate"
 	sdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("catalog: open %s: %w", path, err)
 	}
-	db := &DB{sql: sdb}
+	db := &DB{sql: sdb, opts: opts}
 	if err := db.migrate(ctx); err != nil {
 		_ = sdb.Close()
 		return nil, fmt.Errorf("catalog: %s: %w", path, err)
 	}
 	return db, nil
+}
+
+// OpenReadOnly opens the catalog at path read-only (diag scan-secrets, P45):
+// SQLite's mode=ro with the busy timeout, no journal_mode pragma and no
+// migration, so it never takes the write lock, and never waits behind the
+// hub's (Open's migration would: its DSN begins every transaction
+// immediate). It refuses a missing catalog, which it never creates, and one
+// whose schema version is not this hub's. While the hub runs, a read-only
+// open of its WAL catalog creates no file; on a closed one SQLite creates
+// the -wal and -shm files it needs, which on Linux, run as root, it gives to
+// the database file's owner (os_unix.c robustFchown), and leaves them.
+func OpenReadOnly(ctx context.Context, path string) (*DB, error) {
+	return openExisting(ctx, path, "ro")
+}
+
+// OpenExisting opens the catalog at path read-write as Open does, but only
+// when it exists with this hub's schema version: it creates nothing and
+// migrates nothing, so it never takes the write lock to open, and writes
+// only what its caller writes, in short transactions. diag visibility uses
+// it beside a running hub: it stores a rotated refresh token (SwapSecret)
+// and its probe file's remote IDs (PutFolder).
+func OpenExisting(ctx context.Context, path string) (*DB, error) {
+	return openExisting(ctx, path, "rw")
+}
+
+// openExisting opens the existing catalog at path in SQLite's mode (ro or
+// rw, which never creates the file) through a file: URI, so that a space, a
+// '?' or a '#' in the path stays a file name.
+func openExisting(ctx context.Context, path, mode string) (*DB, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: open %s: %w", path, err)
+	}
+	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}
+	if !strings.HasPrefix(uri.Path, "/") {
+		uri.Path = "/" + uri.Path // a Windows path: file:///C:/…
+	}
+	query := "mode=" + mode + "&_pragma=busy_timeout(10000)"
+	if mode == "rw" {
+		query += "&_pragma=synchronous(FULL)&_txlock=immediate"
+	}
+	sdb, err := sql.Open("sqlite", uri.String()+"?"+query)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: open %s: %w", path, err)
+	}
+	var version int
+	if err := sdb.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		_ = sdb.Close()
+		return nil, fmt.Errorf("catalog: %s: %w", path, err)
+	}
+	if version != len(migrations) {
+		_ = sdb.Close()
+		return nil, fmt.Errorf("catalog: %s: the catalog's schema version %d is not this hub's %d", path, version, len(migrations))
+	}
+	return &DB{sql: sdb}, nil
 }
 
 func (db *DB) migrate(ctx context.Context) error {
@@ -178,21 +277,69 @@ func (db *DB) migrate(ctx context.Context) error {
 // Close closes the catalog.
 func (db *DB) Close() error { return db.sql.Close() }
 
-// PutSegment writes s, by its path: a new path gets a row with a new UUIDv7
-// id (or s.ID when it is set), a known path is updated and keeps its id. A
-// row whose bytes or state change is no longer verified.
+// WithTx runs fn in a transaction of the catalog and commits it when fn
+// returns nil. Otherwise it rolls the transaction back and returns fn's
+// error as it is.
+func (db *DB) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("catalog: begin a transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("catalog: commit a transaction: %w", err)
+	}
+	return nil
+}
+
+// PutSegment writes s, by its path, in a transaction of its own: a new path
+// gets a row with a new UUIDv7 id (or s.ID when it is set), a known path is
+// updated and keeps its id. A row whose bytes or state change is no longer
+// verified. When the row's new state is complete and it was not complete
+// before, or its bytes changed, Options.OnSegmentComplete runs in that
+// transaction with the row as stored, its id the row's own, whatever s.ID
+// says.
 func (db *DB) PutSegment(ctx context.Context, s Segment) error {
+	return db.WithTx(ctx, func(tx *sql.Tx) error {
+		var wasState string
+		var wasBytes int64
+		err := tx.QueryRowContext(ctx, "SELECT local_state, bytes FROM segments WHERE local_path = ?", s.Path).Scan(&wasState, &wasBytes)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("catalog: put segment %s: %w", s.Path, err)
+		}
+		id, state, err := upsertSegment(ctx, tx, s)
+		if err != nil || state != StateComplete || (wasState == StateComplete && wasBytes == s.Bytes) {
+			return err
+		}
+		return db.completed(ctx, tx, id)
+	})
+}
+
+// PutSegmentTx is PutSegment on the caller's transaction tx, so that the row
+// and what the caller writes with it, such as its placements, commit
+// together (S3). It runs no callback: it is a function of no catalog.
+func PutSegmentTx(ctx context.Context, tx *sql.Tx, s Segment) error {
+	_, _, err := upsertSegment(ctx, tx, s)
+	return err
+}
+
+// upsertSegment writes s on tx as PutSegment says, and returns the id that
+// the row keeps and the state that it takes.
+func upsertSegment(ctx context.Context, tx *sql.Tx, s Segment) (id, state string, err error) {
 	if s.State == "" {
 		s.State = StateComplete
 	}
 	if s.ID == "" {
-		id, err := uuid.NewV7()
+		uid, err := uuid.NewV7()
 		if err != nil {
-			return err
+			return "", "", err
 		}
-		s.ID = id.String()
+		s.ID = uid.String()
 	}
-	_, err := db.sql.ExecContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO segments (id, camera_id, profile, local_path, start_ms, end_ms, bytes, encrypted, local_state)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (local_path) DO UPDATE SET
@@ -200,36 +347,75 @@ func (db *DB) PutSegment(ctx context.Context, s Segment) error {
 			start_ms = excluded.start_ms, end_ms = excluded.end_ms,
 			verified_at_ms = CASE WHEN segments.bytes = excluded.bytes AND segments.local_state = excluded.local_state
 				THEN segments.verified_at_ms END,
-			bytes = excluded.bytes, encrypted = excluded.encrypted, local_state = excluded.local_state`,
-		s.ID, s.Cam, s.Profile, s.Path, s.StartMs, s.EndMs, s.Bytes, s.Encrypted, s.State)
+			bytes = excluded.bytes, encrypted = excluded.encrypted, local_state = excluded.local_state
+		RETURNING id`,
+		s.ID, s.Cam, s.Profile, s.Path, s.StartMs, s.EndMs, s.Bytes, s.Encrypted, s.State).Scan(&id)
 	if err != nil {
-		return fmt.Errorf("catalog: put segment %s: %w", s.Path, err)
+		return "", "", fmt.Errorf("catalog: put segment %s: %w", s.Path, err)
+	}
+	return id, s.State, nil
+}
+
+// completed runs Options.OnSegmentComplete, when set, on tx with the stored
+// row of the segment id, which tx has just made complete or given new bytes.
+func (db *DB) completed(ctx context.Context, tx *sql.Tx, id string) error {
+	if db.opts.OnSegmentComplete == nil {
+		return nil
+	}
+	s, err := scanSegment(tx.QueryRowContext(ctx, "SELECT "+segmentColumns+" FROM segments WHERE id = ?", id))
+	if err != nil {
+		return fmt.Errorf("catalog: read segment %s: %w", id, err)
+	}
+	if err := db.opts.OnSegmentComplete(ctx, tx, s); err != nil {
+		return fmt.Errorf("catalog: segment %s complete: %w", s.Path, err)
 	}
 	return nil
 }
 
+// segmentColumns are the columns that scanSegment reads, in its order.
+const segmentColumns = "id, camera_id, profile, local_path, start_ms, end_ms, bytes, encrypted, local_state, verified_at_ms"
+
+// rowScanner is a row of a query: *sql.Row or *sql.Rows.
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanSegment(row rowScanner) (Segment, error) {
+	var s Segment
+	var verified sql.NullInt64
+	if err := row.Scan(&s.ID, &s.Cam, &s.Profile, &s.Path, &s.StartMs, &s.EndMs, &s.Bytes, &s.Encrypted, &s.State, &verified); err != nil {
+		return Segment{}, err
+	}
+	if verified.Valid {
+		s.VerifiedAtMs = &verified.Int64
+	}
+	return s, nil
+}
+
 // Segments returns every segment, by path.
 func (db *DB) Segments(ctx context.Context) ([]Segment, error) {
-	rows, err := db.sql.QueryContext(ctx, `
-		SELECT id, camera_id, profile, local_path, start_ms, end_ms, bytes, encrypted, local_state, verified_at_ms
-		FROM segments ORDER BY local_path`)
+	rows, err := db.sql.QueryContext(ctx, "SELECT "+segmentColumns+" FROM segments ORDER BY local_path")
 	if err != nil {
 		return nil, fmt.Errorf("catalog: list segments: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var segs []Segment
 	for rows.Next() {
-		var s Segment
-		var verified sql.NullInt64
-		if err := rows.Scan(&s.ID, &s.Cam, &s.Profile, &s.Path, &s.StartMs, &s.EndMs, &s.Bytes, &s.Encrypted, &s.State, &verified); err != nil {
+		s, err := scanSegment(rows)
+		if err != nil {
 			return nil, fmt.Errorf("catalog: list segments: %w", err)
-		}
-		if verified.Valid {
-			s.VerifiedAtMs = &verified.Int64
 		}
 		segs = append(segs, s)
 	}
 	return segs, rows.Err()
+}
+
+// SegmentByID returns the segment whose id is id. An unknown id is an error
+// that wraps sql.ErrNoRows.
+func (db *DB) SegmentByID(ctx context.Context, id string) (Segment, error) {
+	s, err := scanSegment(db.sql.QueryRowContext(ctx, "SELECT "+segmentColumns+" FROM segments WHERE id = ?", id))
+	if err != nil {
+		return Segment{}, fmt.Errorf("catalog: read segment %s: %w", id, err)
+	}
+	return s, nil
 }
 
 // MarkVerified records that the segment at path passed the verification at atMs.
@@ -379,7 +565,10 @@ func (db *DB) DiffFiles(ctx context.Context, files []FileFact) (ReconcileDiff, e
 // ReconcileFiles makes the rows match files, the segment files on disk: the
 // files win (§4.1 (5)). A file without a row gets one, a row whose file says
 // otherwise takes the file's facts, and a row without a file becomes lost.
-// It returns what it changed, all in one transaction.
+// It returns what it changed, all in one transaction, in which
+// Options.OnSegmentComplete runs for each Added row and each Updated row
+// that was not complete or whose bytes changed (PutSegment's rule), with
+// the row as stored.
 func (db *DB) ReconcileFiles(ctx context.Context, files []FileFact) (ReconcileDiff, error) {
 	segs, err := db.Segments(ctx)
 	if err != nil {
@@ -412,6 +601,9 @@ func (db *DB) ReconcileFiles(ctx context.Context, files []FileFact) (ReconcileDi
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id.String(), f.Cam, f.Profile, f.Path, f.StartMs, f.EndMs, f.Bytes, f.Encrypted, StateComplete); err != nil {
 			return ReconcileDiff{}, fmt.Errorf("catalog: add %s: %w", path, err)
 		}
+		if err := db.completed(ctx, tx, id.String()); err != nil {
+			return ReconcileDiff{}, err
+		}
 	}
 	for _, path := range d.Updated {
 		f, s := facts[path], rows[path]
@@ -422,6 +614,14 @@ func (db *DB) ReconcileFiles(ctx context.Context, files []FileFact) (ReconcileDi
 		if _, err := tx.ExecContext(ctx, `UPDATE segments SET start_ms = ?, end_ms = ?, bytes = ?, encrypted = ?, local_state = ?, verified_at_ms = NULL
 			WHERE local_path = ?`, start, end, f.Bytes, f.Encrypted, StateComplete, path); err != nil {
 			return ReconcileDiff{}, fmt.Errorf("catalog: update %s: %w", path, err)
+		}
+		// PutSegment's rule: the row turned complete, or its bytes changed.
+		// Diff also lists a complete row whose times or encryption alone
+		// changed, which keeps its placements.
+		if s.State != StateComplete || s.Bytes != f.Bytes {
+			if err := db.completed(ctx, tx, s.ID); err != nil {
+				return ReconcileDiff{}, err
+			}
 		}
 	}
 	for _, path := range d.Lost {
