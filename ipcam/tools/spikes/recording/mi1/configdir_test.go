@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubproc"
@@ -89,4 +90,28 @@ func TestHubConfig_ReplacesAFilePlantedAtItsName(t *testing.T) {
 		t.Errorf("the config is still the file planted at its name")
 	}
 	checkTrusted(t, path, d, vol)
+}
+
+// TestExpandSystemFolders (Final fix C review, M3): HKLM keeps ProgramData's
+// place as %SystemDrive%\ProgramData. ProgramData expands it with the drive
+// and the folder of the system's own Windows folder, never with the process
+// environment, and refuses any other variable, which only the environment
+// could give.
+func TestExpandSystemFolders(t *testing.T) {
+	for _, c := range []struct{ raw, want, err string }{
+		{`%SystemDrive%\ProgramData`, `C:\ProgramData`, ""},
+		{`%SYSTEMDRIVE%\ProgramData`, `C:\ProgramData`, ""},
+		{`%SystemRoot%\..\ProgramData`, `C:\Windows\..\ProgramData`, ""},
+		{`D:\ProgramData`, `D:\ProgramData`, ""},
+		{`%ALLUSERSPROFILE%`, "", "%ALLUSERSPROFILE%"},
+		{`%SystemDrive`, "", "%SystemDrive"},
+	} {
+		got, err := expandSystemFolders(c.raw, `C:\Windows`)
+		if got != c.want || (err == nil) != (c.err == "") || (err != nil && !strings.Contains(err.Error(), c.err)) {
+			t.Errorf("expandSystemFolders(%q) = %q, %v; want %q, an error naming %q", c.raw, got, err, c.want, c.err)
+		}
+	}
+	if _, err := expandSystemFolders(`%SystemDrive%\ProgramData`, `\\server\share`); err == nil {
+		t.Error("a Windows folder without a drive letter gave a ProgramData")
+	}
 }

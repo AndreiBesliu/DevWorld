@@ -8,9 +8,44 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubproc"
 )
+
+// expandSystemFolders expands raw, a path that HKLM keeps with
+// %SystemDrive%, %SystemRoot% or %windir% in it, with the drive and the
+// folder of windowsDir, the system's own Windows folder, never with the
+// process environment (Final fix C review, M3); any other variable is an
+// error, since only the environment could give it.
+func expandSystemFolders(raw, windowsDir string) (string, error) {
+	if len(windowsDir) < 3 || windowsDir[1] != ':' || windowsDir[2] != '\\' {
+		return "", fmt.Errorf("folderul Windows %q nu are o literă de disc", windowsDir)
+	}
+	var b strings.Builder
+	for rest := raw; rest != ""; {
+		i := strings.IndexByte(rest, '%')
+		if i < 0 {
+			b.WriteString(rest)
+			break
+		}
+		b.WriteString(rest[:i])
+		j := strings.IndexByte(rest[i+1:], '%')
+		if j < 0 {
+			return "", fmt.Errorf("calea %q are un %% fără pereche: %s", raw, rest[i:])
+		}
+		switch name := rest[i+1 : i+1+j]; strings.ToLower(name) {
+		case "systemdrive":
+			b.WriteString(windowsDir[:2])
+		case "systemroot", "windir":
+			b.WriteString(windowsDir)
+		default:
+			return "", fmt.Errorf("calea %q numește %%%s%%, pe care doar mediul procesului o dă", raw, name)
+		}
+		rest = rest[i+2+j:]
+	}
+	return b.String(), nil
+}
 
 // WriteHubConfig writes cfg, the config of one start of ipcam-hub, as the
 // file name in dir, the protected folder of the owner's probes, and returns

@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
@@ -73,12 +74,30 @@ func DesktopDir() (string, error) {
 }
 
 // ProgramData is Windows' folder of all users' program data, C:\ProgramData,
-// as Windows itself keeps it (the known folder, under HKLM), never from
-// %ProgramData%: the owner's user may set that variable in HKCU\Environment
-// without a UAC prompt, and the boot task and the shortcut run recspike
-// elevated with that user's environment (Final fix C review, M3).
+// as the system keeps it in HKLM (ProfileList's ProgramData,
+// %SystemDrive%\ProgramData), expanded with the drive of the system's own
+// Windows folder (expandSystemFolders), never from the environment: the
+// owner's user may set %ProgramData%, %ALLUSERSPROFILE% or %SystemDrive% in
+// HKCU\Environment without a UAC prompt, and the boot task and the shortcut
+// run recspike elevated with that user's environment (Final fix C review,
+// M3). The known folder (SHGetKnownFolderPath) expands that same value from
+// the process environment: on the windows CI job it failed once those
+// variables pointed elsewhere (cfe6eba).
 func ProgramData() (string, error) {
-	return windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`, registry.QUERY_VALUE)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = k.Close() }()
+	raw, _, err := k.GetStringValue("ProgramData") // as stored: REG_EXPAND_SZ is not expanded here
+	if err != nil {
+		return "", err
+	}
+	windowsDir, err := WindowsFolder()
+	if err != nil {
+		return "", err
+	}
+	return expandSystemFolders(raw, windowsDir)
 }
 
 // WindowsFolder is Windows' own folder, C:\Windows, as the system reports
