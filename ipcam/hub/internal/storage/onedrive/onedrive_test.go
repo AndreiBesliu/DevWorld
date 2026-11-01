@@ -57,24 +57,26 @@ func (s *tokenSource) set(token string, err error) {
 
 // request is what the test's server saw of one request.
 type request struct {
-	Method, Path, Query string
-	ContentRange, Auth  string
-	Length              int64  // the body's bytes
-	Body                []byte // the body of a request that is not a fragment
+	Method, Path, Query       string
+	ContentRange, Range, Auth string
+	Length                    int64  // the body's bytes
+	Body                      []byte // the body of a request that is not a fragment
 }
 
 // testEnv is one test's fake Graph behind an httptest server and its
 // tokens. The server records each request, then runs hook, when set, before
-// the fake.
+// the fake; serve, when set, answers the requests for which it returns true
+// in the fake's place.
 type testEnv struct {
 	t      *testing.T
 	fake   *fakegraph.Fake
 	srv    *httptest.Server
 	tokens *tokenSource
 
-	mu   sync.Mutex
-	log  []request
-	hook func(*http.Request)
+	mu    sync.Mutex
+	log   []request
+	hook  func(*http.Request)
+	serve func(http.ResponseWriter, *http.Request) bool
 }
 
 func newEnv(t *testing.T) *testEnv {
@@ -83,7 +85,8 @@ func newEnv(t *testing.T) *testEnv {
 	e.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := request{
 			Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery,
-			ContentRange: r.Header.Get("Content-Range"), Auth: r.Header.Get("Authorization"), Length: r.ContentLength,
+			ContentRange: r.Header.Get("Content-Range"), Range: r.Header.Get("Range"), Auth: r.Header.Get("Authorization"),
+			Length: r.ContentLength,
 		}
 		if !strings.HasPrefix(r.URL.Path, "/up/") {
 			rec.Body, _ = io.ReadAll(r.Body)
@@ -91,10 +94,13 @@ func newEnv(t *testing.T) *testEnv {
 		}
 		e.mu.Lock()
 		e.log = append(e.log, rec)
-		hook := e.hook
+		hook, serve := e.hook, e.serve
 		e.mu.Unlock()
 		if hook != nil {
 			hook(r)
+		}
+		if serve != nil && serve(w, r) {
+			return
 		}
 		// A panic of the fake fails the test: the server alone would only
 		// log it and drop the connection, which the driver maps to
@@ -117,6 +123,12 @@ func (e *testEnv) setHook(hook func(*http.Request)) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.hook = hook
+}
+
+func (e *testEnv) setServe(serve func(http.ResponseWriter, *http.Request) bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.serve = serve
 }
 
 // requests returns the requests that the server saw.
@@ -500,6 +512,45 @@ func TestOneDrive_QuickXorVerify(t *testing.T) {
 	info, err := d.Stat(t.Context(), ref)
 	if err != nil || info.Ref != ref || info.ModTimeMs == 0 {
 		t.Errorf("Stat = %+v, %v, want %+v and a time", info, err, ref)
+	}
+}
+
+// TestOneDrive_CommitReadsAMissingHash: when the last fragment's item comes
+// without its quickXorHash (Graph's answer is the item's default set, and the
+// hash may come later), Commit reads it once (items.get, $select=id,size,file).
+func TestOneDrive_CommitReadsAMissingHash(t *testing.T) {
+	e := newEnv(t)
+	d := e.driver(func(o *Options) { o.PartSize = 320 * kib })
+	e.setServe(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, "/up/") {
+			return false
+		}
+		rec := httptest.NewRecorder()
+		e.fake.Handler().ServeHTTP(rec, r)
+		body := rec.Body.Bytes()
+		if rec.Code == http.StatusCreated || rec.Code == http.StatusOK {
+			var it map[string]any
+			_ = json.Unmarshal(body, &it)
+			delete(it, "file")
+			body, _ = json.Marshal(it)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(body)
+		return true
+	})
+	data := randomBytes(400*kib, 11)
+	ref, st := uploadAll(t, d, "c1/a.mp4", data)
+	if ref.Hash != quickXorOf(t, data) || ref.HashKind != storage.HashQuickXor || ref.Size != int64(len(data)) {
+		t.Errorf("Commit = %+v, want the bytes' quickXorHash and size", ref)
+	}
+	if want := (storage.CallCounts{"createUploadSession": 1, "upload.put": 2, "items.get": 1}); !reflect.DeepEqual(st.Calls, want) {
+		t.Errorf("the upload's calls %v, want %v", st.Calls, want)
+	}
+	for _, r := range e.requests() {
+		if r.Path == "/v1.0/me/drive/items/"+ref.ID && r.Query != "$select=id,size,file" {
+			t.Errorf("Commit asked the item with %q, want $select=id,size,file", r.Query)
+		}
 	}
 }
 
@@ -932,14 +983,15 @@ func TestOneDrive_PlaybackURLIsPreauthenticated(t *testing.T) {
 }
 
 // TestOneDrive_RangeRead: OpenRange reads a range of an object through
-// /content's redirect to the download URL, a range that ends past the
-// object's end included.
+// /content's redirect to the download URL, which gets the Range, a range
+// that ends past the object's end included.
 func TestOneDrive_RangeRead(t *testing.T) {
 	e := newEnv(t)
 	d := e.driver(func(o *Options) { o.PartSize = 320 * kib })
 	data := randomBytes(400*kib, 10)
 	ref, _ := uploadAll(t, d, "c1/a.mp4", data)
 	for _, tc := range []struct{ off, n int64 }{{0, 10}, {1000, 5000}, {int64(len(data)) - 100, 100}, {int64(len(data)) - 100, 1000}, {5, 0}} {
+		before := len(e.requests())
 		r, err := d.OpenRange(t.Context(), ref, tc.off, tc.n)
 		if err != nil {
 			t.Fatalf("OpenRange(%d, %d): %v", tc.off, tc.n, err)
@@ -950,6 +1002,36 @@ func TestOneDrive_RangeRead(t *testing.T) {
 		if err != nil || !bytes.Equal(got, data[tc.off:end]) {
 			t.Errorf("OpenRange(%d, %d) read %d bytes, %v, want bytes %d to %d", tc.off, tc.n, len(got), err, tc.off, end)
 		}
+		var ranges []string
+		for _, r := range e.requests()[before:] {
+			if strings.HasPrefix(r.Path, "/download/") {
+				ranges = append(ranges, r.Range)
+			}
+		}
+		if want := fmt.Sprintf("bytes=%d-%d", tc.off, tc.off+tc.n-1); tc.n > 0 && (len(ranges) != 1 || ranges[0] != want) {
+			t.Errorf("OpenRange(%d, %d) sent the download URL the Ranges %q, want %s", tc.off, tc.n, ranges, want)
+		}
+	}
+}
+
+// TestOneDrive_InvalidKeys: a key that is not a clean relative path, or
+// whose name OneDrive refuses, is ErrPermanent before any call.
+func TestOneDrive_InvalidKeys(t *testing.T) {
+	e := newEnv(t)
+	d := e.driver()
+	for _, key := range []storage.ObjectKey{"", ".", "/a.mp4", "a/../b.mp4", "a//b.mp4", `a\b.mp4`, "a:b.mp4", "a?.mp4", "a*.mp4", "a|b.mp4"} {
+		if _, err := d.BeginUpload(t.Context(), key, 10, storage.Meta{}); !errors.Is(err, storage.ErrPermanent) {
+			t.Errorf("BeginUpload(%q): %v, want ErrPermanent", key, err)
+		}
+		if _, err := d.PutSmall(t.Context(), key, []byte("x")); !errors.Is(err, storage.ErrPermanent) {
+			t.Errorf("PutSmall(%q): %v, want ErrPermanent", key, err)
+		}
+	}
+	if _, err := d.BeginUpload(t.Context(), "a.mp4", 0, storage.Meta{}); !errors.Is(err, storage.ErrPermanent) {
+		t.Errorf("BeginUpload of 0 bytes: %v, want ErrPermanent", err)
+	}
+	if n := len(e.requests()); n != 0 {
+		t.Errorf("%d requests, want none", n)
 	}
 }
 
