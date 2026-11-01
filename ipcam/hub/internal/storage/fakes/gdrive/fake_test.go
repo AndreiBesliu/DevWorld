@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -564,4 +565,73 @@ func TestFake_LocationUnderPrefix(t *testing.T) {
 	}
 	resp, body = c.do(http.MethodPut, loc, map[string]string{"Content-Range": "bytes 0-2/3"}, []byte("abc"))
 	c.want(resp, body, http.StatusOK)
+}
+
+// TestFake_AcceptTokenMayCallTheFake (Task 5 review M8): AcceptToken's
+// callback runs with the fake unlocked, so it may call the fake's methods.
+func TestFake_AcceptTokenMayCallTheFake(t *testing.T) {
+	c := newClient(t)
+	var blocked atomic.Bool
+	c.f.AcceptToken(func(string) bool {
+		got := make(chan struct{})
+		go func() {
+			defer close(got)
+			_ = c.f.Counts()
+		}()
+		select {
+		case <-got:
+		case <-time.After(5 * time.Second):
+			blocked.Store(true) // Counts waits for the lock that the fake holds
+		}
+		return true
+	})
+	resp, body := c.do(http.MethodGet, "/drive/v3/about?fields=storageQuota", nil, nil)
+	c.want(resp, body, http.StatusOK)
+	if blocked.Load() {
+		t.Error("the callback's Counts() waited 5 s: AcceptToken runs under the fake's lock")
+	}
+}
+
+// TestFake_AbandonedSessionsAreFreed (Task 5 review, out of scope item): the
+// bytes of a session that does not hold every byte are freed when the client
+// cancels it (DELETE of its URI, answered 499, as every later request of it
+// is) or when it expires a week after its start (404 from then on), so that a
+// long lab run does not keep every abandoned upload in memory.
+func TestFake_AbandonedSessionsAreFreed(t *testing.T) {
+	c := newClient(t)
+	data := pattern(2*chunk+10, 4)
+	cancelled := c.session("a.mp4", "root", "", len(data))
+	resp, body := c.put(cancelled, data, 0, chunk)
+	c.want(resp, body, http.StatusPermanentRedirect)
+	if n := c.f.PendingBytes(); n != chunk {
+		t.Fatalf("PendingBytes() = %d after one chunk, want %d", n, chunk)
+	}
+	resp, body = c.do(http.MethodDelete, cancelled, nil, nil)
+	c.want(resp, body, StatusCancelled)
+	if n := c.f.PendingBytes(); n != 0 {
+		t.Errorf("PendingBytes() = %d after the cancel, want 0", n)
+	}
+	resp, body = c.status(cancelled, len(data))
+	c.want(resp, body, StatusCancelled)
+	resp, body = c.put(cancelled, data, chunk, 2*chunk)
+	c.want(resp, body, StatusCancelled)
+	if n := c.f.Counts()["upload.cancel"]; n != 1 {
+		t.Errorf("%d upload.cancel requests counted, want 1", n)
+	}
+
+	expiring := c.session("b.mp4", "root", "", len(data))
+	resp, body = c.put(expiring, data, 0, chunk)
+	c.want(resp, body, http.StatusPermanentRedirect)
+	c.clock.Advance(7*24*time.Hour - time.Second)
+	resp, body = c.status(expiring, len(data))
+	c.want(resp, body, http.StatusPermanentRedirect)
+	c.clock.Advance(time.Second)
+	if n := c.f.PendingBytes(); n != 0 {
+		t.Errorf("PendingBytes() = %d a week after the session's start, want 0", n)
+	}
+	resp, body = c.status(expiring, len(data))
+	c.want(resp, body, http.StatusNotFound)
+	if objects := c.f.Objects(); len(objects) != 0 {
+		t.Errorf("Objects() = %d objects, want none", len(objects))
+	}
 }

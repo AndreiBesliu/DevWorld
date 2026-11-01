@@ -70,19 +70,20 @@ func (a *answer) decode(method string, v any) error {
 
 // send makes c's request on the plain client with the bearer token that
 // Tokens gives now (P27), and returns the answer when its status is one of
-// want. A create first takes a slot of the bucket and, without one, returns
-// ErrRateLimited before any call. Any other status is an error as
-// statusError maps it, and a request that gets no answer is ErrTransient;
-// neither text quotes the request (g2-03). Every request sent is counted.
+// want. A create then takes a slot of the bucket and, without one, returns
+// ErrRateLimited before any call; a token failure spends no slot. Any other
+// status is an error as statusError maps it, and a request that gets no
+// answer is ErrTransient; neither text quotes the request (g2-03). Every
+// request sent is counted.
 func (d *Drive) send(ctx context.Context, c call, want ...int) (*answer, error) {
+	tok, err := d.tokens.Token()
+	if err != nil {
+		return nil, tokenError(c.method, err)
+	}
 	if c.create {
 		if wait, ok := d.bucket.take(d.clock()); !ok {
 			return nil, rateLimited(c.method, wait)
 		}
-	}
-	tok, err := d.tokens.Token()
-	if err != nil {
-		return nil, tokenError(c.method, err)
 	}
 	timeout := c.timeout
 	if timeout == 0 {
@@ -114,6 +115,20 @@ func (d *Drive) send(ctx context.Context, c call, want ...int) (*answer, error) 
 		return nil, err
 	}
 	return a, nil
+}
+
+// slot takes a create slot for a create that makes calls before its own
+// (a folder's files.generateIds, a small file's), once Tokens gives a
+// token, so that a token failure spends no slot (Task 5 review M6). Without a
+// slot it returns ErrRateLimited.
+func (d *Drive) slot(method string) error {
+	if _, err := d.tokens.Token(); err != nil {
+		return tokenError(method, err)
+	}
+	if wait, ok := d.bucket.take(d.clock()); !ok {
+		return rateLimited(method, wait)
+	}
+	return nil
 }
 
 // createBucket holds the driver's creates to createsPerSec in any second

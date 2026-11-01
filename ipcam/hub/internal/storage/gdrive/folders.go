@@ -47,6 +47,10 @@ func (d *Drive) folders(ctx context.Context, dir string, calls storage.CallCount
 	for i, name := range names {
 		p = path.Join(p, name)
 		id, err := d.ensure(ctx, p, name, parent, calls)
+		if errors.Is(err, storage.ErrNotFound) && i > 0 {
+			// The parent is gone: its owner deleted it (or a folder above it).
+			id, err = d.remake(ctx, chain[:i], p, name, calls)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -68,14 +72,35 @@ func (d *Drive) ensure(ctx context.Context, p, name, parent string, calls storag
 	if id, ok, err := d.stored(ctx, p); err != nil || ok {
 		return id, err
 	}
-	if wait, ok := d.bucket.take(d.clock()); !ok {
-		return "", rateLimited(methodCreate, wait)
+	if err := d.slot(methodCreate); err != nil {
+		return "", err
 	}
 	id, err := d.storeNewID(ctx, p, calls)
 	if err != nil {
 		return "", err
 	}
 	if _, err := d.createFolder(ctx, id, name, parent, false, calls); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// remake makes again the folders of chain, the parents of the folder at p
+// whose create found its parent gone (recreate, which goes up as many levels
+// as are gone), then creates that folder, named name, once more with the ID
+// that ensure stored for p before its create (Task 5 review M1).
+func (d *Drive) remake(ctx context.Context, chain []folder, p, name string, calls storage.CallCounts) (string, error) {
+	id, ok, err := d.stored(ctx, p)
+	switch {
+	case err != nil:
+		return "", err
+	case !ok:
+		return "", fmt.Errorf("gdrive: folder store: no ID for %s, whose create found its parent gone: %w", p, storage.ErrTransient)
+	}
+	if err := d.recreate(ctx, chain, len(chain)-1, calls); err != nil {
+		return "", err
+	}
+	if _, err := d.createFolder(ctx, id, name, chain[len(chain)-1].id, true, calls); err != nil {
 		return "", err
 	}
 	return id, nil

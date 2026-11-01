@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -152,7 +153,8 @@ func (s *tokenSource) set(token string, err error) {
 
 // testEnv is one test's fake Drive behind an httptest server, its clock,
 // folder store and tokens. hook, when set, sees each request before the
-// fake does.
+// fake does; serve, when set, answers the requests for which it returns
+// true in the fake's place.
 type testEnv struct {
 	t       *testing.T
 	fake    *fakegdrive.Fake
@@ -161,8 +163,9 @@ type testEnv struct {
 	folders *memFolders
 	tokens  *tokenSource
 
-	mu   sync.Mutex
-	hook func(*http.Request)
+	mu    sync.Mutex
+	hook  func(*http.Request)
+	serve func(http.ResponseWriter, *http.Request) bool
 }
 
 func newEnv(t *testing.T) *testEnv {
@@ -174,10 +177,13 @@ func newEnv(t *testing.T) *testEnv {
 	}
 	e.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.mu.Lock()
-		hook := e.hook
+		hook, serve := e.hook, e.serve
 		e.mu.Unlock()
 		if hook != nil {
 			hook(r)
+		}
+		if serve != nil && serve(w, r) {
+			return
 		}
 		// A panic of the fake fails the test: the server alone would only
 		// log it and drop the connection, which the driver maps to
@@ -200,6 +206,12 @@ func (e *testEnv) setHook(hook func(*http.Request)) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.hook = hook
+}
+
+func (e *testEnv) setServe(serve func(http.ResponseWriter, *http.Request) bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.serve = serve
 }
 
 // options are the Options of a driver of the env's fake, as ipcam-hub
@@ -242,7 +254,7 @@ func (e *testEnv) request(method, p string, body any) []byte {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode/100 != 2 {
 		e.t.Fatalf("%s %s: HTTP %d %s", method, p, resp.StatusCode, data)
 	}
 	return data
@@ -1256,5 +1268,192 @@ func testRewritten(t *testing.T, during string, supersede bool) {
 	}
 	if n := counts["files.delete"]; n != 1 {
 		t.Errorf("%d files.delete calls, want 1: the old copy", n)
+	}
+}
+
+// TestDrive_RecreatesFoldersTheOwnerDeleted (P35, Task 5 review M1 and M7):
+// after the owner deletes a folder that the store holds, the next upload
+// makes it again with its stored ID on its first attempt, going up as many
+// levels as are gone: through ensure for a new day's folder, and through
+// into for a day folder that the store holds.
+func TestDrive_RecreatesFoldersTheOwnerDeleted(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		deleted string // the folder that the owner deletes, by its path in the store
+		key     storage.ObjectKey
+	}{
+		{name: "a new day under a deleted camera folder", deleted: "ipcam/hub/c1", key: "hub/c1/2026-10-18/a.mp4"},
+		{name: "a new day under a deleted root", deleted: "ipcam", key: "hub/c1/2026-10-18/a.mp4"},
+		{name: "a stored day under a deleted hub folder", deleted: "ipcam/hub", key: "hub/c1/2026-10-17/b.mp4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.clock.SetStep(time.Second)
+			d := e.drive()
+			uploadAll(t, d, "hub/c1/2026-10-17/a.mp4", randomBytes(1000, 1))
+			ids := map[string]string{}
+			for _, p := range []string{"ipcam", "ipcam/hub", "ipcam/hub/c1"} {
+				ids[p] = e.folders.get(p)
+			}
+			e.request(http.MethodDelete, "/drive/v3/files/"+e.folders.get(tc.deleted), nil)
+
+			data := randomBytes(2000, 2)
+			ref, _ := uploadAll(t, d, tc.key, data) // fails the test unless its first attempt succeeds
+			dir := path.Join("ipcam", path.Dir(string(tc.key)))
+			ids[dir] = e.folders.get(dir)
+			byID := map[string]fakegdrive.Object{}
+			for _, o := range e.fake.Objects() {
+				byID[o.ID] = o
+			}
+			parent := "root"
+			for _, p := range []string{"ipcam", "ipcam/hub", "ipcam/hub/c1", dir} {
+				o, ok := byID[ids[p]]
+				if !ok || !o.Folder || o.Name != path.Base(p) || o.Parent != parent {
+					t.Errorf("the folder %s: %+v (found %t), want %s with its stored ID %s in %s", p, o, ok, path.Base(p), ids[p], parent)
+				}
+				parent = ids[p]
+			}
+			if f, ok := byID[ref.ID]; !ok || f.Parent != ids[dir] || !bytes.Equal(f.Data, data) {
+				t.Errorf("the upload's file %+v (found %t), want its bytes in %s", f.Name, ok, ids[dir])
+			}
+		})
+	}
+}
+
+// TestDrive_TokenFailureSpendsNoCreateSlot (Task 5 review M6): a create whose
+// token the token source cannot give spends no slot of the 2-per-second
+// bucket, whether the slot is a folder's, a session's or a small file's: at
+// one instant, after any number of token failures, two creates still go.
+func TestDrive_TokenFailureSpendsNoCreateSlot(t *testing.T) {
+	e := newEnv(t) // the clock stands still
+	d := e.drive()
+	tokenFails := func(what string, call func() error) {
+		t.Helper()
+		e.tokens.set("", errors.New("oauth2: cannot fetch token"))
+		for i := range 3 {
+			if err := call(); !errors.Is(err, storage.ErrTransient) {
+				t.Fatalf("%s %d without a token: %v, want the token source's ErrTransient", what, i, err)
+			}
+		}
+		e.tokens.set("tok-1", nil)
+	}
+	beginUpload := func(key storage.ObjectKey) func() error {
+		return func() error {
+			_, err := d.BeginUpload(t.Context(), key, 10, storage.Meta{})
+			return err
+		}
+	}
+
+	tokenFails("a folder's create", beginUpload("a.mp4"))
+	if err := beginUpload("a.mp4")(); err != nil { // the root folder and the session: two creates
+		t.Fatalf("BeginUpload after the token failures: %v, want the two slots of this second", err)
+	}
+	e.clock.Advance(time.Second)
+	tokenFails("a session's create", beginUpload("b.mp4"))
+	for _, key := range []storage.ObjectKey{"b.mp4", "c.mp4"} {
+		if err := beginUpload(key)(); err != nil {
+			t.Fatalf("BeginUpload(%s) after the token failures: %v, want one of the two slots of this second", key, err)
+		}
+	}
+	e.clock.Advance(time.Second)
+	putSmall := func() error {
+		_, err := d.PutSmall(t.Context(), "x.txt", []byte("x"))
+		return err
+	}
+	tokenFails("a small file's create", putSmall)
+	if err := putSmall(); err != nil {
+		t.Fatalf("PutSmall after the token failures: %v, want a slot of this second", err)
+	}
+	if err := beginUpload("d.mp4")(); err != nil {
+		t.Fatalf("BeginUpload after PutSmall: %v, want the second slot of this second", err)
+	}
+}
+
+// TestDrive_ResetInAMediaBody (Task 5 review M7): a connection reset in the
+// middle of a files.get.media body ends the read with ErrTransient, after the
+// bytes that came, and the error's text names no URL.
+func TestDrive_ResetInAMediaBody(t *testing.T) {
+	e := newEnv(t)
+	e.clock.SetStep(time.Second)
+	d := e.drive()
+	data := randomBytes(8*kib, 1)
+	ref, _ := uploadAll(t, d, "c1/a.mp4", data)
+	e.setServe(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Query().Get("alt") != "media" {
+			return false
+		}
+		w.Header().Set("Content-Length", "4096")
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-4095/%d", len(data)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[:1000])
+		rc := http.NewResponseController(w)
+		_ = rc.Flush()
+		conn, _, err := rc.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return true
+		}
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			_ = tcp.SetLinger(0)
+		}
+		_ = conn.Close()
+		return true
+	})
+	r, err := d.OpenRange(t.Context(), ref, 0, 4096)
+	if err != nil {
+		t.Fatalf("OpenRange: %v", err)
+	}
+	got, err := io.ReadAll(r)
+	_ = r.Close()
+	if !errors.Is(err, storage.ErrTransient) || !bytes.Equal(got, data[:1000]) {
+		t.Fatalf("the read gave %d bytes and %v, want the 1000 bytes sent and ErrTransient", len(got), err)
+	}
+	for _, leak := range []string{e.srv.URL, "http", "alt=media", ref.ID, "tok-1"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("the error's text %q holds %q", err, leak)
+		}
+	}
+}
+
+// TestDrive_AbortCancelsAnIncompleteSession (Task 5 review, out of scope
+// item): Abort of a session that does not hold every byte cancels it with a
+// DELETE of its URI, so the provider (and the fake) frees the bytes it held;
+// the session then answers 499, which is ErrSessionExpired.
+func TestDrive_AbortCancelsAnIncompleteSession(t *testing.T) {
+	e := newEnv(t)
+	e.clock.SetStep(time.Second)
+	d := e.drive(func(o *Options) { o.PartSize = 256 * kib })
+	data := randomBytes(600*kib, 1)
+	st, err := d.BeginUpload(t.Context(), "c1/a.mp4", int64(len(data)), storage.Meta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.PutChunk(t.Context(), &st, 0, bytes.NewReader(data[:256*kib]), 256*kib); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.fake.PendingBytes(); n != 256*kib {
+		t.Fatalf("the fake holds %d bytes of open sessions, want 256 KiB", n)
+	}
+	before := e.fake.Counts()
+	if err := d.Abort(t.Context(), &st); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	calls := map[string]int{}
+	for method, n := range e.fake.Counts() {
+		if n != before[method] {
+			calls[method] = n - before[method]
+		}
+	}
+	if want := map[string]int{"upload.status": 1, "upload.cancel": 1}; !reflect.DeepEqual(calls, want) {
+		t.Errorf("Abort made the calls %v, want %v", calls, want)
+	}
+	if n := e.fake.PendingBytes(); n != 0 {
+		t.Errorf("the fake holds %d bytes of open sessions after Abort, want 0", n)
+	}
+	if _, err := d.Resume(t.Context(), &st); !errors.Is(err, storage.ErrSessionExpired) {
+		t.Errorf("Resume of the cancelled session: %v, want ErrSessionExpired", err)
+	}
+	if files := e.objects(false); len(files) != 0 {
+		t.Errorf("files at the fake %s, want none", describe(files))
 	}
 }

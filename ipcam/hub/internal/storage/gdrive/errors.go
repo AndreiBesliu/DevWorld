@@ -22,6 +22,9 @@ const (
 	maxErrorBody = 64 << 10
 	// maxReason bounds the length of a reason that an error's text names.
 	maxReason = 64
+	// statusCancelled is what a cancelled session answers: 499 Client
+	// Closed Request, in Google's resumable upload protocol.
+	statusCancelled = 499
 )
 
 // statusError maps an answer with a status that c does not expect to a typed
@@ -32,8 +35,8 @@ const (
 //   - 403 userRateLimitExceeded or rateLimitExceeded, and 429, are
 //     ErrRateLimited, after Retry-After (0 without one);
 //   - 403 dailyLimitExceeded or uploadLimitExceeded is ErrDailyCap{24 h};
-//   - 404 or 410 on a session URI is ErrSessionExpired, and 404 on anything
-//     else ErrNotFound;
+//   - 404, 410 or 499 (cancelled) on a session URI is ErrSessionExpired, and
+//     404 on anything else ErrNotFound;
 //   - 5xx is ErrTransient, and any other 4xx ErrPermanent;
 //   - a status below 400 that c does not expect is ErrTransient.
 //
@@ -59,7 +62,7 @@ func statusError(c *call, resp *http.Response, now time.Time) error {
 		kind = storage.ErrRateLimited{RetryAfter: retryAfter(resp.Header, now)}
 	case status == http.StatusForbidden && (reason == "dailyLimitExceeded" || reason == "uploadLimitExceeded"):
 		kind = storage.ErrDailyCap{ResetAfter: dailyCapPause}
-	case c.session && (status == http.StatusNotFound || status == http.StatusGone):
+	case c.session && (status == http.StatusNotFound || status == http.StatusGone || status == statusCancelled):
 		kind = storage.ErrSessionExpired
 	case status == http.StatusNotFound:
 		kind = storage.ErrNotFound

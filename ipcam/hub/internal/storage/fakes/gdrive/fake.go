@@ -6,9 +6,11 @@
 // that exists, runs resumable uploads (308 with Range until the last byte,
 // then the file), gives each file the md5Checksum of its bytes, counts the
 // requests of each API method and meters the creates in any second
-// (STO-07). Tests inject answers with FailNext, Drive's daily upload cap with
-// DailyCapAfter, a quota with SetQuota and a token check with AcceptToken.
-// It is permanent test infrastructure, as the drivers are (P04).
+// (STO-07). A session that the client cancels, or that is a week old, is
+// gone with the bytes it held. Tests inject answers with FailNext, Drive's
+// daily upload cap with DailyCapAfter, a quota with SetQuota and a token
+// check with AcceptToken. It is permanent test infrastructure, as the
+// drivers are (P04).
 package fakegdrive
 
 import (
@@ -38,6 +40,11 @@ const FolderMimeType = "application/vnd.google-apps.folder"
 // answer, as a route that went down does.
 const Reset = -1
 
+// StatusCancelled is the answer to the cancel of a session (a DELETE of its
+// URI) and to every later request of it: Google's resumable upload protocol
+// answers 499 Client Closed Request.
+const StatusCancelled = 499
+
 const (
 	// rootID is the alias of My Drive's root, the parent of the files in it.
 	rootID = "root"
@@ -47,6 +54,9 @@ const (
 	maxBody = 128 << 20
 	// capPause is how long the daily cap holds once it is reached.
 	capPause = 24 * time.Hour
+	// sessionLife is how long a session lasts after its start: a session URI
+	// expires after one week (§9.2).
+	sessionLife = 7 * 24 * time.Hour
 	// defaultLimit is a new fake's storage limit: a free account's 15 GiB.
 	defaultLimit = 15 << 30
 )
@@ -95,9 +105,13 @@ type file struct {
 
 // session is a resumable upload.
 type session struct {
-	size int64
-	meta metadata
-	data []byte // the bytes held, until the upload is complete
+	size    int64
+	meta    metadata
+	started time.Time
+	data    []byte // the bytes held, until the upload is complete or cancelled
+	// cancelled is set once the client cancelled the session, which answers
+	// StatusCancelled from then on.
+	cancelled bool
 	// made is the answer of the last chunk, the resource of the file that
 	// the upload created, once complete. The session answers it to every
 	// later request, after that file is deleted too, as Google's upload
@@ -172,6 +186,19 @@ func (f *Fake) Objects() []Object {
 	return objects
 }
 
+// PendingBytes returns the bytes that the sessions which do not hold every
+// byte keep in memory.
+func (f *Fake) PendingBytes() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.expire()
+	var n int64
+	for _, s := range f.sessions {
+		n += int64(len(s.data))
+	}
+	return n
+}
+
 // SetQuota sets the storage limit to total bytes (0: no limit) and the
 // bytes used besides the fake's files to used.
 func (f *Fake) SetQuota(total, used int64) {
@@ -202,6 +229,7 @@ func (f *Fake) DailyCapAfter(bytes int64) {
 
 // AcceptToken sets the check of each request's bearer token: a request
 // whose token it refuses, or with none, answers 401. nil accepts any token.
+// The check runs with the fake unlocked, so it may call the fake's methods.
 func (f *Fake) AcceptToken(accept func(token string) bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -247,6 +275,8 @@ func route(r *http.Request) (method, id string) {
 			return "upload.status", ""
 		}
 		return "upload.put", ""
+	case p == "/upload/drive/v3/files" && r.Method == http.MethodDelete && q.Get("upload_id") != "":
+		return "upload.cancel", ""
 	case r.Method == http.MethodPatch && q.Get("uploadType") == "media" && fileID("/upload/drive/v3/files/") != "":
 		return "files.update", fileID("/upload/drive/v3/files/")
 	case p == "/drive/v3/files" && r.Method == http.MethodPost:
@@ -299,11 +329,14 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.expire()
 	switch method {
 	case "files.create.resumable":
 		f.createSession(w, r, body)
 	case "upload.put", "upload.status":
 		f.putSession(w, r, body)
+	case "upload.cancel":
+		f.cancelSession(w, r)
 	case "files.create":
 		f.create(w, r, body)
 	case "files.update":
@@ -325,20 +358,23 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 
 // arrive counts r as a request of method, meters it when it is a create,
 // and returns the failure that FailNext queued for it, if any, and whether
-// its bearer token is accepted.
+// its bearer token is accepted. AcceptToken's check runs with the fake
+// unlocked, so it may call the fake.
 func (f *Fake) arrive(method string, r *http.Request) (fail failure, failed, authorized bool) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.counts[method]++
 	if method == "files.create.resumable" || method == "files.create" {
 		f.creates = append(f.creates, f.clock())
 	}
 	if queued := f.fails[method]; len(queued) > 0 {
 		fail, f.fails[method] = queued[0], queued[1:]
+		f.mu.Unlock()
 		return fail, true, false
 	}
+	accept := f.accept
+	f.mu.Unlock()
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	authorized = ok && token != "" && (f.accept == nil || f.accept(token))
+	authorized = ok && token != "" && (accept == nil || accept(token))
 	return failure{}, false, authorized
 }
 
@@ -369,7 +405,7 @@ func (f *Fake) createSession(w http.ResponseWriter, r *http.Request, body []byte
 		scheme = "https"
 	}
 	id := f.newID("session")
-	f.sessions[id] = &session{size: size, meta: meta, data: []byte{}}
+	f.sessions[id] = &session{size: size, meta: meta, started: f.clock(), data: []byte{}}
 	w.Header().Set("Location", scheme+"://"+r.Host+reqURL.EscapedPath()+"?uploadType=resumable&upload_id="+id)
 	w.WriteHeader(http.StatusOK)
 }
@@ -378,14 +414,17 @@ func (f *Fake) createSession(w http.ResponseWriter, r *http.Request, body []byte
 // answers a status query (bytes */size): 308 with the Range of the bytes
 // held, or 200 with the file once the session holds every byte. A complete
 // session answers the file as its last chunk did, whether or not the file
-// still exists.
+// still exists; a cancelled one answers StatusCancelled.
 func (f *Fake) putSession(w http.ResponseWriter, r *http.Request, body []byte) {
 	s := f.sessions[r.URL.Query().Get("upload_id")]
-	if s == nil {
+	switch {
+	case s == nil:
 		writeError(w, http.StatusNotFound, "notFound", 0)
 		return
-	}
-	if s.made != nil {
+	case s.cancelled:
+		writeError(w, StatusCancelled, "uploadCancelled", 0)
+		return
+	case s.made != nil:
 		writeJSON(w, http.StatusOK, s.made)
 		return
 	}
@@ -415,6 +454,29 @@ func (f *Fake) putSession(w http.ResponseWriter, r *http.Request, body []byte) {
 	id := f.add(s.meta, s.data)
 	s.made, s.data = resource(f.files[id], ""), nil // the file keeps its own copy of the bytes
 	writeJSON(w, http.StatusOK, s.made)
+}
+
+// cancelSession cancels a session (a DELETE of its URI) and frees the bytes
+// it held. It answers StatusCancelled, as the session does from then on.
+func (f *Fake) cancelSession(w http.ResponseWriter, r *http.Request) {
+	s := f.sessions[r.URL.Query().Get("upload_id")]
+	if s == nil {
+		writeError(w, http.StatusNotFound, "notFound", 0)
+		return
+	}
+	s.cancelled, s.data = true, nil
+	writeError(w, StatusCancelled, "uploadCancelled", 0)
+}
+
+// expire drops the sessions that started sessionLife ago or more, with the
+// bytes they held: their URIs answer 404 from then on.
+func (f *Fake) expire() {
+	now := f.clock()
+	for id, s := range f.sessions {
+		if !now.Before(s.started.Add(sessionLife)) {
+			delete(f.sessions, id)
+		}
+	}
 }
 
 // storeChunk stores body as the bytes rng ("a-b") of s, or returns the

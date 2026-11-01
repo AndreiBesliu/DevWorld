@@ -8,11 +8,12 @@ import (
 )
 
 // The API methods, by the names of the call log (P18): Drive's reference
-// names, and three of the resumable upload protocol.
+// names, and four of the resumable upload protocol.
 const (
 	methodCreateResumable = "files.create.resumable" // a resumable upload's session
 	methodUploadPut       = "upload.put"             // a chunk sent to a session
 	methodUploadStatus    = "upload.status"          // a session's status query
+	methodUploadCancel    = "upload.cancel"          // a session's cancel, a DELETE of its URI
 	methodGet             = "files.get"
 	methodGetMedia        = "files.get.media"
 	methodDelete          = "files.delete"
