@@ -44,23 +44,6 @@ func UnprotectFolderCommands(dir string) [][]string {
 // DataFolder is the data folder name of the PC's release folder dir.
 func DataFolder(dir, name string) string { return dir + `\` + name }
 
-// AdministratorsOwnCommand is the icacls command that gives path to
-// Administrators.
-func AdministratorsOwnCommand(path string) []string {
-	return []string{"icacls", path, "/setowner", "*" + administratorsSID}
-}
-
-// AdministratorsOnlyCommands are the icacls commands that give the folder
-// dir to Administrators, with a protected DACL where only Administrators
-// and SYSTEM have access (Full control), passed on to everything in it.
-// recspike keeps there what its elevated install and uninstall read, under
-// %ProgramData%, where any user may create a folder first: whoever did
-// loses it.
-func AdministratorsOnlyCommands(dir string) [][]string {
-	return [][]string{AdministratorsOwnCommand(dir),
-		{"icacls", dir, "/inheritance:r", "/grant:r", "*" + administratorsSID + ":(OI)(CI)F", "*" + systemSID + ":(OI)(CI)F"}}
-}
-
 // AdministratorsOwned reports whether owner, the SID of a file's owner, is
 // Administrators or SYSTEM: no other account wrote the file.
 func AdministratorsOwned(owner string) bool {

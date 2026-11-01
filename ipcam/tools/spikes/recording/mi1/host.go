@@ -4,6 +4,7 @@ package mi1
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -140,7 +141,7 @@ func (d *Driver) record(ctx context.Context, s *session, st *RunState, p RunPlan
 		return err
 	}
 	defer func() { _ = log.Close() }()
-	config, err := d.ownMediaMTX(cur)
+	config, err := d.hubConfig(st, cur, vol)
 	if err != nil {
 		return err
 	}
@@ -328,7 +329,7 @@ func (d *Driver) stop(ctx context.Context, s *session, st *RunState, cur *Curren
 		if err := SaveRunState(d.statePath(), st); err != nil {
 			return err
 		}
-		if _, err := d.ownMediaMTX(cur); err != nil {
+		if _, err := d.hubConfig(st, cur, vol); err != nil {
 			return err
 		}
 		again, err := hub.Restart()
@@ -431,7 +432,7 @@ func (d *Driver) finishAfterReboot(ctx context.Context, s *session, st *RunState
 		return err
 	}
 	defer func() { _ = log.Close() }()
-	config, err := d.ownMediaMTX(cur)
+	config, err := d.hubConfig(st, cur, vol)
 	if err != nil {
 		return err
 	}
@@ -486,7 +487,7 @@ func (d *Driver) afterStop(ctx context.Context, s *session, st *RunState, cur *C
 	if err := SaveRunState(d.statePath(), st); err != nil {
 		return err
 	}
-	if _, err := d.ownMediaMTX(cur); err != nil {
+	if _, err := d.hubConfig(st, cur, vol); err != nil {
 		return err
 	}
 	again, err := hub.Restart()
@@ -708,26 +709,72 @@ func (d *Driver) writeRun(cur *CurrentRun, vol Volume, s *session) (string, erro
 	return config, errors.Join(syncPath(config), syncDir(dir), syncDir(d.Work))
 }
 
-// ownMediaMTX returns the run's run.json once it names the release's own
-// MediaMTX, d.MediaMTX ("" for the one next to ipcam-hub), before every
-// start of ipcam-hub: the first, the resume after a reboot and the
-// restarts after a stop run elevated on the PC (the boot task, the
-// shortcut), while run.json lies in work/, which the owner's own token may
-// change, and ipcam-hub runs the binary that it names (Final fix A review,
-// Minor 1).
-func (d *Driver) ownMediaMTX(cur *CurrentRun) (string, error) {
-	config := filepath.Join(d.runDir(cur.RunID), "run.json")
-	cfg, err := hubproc.ReadConfig(config)
+// The configs, in the protected folder (ProtectConfigDir), that the owner's
+// probes start ipcam-hub with, elevated: one file per probe, so that no two
+// probes ever share one. HubConfigName is MI1's, in Driver.ConfigDir.
+const (
+	HubConfigName = "ipcam-hub-run.json"
+	HubConfigMI2  = "ipcam-hub-mi2.json"
+	HubConfigMI3  = "ipcam-hub-mi3.json"
+	HubConfigMI4  = "ipcam-hub-mi4.json"
+	HubConfigMI9  = "ipcam-hub-mi9.json"
+)
+
+// HubConfigNames are every probe's config, which uninstall removes.
+var HubConfigNames = []string{HubConfigName, HubConfigMI2, HubConfigMI3, HubConfigMI4, HubConfigMI9}
+
+// hubConfig writes the config that ipcam-hub starts with, before each of
+// its starts (the first, the resume after a reboot, the restarts after a
+// stop), and returns its path. On the owner's devices these starts run
+// elevated (the boot task, the shortcut, root on the Pi), while the run's
+// run.json lies in work/, which the owner's own token may change (Final
+// fix A review, Minor 1; Final fix B review, M2). So only the
+// controller's camera jobs and the SD card's confirmation come from it;
+// the MediaMTX binary is the release's own (d.MediaMTX), the data
+// directory the run's volume's, and RI_g's file the one in the run's
+// folder when the run state says that the run is encrypted. The owner's
+// runs write the config into d.ConfigDir, which only Administrators and
+// SYSTEM, or root, may write, as a new file that no one else may change
+// (WriteHubConfig): a folder that another account made there before
+// install is refused (ProtectConfigDir), and a file at the config's name is
+// replaced, not written through (Final fix C review, I2). The lab's runs,
+// and a driver without a ConfigDir, write it back into run.json when it
+// changes (rewriteRun).
+func (d *Driver) hubConfig(st *RunState, cur *CurrentRun, vol Volume) (string, error) {
+	path := filepath.Join(d.runDir(cur.RunID), "run.json")
+	saved, err := hubproc.ReadConfig(path)
 	if err != nil {
 		return "", err
 	}
-	if cfg.MediaMTX != d.MediaMTX {
-		cfg.MediaMTX = d.MediaMTX
-		if err := hubproc.WriteConfig(config, cfg); err != nil {
-			return "", err
-		}
+	cfg := hubproc.Config{DataDir: vol.DataDir(), MediaMTX: d.MediaMTX, SDCardConfirmed: saved.SDCardConfirmed, Jobs: saved.Jobs}
+	if cur.Encrypted {
+		cfg.IdentityFile = filepath.Join(d.runDir(cur.RunID), "ri_g.key")
 	}
-	return config, nil
+	if d.ConfigDir == "" || st.Mode == ModeLab {
+		return path, rewriteRun(path, cfg)
+	}
+	protect, write := d.protectDir, d.writeProtected
+	if protect == nil {
+		protect = ProtectConfigDir
+	}
+	if write == nil {
+		write = WriteProtected
+	}
+	return writeHubConfig(protect, write, d.ConfigDir, HubConfigName, cfg)
+}
+
+// rewriteRun writes cfg into the run's run.json at path when it changes
+// what is there, durably: a resume reads it again after a reset, which a
+// write that is not synced could leave empty (Final fix C review, M2).
+func rewriteRun(path string, cfg hubproc.Config) error {
+	data, err := hubproc.EncodeConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if saved, err := os.ReadFile(path); err == nil && bytes.Equal(saved, data) { //nolint:gosec // the run's own run.json
+		return nil
+	}
+	return WriteDurably(path, data, 0o600)
 }
 
 // identity reads the run's RI_g; nil for a clear run.

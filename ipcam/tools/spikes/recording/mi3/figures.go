@@ -11,7 +11,6 @@ import (
 
 	"filippo.io/age"
 
-	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
@@ -72,7 +71,7 @@ func (s *stepRun) figures(start, end usage, peak uint64, res link.Mi3Result, upl
 		SkippedAUs:         res.SkippedAUs,
 		DiskQueuePeakBytes: queuePeak,
 		LoadCPUPct:         loads,
-		Invalid:            s.shortLoad(res.LatencySamples, disk.seconds),
+		Invalid:            s.shortLoad(res, disk.seconds),
 	}, nil
 }
 
@@ -81,26 +80,21 @@ func (s *stepRun) figures(start, end usage, peak uint64, res link.Mi3Result, upl
 const minLoadShare = 0.95
 
 // shortLoad says, in Romanian, why the step's load did not run for its
-// whole window (mis-2), or "": the live sessions received fewer than 95 %
-// of their tiles' frames over the window (received, the controller's
-// count), a camera recorded parts for less than 95 % of it (recorded, by
-// stream), or MediaMTX restarted. A tile that stops, a camera that
-// MediaMTX dropped, or a restart leaves a lighter load than HUB-32 asks
-// for, so the step is redone rather than judged.
-func (s *stepRun) shortLoad(received int, recorded map[string]float64) string {
+// whole window (mis-2), or "": a live tile of a session received frames,
+// without a pause longer than 2 s, for less than 95 % of the window (live,
+// the controller's Coverage), a camera recorded parts for less than 95 % of
+// it (recorded, by stream), or MediaMTX restarted. A tile that stops, a
+// camera that MediaMTX dropped, or a restart leaves a lighter load than
+// HUB-32 asks for, so the step is redone rather than judged. The number of
+// live frames does not decide: a healthy load's tiles lose some at the
+// start and on the LAN (Final fix C).
+func (s *stepRun) shortLoad(live link.Mi3Result, recorded map[string]float64) string {
 	window := s.r.o.window(s.minutes).Seconds()
-	mains, tiles := streams(s.cameras)
-	fps := map[string]int{}
-	for _, st := range controller.Streams("") {
-		fps[st.Path] = st.FPS
-	}
-	frames := 0
-	for _, tile := range tiles {
-		frames += fps[tile]
-	}
+	mains, _ := streams(s.cameras)
 	var why []string
-	if want := int(float64(Sessions(s.r.tier)*frames) * window); float64(received) < minLoadShare*float64(want) {
-		why = append(why, fmt.Sprintf("sesiunile live au primit %d de cadre din cele %d ale ferestrei pasului (sub 95 %%)", received, want))
+	if live.LiveLeastS < minLoadShare*window {
+		why = append(why, fmt.Sprintf("placa live %s din sesiunea live %d a primit cadre timp de %s s din cele %s s ale ferestrei pasului (sub 95 %%)",
+			live.LiveLeastTile, live.LiveLeastSession, results.Decimal(live.LiveLeastS, 0), results.Decimal(window, 0)))
 	}
 	for _, cam := range mains {
 		if got := recorded[cam]; got < minLoadShare*window {

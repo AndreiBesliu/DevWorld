@@ -75,7 +75,7 @@ func TestMI3_SmokeEndToEnd(t *testing.T) {
 			out := &syncBuffer{}
 			err := mi3.Run(ctx, mi3.Options{
 				Host: c.host, Controller: lns.Link.Addr().String(), Hub: hub, MediaMTX: mediamtx, Self: recspike,
-				Results: filepath.Join(work, "results"), Work: filepath.Join(work, "work"), Out: out,
+				Results: filepath.Join(work, "results"), Work: filepath.Join(work, "work"), ConfigDir: filepath.Join(work, "config"), Out: out,
 				// An hour is 12 s, 15 min 3 s.
 				Window:       func(minutes int) time.Duration { return time.Duration(minutes) * 200 * time.Millisecond },
 				FixtureBytes: 4 << 20,
@@ -93,7 +93,14 @@ func TestMI3_SmokeEndToEnd(t *testing.T) {
 			t.Logf("CPU %.1f %%, RAM %.0f MB, budgets %v, disk %v, fsync/s %.3f, latency p95 %v ms, pacing p99 %d ms, skipped %d, disk queue peak %d, load CPU %v",
 				d.CPUPctTotal, d.RAMMb, d.Budgets, d.DiskRatio, d.FsyncPerSecPerFile, d.LatencyP95Ms, d.PacingP99Ms, d.SkippedAUs, d.DiskQueuePeakBytes, d.LoadCPUPct)
 			if d.Tier != c.tier || d.Cameras != 2 || len(d.Steps) == 0 || d.Steps[0].Cameras != 2 || d.Steps[0].Minutes != mi3.FullMinutes {
-				t.Errorf("tier %s, %d cameras, steps %+v; want %s at 2 cameras for its hour first", d.Tier, d.Cameras, d.Steps, c.tier)
+				t.Fatalf("tier %s, %d cameras, steps %+v; want %s at 2 cameras for its hour first", d.Tier, d.Cameras, d.Steps, c.tier)
+			}
+			// The hour counts: its loads ran their whole window, by mis-2's
+			// 95 % checks (the live frames, each camera's recorded seconds,
+			// no MediaMTX restart), and the controller sent evenly (Final
+			// fix B review, M4).
+			if s := d.Steps[0]; !s.Valid || s.InvalidReason != "" {
+				t.Errorf("the hour at 2 cameras does not count: valid %v, pacing p99 %d ms, %d skipped, %q", s.Valid, s.PacingP99Ms, s.SkippedAUs, s.InvalidReason)
 			}
 			if d.CPUPctTotal <= 0 || d.CPUPctTotal > 100 || d.RAMMb < 10 {
 				t.Errorf("CPU %v %%, RAM %v MB: not measured", d.CPUPctTotal, d.RAMMb)
@@ -136,6 +143,40 @@ func TestMI3_SmokeEndToEnd(t *testing.T) {
 	}
 	if got := strings.Count(screen.String(), "toate plăcile live primesc"); got < 2 {
 		t.Errorf("the controller's screen shows the live tiles bound %d times, want each run's:\n%s", got, screen.String())
+	}
+}
+
+// TestMI3_EndSaysTheLeastCoveredLiveTile (mis-2, Final fix C): each live
+// peer's access units count for its own session's tiles, and the step's
+// result names the tile that received frames for the least time since the
+// binds, with its session and seconds, which the host compares with its
+// window; the frames' count does not decide.
+func TestMI3_EndSaysTheLeastCoveredLiveTile(t *testing.T) {
+	r := newRig(t)
+	conn := r.connect("pc")
+	tiles := []string{"cam01_sub", "cam01_main"}
+	st := newMi3Step(conn, r.c.sendLog, 2, tiles)
+	r.c.mu.Lock()
+	r.c.steps["pc-mi3-03"] = st
+	r.c.mu.Unlock()
+	t0 := r.clock.Now()
+	st.coverage.Start(t0)
+	first, second := st.onAU(1), st.onAU(2)
+	for i := range 121 { // a frame every 500 ms for 60 s
+		at := t0.Add(time.Duration(i) * 500 * time.Millisecond)
+		for _, tile := range tiles {
+			first(tile, nil, at)
+		}
+		second("cam01_sub", nil, at)
+		if i <= 20 { // the second session's main stops after 10 s
+			second("cam01_main", nil, at)
+		}
+	}
+	r.clock.set(t0.Add(time.Minute))
+	r.send(conn, link.Mi3End{RunID: "pc-mi3-03"})
+	res, ok := r.receive(conn).(link.Mi3Result)
+	if !ok || res.LiveLeastTile != "cam01_main" || res.LiveLeastSession != 2 || res.LiveLeastS != 10 {
+		t.Errorf("got %#v, want cam01_main of session 2 covered for 10 s", res)
 	}
 }
 

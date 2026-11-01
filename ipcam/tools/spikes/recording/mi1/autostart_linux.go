@@ -25,8 +25,14 @@ func FileOwnerSID(string) (string, error) { return "", errNotWindows }
 // DesktopDir is Windows-only: the folder of the real cuts' shortcut.
 func DesktopDir() (string, error) { return "", errNotWindows }
 
+// ProgramData is Windows-only: the folder of recspike's protected folder.
+func ProgramData() (string, error) { return "", errNotWindows }
+
+// WindowsFolder is Windows-only: the folder of Windows' kernel dump.
+func WindowsFolder() (string, error) { return "", errNotWindows }
+
 // CreateShortcut is Windows-only.
-func CreateShortcut(string, string, string, string, bool) error { return errNotWindows }
+func CreateShortcut(string, string, string, string, string, bool) error { return errNotWindows }
 
 // TimeService is Windows' time service, which only the PC's install
 // changes (C1-R16, C1-R16b).

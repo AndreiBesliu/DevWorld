@@ -160,11 +160,12 @@ func latest(envs []results.Envelope, host string) *results.Envelope {
 // judgeHost judges host's MI3 envelope and adds its rows, reasons and
 // notes to j; a failure comes with its plan B.
 func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (hostState, string) {
-	prefix := "MI3 " + host + ": "
+	prefix, part := "MI3 "+host+": ", results.Label("MI3", "", host)
 	e := latest(envs, host)
 	if e == nil {
 		j.Rows = append(j.Rows, results.Row{Code: prefix + "rezultat", Value: "lipsește", Source: host})
 		j.Reasons = append(j.Reasons, host+": lipsește proba MI3")
+		j.AddOpen(part, "lipsește proba MI3")
 		return hostIncomplete, ""
 	}
 	d := e.MI3
@@ -201,7 +202,9 @@ func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (host
 	}
 	switch {
 	case !valid:
-		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: ora la %s nu are nicio rulare validă (%s)", host, camerasText(d.Cameras), invalidText(d)))
+		why := fmt.Sprintf("ora la %s nu are nicio rulare validă (%s)", camerasText(d.Cameras), invalidText(d))
+		j.Reasons = append(j.Reasons, host+": "+why)
+		j.AddOpen(part, why)
 		return hostIncomplete, ""
 	case failed:
 		n, settled := recommended(d.Steps)
@@ -217,6 +220,7 @@ func judgeHost(j *results.Judgement, host string, envs []results.Envelope) (host
 		return hostFail, fmt.Sprintf("%s: numărul recomandat devine %d", host, n)
 	case missing:
 		j.Reasons = append(j.Reasons, host+": lipsesc bugete ale nivelului "+d.Tier)
+		j.AddOpen(part, "lipsesc bugete ale nivelului "+d.Tier)
 		return hostIncomplete, ""
 	}
 	j.Recommend(host, d.Cameras)

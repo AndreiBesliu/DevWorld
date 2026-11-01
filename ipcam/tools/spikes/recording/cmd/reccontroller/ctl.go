@@ -348,10 +348,10 @@ func (c *ctl) markEnd(r *runState) {
 	}
 	caughtUp := c.waitFed(r, to)
 	if r.ctx.Err() != nil {
-		return // the run ended first, judged from the live log
+		return // the run ended first, judged from the live log once fed (judgeReport)
 	}
 	if !caughtUp {
-		c.say("Rularea %s: jurnalul trimiterilor a rămas în urmă la oprire; orele de trimitere copiate pentru raport pot fi incomplete.", runID)
+		c.sayFeedBehind(runID)
 	}
 	sent := c.sendLog.Times(r.start.Streams, from, to)
 	c.mu.Lock()
@@ -359,6 +359,23 @@ func (c *ctl) markEnd(r *runState) {
 	if c.runs[runID] == r {
 		r.sent = sent
 	}
+}
+
+// unlogged reports whether a last recorded index of report m has no send
+// time in the live send log, yet or any more.
+func (c *ctl) unlogged(m link.Report) bool {
+	for _, s := range m.Streams {
+		if _, ok := c.sendLog.SendTime(s.Stream, s.LastRecordedIndex); !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// sayFeedBehind says that the send log's feed had not caught up with run
+// runID's stop when its wait ended.
+func (c *ctl) sayFeedBehind(runID string) {
+	c.say("Rularea %s: jurnalul trimiterilor a rămas în urmă la oprire; orele de trimitere copiate pentru raport pot fi incomplete.", runID)
 }
 
 // waitFed waits until the send log has every frame of the run's streams
@@ -613,12 +630,25 @@ func (c *ctl) report(m link.Report) link.Verdict {
 
 // judgeReport is report's judgement of run r, by the run's first report:
 // it writes the envelope, ends the run and returns its verdict, with the
-// diagnostics' timing of a stream over its limit.
+// diagnostics' timing of a stream over its limit. A report that comes
+// before the run's copy of its send times, with a last recorded index that
+// the live log lacks, waits for the send log's feed to pass the stop, at
+// most feedCatchUp after it (Final fix B review, M1).
 func (c *ctl) judgeReport(r *runState, m link.Report) link.Verdict {
 	beacons := c.beacons.Beacons(m.RunID)
 	interrupted := c.beacons.Interrupted(m.RunID)
 	late := len(beacons) > 0 && startedLate(beacons[0])
 	stopAt, errBound := controller.StopMoment(r.cut.Kind, beacons)
+	c.mu.Lock()
+	copied := r.sent != nil
+	c.mu.Unlock()
+	// A report before the run's copy is judged from the live log, whose
+	// feed may still lag (about 12 s of sends): when a last recorded index
+	// is not there yet, it waits, as the copy does, until the feed has
+	// passed the stop, at most feedCatchUp after it.
+	if !copied && c.unlogged(m) && !c.waitFed(r, stopAt) && r.ctx.Err() == nil {
+		c.sayFeedBehind(m.RunID)
+	}
 	c.mu.Lock()
 	r.cut.StopAt = stopAt
 	if r.cut.BootAt.IsZero() && len(beacons) > 0 {
@@ -722,10 +752,10 @@ type beaconsSeen struct {
 
 // judge is the run as its envelope holds it, with the send times of sent.
 // A stream that the host could not read, or whose index has no send time,
-// lost everything since the run's first beacon. A run whose beacons came back after a silence
-// (interrupted) is invalid for that reason: its stop is not its last kept
-// beacon; so is a run whose start the controller missed (late), whose
-// timing is partial.
+// lost everything since the run's first beacon. A run whose beacons came
+// back after a silence (interrupted) is invalid for that reason: its stop
+// is not its last kept beacon; so is a run whose start the controller
+// missed (late), whose timing is partial.
 func (c *ctl) judge(r *runState, m link.Report, cut controller.Cut, beacons beaconsSeen, errBound time.Duration,
 	pacing controller.PacingStats, sent controller.SendTimer) results.Run {
 	valid := controller.Valid(cut)

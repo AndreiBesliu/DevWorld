@@ -51,17 +51,23 @@ type Options struct {
 	// Results is recspike's published results folder, with the run's state
 	// in state/; Work is its private folder: the run's data and keys.
 	Results, Work string
+	// ConfigDir is the protected folder (mi1.ProtectConfigDir) of the
+	// config that each start of ipcam-hub reads, mi1.HubConfigMI2.
+	ConfigDir string
 	// Out is the owner's screen.
 	Out io.Writer
 	// CameraURLs gives the RTSP address of each stream, from the
 	// controller, a host-local reccontroller -local (G18, G19).
 	CameraURLs func(ctx context.Context, streams []string) (map[string]string, error)
 
-	// The rest are the system's when nil.
-	FreeBytes func() (uint64, error)
-	Clock     source.Clock
-	ThisBoot  func() (mi1.Boot, error)
-	StartHub  func(config string, stderr io.Writer, onEvent func(hubproc.Event)) (Hub, error)
+	// The rest are the system's when nil; WriteConfig writes the config
+	// into the protected folder (mi1.WriteHubConfig), and StartHub starts
+	// ipcam-hub on it.
+	FreeBytes   func() (uint64, error)
+	Clock       source.Clock
+	ThisBoot    func() (mi1.Boot, error)
+	WriteConfig func(dir, name string, cfg hubproc.Config) (string, error)
+	StartHub    func(config string, stderr io.Writer, onEvent func(hubproc.Event)) (Hub, error)
 }
 
 // The 72 h run's pace.
@@ -161,9 +167,12 @@ func Run(ctx context.Context, o Options) error {
 
 	statePath := filepath.Join(o.Results, "state", "mi2-"+set+".json")
 	boot, bootErr := o.thisBoot()
-	st, err := beginRun(statePath, set, boot, bootErr == nil)
+	st, lost, err := beginRun(statePath, set, boot, bootErr == nil, o.clock().Now())
 	if err != nil {
 		return err
+	}
+	if lost != nil {
+		o.writeLost(set, cameras, *lost)
 	}
 	runID := runIDOf(set, st.Attempt)
 	if n := len(st.Invalidated); n > 0 {
@@ -173,7 +182,7 @@ func Run(ctx context.Context, o Options) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("nu pot pregăti rularea %s: %w", runID, err)
 	}
-	config, err := o.writeRun(dir, streams, urls)
+	cfg, err := o.runConfig(dir, streams, urls)
 	if err != nil {
 		return fmt.Errorf("nu pot pregăti rularea %s: %w", runID, err)
 	}
@@ -200,12 +209,12 @@ func Run(ctx context.Context, o Options) error {
 	// Each crash goes into the run's state as it happens: a reboot or an
 	// interruption after it must not lose it (mis-3, G27).
 	crashed := func(crashes int) {
-		st.Crashes = crashes
+		st.Crashes, st.CrashAtMs = crashes, o.clock().Now().UnixMilli()
 		if err := saveState(statePath, st); err != nil {
 			o.say("Crash-ul nu s-a putut salva în starea probei: %v", err)
 		}
 	}
-	data, err := o.record(ctx, config, log, window, streams, crashed)
+	data, err := o.record(ctx, cfg, log, window, streams, crashed)
 	switch {
 	case errors.Is(err, errNeverReady):
 		if serr := abandonRun(statePath, st, runID+": "+errNeverReady.Error()); serr != nil {
@@ -233,10 +242,14 @@ func Run(ctx context.Context, o Options) error {
 	return nil
 }
 
-// record runs ipcam-hub on config, which records streams, for the run's
-// hours and supervises it (C07): an exit that recspike did not ask for is
-// a crash when that ipcam-hub was ready, which crashed reports, a setup
-// failure before, and ipcam-hub starts again at once. After
+// record runs ipcam-hub on cfg, which records streams, for the run's hours
+// and supervises it (C07): an exit that recspike did not ask for is a
+// crash when that ipcam-hub was ready, which crashed reports, a setup
+// failure before, and ipcam-hub starts again at once. Every start reads
+// cfg from the one file that the run writes into the protected folder
+// (writeConfig) before its first start, and removes once its last
+// ipcam-hub has stopped: that config names the controller's cameras with
+// their login. After
 // maxStartsUnready setup failures in a row, the run ends: with
 // errNeverReady when no ipcam-hub of the run ever got ready, else with the
 // crashes measured. A restart after a crash that refuses its reconcile
@@ -248,7 +261,7 @@ func Run(ctx context.Context, o Options) error {
 // ctx is done, it stops ipcam-hub cleanly, waiting mi1.StopTimeout, long
 // enough for an SD card (Task 7.2d): that stop is no crash, even when it
 // ends in a kill.
-func (o Options) record(ctx context.Context, config string, stderr io.Writer, window time.Duration, streams []string,
+func (o Options) record(ctx context.Context, cfg hubproc.Config, stderr io.Writer, window time.Duration, streams []string,
 	crashed func(crashes int)) (results.Mi2Data, error) {
 	clock := o.clock()
 	start := clock.Now()
@@ -264,6 +277,11 @@ func (o Options) record(ctx context.Context, config string, stderr io.Writer, wi
 		}
 		t.event(e, clock.Now())
 	}
+	config, err := o.writeConfig(cfg)
+	if err != nil {
+		return results.Mi2Data{}, fmt.Errorf("nu pot porni ipcam-hub: %w", err)
+	}
+	defer func() { _ = os.Remove(config) }() // every return below follows ipcam-hub's stop or exit
 	hub, err := o.startHub(config, stderr, onEvent)
 	if err != nil {
 		return results.Mi2Data{}, fmt.Errorf("nu pot porni ipcam-hub: %w", err)
@@ -350,8 +368,7 @@ func clearRuns(runs string) error {
 }
 
 // clearRun removes what the run in dir left but its ipcam-hub log: its
-// recordings and ipcam-hub's catalog in data/, run.json, and the RI_g
-// identity.
+// recordings and ipcam-hub's catalog in data/, and the RI_g identity.
 func clearRun(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -492,23 +509,24 @@ func (t *tally) data(d time.Duration) results.Mi2Data {
 		NotRecordingMinutes: math.Round(worst.Minutes()*10) / 10}
 }
 
-// writeRun writes the run's run.json in dir: each stream a job that pulls
-// the controller's camera, the odd ones encrypted to a fresh RI_g and RK of
-// the run (C11, PH0-22), whose RI_g is a 0600 file beside it and whose RK's
-// identity is never kept.
-func (o Options) writeRun(dir string, streams []string, urls map[string]string) (string, error) {
+// runConfig is the run's config, of the run in dir: each stream a job that
+// pulls the controller's camera, the odd ones encrypted to a fresh RI_g and
+// RK of the run (C11, PH0-22), whose RI_g is a 0600 file in dir, which it
+// writes, and whose RK's identity is never kept; the data folder is dir's
+// and MediaMTX the release's.
+func (o Options) runConfig(dir string, streams []string, urls map[string]string) (hubproc.Config, error) {
 	cfg := hubproc.Config{DataDir: filepath.Join(dir, "data"), MediaMTX: o.MediaMTX, SDCardConfirmed: o.Host.SdConfirmation != nil}
 	riG, err := age.GenerateX25519Identity()
 	if err != nil {
-		return "", err
+		return cfg, err
 	}
 	rk, err := age.GenerateX25519Identity()
 	if err != nil {
-		return "", err
+		return cfg, err
 	}
 	cfg.IdentityFile = filepath.Join(dir, "ri_g.key")
 	if err := mi1.WriteDurably(cfg.IdentityFile, []byte(riG.String()+"\n"), 0o600); err != nil {
-		return "", err
+		return cfg, err
 	}
 	for i, stream := range streams {
 		cam, profile, _ := strings.Cut(stream, "_")
@@ -518,8 +536,7 @@ func (o Options) writeRun(dir string, streams []string, urls map[string]string) 
 		}
 		cfg.Jobs = append(cfg.Jobs, job)
 	}
-	config := filepath.Join(dir, "run.json")
-	return config, hubproc.WriteConfig(config, cfg)
+	return cfg, nil
 }
 
 // sayWindow prints the free space that the run needs on this host and the
@@ -551,6 +568,20 @@ func (o Options) clock() source.Clock {
 	return source.SystemClock{}
 }
 
+// writeConfig writes cfg into the protected folder (mi1.WriteHubConfig) and
+// returns its path: the guide runs MI2 elevated, from an administrator
+// window or with sudo, and work/ is the owner's (Final fix C review, M9).
+// Nothing in cfg changes between the run's starts, so the run writes it
+// once: on Windows, a crash restart that wrote it anew could find its name
+// still held by a scanner, or its delete still pending, and end the 72 h
+// run (Final fix D review, M6).
+func (o Options) writeConfig(cfg hubproc.Config) (string, error) {
+	if o.WriteConfig != nil {
+		return o.WriteConfig(o.ConfigDir, mi1.HubConfigMI2, cfg)
+	}
+	return mi1.WriteHubConfig(o.ConfigDir, mi1.HubConfigMI2, cfg)
+}
+
 func (o Options) thisBoot() (mi1.Boot, error) {
 	if o.ThisBoot != nil {
 		return o.ThisBoot()
@@ -558,6 +589,8 @@ func (o Options) thisBoot() (mi1.Boot, error) {
 	return mi1.ThisBoot()
 }
 
+// startHub starts ipcam-hub on config, the run's file in the protected
+// folder (writeConfig).
 func (o Options) startHub(config string, stderr io.Writer, onEvent func(hubproc.Event)) (Hub, error) {
 	if o.StartHub != nil {
 		return o.StartHub(config, stderr, onEvent)
@@ -567,47 +600,90 @@ func (o Options) startHub(config string, stderr io.Writer, onEvent func(hubproc.
 
 // runState is where the host's 72 h runs stand, in
 // results/state/mi2-<set>.json: the last run started, whether it is still
-// open, the boot it started in, its crashes so far, and the runs before it
-// that did not end, with the crashes that they measured (mis-3). The file
-// lives in the published results folder, so it names no address and no
-// path (PH0-22).
+// open, the boot it started in, when it started, its crashes so far and
+// when the last one came, and the runs before it that did not end, with
+// the crashes that they measured (mis-3). The file lives in the published
+// results folder, so it names no address and no path (PH0-22).
 type runState struct {
 	Attempt            int      `json:"attempt"`
 	Open               bool     `json:"open"`
 	Boot               mi1.Boot `json:"boot"`
+	StartedMs          int64    `json:"startedMs,omitempty"`
 	Crashes            int      `json:"crashes,omitempty"`
+	CrashAtMs          int64    `json:"crashAtMs,omitempty"`
 	Invalidated        []string `json:"invalidated,omitempty"`
 	CrashesInvalidated int      `json:"crashesInvalidated,omitempty"`
+}
+
+// lostRun is a run that did not end but measured crashes (G27): its id,
+// why it did not end, its crashes and the hours from its start to the
+// last one.
+type lostRun struct {
+	id, reason string
+	crashes    int
+	hours      float64
 }
 
 // runIDOf is the id of the attempt-th run of set.
 func runIDOf(set string, attempt int) string { return fmt.Sprintf("%s-%d", set, attempt) }
 
-// beginRun starts the next run of set in the state at path. A run that is
-// still open did not end: it is invalid, because the host rebooted since it
-// began (another boot, when both are known), or because recspike stopped.
-// So is one that abandonRun closed; a run that finishRun closed is not.
-func beginRun(path, set string, boot mi1.Boot, bootKnown bool) (runState, error) {
+// beginRun starts the next run of set in the state at path, at now. A run
+// that is still open did not end: it is invalid, because the host rebooted
+// since it began (another boot, when both are known), or because recspike
+// stopped. So is one that abandonRun closed; a run that finishRun closed
+// is not. An open run that measured crashes is returned as lost, for its
+// crash-only envelope (writeLost).
+func beginRun(path, set string, boot mi1.Boot, bootKnown bool, now time.Time) (runState, *lostRun, error) {
 	var st runState
 	data, err := os.ReadFile(path) //nolint:gosec // recspike's own state
 	switch {
 	case err == nil:
 		if err := json.Unmarshal(data, &st); err != nil {
-			return st, fmt.Errorf("nu pot citi starea probei din %s: %w", filepath.Base(path), err)
+			return st, nil, fmt.Errorf("nu pot citi starea probei din %s: %w", filepath.Base(path), err)
 		}
 	case !errors.Is(err, os.ErrNotExist):
-		return st, fmt.Errorf("nu pot citi starea probei: %w", err)
+		return st, nil, fmt.Errorf("nu pot citi starea probei: %w", err)
 	}
+	var lost *lostRun
 	if st.Open {
 		reason := "proba s-a întrerupt înainte de final (recspike s-a oprit)"
 		if bootKnown && !boot.Same(st.Boot) {
 			reason = "gazda a repornit în timpul probei"
 		}
-		st = invalidate(st, runIDOf(set, st.Attempt)+": "+reason)
+		id := runIDOf(set, st.Attempt)
+		if st.Crashes > 0 {
+			lost = &lostRun{id: id, crashes: st.Crashes}
+			if st.StartedMs > 0 && st.CrashAtMs > st.StartedMs {
+				lost.hours = float64(st.CrashAtMs-st.StartedMs) / float64(time.Hour/time.Millisecond)
+			}
+		}
+		st = invalidate(st, id+": "+reason)
+		if lost != nil {
+			lost.reason = st.Invalidated[len(st.Invalidated)-1]
+		}
 	}
 	st.Attempt++
-	st.Open, st.Boot, st.Crashes = true, boot, 0
-	return st, saveState(path, st)
+	st.Open, st.Boot, st.StartedMs, st.Crashes, st.CrashAtMs = true, boot, now.UnixMilli(), 0, 0
+	return st, lost, saveState(path, st)
+}
+
+// writeLost writes the crash-only envelope of a run of set that did not
+// end but measured crashes (Final fix B review, M5): its crashes in the
+// hours until the last one, with why it did not end, and no error text.
+// mi2.Judge reads it as a measured failure of G11 (G27) even when no redo
+// ends; a redo that ends carries the same crashes, and G11 judges one run.
+// A write that fails is said and does not stop the redo, whose envelope
+// carries the crashes too.
+func (o Options) writeLost(set string, cameras int, lost lostRun) {
+	e := results.Envelope{Schema: results.Schema, Code: "MI2", RunID: lost.id, AtMs: o.clock().Now().UnixMilli(), Set: set, Host: o.Host.Pseudonym,
+		OS: o.Host.OS, PiModel: o.Host.PiModel, Storage: o.Host.Storage, SdConfirmation: o.Host.SdConfirmation,
+		MI2: &results.Mi2Data{Hours: math.Round(lost.hours*100) / 100, Cameras: cameras, OnSdCard: o.Host.Storage == "sd",
+			Crashes72h: lost.crashes, Invalidated: []string{lost.reason}}}
+	if err := results.Create(o.Results, e); err != nil {
+		o.say("Rezultatul cu crash-ul probei %s nu s-a putut scrie: %v; crash-ul rămâne în rezultatul rulării care o reface.", lost.id, err)
+		return
+	}
+	o.say("Proba MI2 %s s-a întrerupt după %s ipcam-hub; crash-ul rămâne în rezultate.", lost.id, CrashText(lost.crashes))
 }
 
 // abandonRun records that the run of st ended without a result, invalid
@@ -642,7 +718,7 @@ func CrashText(n int) string {
 // finishRun records that the run of st ended: its envelope carries its
 // crashes and the redone runs'.
 func finishRun(path string, st runState) error {
-	st.Open, st.Crashes, st.Invalidated, st.CrashesInvalidated = false, 0, nil, 0
+	st.Open, st.Crashes, st.CrashAtMs, st.Invalidated, st.CrashesInvalidated = false, 0, 0, nil, 0
 	return saveState(path, st)
 }
 

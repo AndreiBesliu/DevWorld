@@ -8,11 +8,14 @@
 # is reliable, which one start per job cannot: every start must give its result,
 # and the script goes on after a start that fails, to count how many do.
 #
+# The first launch after the emulator booted is a warm-up, not counted: the
+# emulator is still finishing its boot then (see warm_up).
+#
 # Two more starts check what must not end or repeat a run:
 # - the probe changes the system's font scale 5 s after the launch. The Activity
 #   must not be created again for that (nor for the other changes an emulator or
-#   a phone makes at run time, such as the SIM's mcc and mnc): a new Activity gets
-#   no launch extras, and the scenario would be lost;
+#   a phone makes at run time, such as the SIM's mcc and mnc): a new Activity
+#   would end the run in progress with its WebView;
 # - the process-death start sends the finished app to the background, kills its
 #   process and starts it again from the launcher Intent. The system restores the
 #   Activity from the launch Intent it kept, extras included, and the scenario
@@ -29,27 +32,52 @@
 # 3 starts on a push); the full mode adds the two checks above (on a pull
 # request, with 5 starts).
 #
+# The age mode runs the recorder spike's AGE scenario once from a cold start
+# (C1-R25): agerange's speed in an Android WebView. The emulator's speed is not
+# judged; its result must arrive with mbps > 0, which shows that the scenario runs
+# in the WebView. ipcam-mobile runs it in a step of its own once the S1 step has
+# passed, so in a new emulator, after a warm-up launch of its own.
+#
 # On failure it prints the cause as check annotations, which can be read where
 # the job log cannot. Each check and the outcome also go to the job's step
-# summary ($GITHUB_STEP_SUMMARY), which GitHub keeps whole, while it shows only
-# about ten annotations of a level per step.
+# summary ($GITHUB_STEP_SUMMARY), which GitHub keeps whole, while it keeps only
+# ten annotations of a level per step, and drops the rest without a word. So a
+# full run of the S1 starts gives eight notices: the warm-up, which carries the
+# network check, five starts, the first that stores a result with the device
+# facts, the probe, and the process death with the start before it. The age mode
+# gives two (its warm-up and AGE). A run that would give more than max_notices
+# fails, with an error that says so, before a notice can be lost.
 #
 #   apps/mobile/ci/emulator-smoke.sh <apk> <spikehub results folder> <spikehub log> [starts] [full|quick]
+#   apps/mobile/ci/emulator-smoke.sh <apk> <spikehub results folder> <spikehub log> age
 set -euo pipefail
 shopt -s nullglob
 
+usage() {
+  echo "usage: $0 <apk> <spikehub results folder> <spikehub log> [starts] [full|quick]" >&2
+  echo "       $0 <apk> <spikehub results folder> <spikehub log> age" >&2
+  exit 2
+}
+[[ $# -ge 3 ]] || usage
 apk="$1"
 results="$2"
 hub_log="$3"
-starts="${4:-3}"
-mode="${5:-full}"
-if [[ ! "${starts}" =~ ^[1-9][0-9]*$ || ! "${mode}" =~ ^(full|quick)$ ]]; then
-  echo "usage: $0 <apk> <spikehub results folder> <spikehub log> [starts] [full|quick]" >&2
-  exit 2
+if [[ "${4:-}" == age ]]; then
+  [[ $# -eq 4 ]] || usage
+  starts=0
+  mode=age
+else
+  starts="${4:-3}"
+  mode="${5:-full}"
+  [[ "${starts}" =~ ^[1-9][0-9]*$ && "${mode}" =~ ^(full|quick)$ ]] || usage
 fi
 app=ro.ipcam.spike
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 run_timeout=150 # seconds one start may take; S1 takes about a minute
+age_timeout=240 # seconds the AGE start may take; a phone needs a few seconds
+max_notices=8   # notices one run may give: two below GitHub's ten per step
+notices_log="$(mktemp)"
+trap 'rm -f "${notices_log}"' EXIT
 
 # Prints standard input as one annotation of level $1 (error, notice) titled $2.
 # GitHub shows about 4000 characters of an annotation: keep the first 3300.
@@ -58,6 +86,21 @@ annotate() {
   text="$(cat)"
   body="$(printf '%s' "${text:0:3300}" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "") $0 }')"
   echo "::$1 title=$2::${body:-(nothing)}"
+  # A file, not a variable: annotate runs at the end of a pipe, in a subshell.
+  if [[ "$1" == notice ]]; then
+    echo "$2" >> "${notices_log}"
+  fi
+}
+
+# Fails the run with an error when it gave more than max_notices notices.
+check_notices() {
+  local given
+  given="$(wc -l < "${notices_log}")"
+  if ((given > max_notices)); then
+    echo "the run gave ${given} notices, more than ${max_notices}: GitHub keeps ten per step, so merge them" | annotate error "emulator notices"
+    summarize "- notices: ${given}, more than ${max_notices}"
+    return 1
+  fi
 }
 
 # Appends a line to the job's step summary, when there is one.
@@ -70,6 +113,14 @@ summarize() {
 # The app's own log lines (tag SpikeMetrics): each Activity and page it went through.
 app_log() {
   adb logcat -d -v time -s SpikeMetrics:V | sed -E 's/ [VDIWEF]\/SpikeMetrics\( *[0-9]+\): / /' | cut -c1-300 | tail -n "$1"
+}
+
+# The system's view of the app, its last $1 events: Activities created, created
+# again and destroyed (wm_ since Android 10), processes started and died.
+system_events() {
+  adb logcat -b events -d -v threadtime |
+    grep -E "(am|wm)_(create_activity|destroy_activity|relaunch|proc_start|proc_died|kill|crash|anr).*${app}" |
+    cut -c1-200 | tail -n "$1" || true
 }
 
 # The page's state, the app's log lines and the system's view of the app, as
@@ -93,9 +144,7 @@ diagnose() (
   } 2>&1 | cut -c1-1800 | annotate error "emulator page"
   {
     app_log 14
-    # The system's view of the app: Activities created and destroyed, processes started and died.
-    adb logcat -b events -d -v threadtime | grep -E "am_(create_activity|destroy_activity|relaunch_activity|proc_start|proc_died|kill|crash|anr).*${app}" |
-      cut -c1-200 | tail -n 8
+    system_events 8
   } | annotate error "emulator app log"
   {
     adb logcat -d -v brief | grep -E '^[VDIWEF]/(Capacitor[^ (]*|chromium|cr_WebViewFactory|AndroidRuntime) *\(' |
@@ -105,9 +154,20 @@ diagnose() (
   } | annotate error "emulator logcat"
 )
 
-# The emulator's network comes up a little after boot: start S1 only when
+# The emulator's 1-minute load average.
+load_average() {
+  adb shell cat /proc/loadavg | tr -d '\r' | cut -d' ' -f1
+}
+
+# The emulator's load average, and how long it has been up.
+emulator_load() {
+  printf 'load average %s, up %s s' "$(load_average)" "$(adb shell cat /proc/uptime | tr -d '\r' | cut -d. -f1)"
+}
+
+# The emulator's network comes up a little after boot: start the app only when
 # spikehub answers (toybox nc: -w connect timeout, -q quit after stdin ends).
-# If it stays unreachable for 2 min, S1 cannot run: report why and stop.
+# If it stays unreachable for 2 min, nothing can run: report why and stop. The
+# check's time goes into the warm-up's notice (network).
 booted=${SECONDS}
 until adb shell 'nc -w 2 -q 1 10.0.2.2 7080 </dev/null' >/dev/null 2>&1; do
   if ((SECONDS - booted >= 120)); then
@@ -117,20 +177,33 @@ until adb shell 'nc -w 2 -q 1 10.0.2.2 7080 </dev/null' >/dev/null 2>&1; do
   fi
   sleep 2
 done
-echo "spikehub reachable check took $((SECONDS - booted)) s" | annotate notice "emulator network"
+network="spikehub reachable check took $((SECONDS - booted)) s; $(emulator_load)"
 
 adb install -r "${apk}"
 
 # The S1 result that the last successful cold_start stored.
 stored_s1=""
+# A start's notice that waits for the check after it, which gives it with its
+# own line (held), titled held_title.
+held=""
+held_title=""
+
+# Gives the notice that waits, if one does, alone.
+release_held() {
+  if [[ -n "${held}" ]]; then
+    printf '%s\n' "${held}" | annotate notice "${held_title}"
+    held=""
+  fi
+}
 
 # Starts the app cold with the launch extras (the process is gone, so the app has
 # nothing but them) and waits for the S1 result. $1: the label of the start,
-# $2: "probe" to change the font scale 5 s after the launch. Returns 0 with a
-# notice when the result holds 20 samples (and sets stored_s1), else 1 with an
-# error and the diagnosis.
+# $2: "probe" to change the font scale 5 s after the launch, $3: "hold" to keep
+# the notice for the check that follows (held). Returns 0 with a notice when the
+# result holds 20 samples (and sets stored_s1), else 1 with an error and the
+# diagnosis.
 cold_start() {
-  local label="$1" probe="${2:-}" launch stored="" problem="" deadline file samples known line
+  local label="$1" probe="${2:-}" hold="${3:-}" launch stored="" problem="" deadline file samples known line body
   adb shell am force-stop "${app}"
   adb logcat -b all -c
   # Only a result stored from now on belongs to this start, not a late one of an earlier start.
@@ -154,7 +227,7 @@ cold_start() {
       if ((samples == 20)); then
         stored="${file}"
       else
-        problem="$(jq -r '"S1 stored with \(.samples.firstFrameMs // [] | length) of 20 samples; notes: \(.notes | join("; "))"' "${file}")"
+        problem="$(jq -r '"S1 stored with \(.samples.firstFrameMs // [] | length) of 20 samples; notes: \((.notes // []) | join("; "))"' "${file}")"
       fi
     done
     [[ -n "${stored}${problem}" ]] || sleep 3
@@ -172,21 +245,28 @@ cold_start() {
   # Nearest rank: p50 is the 10th and p90 the 18th of the 20 sorted samples.
   line="$(jq -r '(.samples.firstFrameMs | sort | map(round)) as $ms
     | "S1 stored with 20 samples: first frame p50 \($ms[9]) ms, p90 \($ms[17]) ms, max \($ms[19]) ms;"
-      + " \(.device.model) \(.device.os) \(.device.webview); notes: \(.notes | join("; "))"' "${stored}")"
+      + " \(.device.model) \(.device.os) \(.device.webview); notes: \((.notes // []) | join("; "))"' "${stored}")"
   summarize "- ${label}: ${line}"
-  {
+  body="$(
     echo "${line}"
     echo "launch: ${launch}"
     app_log 12
-  } | annotate notice "emulator S1 ${label}"
+  )"
   stored_s1="${stored}"
+  if [[ "${hold}" == hold ]]; then
+    held="${body}"
+    held_title="emulator S1 ${label}"
+  else
+    printf '%s\n' "${body}" | annotate notice "emulator S1 ${label}"
+  fi
 }
 
 # The device facts of the metrics plugin, with the app still on the page of the
 # start that stored $1: device.ramMb in the stored S1 result, and ramMb and
 # charging in what window.spikeNative.metrics() answers now, with charging
-# compared to the system's own power state. Returns 0 with a notice, else 1
-# with an error.
+# compared to the system's own power state. Returns 0 with the held notice of
+# that start, which then carries the facts' line, else 1 with that notice and
+# an error.
 device_facts() {
   local stored="$1" ram metrics="" pid powered system charging line problems=()
   ram="$(jq -c '.device.ramMb' "${stored}")"
@@ -214,21 +294,27 @@ device_facts() {
     fi
   fi
   if ((${#problems[@]} > 0)); then
+    release_held
     printf '%s\n' "${problems[@]}" | annotate error "emulator device facts"
     summarize "- device facts: failed: ${problems[*]}"
     return 1
   fi
   line="S1 device.ramMb ${ram}; metrics plugin: ramMb $(jq -c '.ramMb' <<<"${metrics}"), charging ${charging} (system:${powered:+ ${powered}})"
   summarize "- device facts: ${line}"
-  echo "${line}" | annotate notice "emulator device facts"
+  {
+    printf '%s\n' "${held}"
+    echo "device facts: ${line}"
+  } | annotate notice "${held_title}"
+  held=""
 }
 
-# After a start with its result: the app goes to the background (its Activity
-# stops and saves its state), the system kills its process, and the launcher
-# Intent starts it again. Returns 0 when the app is back in a new process and
-# did not load the page with the launch extras again, else 1 with the diagnosis.
+# After a start with its result, whose notice is held: the app goes to the
+# background (its Activity stops and saves its state), the system kills its
+# process, and the launcher Intent starts it again. Returns 0 when the app is
+# back in a new process and did not load the page with the launch extras again,
+# with one notice for both, else 1 with the start's notice and the diagnosis.
 survives_process_death() {
-  local label="process death" before after log deadline
+  local label="process death" before after log deadline problem=""
   before="$(adb shell pidof "${app}" | tr -d '\r')"
   adb shell input keyevent KEYCODE_HOME
   sleep 3
@@ -236,6 +322,7 @@ survives_process_death() {
   sleep 2
   after="$(adb shell pidof "${app}" | tr -d '\r')"
   if [[ -n "${after}" ]]; then
+    release_held
     echo "the process ${after} of the app is still alive after am kill" | annotate error "emulator S1 ${label}"
     return 1
   fi
@@ -246,29 +333,133 @@ survives_process_death() {
   after="$(adb shell pidof "${app}" | tr -d '\r')"
   log="$(app_log 14)"
   if [[ -z "${after}" || "${after}" == "${before}" ]]; then
-    echo "the app did not start again in a new process (pid ${before} before, ${after:-none} after)" | annotate error "emulator S1 ${label}"
+    problem="the app did not start again in a new process (pid ${before} before, ${after:-none} after)"
   elif grep -q 'loadUrl:' <<<"${log}"; then
-    echo "the restored Activity ran the launch extras again:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
+    problem="the restored Activity ran the launch extras again:"$'\n'"${log}"
   elif ! grep -q 'restored=true' <<<"${log}"; then
-    echo "the app started again, but its Activity was not restored from a saved state:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
+    problem="the app started again, but its Activity was not restored from a saved state:"$'\n'"${log}"
   elif ! grep -q 'page loaded' <<<"${log}"; then
-    echo "the restored app loaded no page within 30 s:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
-  else
-    echo "new process ${after} after ${before}; no autorun again:"$'\n'"${log}" | annotate notice "emulator S1 ${label}"
-    summarize "- ${label}: the app came back in a new process and did not run the scenario again"
-    return 0
+    problem="the restored app loaded no page within 30 s:"$'\n'"${log}"
   fi
-  summarize "- ${label}: failed (see the annotations)"
-  diagnose
-  return 1
+  if [[ -n "${problem}" ]]; then
+    release_held
+    echo "${problem}" | annotate error "emulator S1 ${label}"
+    summarize "- ${label}: failed (see the annotations)"
+    diagnose
+    return 1
+  fi
+  {
+    printf '%s\n' "${held}"
+    echo "process death: new process ${after} after ${before}; no autorun again:"
+    echo "${log}"
+  } | annotate notice "emulator S1 ${label}"
+  held=""
+  summarize "- ${label}: the app came back in a new process and did not run the scenario again"
 }
 
+# The first launch after the emulator booted, not counted. The emulator is still
+# finishing its boot then, and every failure of this job up to 2026-10-30 with
+# annotations came from that launch alone, never from a later one: the system
+# created the Activity again 0.1 s after the launch (an app resource change after
+# boot, which no configChanges entry stops; AutorunHandoff now keeps the scenario
+# across it), the player's first frame came after its 4 s limit, or the metrics
+# plugin's first answer after the page's 3 s. The warm-up takes the app's and the
+# WebView's first launch, then waits at most 2 min for the emulator's load average
+# to fall below its CPU count, so that the counted starts measure the app's cold
+# start rather than the device's boot. Its notice, titled $1, says what it saw,
+# after the network check's line; it never fails.
+warm_up() {
+  local title="$1" deadline cpus log events waited
+  adb shell am force-stop "${app}"
+  adb logcat -b all -c
+  adb shell am start -W -n "${app}/.MainActivity" >/dev/null
+  deadline=$((SECONDS + 60))
+  until [[ "$(app_log 60)" == *'page loaded'* ]] || ((SECONDS >= deadline)); do sleep 2; done
+  log="$(app_log 14)"
+  events="$(system_events 8)"
+  cpus="$(adb shell nproc | tr -d '\r' || true)"
+  waited=${SECONDS}
+  deadline=$((SECONDS + 120))
+  until awk -v avg="$(load_average)" -v cpus="${cpus:-1}" 'BEGIN { exit !(avg + 0 < cpus + 0) }' ||
+    ((SECONDS >= deadline)); do
+    sleep 5
+  done
+  adb shell am force-stop "${app}"
+  summarize "- warm-up launch (not counted): waited $((SECONDS - waited)) s for the emulator to settle; $(emulator_load), ${cpus} CPUs"
+  {
+    echo "${network}"
+    echo "waited $((SECONDS - waited)) s for the emulator to settle; $(emulator_load), ${cpus} CPUs"
+    echo "${log}"
+    echo "${events}"
+  } | annotate notice "${title}"
+}
+
+# AGE once (age mode): the app starts cold with the launch extras autorun=AGE,
+# like an S1 start, since a warm start ignores them. Returns 0 with a notice when
+# spikehub stores an AGE result with mbps > 0 that was not interrupted, else 1
+# with an error and the diagnosis. The notice and the error carry the app's log
+# lines: the extras that the Activity read and the scenario that the page got.
+age_start() {
+  local launch stored="" deadline file known line problem=""
+  adb shell am force-stop "${app}"
+  adb logcat -b all -c
+  known="$(printf '%s\n' "${results}"/*.json)"
+  launch="$(adb shell am start -W -n "${app}/.MainActivity" --es autorun AGE --es hub http://10.0.2.2:7080 | tr -d '\r')"
+  launch="${launch//$'\n'/ | }"
+  echo "AGE: ${launch}"
+  deadline=$((SECONDS + age_timeout))
+  while [[ -z "${stored}" ]] && ((SECONDS < deadline)); do
+    for file in "${results}"/*.json; do
+      if ! grep -qxF -- "${file}" <<<"${known}" && jq -e '.scenario == "AGE"' "${file}" >/dev/null; then
+        stored="${file}"
+      fi
+    done
+    [[ -n "${stored}" ]] || sleep 3
+  done
+  if [[ -z "${stored}" ]]; then
+    problem="no AGE result within ${age_timeout} s"
+  elif ! jq -e '(.mbps | type == "number") and .mbps > 0 and .interrupted != true' "${stored}" >/dev/null; then
+    problem="$(jq -r '"AGE stored without mbps > 0: mbps \(.mbps), interrupted \(.interrupted); notes: \((.notes // []) | join("; "))"' "${stored}")"
+  fi
+  if [[ -n "${problem}" ]]; then
+    {
+      echo "${problem}; ${launch}"
+      app_log 12
+    } | annotate error "emulator AGE"
+    summarize "- AGE: failed: ${problem}"
+    diagnose
+    return 1
+  fi
+  line="$(jq -r '"AGE stored: \(.mbps * 10 | round / 10) Mbps, \(.bytes) bytes in \(.ms | round) ms (the emulator'"'"'s speed is not judged);"
+    + " \(.device.model) \(.device.os) \(.device.webview); notes: \((.notes // []) | join("; "))"' "${stored}")"
+  summarize "- ${line}"
+  {
+    echo "${line}"
+    echo "launch: ${launch}"
+    app_log 12
+  } | annotate notice "emulator AGE"
+}
+
+if [[ "${mode}" == age ]]; then
+  summarize "### AGE in the emulator's WebView (C1-R25)"
+  warm_up "emulator AGE warm-up"
+  code=0
+  age_start || code=$?
+  check_notices || code=1
+  exit "${code}"
+fi
+
 summarize "### Emulator smoke test (AND-3), ${mode} mode"
+warm_up "emulator warm-up"
 failures=0
 checks=$((starts + 1)) # the starts and the device facts
 facts=""
 for ((start = 1; start <= starts; start++)); do
-  if ! cold_start "start ${start} of ${starts}"; then
+  hold=""
+  if [[ -z "${facts}" ]]; then
+    hold=hold # the device facts' line goes into this start's notice
+  fi
+  if ! cold_start "start ${start} of ${starts}" "" "${hold}"; then
     failures=$((failures + 1))
   elif [[ -z "${facts}" ]]; then
     facts=checked
@@ -283,13 +474,14 @@ fi
 if [[ "${mode}" == full ]]; then
   checks=$((checks + 3))
   cold_start "probe (font scale change)" probe || failures=$((failures + 1))
-  if cold_start "start before process death"; then
+  if cold_start "start before process death" "" hold; then
     survives_process_death || failures=$((failures + 1))
   else
     failures=$((failures + 1))
   fi
 fi
 
+check_notices || failures=$((failures + 1))
 if ((failures == 0)); then
   summarize "All ${checks} checks passed."
 else

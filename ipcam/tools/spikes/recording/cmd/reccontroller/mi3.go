@@ -14,13 +14,29 @@ import (
 )
 
 // mi3Step is one step of MI3 that a host runs against this controller
-// (G20, R07): its host's connection, its pacing's start, its live peers
-// and their tiles' latencies.
+// (G20, R07): its host's connection, its pacing's start, its live peers,
+// their tiles' latencies, and how long each tile received frames (mis-2).
 type mi3Step struct {
 	conn      *link.Conn
 	start     controller.PacingMark
 	peers     []*controller.LivePeer
 	latencies *mi3.Latencies
+	coverage  *mi3.Coverage
+}
+
+// newMi3Step is a step of host conn whose sessions live sessions show
+// tiles, timed against sent; its live peers come after.
+func newMi3Step(conn *link.Conn, sent mi3.SendTimes, sessions int, tiles []string) *mi3Step {
+	return &mi3Step{conn: conn, latencies: mi3.NewLatencies(sent), coverage: mi3.NewCoverage(sessions, tiles)}
+}
+
+// onAU is what the live peer of session, counted from 1, does with each
+// access unit that it receives: a latency sample, and a frame of its tile.
+func (st *mi3Step) onAU(session int) func(stream string, nalus [][]byte, at time.Time) {
+	return func(stream string, nalus [][]byte, at time.Time) {
+		st.latencies.Arrived(stream, nalus, at)
+		st.coverage.Arrived(session, stream, at)
+	}
 }
 
 // close closes the step's live peers.
@@ -67,10 +83,10 @@ func (c *ctl) mi3Start(conn *link.Conn, m link.Mi3Start) {
 			return
 		}
 	}
-	st := &mi3Step{conn: conn, latencies: mi3.NewLatencies(c.sendLog)}
+	st := newMi3Step(conn, c.sendLog, m.Sessions, m.Tiles)
 	offers := make([]string, 0, m.Sessions)
-	for range m.Sessions {
-		p, err := controller.NewLivePeer(c.liveAPI, m.Tiles, c.clock, st.latencies.Arrived)
+	for i := range m.Sessions {
+		p, err := controller.NewLivePeer(c.liveAPI, m.Tiles, c.clock, st.onAU(i+1))
 		if err != nil {
 			st.close()
 			refuse(fmt.Sprintf("nu pot pregăti sesiunile live: %v", err))
@@ -125,12 +141,14 @@ func (c *ctl) mi3Answers(ctx context.Context, conn *link.Conn, m link.Mi3Answers
 			return
 		}
 	}
+	st.coverage.Start(c.clock.Now())
 	c.say("Pasul MI3 %s: toate plăcile live primesc.", m.RunID)
 	c.reply(conn, link.Mi3Live{RunID: m.RunID})
 }
 
 // mi3End ends a step: its pacing from its start to now (R07), its live
-// tiles' added latency (§4.8), and its live peers closed.
+// tiles' added latency (§4.8), its live peers closed, and its least
+// covered tile once no frame arrives any more (mis-2).
 func (c *ctl) mi3End(conn *link.Conn, m link.Mi3End) {
 	c.mu.Lock()
 	st := c.steps[m.RunID]
@@ -143,8 +161,10 @@ func (c *ctl) mi3End(conn *link.Conn, m link.Mi3End) {
 	pacing := c.pacer.Pacing(st.start, c.pacer.MarkPacing(), c.clock.Now())
 	st.close()
 	p95, n := st.latencies.P95()
+	least := st.coverage.Least(c.clock.Now())
 	res := link.Mi3Result{RunID: m.RunID, PacingP99Ms: pacing.P99.Milliseconds(), SkippedAUs: pacing.SkippedAUs,
-		LatencyP95Ms: float64(p95.Milliseconds()), LatencySamples: n}
+		LatencyP95Ms: float64(p95.Milliseconds()), LatencySamples: n,
+		LiveLeastS: least.Seconds, LiveLeastTile: least.Tile, LiveLeastSession: least.Session}
 	c.say("Pasul MI3 %s s-a încheiat: ritm p99 %d ms, cadre sărite %d; latența plăcilor live p95 %d ms (%d cadre).",
 		m.RunID, res.PacingP99Ms, res.SkippedAUs, p95.Milliseconds(), n)
 	c.reply(conn, res)

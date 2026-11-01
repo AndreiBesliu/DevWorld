@@ -129,7 +129,7 @@ func newHarness(t *testing.T, dir string, host mi1.HostState, boot string) *harn
 	h := &harness{t: t, clock: &fakeClock{now: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)}, hubs: make(chan *fakeHub, 8), out: &bytes.Buffer{}}
 	h.opts = Options{
 		Hours: 72, Host: host, Hub: filepath.Join(dir, "ipcam-hub"),
-		Results: filepath.Join(dir, "results"), Work: filepath.Join(dir, "work"), Out: h.out,
+		Results: filepath.Join(dir, "results"), Work: filepath.Join(dir, "work"), ConfigDir: filepath.Join(dir, "ProgramData", "ipcam-recspike"), Out: h.out,
 		FreeBytes: func() (uint64, error) { return 500e9, nil },
 		CameraURLs: func(_ context.Context, streams []string) (map[string]string, error) {
 			urls := map[string]string{}
@@ -415,7 +415,7 @@ func TestStability_StaleRecordingsDoNotShrinkTheWindow(t *testing.T) {
 		dir := t.TempDir()
 		work := filepath.Join(dir, "work")
 		// The reboot: pi-72h-1 is still open, and its recordings hold 10 GB.
-		if _, err := beginRun(filepath.Join(dir, "results", "state", "mi2-pi-72h.json"), "pi-72h", mi1.Boot{ID: "boot-1"}, true); err != nil {
+		if _, _, err := beginRun(filepath.Join(dir, "results", "state", "mi2-pi-72h.json"), "pi-72h", mi1.Boot{ID: "boot-1"}, true, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		record(t, work, "pi-72h-1", 10)
@@ -613,7 +613,7 @@ func TestStability_KeepsTheLastLogUntilTheRunStarts(t *testing.T) {
 	prior := func(t *testing.T, dir string) string {
 		t.Helper()
 		state := filepath.Join(dir, "results", "state", "mi2-pc-72h.json")
-		st, err := beginRun(state, "pc-72h", mi1.Boot{ID: "boot-1"}, true)
+		st, _, err := beginRun(state, "pc-72h", mi1.Boot{ID: "boot-1"}, true, time.Now())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -899,6 +899,47 @@ func TestStability_InterruptedRunKeepsItsCrashes(t *testing.T) {
 	}
 }
 
+// TestStability_CrashesOfALostRunFailG11 (Final fix B review, M5; G27):
+// a run that measured a crash and then did not end (the host rebooted),
+// once a later recspike mi2 invalidates it, has a crash-only envelope of
+// its own: its crash and the hours until it, public-safe. With no redo
+// that ends, G11 reads «pică», not «fără verdict»: a measured failure
+// decides. A redo that ends still carries the crash, judged once.
+func TestStability_CrashesOfALostRunFailG11(t *testing.T) {
+	dir := t.TempDir()
+	h := newHarness(t, dir, pcHost, "boot-1")
+	h.start()
+	first := h.nextHub()
+	h.clock.advance(t, 5*time.Hour)
+	first.exit() // a crash, 5 h into the run
+	h.nextHub()
+	h.cancel() // the host reboots
+	if err := h.wait(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the interrupted run: %v, want context.Canceled", err)
+	}
+
+	redo := newHarness(t, dir, pcHost, "boot-2")
+	redo.start()
+	redo.nextHub()
+	redo.cancel() // the redo never ends either
+	if err := redo.wait(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the redo: %v, want context.Canceled", err)
+	}
+	lost := redo.envelope("pc-72h-1")
+	if d := lost.MI2; d.Crashes72h != 1 || d.Hours != 5 || len(d.Invalidated) != 1 ||
+		d.Invalidated[0] != "pc-72h-1: gazda a repornit în timpul probei, după 1 crash" {
+		t.Errorf("the lost run's envelope: %d crashes in %v h, invalidated %q; want 1 in 5 h, and why it did not end", d.Crashes72h, d.Hours, d.Invalidated)
+	}
+	if !strings.Contains(redo.out.String(), "Proba MI2 pc-72h-1 s-a întrerupt după 1 crash ipcam-hub") {
+		t.Errorf("the redo printed:\n%s\nwant the lost run's crash named", redo.out)
+	}
+	envs := passing(t)
+	envs[len(envs)-2] = lost
+	if j := Judge(envs); j.Verdict != results.Fail || j.PlanB != PlanB {
+		t.Errorf("Judge = %q, plan B %q, reasons %q; want pică with the plan B", j.Verdict, j.PlanB, j.Reasons)
+	}
+}
+
 // TestStability_RestartRefusedAfterACrashNamesTheCrash (hub-2): MI2's
 // pruner deletes segments behind ipcam-hub's catalog, so after a crash
 // late in the run the restarted ipcam-hub may refuse its reconcile
@@ -942,5 +983,130 @@ func TestStability_RestartRefusedAfterACrashNamesTheCrash(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+// TestStability_ElevatedHubStartsFromTrustedValues (Final fix C review,
+// M9): the guide runs MI2 from an administrator window, and the run's
+// folder lies in work/, which the owner's own token may change, between
+// its write and any start of ipcam-hub, the restarts after each crash in
+// the 72 h included. Every start reads the probe's own config in the
+// protected folder (ConfigDir, mi1.ProtectConfigDir), written from the
+// run's trusted values: the release's MediaMTX, the run's data folder and
+// RI_g's file, and the controller's cameras. A run.json planted in the
+// run's folder changes nothing, and the protected config goes with the run.
+func TestStability_ElevatedHubStartsFromTrustedValues(t *testing.T) {
+	dir := t.TempDir()
+	h := newHarness(t, dir, pcHost, "boot-1")
+	h.opts.MediaMTX = filepath.Join(dir, "proba-inregistrare", "mediamtx")
+	run := filepath.Join(h.opts.Work, "mi2", "pc-72h-1")
+	planted := hubproc.Config{DataDir: filepath.Join(dir, "elsewhere", "data"), MediaMTX: filepath.Join(dir, "elsewhere", "mediamtx"),
+		IdentityFile: filepath.Join(dir, "elsewhere", "ri_g.key"), Jobs: []hubproc.Job{{Cam: "cam01", Profile: "main", RestreamURL: "rtsp://192.0.2.9/x"}}}
+	type start struct {
+		config string
+		cfg    hubproc.Config
+	}
+	var starts []start
+	fake := h.opts.StartHub
+	h.opts.StartHub = func(config string, stderr io.Writer, onEvent func(hubproc.Event)) (Hub, error) {
+		// What another program of the owner's user may write between the
+		// run's config and this start.
+		if err := hubproc.WriteConfig(filepath.Join(run, "run.json"), planted); err != nil {
+			return nil, err
+		}
+		cfg, err := hubproc.ReadConfig(config) // what ipcam-hub reads
+		if err != nil {
+			return nil, err
+		}
+		starts = append(starts, start{config, cfg})
+		return fake(config, stderr, onEvent)
+	}
+	h.start()
+	h.nextHub().exit() // a crash: ipcam-hub starts again
+	h.nextHub()
+	h.finish()
+
+	if len(starts) != 2 {
+		t.Fatalf("ipcam-hub started %d times, want 2", len(starts))
+	}
+	for i, s := range starts {
+		cfg := s.cfg
+		if s.config != filepath.Join(h.opts.ConfigDir, mi1.HubConfigMI2) || cfg.MediaMTX != h.opts.MediaMTX || cfg.DataDir != filepath.Join(run, "data") ||
+			cfg.IdentityFile != filepath.Join(run, "ri_g.key") || len(cfg.Jobs) != pcHost.Cameras {
+			t.Errorf("start %d of ipcam-hub read %s: %+v; want %s, with MediaMTX %s, the run's data folder and RI_g's file under %s, and %d cameras",
+				i+1, s.config, cfg, filepath.Join(h.opts.ConfigDir, mi1.HubConfigMI2), h.opts.MediaMTX, run, pcHost.Cameras)
+			continue
+		}
+		for _, j := range cfg.Jobs {
+			if j.RestreamURL != "rtsp://user:pass@127.0.0.1:8554/"+j.Cam+"_main" {
+				t.Errorf("start %d: job %+v, want the controller's camera", i+1, j)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(h.opts.ConfigDir, mi1.HubConfigMI2)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the protected config, with the cameras' login, is still there after the run (%v)", err)
+	}
+}
+
+// TestStability_ACrashRestartNeedsNoNewConfig (Final fix D review, M6): on
+// Windows, a new file at the config's name may be refused for a moment
+// after a crash, while a scanner still holds the config or its delete is
+// still pending. Nothing in the 72 h run's config changes between its
+// starts, so the run writes it into the protected folder once, and every
+// restart after a crash starts ipcam-hub on that same file: a write that
+// would be refused then cannot end the run. The config goes with the run.
+func TestStability_ACrashRestartNeedsNoNewConfig(t *testing.T) {
+	h := newHarness(t, t.TempDir(), pcHost, "boot-1")
+	writes := 0
+	h.opts.WriteConfig = func(dir, name string, cfg hubproc.Config) (string, error) {
+		if writes++; writes > 1 { // what Windows answers while a scanner holds the config
+			return "", &os.PathError{Op: "create", Path: filepath.Join(dir, name), Err: errors.New("the process cannot access the file because it is being used by another process")}
+		}
+		return mi1.WriteHubConfig(dir, name, cfg)
+	}
+	var configs []string
+	fake := h.opts.StartHub
+	h.opts.StartHub = func(config string, stderr io.Writer, onEvent func(hubproc.Event)) (Hub, error) {
+		if _, err := hubproc.ReadConfig(config); err != nil {
+			return nil, err
+		}
+		configs = append(configs, config)
+		return fake(config, stderr, onEvent)
+	}
+	h.start()
+	h.nextHub().exit() // a crash: ipcam-hub starts again
+	h.nextHub()
+	h.finish()
+
+	config := filepath.Join(h.opts.ConfigDir, mi1.HubConfigMI2)
+	if writes != 1 || !slices.Equal(configs, []string{config, config}) {
+		t.Errorf("the run wrote its config %d times and started ipcam-hub on %q; want one write, and both starts on %s", writes, configs, config)
+	}
+	if got := h.envelope("pc-72h-1").MI2.Crashes72h; got != 1 {
+		t.Errorf("the envelope counts %d crashes, want 1", got)
+	}
+	if _, err := os.Stat(config); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the protected config, with the cameras' login, is still there after the run (%v)", err)
+	}
+}
+
+// TestStability_WithoutAProtectedFolderRemovesNothingHere (Final fix D
+// review, M5): a run without its protected folder (ConfigDir "") fails at
+// its first start, with no config written. Its cleanup then removes no file
+// of the current folder, one with the name of MI2's config included.
+func TestStability_WithoutAProtectedFolderRemovesNothingHere(t *testing.T) {
+	h := newHarness(t, t.TempDir(), pcHost, "boot-1")
+	h.opts.ConfigDir = ""
+	here := t.TempDir()
+	t.Chdir(here)
+	if err := os.WriteFile(mi1.HubConfigMI2, []byte("the owner's own file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.start()
+	if err := h.wait(); err == nil || !strings.Contains(err.Error(), "lipsește folderul protejat") {
+		t.Errorf("Run without a protected folder = %v, want the Romanian line that it is missing", err)
+	}
+	if _, err := os.Stat(filepath.Join(here, mi1.HubConfigMI2)); err != nil {
+		t.Errorf("the run removed %s from the current folder: %v", mi1.HubConfigMI2, err)
 	}
 }

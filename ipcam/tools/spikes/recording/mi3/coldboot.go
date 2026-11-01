@@ -72,6 +72,7 @@ func judgeColdBoot(j *results.Judgement, envs []results.Envelope) hostState {
 		return hostFail
 	case !complete:
 		j.Reasons = append(j.Reasons, fmt.Sprintf("pc: %d din %d porniri la rece măsurate în %s", measured, coldBootRuns, mi1.SetPCBugcheck))
+		j.AddOpen(results.Label("MI1", mi1.SetPCBugcheck, "pc"), fmt.Sprintf("%d din %d porniri la rece măsurate", measured, coldBootRuns))
 		return hostIncomplete
 	}
 	return hostPass

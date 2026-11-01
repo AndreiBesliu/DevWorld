@@ -127,8 +127,10 @@ func TestRunState_RunIDIsAFileName(t *testing.T) {
 		if err := os.WriteFile(path, []byte(states), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if st, err := LoadRunState(path); err == nil || !strings.HasPrefix(err.Error(), "starea probelor nu se poate citi") {
-			t.Errorf("run id %q: LoadRunState = %+v, %v; want the Romanian refusal of a damaged state", id, st, err)
+		// The reason inside it is Romanian too (Final fix B review, M6).
+		want := "identificatorul rulării " + strconv.Quote(id) + " nu este un nume de fișier"
+		if st, err := LoadRunState(path); err == nil || !strings.HasPrefix(err.Error(), "starea probelor nu se poate citi") || !strings.Contains(err.Error(), want) {
+			t.Errorf("run id %q: LoadRunState = %+v, %v; want the Romanian refusal of a damaged state, with «%s»", id, st, err, want)
 		}
 	}
 }

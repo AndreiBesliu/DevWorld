@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -184,5 +187,17 @@ func TestProbe_PushSendsTheResults(t *testing.T) {
 	out, err = probeOut(t, fakePi(t, cpuinfoPi4, "", "aarch64"), "--push", ln.Addr().String())
 	if err == nil || !strings.Contains(err.Error(), "sudo ./recspike push --controller") {
 		t.Errorf("--push on an arm64 Pi = %q, %v; want a refusal that names recspike push", out, err)
+	}
+}
+
+// TestProbe_CtrlCDuringThePushIsTheCancel (Task 13 review, M1): Ctrl+C
+// before the probe reaches the PC is the owner's own stop, as for
+// `recspike push`, not «nu mă pot conecta la PC».
+func TestProbe_CtrlCDuringThePushIsTheCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := pushResults(ctx, "192.0.2.1", t.TempDir(), io.Discard)
+	if !errors.Is(err, context.Canceled) || strings.Contains(fmt.Sprint(err), "nu mă pot conecta") {
+		t.Errorf("pushResults after Ctrl+C = %v, want context.Canceled", err)
 	}
 }

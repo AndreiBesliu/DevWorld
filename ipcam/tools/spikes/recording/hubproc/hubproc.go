@@ -54,11 +54,20 @@ type Job struct {
 
 // WriteConfig writes run.json at path, readable by its owner only.
 func WriteConfig(path string, c Config) error {
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := EncodeConfig(c)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o600)
+	return os.WriteFile(path, data, 0o600)
+}
+
+// EncodeConfig is c as WriteConfig writes it.
+func EncodeConfig(c Config) ([]byte, error) {
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
 }
 
 // ReadConfig reads run.json at path.

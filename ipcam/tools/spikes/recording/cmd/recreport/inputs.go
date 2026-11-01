@@ -145,7 +145,8 @@ var ageName = regexp.MustCompile(`-(\d{8}-\d{6})-age(?:-\d+)?\.json$`)
 // load reads the results folders dirs and the annotations of the workflow
 // runs, the newest run first (readRuns), then makes each envelope one:
 // identical copies are read once, and sets whose different envelopes share
-// a run id are renumbered by time.
+// a run id are renumbered by time. A folder that holds no envelope and no
+// AGE result is refused, named by its position among the -in flags.
 func load(dirs, runs []string) (*inputs, error) {
 	in := &inputs{folders: len(dirs), ciRuns: len(runs)}
 	var reads []read
@@ -154,6 +155,12 @@ func load(dirs, runs []string) (*inputs, error) {
 		e, a, s, err := readFolder(dir)
 		if err != nil {
 			return nil, err
+		}
+		if len(e) == 0 && len(a) == 0 {
+			// Such as recreport's own output, a report and CSV files
+			// (report-3): every result it was meant to carry would read
+			// «lipsește» without a word.
+			return nil, fmt.Errorf("-in #%d holds no results (envelopes are *.json under MI1/…, MI2/…)", n+1)
 		}
 		reads, ages, in.skipped = append(reads, readFrom(e, origin{folder: n + 1})...), append(ages, a...), append(in.skipped, s...)
 	}

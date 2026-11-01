@@ -8,12 +8,17 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi2"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi3"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi4"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi9"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
@@ -105,26 +110,38 @@ func storePi(conn *link.Conn, tarball []byte, resultsDir string, out io.Writer) 
 	}
 	_ = conn.Send(link.Bye{})
 	_, _ = fmt.Fprintf(out, "Am pus rezultatele Pi-ului în %s.\n", filepath.Join(resultsDir, "pi"))
-	piSupported := !unsupportedPi(resultsDir)
+	held := results.Collect(resultsDir) // one walk of the folder
+	piSupported := !unsupportedPi(held.Envelopes)
 	if !piSupported {
 		_, _ = fmt.Fprintln(out, "Modelul Pi-ului nu este suportat: nu se așteaptă rezultate cu Pi-ul ca gazdă.")
 	}
-	_, _ = fmt.Fprint(out, results.InventoryText(results.Inventory(resultsDir, piSupported)))
+	_, _ = fmt.Fprint(out, collection(held, piSupported))
 	return nil
 }
 
-// unsupportedPi reports whether an envelope of the results says that the
-// Pi's model is known and unsupported.
-func unsupportedPi(dir string) bool {
-	found := false
-	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || filepath.Ext(path) != ".json" || found {
-			return nil
-		}
-		if e, err := results.Read(path); err == nil && e.Host == "pi" && e.PiModel != nil && e.PiModel.Known && !e.PiModel.Supported {
-			found = true
-		}
-		return nil
+// judges are the gates' judges whose open parts the final collection
+// lists (mis-4).
+var judges = []func([]results.Envelope) results.Judgement{mi1.Judge, mi2.Judge, mi3.Judge, mi4.Judge, mi9.Judge}
+
+// collection is what the final collection prints of the results folder
+// that held was read from, in Romanian: what it holds, what is missing
+// and, judged by the gates' judges, each part of an owner device still
+// without a verdict, with the guide step that completes it (mi1-4, mis-4,
+// report-4); «Nu lipsește nimic.» only when nothing is missing or
+// incomplete.
+func collection(held results.Results, piSupported bool) string {
+	present, missing := held.Inventory(piSupported)
+	var open []results.OpenPart
+	for _, judge := range judges {
+		open = append(open, judge(held.Envelopes).Open...)
+	}
+	return results.InventoryText(present, missing, results.IncompleteParts(open, missing, piSupported))
+}
+
+// unsupportedPi reports whether an envelope of envs says that the Pi's
+// model is known and unsupported.
+func unsupportedPi(envs []results.Envelope) bool {
+	return slices.ContainsFunc(envs, func(e results.Envelope) bool {
+		return e.Host == "pi" && e.PiModel != nil && e.PiModel.Known && !e.PiModel.Supported
 	})
-	return found
 }

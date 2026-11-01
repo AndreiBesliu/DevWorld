@@ -92,7 +92,7 @@ func needsRoot(dir string) (bool, error) {
 
 // Push is `recspike push --controller <PC>` on the Pi, the final collection
 // (G15): it connects to the PC's reccontroller, which pulls the results
-// folder dir (link.Push), and returns when the PC has it. Started without
+// folder dir (link.PushTo), and returns when the PC has it. Started without
 // sudo on results that root owns, it says so in Romanian before it
 // connects.
 func Push(ctx context.Context, addr, dir, host string, out io.Writer) error {
@@ -101,18 +101,11 @@ func Push(ctx context.Context, addr, dir, host string, out io.Writer) error {
 	} else if root {
 		return errors.New(pushNeedsSudo)
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	c, err := dialLink(dialCtx, addr)
-	cancel()
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return fmt.Errorf("nu mă pot conecta la controlor (portul %d): %w", link.Port, err)
-	}
-	defer func() { _ = c.Close() }()
+	var dialErr *link.DialError
 	var noPull *link.NoPullError
-	switch err := link.Push(ctx, c, host, dir); {
+	switch err := link.PushTo(ctx, addr, host, dir); {
+	case errors.As(err, &dialErr):
+		return fmt.Errorf("nu mă pot conecta la controlor (portul %d): %w", link.Port, dialErr.Err)
 	case errors.As(err, &noPull):
 		return fmt.Errorf("controlorul a închis legătura înainte să ceară rezultatele: %w", noPull.Err)
 	case err != nil:

@@ -38,7 +38,9 @@ type Row struct {
 // Recommended is, per host, the recommended camera count that the gate's
 // measurements leave (§4.8): G12's count, measured or lowered, and G13's
 // after the Pi's encryption rate; a host whose count the gate did not
-// settle has none.
+// settle has none. Open is each part of an owner device that the gate
+// still has no verdict for, which the owner completes by running its step
+// again (the final collection, IncompleteParts).
 type Judgement struct {
 	Gate            string
 	Verdict         Verdict
@@ -48,6 +50,18 @@ type Judgement struct {
 	Rows            []Row
 	O17OffOverLimit bool
 	Recommended     map[string]int
+	Open            []OpenPart
+}
+
+// OpenPart is a part of an owner device without a verdict yet (mi1-4,
+// mis-4): Part names it as Inventory does ("MI1 pc-bugcheck (pc)",
+// "MI3 (pi)"), and Why says, in Romanian, what it lacks ("14 din 20
+// rulări valide"). A part that failed is decided (G27) and is never open.
+type OpenPart struct{ Part, Why string }
+
+// AddOpen records that part, of an owner device, lacks why (OpenPart).
+func (j *Judgement) AddOpen(part, why string) {
+	j.Open = append(j.Open, OpenPart{Part: part, Why: why})
 }
 
 // Recommend records n as host's recommended camera count in j.

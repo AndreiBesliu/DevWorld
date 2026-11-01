@@ -155,6 +155,7 @@ func judgeResumes(j *results.Judgement, host, kill9 string, envs []results.Envel
 		return hostFail
 	case !complete:
 		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: %d din %d reluări măsurate în %s", host, measured, Kill9Runs, kill9))
+		j.AddOpen(results.Label("MI1", kill9, host), fmt.Sprintf("%d din %d reluări măsurate", measured, Kill9Runs))
 		return hostIncomplete
 	}
 	return hostPass
@@ -173,11 +174,12 @@ func judgeRun(j *results.Judgement, host string, envs []results.Envelope) hostSt
 			run = &envs[i]
 		}
 	}
-	prefix := "MI2 " + host + ": "
+	prefix, part := "MI2 "+host+": ", results.Label("MI2", "", host)
 	crashRow := results.Row{Code: prefix + "crash-uri ipcam-hub în 72 h", Value: "lipsește", Limit: "0", Source: host}
 	if run == nil {
 		j.Rows = append(j.Rows, crashRow)
 		j.Reasons = append(j.Reasons, host+": lipsește proba de 72 h")
+		j.AddOpen(part, "lipsește proba de 72 h")
 		return hostIncomplete
 	}
 	d := run.MI2
@@ -217,9 +219,12 @@ func judgeRun(j *results.Judgement, host string, envs []results.Envelope) hostSt
 		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: rularea %s: o cameră nu s-a înregistrat %s min din %s h, peste 1 %% din rulare: "+
 			"proba a măsurat un ipcam-hub care nu înregistra. Refaceți proba cu reccontroller -local pornit tot timpul",
 			run.Set, run.RunID, results.Decimal(d.NotRecordingMinutes, 1), results.Decimal(d.Hours, 1)))
+		j.AddOpen(part, fmt.Sprintf("o cameră nu s-a înregistrat %s min din %s h, peste 1 %% din rulare: lăsați reccontroller -local pornit tot timpul",
+			results.Decimal(d.NotRecordingMinutes, 1), results.Decimal(d.Hours, 1)))
 		return hostIncomplete
 	case !complete:
 		j.Reasons = append(j.Reasons, fmt.Sprintf("%s: proba de 72 h a rulat doar %s h", host, results.Decimal(d.Hours, 1)))
+		j.AddOpen(part, fmt.Sprintf("proba de 72 h a rulat doar %s h", results.Decimal(d.Hours, 1)))
 		return hostIncomplete
 	}
 	return hostPass

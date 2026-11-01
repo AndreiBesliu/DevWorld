@@ -4,7 +4,48 @@ package link
 
 import (
 	"context"
+	"net"
+	"strconv"
+	"time"
 )
+
+// pushDialTimeout bounds PushTo's dial of the controller.
+const pushDialTimeout = 10 * time.Second
+
+// dial is Dial; tests replace it.
+var dial = Dial
+
+// DialError is PushTo's error when it cannot connect to the controller;
+// Err says why.
+type DialError struct{ Err error }
+
+func (e *DialError) Error() string { return "link: cannot connect to the controller: " + e.Err.Error() }
+
+func (e *DialError) Unwrap() error { return e.Err }
+
+// PushTo is the final collection's push (G15) as `recspike push` and, on
+// an armv6 Pi, `recspike-probe --push` run it: it dials the controller at
+// addr, on the link's port when addr names none, for at most 10 s, then
+// pushes the results folder dir as host (Push). A dial that fails is a
+// DialError; the end of ctx, during the dial or after it, is ctx's error,
+// so that the owner's Ctrl+C never reads as a connection failure. The
+// callers word each error in Romanian.
+func PushTo(ctx context.Context, addr, host, dir string) error {
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		addr = net.JoinHostPort(addr, strconv.Itoa(Port))
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, pushDialTimeout)
+	c, err := dial(dialCtx, addr)
+	cancel()
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &DialError{Err: err}
+	}
+	defer func() { _ = c.Close() }()
+	return Push(ctx, c, host, dir)
+}
 
 // Version is the protocol's version, which a host's hello names.
 const Version = "c1"

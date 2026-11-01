@@ -145,7 +145,10 @@ func run(ctx context.Context, args []string, in *bufio.Reader, out io.Writer) er
 		if err != nil {
 			return err
 		}
-		a := systemAutostart(out)
+		a, err := systemAutostart(runtime.GOOS, out)
+		if err != nil {
+			return err
+		}
 		if cmd == "install" {
 			return a.install(exe)
 		}

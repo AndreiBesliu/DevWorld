@@ -129,8 +129,9 @@ func (r *stepRunner) measure(ctx context.Context, cameras, minutes, attempt int)
 	f, err := s.run(ctx)
 	s.cleanup()
 	// The recordings are measured, or of a step that failed: they would only
-	// take space, and the RI_g identity and run.json, with the controller's
-	// RTSP login, go with them (mis-5). The logs stay.
+	// take space, and the RI_g identity goes with them (mis-5), as the
+	// step's config, with the controller's RTSP login, went in its cleanup.
+	// The logs stay.
 	if err := clearStep(dir); err != nil {
 		r.o.say("Înregistrările și cheile pasului %d nu s-au putut șterge (%v); se șterg la următorul recspike mi3.", r.n, err)
 	}
@@ -204,8 +205,7 @@ func logLine(dir, line string) {
 }
 
 // clearStep removes what the step in dir left but its logs (stepLogs):
-// its recordings and ipcam-hub's catalog in data/, run.json and the RI_g
-// identity.
+// its recordings and ipcam-hub's catalog in data/, and the RI_g identity.
 func clearStep(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -260,6 +260,9 @@ func (s *stepRun) run(ctx context.Context) (Figures, error) {
 	if err != nil {
 		return Figures{}, fmt.Errorf("nu pot pregăti pasul: %w", err)
 	}
+	// Once ipcam-hub has stopped (undone first, as registered later): the
+	// config names the controller's cameras with their login (mis-5).
+	s.later(func() { _ = os.Remove(config) })
 
 	// The controller first: it marks its pacing and makes the live peers.
 	sessions := Sessions(s.r.tier)
@@ -342,10 +345,15 @@ func (s *stepRun) run(ctx context.Context) (Figures, error) {
 	return s.figures(start, end, peak, res, reports[LoadUpload], riG)
 }
 
-// writeRun writes the step's run.json: each main stream a job that pulls
-// the controller's camera, the even ones encrypted to a fresh RI_g and RK
-// (C11, PH0-22), whose RI_g identity is a 0600 file beside it, which the
-// disk measurement decrypts with, and whose RK's identity is never kept.
+// writeRun writes the step's config, which its ipcam-hub starts with, in
+// the protected folder (mi1.WriteHubConfig): the guide runs MI3 elevated,
+// from an administrator window or with sudo, and the step's folder lies in
+// work/, which the owner's own token may change (Final fix C review, M9).
+// Each main stream is a job that pulls the controller's camera, the even
+// ones encrypted to a fresh RI_g and RK (C11, PH0-22), whose RI_g identity
+// is a 0600 file in the step's folder, which the disk measurement decrypts
+// with, and whose RK's identity is never kept; the data folder is the
+// step's and MediaMTX the release's.
 func (s *stepRun) writeRun(mains []string) (config string, riG *age.X25519Identity, err error) {
 	cfg := hubproc.Config{DataDir: filepath.Join(s.dir, "data"), MediaMTX: s.r.o.MediaMTX, SDCardConfirmed: s.r.o.Host.SdConfirmation != nil}
 	if riG, err = age.GenerateX25519Identity(); err != nil {
@@ -371,8 +379,8 @@ func (s *stepRun) writeRun(mains []string) (config string, riG *age.X25519Identi
 		}
 		cfg.Jobs = append(cfg.Jobs, job)
 	}
-	config = filepath.Join(s.dir, "run.json")
-	return config, riG, hubproc.WriteConfig(config, cfg)
+	config, err = mi1.WriteHubConfig(s.r.o.ConfigDir, mi1.HubConfigMI3, cfg)
+	return config, riG, err
 }
 
 // startLoads starts the four loads, the live one answering offers over

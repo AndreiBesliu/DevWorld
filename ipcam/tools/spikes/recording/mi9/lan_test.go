@@ -150,11 +150,44 @@ func lanRun(t *testing.T, dir, hub, host string, c *lanController) (string, erro
 	var out strings.Builder
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	err := RunLAN(ctx, LANOptions{Controller: c.addr, Hub: hub, Results: filepath.Join(dir, "results"), Work: filepath.Join(dir, "work"), Out: &out,
+	err := RunLAN(ctx, LANOptions{Controller: c.addr, Hub: hub, Results: filepath.Join(dir, "results"), Work: filepath.Join(dir, "work"),
+		ConfigDir: filepath.Join(dir, "config"), Out: &out,
 		Host: func(context.Context) (mi1.HostState, error) {
 			return mi1.HostState{Pseudonym: host, OS: "linux", Storage: "ssd"}, nil
 		}})
 	return out.String(), err
+}
+
+// TestRunLAN_ElevatedHubStartsFromTrustedValues (Final fix C review, M9):
+// the guide runs MI9 from an administrator window, and its recording lies
+// in work/, which the owner's own token may change. The recording's
+// ipcam-hub starts from MI9's own config in the protected folder
+// (LANOptions.ConfigDir, mi1.HubConfigMI9), with the recording's trusted
+// values, never from a run.json in work/.
+func TestRunLAN_ElevatedHubStartsFromTrustedValues(t *testing.T) {
+	dir := t.TempDir()
+	hub, _ := spiketest.InstallFakeHub(t, dir)
+	c := startLANController(t, &lanController{})
+	configDir, mediamtx := filepath.Join(dir, "ProgramData", "ipcam-recspike"), filepath.Join(dir, "proba-inregistrare", "mediamtx")
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	var out strings.Builder
+	err := RunLAN(ctx, LANOptions{Controller: c.addr, Hub: hub, MediaMTX: mediamtx, Results: filepath.Join(dir, "results"), Work: filepath.Join(dir, "work"),
+		ConfigDir: configDir, Out: &out,
+		Host: func(context.Context) (mi1.HostState, error) { return mi1.HostState{Pseudonym: "pc", OS: "linux", Storage: "ssd"}, nil }})
+	if err != nil {
+		t.Fatalf("RunLAN: %v\n%s", err, out.String())
+	}
+	starts := spiketest.HubStarts(t, dir)
+	if len(starts) != 1 {
+		t.Fatalf("ipcam-hub started %+v, want once", starts)
+	}
+	rec := filepath.Dir(starts[0].DataDir)
+	want := spiketest.HubStart{Config: filepath.Join(configDir, mi1.HubConfigMI9), MediaMTX: mediamtx, DataDir: filepath.Join(rec, hubrec.RecordingDir),
+		IdentityFile: filepath.Join(rec, hubrec.IdentityFile)}
+	if starts[0] != want || filepath.Dir(filepath.Dir(rec)) != filepath.Join(dir, "work", "mi9") || filepath.Base(rec) != hubrec.FiveMin {
+		t.Errorf("ipcam-hub started %+v, want %+v, in a run of work/mi9", starts[0], want)
+	}
 }
 
 // leftUnder is every recording and identity file left under root.
@@ -183,7 +216,7 @@ func TestRunLAN_PiPlaysMI4sSegment(t *testing.T) {
 		t.Fatal(err)
 	}
 	left, err := hubrec.Record(t.Context(), hubrec.Options{Hub: hub, CameraURL: "rtsp://127.0.0.1:8554/cam01_main", Run: run,
-		Name: hubrec.FiveMin, SegmentSecs: 300})
+		Name: hubrec.FiveMin, SegmentSecs: 300, ConfigDir: filepath.Join(dir, "config"), Config: mi1.HubConfigMI4})
 	if err != nil {
 		t.Fatal(err)
 	}

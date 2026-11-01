@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
@@ -72,6 +73,37 @@ func DesktopDir() (string, error) {
 	return windows.KnownFolderPath(windows.FOLDERID_Desktop, windows.KF_FLAG_DEFAULT)
 }
 
+// ProgramData is Windows' folder of all users' program data, C:\ProgramData,
+// as the system keeps it in HKLM (ProfileList's ProgramData,
+// %SystemDrive%\ProgramData), expanded with the drive of the system's own
+// Windows folder (expandSystemFolders), never from the environment: the
+// owner's user may set %ProgramData%, %ALLUSERSPROFILE% or %SystemDrive% in
+// HKCU\Environment without a UAC prompt, and the boot task and the shortcut
+// run recspike elevated with that user's environment (Final fix C review,
+// M3). The known folder (SHGetKnownFolderPath) expands that same value from
+// the process environment: on the windows CI job it failed once those
+// variables pointed elsewhere (cfe6eba).
+func ProgramData() (string, error) {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`, registry.QUERY_VALUE)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = k.Close() }()
+	raw, _, err := k.GetStringValue("ProgramData") // as stored: REG_EXPAND_SZ is not expanded here
+	if err != nil {
+		return "", err
+	}
+	windowsDir, err := WindowsFolder()
+	if err != nil {
+		return "", err
+	}
+	return expandSystemFolders(raw, windowsDir)
+}
+
+// WindowsFolder is Windows' own folder, C:\Windows, as the system reports
+// it, never from %SystemRoot% or %windir%, for the same reason.
+func WindowsFolder() (string, error) { return windows.GetSystemWindowsDirectory() }
+
 // shellLinkCS saves a shortcut through the shell's own link object, with
 // its Unicode interfaces (IShellLinkW, IPersistFile). WScript.Shell's
 // shortcut object is not Unicode-safe: on the Windows CI runner, whose ANSI
@@ -118,15 +150,21 @@ public static class RecspikeShortcut {
 }
 `
 
+// runShortcut runs CreateShortcut's PowerShell and returns its output;
+// tests see its command.
+var runShortcut = (*exec.Cmd).CombinedOutput
+
 // CreateShortcut writes a .lnk shortcut at path that runs target with args
-// in dir, through the shell's own link object (shellLinkCS); with
-// runAsAdmin, the target starts elevated (RunAsAdministrator).
-func CreateShortcut(path, target, args, dir string, runAsAdmin bool) error {
+// in dir, through the shell's own link object (shellLinkCS), which
+// PowerShell compiles in temp, a folder that only Administrators and SYSTEM
+// may write (shortcutEnv); with runAsAdmin, the target starts elevated
+// (RunAsAdministrator).
+func CreateShortcut(path, target, args, dir, temp string, runAsAdmin bool) error {
 	const script = "$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition $env:LNK_CS; " +
 		"[RecspikeShortcut]::Save($env:LNK_PATH, $env:LNK_TARGET, $env:LNK_ARGS, $env:LNK_DIR)"
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
-	cmd.Env = append(os.Environ(), "LNK_CS="+shellLinkCS, "LNK_PATH="+path, "LNK_TARGET="+target, "LNK_ARGS="+args, "LNK_DIR="+dir)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	cmd.Env = shortcutEnv(os.Environ(), temp, "LNK_CS="+shellLinkCS, "LNK_PATH="+path, "LNK_TARGET="+target, "LNK_ARGS="+args, "LNK_DIR="+dir)
+	if out, err := runShortcut(cmd); err != nil {
 		return fmt.Errorf("mi1: the shortcut: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	if runAsAdmin {

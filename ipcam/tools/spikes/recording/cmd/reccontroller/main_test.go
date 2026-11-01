@@ -897,6 +897,58 @@ func TestReport_SendsLoggedAfterTheSilenceKeepTheirLoss(t *testing.T) {
 	})
 }
 
+// TestReport_PromptReportWaitsForTheFeed (Final fix B review, M1): a
+// report that comes before the run's copy, while the send log's feed still
+// lags, waits for the feed to pass the stop, at most feedCatchUp after it,
+// before the run is judged from the live log: the run's last recorded
+// frame, logged after the report, keeps its real loss, never the whole
+// run's. A feed that has not caught up by then is named on the screen.
+func TestReport_PromptReportWaitsForTheFeed(t *testing.T) {
+	const id = "pc-kill9-06-1"
+	t.Run("the feed catches up", func(t *testing.T) {
+		r := newRig(t)
+		conn := r.connect("pc")
+		report, stopAt := r.kill9RunUnlogged(conn, id, 0)
+		r.send(conn, report)
+		verdicts := make(chan link.Message, 1)
+		go func() {
+			m, err := conn.Receive()
+			if err != nil {
+				m = nil
+			}
+			verdicts <- m
+		}()
+		select {
+		case m := <-verdicts:
+			t.Fatalf("the controller judged the run before its feed caught up: %+v", m)
+		case <-time.After(300 * time.Millisecond):
+		}
+		r.c.sendLog.Record("cam01_main", 5000, stopAt.Add(-700*time.Millisecond))
+		r.c.sendLog.Record("cam01_main", 5001, stopAt.Add(50*time.Millisecond))
+		if v, ok := (<-verdicts).(link.Verdict); !ok || !mi1.Counts(v.Run) || v.Run.LossMs != 700 {
+			t.Errorf("verdict %+v, want a counting run that lost 700 ms", v.Run)
+		}
+	})
+	t.Run("the feed has not caught up when its wait ends", func(t *testing.T) {
+		r := newRig(t)
+		conn := r.connect("pc")
+		report, stopAt := r.kill9RunUnlogged(conn, id, 0)
+		r.send(conn, report)
+		waitFor(t, "the report's judgement", func() bool {
+			r.c.mu.Lock()
+			defer r.c.mu.Unlock()
+			return r.c.runs[id] != nil && r.c.runs[id].judging != nil
+		})
+		r.clock.set(stopAt.Add(feedCatchUp + time.Second))
+		if _, ok := r.receive(conn).(link.Verdict); !ok {
+			t.Fatal("no verdict once the feed's wait ended")
+		}
+		if want := "Rularea " + id + ": jurnalul trimiterilor a rămas în urmă"; !strings.Contains(r.screen.String(), want) {
+			t.Errorf("screen %q, want %q", r.screen.String(), want)
+		}
+	})
+}
+
 // TestReport_LateReportKeepsItsLoss (mi1-1): the send log keeps each
 // stream's newest hour of indexes, while a run's report can come much
 // later: the boot task could not reach the controller, and the owner ran

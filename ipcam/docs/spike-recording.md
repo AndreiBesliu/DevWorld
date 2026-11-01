@@ -20,7 +20,7 @@ Proba are mai multe părți. Fiecare dispozitiv le face pe rând; un dispozitiv 
 | Partea | Ce face | Cât durează |
 |---|---|---|
 | Pregătirea (pașii 2–5) | descărcarea, pornirea automată, copia cardului | 45 min, o singură dată |
-| Fereastra automată (MI1, pasul 6) | 42 de opriri bruște ale înregistrării, pe fiecare dispozitiv: două seturi de câte 20 de rulări, plus o rulare în plus pentru fiecare set. Pe PC, jumătate dintre opriri sunt ecrane albastre (o eroare de sistem provocată intenționat), după care PC-ul repornește singur. | ≈ 6 h și 30 min pe dispozitiv, nesupravegheat, în orele alese de dvs. |
+| Fereastra automată (MI1, pasul 6) | 42 de opriri bruște ale înregistrării, pe fiecare dispozitiv: două seturi de câte 20 de rulări, plus o rulare în plus pentru fiecare set. Pe PC, jumătate dintre opriri sunt ecrane albastre (o eroare de sistem provocată intenționat), după care PC-ul repornește singur. | pe fiecare dispozitiv, ≈ 3 h setul `kill9` și ≈ 3 h și 30 min setul `bugcheck` (PC) sau `sysrq` (Pi), nesupravegheat, în orele alese de dvs.; al doilea set îl porniți dvs. după primul, așa că de obicei faceți un set pe noapte: ≈ 4 nopți pentru ambele dispozitive |
 | Tăierile reale (pasul 7) | 5 tăieri ale alimentării pe fiecare dispozitiv, făcute de dvs. când programul vă cere | ≈ 2 h și 30 min în total |
 | MI2 (pasul 8) | înregistrare fără oprire, pe ambele dispozitive deodată, fiecare pornit tot timpul | 72 h |
 | MI3 (pasul 9) | numărul de camere pe care îl duce fiecare dispozitiv | 1 h pe dispozitiv, plus pașii (dacă ora nu trece), plus încă 1 h la 16 camere pe un PC cu 6 nuclee sau mai multe |
@@ -37,7 +37,7 @@ Spațiul liber pentru MI2: de cel puțin 2 × N × camere × 4 Mbps, unde N e nu
 
 Pentru fereastra întreagă de 6 h: ≈ 173, 87 și 44 GB. recspike scrie cifra exactă pentru dispozitivul dvs. când pornește MI2 (pasul 8).
 
-Ordinea recomandată: pregătirea, ferestrele automate (de exemplu noaptea), tăierile reale, MI3, MI4, MI9, telefonul, apoi MI2 (72 h), rezultatele și, la final, ștergerea pornirii automate. Le puteți împărți în mai multe zile.
+Ordinea recomandată: pregătirea, ferestrele automate (de exemplu noaptea), tăierile reale, MI3, MI4, MI9, telefonul, apoi MI2 (72 h), rezultatele și, la final, ștergerea pornirii automate. Le puteți împărți în mai multe zile: doar ferestrele automate cer în jur de 4 nopți (pasul 6).
 
 Dacă Pi-ul dvs. este armv6 (pasul 3 vă spune), el nu poate fi măsurat: e doar controlorul probelor PC-ului, iar toate părțile cu Pi-ul ca gazdă se sar.
 
@@ -97,10 +97,10 @@ De fiecare dată când deschideți un terminal nou pe Pi, scrieți întâi `cd ~
 
 ### Pe PC
 
-1. Descărcați NotMyFault de pe pagina Microsoft Sysinternals: <https://learn.microsoft.com/sysinternals/downloads/notmyfault>. Despachetați arhiva și copiați `notmyfault64.exe` în `C:\proba-inregistrare`, lângă `recspike.exe`. E programul Microsoft care provoacă ecranul albastru din fereastra automată; nu avem voie să-l punem noi în arhivă.
+1. Descărcați NotMyFault de pe pagina Microsoft Sysinternals: <https://learn.microsoft.com/sysinternals/downloads/notmyfault>. Despachetați arhiva și copiați `notmyfault64.exe` în `C:\proba-inregistrare`, lângă `recspike.exe`. E programul Microsoft care provoacă ecranul albastru din fereastra automată; nu avem voie să-l punem noi în arhivă. Fiecare ecran albastru lasă pe PC date despre eroare: fișierul `C:\Windows\MEMORY.DMP` (de obicei câțiva GB, rescris la fiecare ecran albastru), câte un fișier mic în `C:\Windows\Minidump` și un raport de eroare Windows, pe care Windows îl poate trimite la Microsoft după setările dvs. de date de diagnosticare, ca la orice ecran albastru. Pasul 14 vă arată cum le ștergeți.
 2. Întrerupeți actualizările Windows pe durata probei: „Setări” → „Windows Update” → „Întrerupeți actualizările” (alegeți cea mai lungă perioadă). O actualizare care repornește PC-ul în timpul probei ar strica rulările.
 3. În fereastra de administrator, scrieți `recspike.exe install`. Dacă ați pornit-o dintr-o fereastră obișnuită, apare «Windows cere acum permisiunea de administrator»<!--recspike-->: răspundeți „Da”. Programul instalează pornirea automată: după fiecare repornire din fereastra automată și după fiecare tăiere reală, proba continuă singură. Pe desktop apare scurtătura «Proba înregistrare – tăieri reale»<!--recspike-->, folosită la pasul 7. Tot acum, recspike protejează folderul probei, din care pornirea automată rulează programele ca administrator: «Folderul probei poate fi schimbat acum doar de un administrator»<!--recspike-->. Programele probei scriu doar în `results` și `work`. Dacă mai puneți ceva în folder (de exemplu `notmyfault64.exe`, pasul 4.1), Windows cere permisiunea de administrator: apăsați „Continuare”.
-4. Tot la instalare, recspike schimbă o setare a Windows și o spune: «Serviciul de timp Windows pornește acum automat»<!--recspike-->. Serviciul de timp Windows pornește automat, iar declanșatoarele care îl pot opri sunt scoase, ca ceasul PC-ului să se sincronizeze după fiecare repornire. La pasul 14, `recspike.exe uninstall` pune la loc ambele setări, exact cum erau.
+4. Tot la instalare, recspike schimbă o setare a Windows și o spune: «Serviciul de timp Windows pornește acum automat»<!--recspike-->. Serviciul de timp Windows pornește automat, iar declanșatoarele care îl pot opri sunt scoase, ca ceasul PC-ului să se sincronizeze după fiecare repornire. La pasul 14, `recspike.exe uninstall` pune la loc ambele setări, exact cum erau. Excepție: dacă instalarea scrie un rând cu «nu le salvez pe acestea în locul lor»<!--recspike--> (de exemplu, când instalați din nou după ce ați șters folderul probei), setările de dinainte nu mai sunt salvate. Fotografiați sau copiați rândul: el conține cele două comenzi `sc` cu care le puneți la loc la pasul 14.
 5. Cât timp PC-ul e controlorul (pasul 5), `reccontroller.exe` nu-l lasă să intre în repaus. Dacă PC-ul intră totuși în repaus în timpul probei, sau dacă controlorul scrie «Atenție: reccontroller nu poate împiedica intrarea PC-ului în repaus»<!--reccontroller-->, opriți repausul pe durata probei: „Setări” → „Sistem” → „Alimentare” → „Ecran și repaus” → la repaus alegeți „Niciodată”. După probă, readuceți setarea cum era (pasul 14).
 
 ### Pe Pi (nu și pe un Pi armv6)
@@ -143,9 +143,13 @@ Cum aflați adresele:
 
 Adresele se pot schimba după o repornire a routerului. Dacă un program nu se mai conectează, verificați-le din nou.
 
+Programele probei se conectează între ele fără parolă și se bazează pe rețeaua dvs. de acasă. Rulați proba doar acasă, cu dispozitivele legate la routerul dvs., niciodată într-o rețea publică (o cafenea, un hotel).
+
 ## 6. Fereastra automată, pe fiecare dispozitiv
 
 Fereastra automată oprește brusc înregistrarea de 42 de ori pe fiecare dispozitiv și măsoară ce se pierde. Rulează doar în fereastra de ore aleasă de dvs., de exemplu noaptea, când nu folosiți dispozitivele. Ora se scrie ca `HH:MM-HH:MM`, de exemplu `22:00-06:00`. Fiecare dispozitiv are două seturi, pe rând: întâi `kill9` (oprește doar programul de înregistrare), apoi `bugcheck` pe PC (ecran albastru) sau `sysrq` pe Pi (repornire bruscă).
+
+Setul `kill9` durează în jur de 3 ore, iar `bugcheck` sau `sysrq` în jur de 3 ore și 30 de minute. Al doilea set nu pornește singur: îl porniți dvs., cu comanda lui, după ce primul scrie «Proba … are toate rulările.»<!--recspike-->. Așa că de obicei faceți un set pe noapte, iar cele patru seturi ale ambelor dispozitive cer în jur de 4 nopți. Dacă fereastra se încheie înaintea setului, el continuă în noaptea următoare (vedeți mai jos).
 
 ### PC-ul ca gazdă
 
@@ -169,7 +173,7 @@ Fereastra automată oprește brusc înregistrarea de 42 de ori pe fiecare dispoz
 
 ## 7. Cele 5 tăieri reale pe fiecare dispozitiv
 
-Aici dvs. tăiați alimentarea, când programul vă cere. Cererea apare la un moment ales la întâmplare, între 3 și 12 minute după ce înregistrarea a pornit: «Scoateți acum alimentarea»<!--reccontroller-->. Apare în fereastra controlorului și, când PC-ul e gazda, și în fereastra recspike de pe PC.
+Aici dvs. tăiați alimentarea, când programul vă cere. Cererea apare la un moment ales la întâmplare, între 3 și 10 minute după ce înregistrarea a pornit: «Scoateți acum alimentarea»<!--reccontroller-->. Apare în fereastra controlorului și, când PC-ul e gazda, și în fereastra recspike de pe PC.
 
 Când apare cererea, în cel mult 2 minute:
 
@@ -218,7 +222,9 @@ sudo ./recspike mi2 --controller 127.0.0.1
 La pornire, recspike scrie cât spațiu îi trebuie: «Proba de … h înregistrează …»<!--recspike-->, «Sunt necesari cel puțin … GB liberi»<!--recspike--> și «Spațiu liber aici: …»<!--recspike-->, apoi «Proba MI2 … începe: …»<!--recspike-->. Dacă spațiul nu ajunge, scrie «Spațiul liber nu ajunge pentru o fereastră de cel puțin 1 h.»<!--recspike-->: eliberați spațiu și porniți din nou. La final scrie «Proba MI2 … s-a încheiat după … h.»<!--recspike-->.
 
 - Dacă folosiți Pi-ul prin `ssh` de pe PC, lăsați ferestrele `ssh` deschise toate cele 72 de ore: închiderea lor oprește proba de pe Pi.
-- Dacă un dispozitiv repornește în timpul MI2 (o pană de curent, de exemplu), porniți din nou pe el ambele comenzi: întâi `reccontroller` cu `-local`, apoi `recspike mi2`. Rularea întreruptă nu contează și se reface de la început.
+- Dacă un dispozitiv repornește în timpul MI2 (o pană de curent, de exemplu), porniți din nou pe el ambele comenzi: întâi `reccontroller` cu `-local`, apoi `recspike mi2`. Rularea întreruptă nu contează și se reface de la început. Dacă ipcam-hub avusese un crash înainte, recspike scrie la repornire «Proba MI2 … s-a întrerupt după …»<!--recspike-->: crash-ul rămâne în rezultate.
+- Dacă recspike scrie «Camerele nu se mai înregistrează: verificați că reccontroller -local rulează.»<!--recspike-->, faceți ce scrie pe același rând: porniți din nou `reccontroller -local` dacă s-a oprit; dacă l-ați pornit din nou, opriți `recspike mi2` cu Ctrl+C și porniți-l din nou.
+- Dacă ipcam-hub se oprește singur, recspike scrie «ipcam-hub s-a oprit neașteptat»<!--recspike--> și îl pornește din nou. E un rezultat al probei, nu o greșeală a dvs.: lăsați proba să ruleze mai departe.
 
 ## 9. MI3 (1 h)
 
@@ -236,7 +242,7 @@ Fără spațiul unui pas, recspike nu îl pornește și scrie că pasul nu a por
 - **PC-ul ca gazdă.** Pe Pi: `sudo ./reccontroller` (pe un Pi armv6: `./reccontroller-linux-armv6`). Pe PC, în fereastra de administrator: `recspike.exe mi3 --controller <adresa Pi-ului>`. Dacă firewall-ul întreabă de `recspike.exe`, răspundeți ca la pasul 2.
 - **Pi-ul ca gazdă** (nu și pe un Pi armv6). Pe PC: `reccontroller.exe`. Pe Pi: `sudo ./recspike mi3 --controller <adresa PC-ului>`.
 
-Proba începe cu «Proba MI3 începe: …»<!--recspike--> și se încheie cu «Proba MI3 s-a încheiat: rezultatul este …»<!--recspike-->.
+Proba începe cu «Proba MI3 începe: …»<!--recspike--> și se încheie cu «Proba MI3 s-a încheiat: rezultatul este …»<!--recspike-->. Dacă după el apare un rând cu «deci pasul nu are rezultat»<!--recspike-->, verificați că fereastra controlorului e deschisă și că rețeaua merge, apoi porniți din nou aceeași comandă.
 
 ## 10. MI4 (Pi)
 
@@ -263,7 +269,7 @@ Fiecare durează în jur de 15 minute și se încheie cu «Proba MI9 s-a închei
 2. Dacă pe telefon aveți deja aplicația «Proba ipcam»<!--android--> de la proba video și ea arată «Rezultate netrimise: …»<!--app-->, porniți `spikehub` ca în ghidul probei video și apăsați «Trimite acum»<!--app-->. Apoi dezinstalați aplicația veche: țineți apăsat pe pictograma «Proba ipcam»<!--android--> → „Dezinstalare”. Fiecare versiune de test are o semnătură nouă, așa că Android nu o instalează peste cea veche.
 3. Pe telefon, deschideți în Chrome pagina de release și apăsați pe `ipcam-spike.apk`. Dacă Chrome avertizează că fișierul poate fi periculos, alegeți „Descărcați oricum”. Deschideți fișierul descărcat. La „Setări” activați „Permiteți din această sursă”, reveniți și apăsați „Instalați”. Dacă Play Protect avertizează, apăsați „Mai multe detalii”, apoi „Instalați oricum”. Dacă instalarea e oprită de „Blocare automată”: „Setări” → „Securitate și confidențialitate” → „Blocare automată” → dezactivați, instalați, apoi reactivați-o.
 4. Deschideți «Proba ipcam»<!--android-->. În câmpul «Adresa hub-ului (o vedeți în fereastra spikehub)»<!--app--> scrieți `http://<adresa PC-ului>:7080`. Aici „hub-ul” e controlorul de pe PC; adresa nu apare în fereastra lui, ci o aflați ca la pasul 5.
-5. Nu apăsați «Verifică conexiunea»<!--app-->: controlorul nu are camerele pe care le verifică butonul și ar apărea o eroare. Apăsați direct «Pornește»<!--app--> pe rândul «Viteză agerange (MI4)»<!--app-->.
+5. Nu apăsați «Verifică conexiunea»<!--app-->: butonul deschide o legătură video cu hub-ul probei video, pe care controlorul acestei probe nu o are, așa că ar arăta o eroare chiar dacă totul e în regulă. Dacă l-ați apăsat și apare o eroare, ignorați-o. Apăsați direct «Pornește»<!--app--> pe rândul «Viteză agerange (MI4)»<!--app-->: acest pas nu are nevoie de legătura video.
 6. Așteptați «gata în … s»<!--app-->. Dacă apare «Rezultate netrimise: …»<!--app-->, verificați că fereastra controlorului e deschisă pe PC și apăsați «Trimite acum»<!--app-->.
 
 ## 13. Rezultatele
@@ -273,8 +279,11 @@ La final, PC-ul adună rezultatele ambelor dispozitive și vă spune ce lipseșt
 1. Opriți orice controlor deschis pe PC (Ctrl+C în fereastra lui).
 2. Pe PC, într-o fereastră de administrator: `reccontroller.exe pull`. Apare «Aștept rezultatele Pi-ului: …»<!--reccontroller-->.
 3. Pe Pi: `sudo ./recspike push --controller <adresa PC-ului>`. `sudo` e necesar, pentru că rezultatele Pi-ului sunt ale administratorului (root); fără el, recspike refuză cu «rezultatele sunt ale lui root, fiindcă proba a rulat cu sudo»<!--recspike-->. Pe un Pi armv6: `./recspike-probe-linux-armv6 --push <adresa PC-ului>`. Pi-ul scrie «Am trimis rezultatele.»<!--recspike-->.
-4. Pe PC apare «Am pus rezultatele Pi-ului în …»<!--reccontroller-->, apoi «Prezente: …»<!--reccontroller--> și fie «Nu lipsește nimic.»<!--reccontroller-->, fie «Lipsesc: …»<!--reccontroller-->. Cu un Pi armv6, PC-ul scrie întâi «Modelul Pi-ului nu este suportat»<!--reccontroller--> și nu mai așteaptă rezultate cu Pi-ul ca gazdă.
-5. Dacă lipsește ceva, refaceți pasul care îl produce, apoi reluați acest pas:
+4. Pe PC apare «Am pus rezultatele Pi-ului în …»<!--reccontroller-->, apoi «Prezente: …»<!--reccontroller-->. Cu un Pi armv6, PC-ul scrie întâi «Modelul Pi-ului nu este suportat»<!--reccontroller--> și nu mai așteaptă rezultate cu Pi-ul ca gazdă. PC-ul verifică apoi dacă rezultatele ajung pentru un verdict, nu doar dacă există:
+   - «Lipsesc: …»<!--reccontroller--> numește ce nu există deloc;
+   - «Părți incomplete:»<!--reccontroller--> e urmat de câte un rând pentru fiecare parte care există, dar nu ajunge încă pentru un verdict, de exemplu `MI1 pc-bugcheck (pc): 14 din 20 rulări valide → pasul 6, porniți din nou aceeași comandă.` Rândul spune ce lipsește și pasul de refăcut;
+   - «Nu lipsește nimic.»<!--reccontroller--> apare doar când nu lipsește nimic și nicio parte nu e incompletă.
+5. Dacă lipsește ceva sau o parte e incompletă, refaceți pasul numit, pe dispozitivul din paranteză, apoi reluați acest pas. Pentru o parte incompletă, rândul ei numește pasul: porniți din nou aceeași comandă. Un set MI1 continuă de unde a rămas; MI2, MI3, MI4 și MI9 se reiau de la început. Pentru ce lipsește:
 
    | Ce lipsește | Ce refaceți |
    |---|---|
@@ -287,22 +296,23 @@ La final, PC-ul adună rezultatele ambelor dispozitive și vă spune ce lipseșt
    | `MI9 lan (pc)`, `MI9 lan (pi)` | pasul 11, pe dispozitivul numit |
    | `AGE` | pasul 12 |
 
-6. Când nu mai lipsește nimic, deschideți `C:\proba-inregistrare`, faceți clic dreapta pe folderul `results` → „Copiere”, apoi clic dreapta pe desktop → „Lipire”. Arhiva se face pe desktop, pentru că în folderul probei scrie doar un administrator (pasul 4.3). Pe desktop, clic dreapta pe folderul `results` → „Comprimați în fișier ZIP”. Dacă nu vedeți opțiunea: „Afișați mai multe opțiuni” → „Trimitere la” → „Folder comprimat (arhivat)”. Trimiteți doar această arhivă: e a PC-ului și cuprinde și rezultatele Pi-ului.
+6. Când apare «Nu lipsește nimic.»<!--reccontroller-->, deschideți `C:\proba-inregistrare`, faceți clic dreapta pe folderul `results` → „Copiere”, apoi clic dreapta pe desktop → „Lipire”. Arhiva se face pe desktop, pentru că în folderul probei scrie doar un administrator (pasul 4.3). Pe desktop, clic dreapta pe folderul `results` → „Comprimați în fișier ZIP”. Dacă nu vedeți opțiunea: „Afișați mai multe opțiuni” → „Trimitere la” → „Folder comprimat (arhivat)”. Trimiteți doar această arhivă: e a PC-ului și cuprinde și rezultatele Pi-ului.
 7. Trimiteți arhiva în chat. Sau încărcați-o în Google Drive-ul dvs., în folderul `ipcam-teste` (creați-l dacă nu există), și scrieți-ne în chat că e acolo.
 
 Rezultatele numesc dispozitivele doar `pc` și `pi` și conțin modelul Pi-ului, sistemul de operare, tipul de stocare și măsurătorile. Nu conțin adrese IP, numele rețelei, numele dispozitivelor sau numere de serie.
 
 ## 14. Cum opriți testul și ștergeți pornirea automată
 
-După ce ne-ați trimis rezultatele:
+După ce v-am confirmat în chat că rezultatele sunt complete, ștergeți pornirea automată și folderele probei, ca mai jos. Până la confirmare, păstrați folderele `C:\proba-inregistrare` și, pe Pi, `~/proba-inregistrare`, cu pornirea automată instalată: dacă trebuie refăcută o parte, ea continuă din aceste foldere, fără o instalare nouă.
 
-1. Pe PC, în fereastra de administrator: `recspike.exe uninstall`. Trebuie să apară «Pornirea automată și scurtătura de pe desktop au fost șterse.»<!--recspike-->, «Serviciul de timp Windows are din nou setările de dinainte.»<!--recspike--> și «Folderul probei are din nou permisiunile de dinainte; îl puteți șterge.»<!--recspike-->: serviciul de timp are din nou pornirea și declanșatoarele de dinainte de pasul 4. Dacă în locul rândului despre serviciul de timp apare «Setările de dinainte ale serviciului de timp Windows nu sunt salvate»<!--recspike-->, scrieți în aceeași fereastră, pe rând, cele două comenzi `sc` din acel rând.
+1. Pe PC, în fereastra de administrator: `recspike.exe uninstall`. Trebuie să apară «Pornirea automată și scurtătura de pe desktop au fost șterse.»<!--recspike-->, «Serviciul de timp Windows are din nou setările de dinainte.»<!--recspike--> și «Folderul probei are din nou permisiunile de dinainte; îl puteți șterge.»<!--recspike-->: serviciul de timp are din nou pornirea și declanșatoarele de dinainte de pasul 4. Dacă în locul rândului despre serviciul de timp apare «Setările de dinainte ale serviciului de timp Windows nu sunt salvate»<!--recspike-->, scrieți în aceeași fereastră, pe rând, cele două comenzi `sc` din acel rând (sau din rândul cu «nu le salvez pe acestea în locul lor»<!--recspike--> de la pasul 4.4). Dacă NotMyFault a lăsat în Windows driverul lui, recspike îl șterge și scrie «Am șters serviciul MyFault, lăsat în Windows de NotMyFault.»<!--recspike-->. Dacă scrie «Ecranele albastre ale probei au lăsat pe PC …»<!--recspike-->, faceți și pasul 14.3.
 2. Pe Pi (nu și pe un Pi armv6): `sudo ./recspike uninstall`. Trebuie să apară «Folderul probei și programele din el sunt din nou ale contului dvs.»<!--recspike--> și «Pornirea automată a fost ștearsă.»<!--recspike-->. Dacă pe Pi rulează încă un controlor pornit desprins de `ssh` (pasul 5), opriți-l: `sudo pkill -x reccontroller` (pe un Pi armv6: `pkill -f reccontroller-linux-armv6`).
-3. Reluați actualizările Windows: „Setări” → „Windows Update” → „Reluați actualizările”.
-4. Scoateți regulile de firewall ale probei: în Start căutați „Permiteți o aplicație prin Paravanul de protecție Windows”, apăsați „Modificare setări”, selectați `reccontroller` și apăsați „Eliminare”; la fel pentru `recspike`, dacă apare. Dacă un program apare pe mai multe rânduri, eliminați-le pe toate.
-5. Ștergeți folderele `C:\proba-inregistrare` și, pe Pi, `~/proba-inregistrare` (`sudo rm -r ~/proba-inregistrare`). Pe desktopul PC-ului, ștergeți și copia folderului `results` și arhiva, după ce ne-ați trimis-o.
-6. Pe telefon, dezinstalați «Proba ipcam»<!--android--> și luați înapoi permisiunea Chrome de a instala aplicații: „Setări” → „Aplicații” → Chrome → „Instalați aplicații necunoscute” → dezactivați „Permiteți din această sursă”. Dacă ați dezactivat „Blocare automată” și nu ați reactivat-o, reactivați-o.
-7. Dacă ați trecut rețeaua PC-ului pe „Rețea privată” doar pentru probă, sau ați oprit repausul PC-ului (pasul 4.5), readuceți-le cum erau.
+3. Ștergeți datele lăsate de ecranele albastre (pasul 4.1): în Start scrieți „Curățare disc” și deschideți programul. Alegeți discul `C:`, apăsați „Curățare fișiere de sistem”, răspundeți „Da” la cererea de administrator și alegeți din nou `C:`. În listă, bifați fișierele imagine de memorie pentru erorile de sistem și fișierele de raportare a erorilor Windows, apoi apăsați „OK” și „Ștergere fișiere”. Dacă nu le găsiți în listă, scrieți în fereastra de administrator: `del /f /q %SystemRoot%\MEMORY.DMP %SystemRoot%\Minidump\*.dmp`.
+4. Reluați actualizările Windows: „Setări” → „Windows Update” → „Reluați actualizările”.
+5. Scoateți regulile de firewall ale probei: în Start căutați „Permiteți o aplicație prin Paravanul de protecție Windows”, apăsați „Modificare setări”, selectați `reccontroller` și apăsați „Eliminare”; la fel pentru `recspike`, dacă apare. Dacă un program apare pe mai multe rânduri, eliminați-le pe toate.
+6. Ștergeți folderele `C:\proba-inregistrare` și, pe Pi, `~/proba-inregistrare` (`sudo rm -r ~/proba-inregistrare`). Pe desktopul PC-ului, ștergeți și copia folderului `results` și arhiva, după ce ne-ați trimis-o.
+7. Pe telefon, dezinstalați «Proba ipcam»<!--android--> și luați înapoi permisiunea Chrome de a instala aplicații: „Setări” → „Aplicații” → Chrome → „Instalați aplicații necunoscute” → dezactivați „Permiteți din această sursă”. Dacă ați dezactivat „Blocare automată” și nu ați reactivat-o, reactivați-o.
+8. Dacă ați trecut rețeaua PC-ului pe „Rețea privată” doar pentru probă, sau ați oprit repausul PC-ului (pasul 4.5), readuceți-le cum erau.
 
 ## 15. Ce faceți dacă ceva nu merge
 
@@ -327,7 +337,21 @@ Cazuri pe care le puteți rezolva singur:
 - **Pi-ul înregistrează pe un card SD, iar în MI2 cardul dă erori sau devine doar-citire.** ipcam-hub oprește înregistrarea și notează golul; acesta e un rezultat al probei, nu o greșeală a dvs. Lăsați proba să ruleze până la final și scrieți-ne în chat. Un SSD pe USB evită problema.
 - **Un dispozitiv a repornit singur** (o pană de curent, o actualizare). În fereastra automată, proba continuă singură după repornire. În MI2, porniți din nou ambele comenzi (pasul 8). În MI3, MI4 sau MI9, porniți din nou comanda.
 - **«nu pot proteja folderul probei»<!--recspike-->** la `recspike.exe install`: porniți-l din fereastra de administrator (pasul 2.5). Dacă refuză din nou, scrieți-ne în chat rândul întreg.
+- **«instalarea scrie în /etc/systemd: porniți-o cu sudo ./recspike install»<!--recspike-->** pe Pi: porniți comanda cu `sudo`, ca la pasul 4. La fel pentru «dezinstalarea scrie în /etc/systemd: porniți-o cu sudo ./recspike uninstall»<!--recspike--> la pasul 14.
+- **«nu pot da folderul probei lui root, așa că nu instalez pornirea automată»<!--recspike-->** la `sudo ./recspike install`, pe Pi: motivul e la sfârșitul rândului. Dacă scrie «nu este un fișier obișnuit»<!--recspike-->, în folderul probei se află altceva (de exemplu, o scurtătură) în locul unui program: ștergeți folderul, descărcați și despachetați din nou arhiva (pasul 3), apoi reluați pasul 4. Altfel, scrieți-ne în chat rândul întreg.
 - **«notmyfault64.exe nu mai e semnat de Microsoft»<!--recspike-->** în fereastra automată: fișierul s-a schimbat după pornirea setului. Reluați pasul 4.1, apoi porniți din nou aceeași comandă.
 - **«nu pot asculta pe porturile probei (rulează deja un reccontroller?)»<!--reccontroller-->** Pe același dispozitiv rulează deja un controlor, poate într-o fereastră uitată. Închideți-l și porniți din nou.
 - **«Transferul nu a reușit: …»<!--reccontroller-->** la pasul 13: porniți din nou comanda `push` pe Pi.
+- **«segmentul s-a închis după … s, nu după …: porniți din nou proba»<!--recspike-->** la MI4 sau MI9: porniți din nou aceeași comandă.
+- **«din care pornește ipcam-hub»<!--recspike-->** într-un rând cu «nu pot proteja folderul»<!--recspike-->, în fereastra automată, la tăierile reale sau în MI2, MI3, MI4 și MI9: pe PC, porniți comanda din fereastra de administrator (pasul 2.5); pe Pi, cu `sudo`. Dacă rândul apare și așa, scrieți-ne în chat rândul întreg.
+- **«nu aparține administratorilor sau sistemului»<!--recspike-->** la `recspike.exe install` sau `uninstall`: un fișier din `C:\ProgramData\ipcam-recspike` nu a fost scris de probă. Ștergeți-l, cum scrie pe rând, dintr-o fereastră de administrator (`del` și numele fișierului), apoi porniți din nou comanda.
+- **«a fost făcut de alt cont, nu de probă»<!--recspike-->** la `recspike.exe install`, în fereastra automată, la tăierile reale sau în MI2, MI3, MI4 și MI9: folderul `C:\ProgramData\ipcam-recspike` exista deja, dar nu l-a făcut proba, așa că proba nu îl folosește. Ștergeți-l dintr-o fereastră de administrator cu comanda de pe rând (`rd /s /q "C:\ProgramData\ipcam-recspike"`), apoi porniți din nou comanda. Dacă `rd` refuză, sau dacă rândul apare din nou, un program de pe PC face folderul înaintea probei: scrieți-ne în chat rândul întreg.
+- **«nu este un folder, ci un fișier»<!--recspike-->** pe un rând cu «nu pot proteja folderul»<!--recspike-->: la locul folderului `C:\ProgramData\ipcam-recspike` se află un fișier, pe care proba nu l-a pus. Ștergeți-l dintr-o fereastră de administrator cu comanda de pe rând (`del /f /a "C:\ProgramData\ipcam-recspike"`), apoi porniți din nou comanda.
+- **«ci o legătură spre alt loc»<!--recspike-->** pe același fel de rând: la locul folderului se află o legătură (o joncțiune) spre alt folder. Ștergeți legătura dintr-o fereastră de administrator cu comanda de pe rând (`rd "C:\ProgramData\ipcam-recspike"`, fără `/s`: folderul spre care duce rămâne neatins), apoi porniți din nou comanda. Dacă rândul spune «ci o legătură spre un fișier»<!--recspike-->, ștergeți-o cu `del "C:\ProgramData\ipcam-recspike"`, cum scrie pe rând.
+- **«discul este plin»<!--recspike-->** pe un rând cu «nu pot scrie setările ipcam-hub în»<!--recspike-->: discul pe care stă folderul de pe rând (pe PC `C:`, pe Pi cardul sau discul de pe care pornește) nu mai are loc nici pentru setările probei. Eliberați spațiu acolo (pe PC, de exemplu cu „Curățare disc”), apoi porniți din nou comanda.
+- **«fișierul este folosit de alt program»<!--recspike-->** pe același fel de rând: un alt program ține deschis fișierul de setări al probei. Închideți programele pe care le-ați deschis între timp (de exemplu, un editor de text) sau reporniți PC-ul, apoi porniți din nou comanda. Dacă rândul apare din nou, scrieți-ne în chat rândul întreg.
+- **«nu pot scrie setările ipcam-hub în»<!--recspike-->** cu alt motiv la sfârșit, sau **«nu pot pregăti setările ipcam-hub»<!--recspike-->**: scrieți-ne în chat rândul întreg.
+- **«nu găsesc folderul ProgramData al Windows»<!--recspike-->** sau **«nu găsesc folderul Windows»<!--recspike-->**, la o comandă `recspike.exe`: Windows nu a putut spune unde se află aceste foldere, iar proba nu le caută în altă parte. Reporniți PC-ul, apoi porniți din nou aceeași comandă din fereastra de administrator. Dacă rândul apare din nou, scrieți-ne în chat rândul întreg.
+- **«nu pot scrie sarcina de pornire automată»<!--recspike-->** la `recspike.exe install`: motivul e la sfârșitul rândului. Dacă scrie «discul este plin»<!--recspike-->, eliberați spațiu pe discul `C:` (de exemplu, cu „Curățare disc”), apoi porniți din nou `recspike.exe install`. Dacă scrie «fișierul este folosit de alt program»<!--recspike-->, reporniți PC-ul, apoi porniți din nou `recspike.exe install` din fereastra de administrator. Cu alt motiv, scrieți-ne în chat rândul întreg.
+- **«în care se pregătește scurtătura de pe desktop»<!--recspike-->** pe un rând cu «nu pot proteja folderul»<!--recspike-->, la `recspike.exe install`: porniți din nou `recspike.exe install` din fereastra de administrator (pasul 2.5). Dacă rândul spune «nu este un folder, ci un fișier»<!--recspike--> sau «ci o legătură spre alt loc»<!--recspike-->, ștergeți ce se află acolo cu comanda de pe rând, ca mai sus. Dacă rândul apare din nou, scrieți-ne în chat rândul întreg.
 - **Ați oprit un program cu Ctrl+C.** recspike scrie «Proba a fost oprită de dvs.»<!--recspike-->. Ce s-a măsurat până atunci rămâne; porniți din nou aceeași comandă când puteți.

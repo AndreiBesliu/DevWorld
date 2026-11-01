@@ -38,7 +38,11 @@ func mi9Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	if err != nil {
 		return err
 	}
-	return mi9.RunLAN(ctx, mi9.LANOptions{Controller: controllerAddr(*controller), Hub: f.hub, Results: f.results, Work: f.work, Out: out,
+	protected, err := protectedDir() // ipcam-hub runs elevated, as for MI2
+	if err != nil {
+		return err
+	}
+	return mi9.RunLAN(ctx, mi9.LANOptions{Controller: controllerAddr(*controller), Hub: f.hub, Results: f.results, Work: f.work, ConfigDir: protected, Out: out,
 		Host: func(ctx context.Context) (mi1.HostState, error) {
 			return mi1.OwnerHost(ctx, f.hub, f.work, runtime.GOOS, in, out)
 		}})

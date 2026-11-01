@@ -43,6 +43,9 @@ type LANOptions struct {
 	// Results is recspike's published results folder; Work its private
 	// one, which holds the recording, its key and the logs.
 	Results, Work string
+	// ConfigDir is the protected folder (mi1.ProtectConfigDir) of the
+	// config that the recording's ipcam-hub starts with, mi1.HubConfigMI9.
+	ConfigDir string
 	// Out is the owner's screen.
 	Out io.Writer
 	// Host reads the host: diag host and, on an SD card, the owner's
@@ -175,7 +178,7 @@ func (o LANOptions) segment(ctx context.Context, host mi1.HostState, l *mi1.Host
 		"prin canalul de date. Durează în jur de %d min; lăsați ambele dispozitive pornite și nefolosite până la final. Jurnalele sunt în %s.",
 		SegmentSecs/60, SegmentSecs/60+5, dir)
 	return hubrec.Record(ctx, hubrec.Options{Hub: o.Hub, MediaMTX: o.MediaMTX, CameraURL: url, Run: dir, Name: hubrec.FiveMin,
-		SegmentSecs: SegmentSecs, SDCardConfirmed: host.SdConfirmation != nil, Say: o.say})
+		ConfigDir: o.ConfigDir, Config: mi1.HubConfigMI9, SegmentSecs: SegmentSecs, SDCardConfirmed: host.SdConfirmation != nil, Say: o.say})
 }
 
 // play serves rec to the controller's playback peer, which measures it:

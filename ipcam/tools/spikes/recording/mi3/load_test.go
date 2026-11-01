@@ -10,15 +10,15 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubproc"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
 
-// loadStep is a step of 2 cameras on H1b (one live session of the tiles
-// cam01_sub, cam02_sub and cam01_main: 12 + 12 + 20 fps) whose window is
-// minutes seconds, an hour scaled down: its recordings hold each camera's
-// parts of 1 s, and its log is empty.
+// loadStep is a step of 2 cameras on H1b whose window is minutes seconds,
+// an hour scaled down: its recordings hold each camera's parts of 1 s, and
+// its log is empty.
 func loadStep(t *testing.T, parts map[string]int) *stepRun {
 	t.Helper()
 	dir := t.TempDir()
@@ -30,33 +30,42 @@ func loadStep(t *testing.T, parts map[string]int) *stepRun {
 	return &stepRun{r: r, dir: dir, cameras: 2, minutes: FullMinutes}
 }
 
-// fullLive is what the step's live session receives over its whole window
-// of 60 s: (12 + 12 + 20) fps × 60 s.
-const fullLive = 44 * 60
+// fullLive is what the controller says of the step's live tiles when they
+// received frames over the whole window of 60 s (Coverage): its least
+// covered tile covered all of it, and its frames gave latency samples.
+var fullLive = link.Mi3Result{LiveLeastS: 60.1, LiveLeastTile: "cam01_sub", LiveLeastSession: 1, LatencySamples: 44 * 60, PacingP99Ms: 8}
 
 // TestMI3_StepCountsOnlyAFullLoad (mis-2): a step counts only when its
-// load ran for its whole window: the live session received at least 95 %
-// of the tiles' frames over the window, each recorded camera's parts cover
-// at least 95 % of it, and MediaMTX did not restart. A tile that stops at
-// minute 10, a camera that stops recording, a camera that recorded
-// nothing, or a restart of MediaMTX makes the step invalid with a Romanian
-// reason, so that it is redone and never judged.
+// load ran for its whole window: every live tile of every session received
+// frames, without a pause longer than 2 s, for at least 95 % of the window
+// (the controller's Coverage), each recorded camera's parts cover at least
+// 95 % of it, and MediaMTX did not restart. A tile that stops at minute 10,
+// a camera that stops recording, a camera that recorded nothing, or a
+// restart of MediaMTX makes the step invalid with a Romanian reason, so
+// that it is redone and never judged. The live frames' count does not
+// decide (Final fix C): the frames that a healthy load's tiles lose, at
+// the start or on the LAN, leave it valid.
 func TestMI3_StepCountsOnlyAFullLoad(t *testing.T) {
 	id, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
 	upload := LoadReport{Seconds: 60, Bytes: 1}
+	stopped := fullLive
+	stopped.LiveLeastS, stopped.LiveLeastTile, stopped.LiveLeastSession = 10, "cam02_sub", 2
+	lossy := fullLive
+	lossy.LiveLeastS, lossy.LatencySamples = 57.5, 44*60*80/100
 	for _, tc := range []struct {
 		name     string
 		parts    map[string]int
-		received int
+		live     link.Mi3Result
 		restarts int32
 		why      string
 	}{
-		{"the whole load", map[string]int{"cam01": 60, "cam02": 58}, fullLive * 96 / 100, 0, ""},
-		{"a tile that stops at minute 10", map[string]int{"cam01": 60, "cam02": 60}, fullLive - 12*50, 0,
-			"sesiunile live au primit 2040 de cadre din cele 2640 ale ferestrei pasului"},
+		{"the whole load", map[string]int{"cam01": 60, "cam02": 58}, fullLive, 0, ""},
+		{"a whole load that lost frames", map[string]int{"cam01": 60, "cam02": 60}, lossy, 0, ""},
+		{"a tile that stops at minute 10", map[string]int{"cam01": 60, "cam02": 60}, stopped, 0,
+			"placa live cam02_sub din sesiunea live 2 a primit cadre timp de 10 s din cele 60 s ale ferestrei pasului (sub 95 %)"},
 		{"a camera that stops recording", map[string]int{"cam01": 60, "cam02": 30}, fullLive, 0,
 			"camera cam02_main a înregistrat 30 s din cele 60 s ale ferestrei pasului"},
 		{"a camera that recorded nothing", map[string]int{"cam01": 60}, fullLive, 0,
@@ -67,7 +76,7 @@ func TestMI3_StepCountsOnlyAFullLoad(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := loadStep(t, tc.parts)
 			s.childRestarts.Store(tc.restarts)
-			f, err := s.figures(usage{}, usage{}, 0, link.Mi3Result{LatencySamples: tc.received, PacingP99Ms: 8}, upload, id)
+			f, err := s.figures(usage{}, usage{}, 0, tc.live, upload, id)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -135,11 +144,12 @@ func TestMI3_ShortLoadIsRedone(t *testing.T) {
 
 // TestMI3_FinishedStepKeepsOnlyItsLogs (mis-5): when a step ends, its
 // folder keeps only the step logs that keepStepLogs moves: its
-// recordings, its RI_g identity and its run.json, which holds the
-// controller's RTSP login, go with it.
+// recordings and its RI_g identity go with it, and so does its config in
+// the protected folder, which holds the controller's RTSP login.
 func TestMI3_FinishedStepKeepsOnlyItsLogs(t *testing.T) {
 	work := t.TempDir()
-	o := Options{Host: mi1.HostState{Pseudonym: "pc"}, Work: work, Out: &strings.Builder{}, FreeBytes: func() (uint64, error) { return 1e12, nil }}
+	o := Options{Host: mi1.HostState{Pseudonym: "pc"}, Work: work, ConfigDir: filepath.Join(work, "config"), Out: &strings.Builder{},
+		FreeBytes: func() (uint64, error) { return 1e12, nil }}
 	r := &stepRunner{o: o, l: deadLink(t), dir: filepath.Join(work, "mi3"), tier: TierH3}
 	if _, err := r.measure(t.Context(), 2, FullMinutes, 1); err == nil {
 		t.Fatal("a step on a dead link succeeded")
@@ -154,5 +164,53 @@ func TestMI3_FinishedStepKeepsOnlyItsLogs(t *testing.T) {
 	}
 	if want := []string{"ipcam-hub.log", "loads.log", "recspike.log"}; !slices.Equal(names, want) {
 		t.Errorf("the finished step's folder holds %q, want only %q", names, want)
+	}
+	if _, err := os.Stat(filepath.Join(o.ConfigDir, mi1.HubConfigMI3)); !os.IsNotExist(err) {
+		t.Errorf("the step's protected config, with the RTSP login, is still there (%v)", err)
+	}
+}
+
+// TestMI3_ElevatedHubStartsFromTrustedValues (Final fix C review, M9): the
+// guide runs MI3 from an administrator window, and a step's folder lies in
+// work/, which the owner's own token may change between the step's config
+// and ipcam-hub's start (the controller's offers come in between). So the
+// step's ipcam-hub starts from the probe's own config in the protected
+// folder (ConfigDir, mi1.ProtectConfigDir), with the step's trusted values:
+// the release's MediaMTX, the step's data folder and RI_g's file, the
+// controller's cameras, the even ones encrypted. A run.json planted in the
+// step's folder changes nothing.
+func TestMI3_ElevatedHubStartsFromTrustedValues(t *testing.T) {
+	dir := t.TempDir()
+	step := filepath.Join(dir, "work", "mi3", "01-2cam-60min-1")
+	if err := os.MkdirAll(step, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{Host: mi1.HostState{Pseudonym: "pc"}, MediaMTX: filepath.Join(dir, "proba-inregistrare", "mediamtx"),
+		ConfigDir: filepath.Join(dir, "ProgramData", "ipcam-recspike")}
+	l := &controllerLink{session: link.Session{RTSPBase: "rtsp://192.0.2.1:8554", User: "u", Pass: "p"}, host: "192.0.2.1"}
+	s := &stepRun{r: &stepRunner{o: o, l: l, tier: TierH3}, dir: step, cameras: 2, minutes: FullMinutes}
+	config, _, err := s.writeRun([]string{"cam01_main", "cam02_main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	camera, err := l.cameraURL("cam02_main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What another program of the owner's user may write before ipcam-hub
+	// starts.
+	planted := hubproc.Config{DataDir: filepath.Join(dir, "elsewhere", "data"), MediaMTX: filepath.Join(dir, "elsewhere", "mediamtx"), Jobs: []hubproc.Job{}}
+	if err := hubproc.WriteConfig(filepath.Join(step, "run.json"), planted); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := hubproc.ReadConfig(config) // what ipcam-hub reads
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config != filepath.Join(o.ConfigDir, mi1.HubConfigMI3) || cfg.MediaMTX != o.MediaMTX || cfg.DataDir != filepath.Join(step, "data") ||
+		cfg.IdentityFile != filepath.Join(step, "ri_g.key") || len(cfg.Jobs) != 2 || cfg.Jobs[0].Recipients != nil || len(cfg.Jobs[1].Recipients) != 2 ||
+		cfg.Jobs[1].RestreamURL != camera {
+		t.Errorf("ipcam-hub starts from %s: %+v; want %s, with MediaMTX %s, the step's data folder and RI_g's file under %s, and the controller's 2 cameras",
+			config, cfg, filepath.Join(o.ConfigDir, mi1.HubConfigMI3), o.MediaMTX, step)
 	}
 }

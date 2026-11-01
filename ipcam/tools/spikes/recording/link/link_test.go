@@ -90,7 +90,8 @@ func TestLink_MessagesRoundTrip(t *testing.T) {
 		Mi3Answers{RunID: "pc-mi3-1-8x60-1", Answers: []string{"v=0 x", "v=0 y", "v=0 z"}},
 		Mi3Live{RunID: "pc-mi3-1-8x60-1"},
 		Mi3End{RunID: "pc-mi3-1-8x60-1"},
-		Mi3Result{RunID: "pc-mi3-1-8x60-1", PacingP99Ms: 9, SkippedAUs: 1, LatencyP95Ms: 61, LatencySamples: 702_000},
+		Mi3Result{RunID: "pc-mi3-1-8x60-1", PacingP99Ms: 9, SkippedAUs: 1, LatencyP95Ms: 61, LatencySamples: 702_000,
+			LiveLeastS: 3599.5, LiveLeastTile: "cam02_sub", LiveLeastSession: 3},
 		Bye{},
 	}
 	wantTypes := []string{"hello", "session", "run_start", "run_start", "run_start", "ready", "cut", "report",

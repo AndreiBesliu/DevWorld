@@ -52,8 +52,14 @@ func mi2Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	if err != nil {
 		return err
 	}
+	// ipcam-hub runs elevated: the guide starts every probe from an
+	// administrator window, or with sudo.
+	protected, err := protectedDir()
+	if err != nil {
+		return err
+	}
 	addr := controllerAddr(*controller)
-	return mi2.Run(ctx, mi2.Options{Hours: *hours, Host: host, Hub: f.hub, Results: f.results, Work: f.work, Out: out,
+	return mi2.Run(ctx, mi2.Options{Hours: *hours, Host: host, Hub: f.hub, Results: f.results, Work: f.work, ConfigDir: protected, Out: out,
 		CameraURLs: func(ctx context.Context, streams []string) (map[string]string, error) {
 			return mi1.CameraURLs(ctx, addr, host.Pseudonym, streams)
 		}})

@@ -335,6 +335,49 @@ func TestInputs_WriteNothingWithoutInput(t *testing.T) {
 	}
 }
 
+// TestInputs_AFolderWithoutResultsIsRefused (report-3): an -in folder that
+// yields no envelope and no AGE result, such as recreport's own output
+// folder (a report .md and CSV files), is refused, by its position, and
+// nothing is written; it would otherwise leave every set it was meant to
+// carry «lipsește» without a word.
+func TestInputs_AFolderWithoutResultsIsRefused(t *testing.T) {
+	output := t.TempDir()
+	for name, data := range map[string]string{
+		"2026-10-30-phase0c-recorder-results.md":     "# Raport\n",
+		"phase0-data/phase0c-recorder-mi1.csv":       "set,run\n",
+		"phase0-data/state/run-state.json":           `{"set":"pc-kill9"}`,
+		"phase0-data/app/android-x-20261030-s1.json": `{"scenario":"S1"}`,
+	} {
+		path := filepath.Join(output, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := t.TempDir()
+	code, text := runReport("-in", passing(t).folder(t), "-in", output, "-out", out, "-date", goldenDate)
+	if code != 1 || !strings.Contains(text, "-in #2 holds no results (envelopes are *.json under MI1/…, MI2/…)") {
+		t.Errorf("recreport with a folder of no results = %d %q, want 1 and the folder's position", code, text)
+	}
+	if entries, _ := os.ReadDir(out); len(entries) != 0 {
+		t.Errorf("wrote %v", entries)
+	}
+	// An AGE result alone is a result.
+	age := t.TempDir()
+	a := ageFile(t, "android", time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC), 31.5)
+	if err := os.MkdirAll(filepath.Join(age, "app"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(age, "app", a.name), a.data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := load([]string{passing(t).folder(t), age}, nil); err != nil {
+		t.Errorf("a folder with an AGE result alone: %v", err)
+	}
+}
+
 // TestInputs_SmokeSetsNotJudged (C32): the recorder workflow's annotations
 // carry the smoke runs of the lab sets, two parts of 21 under a -smoke set,
 // which G10 does not judge: they are not named as incomplete lab sets, and
