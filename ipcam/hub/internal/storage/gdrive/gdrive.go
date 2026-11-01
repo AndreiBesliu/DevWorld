@@ -51,7 +51,8 @@ const (
 	jsonType        = "application/json; charset=UTF-8"
 )
 
-// Options configure a Drive.
+// Options configure a Drive. Tokens and Folders must be safe for
+// concurrent use, as oauth2.ReuseTokenSource and the catalog are.
 type Options struct {
 	DestID     string
 	HTTPClient *http.Client // plain; the driver sets "Authorization: Bearer" on each request from Tokens

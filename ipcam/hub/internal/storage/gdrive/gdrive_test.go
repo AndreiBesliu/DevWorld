@@ -265,6 +265,16 @@ func (e *testEnv) objects(folders bool) []fakegdrive.Object {
 	return out
 }
 
+// describe names objects for a failure message, with their sizes and not
+// their bytes.
+func describe(objects []fakegdrive.Object) string {
+	parts := make([]string, len(objects))
+	for i, o := range objects {
+		parts[i] = fmt.Sprintf("%s %q in %s (%d bytes)", o.ID, o.Name, o.Parent, len(o.Data))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
 func randomBytes(n int, seed byte) []byte {
 	b := make([]byte, n)
 	_, _ = rand.NewChaCha8([32]byte{seed}).Read(b)
@@ -382,7 +392,7 @@ func TestDrive_ResumableUploadAndVerify(t *testing.T) {
 
 	files := e.objects(false)
 	if len(files) != 1 {
-		t.Fatalf("%d files at the fake, want 1: %+v", len(files), files)
+		t.Fatalf("%d files at the fake, want 1: %s", len(files), describe(files))
 	}
 	want := md5Of(t, data)
 	if ref.Hash != want || files[0].MD5 != want || ref.HashKind != storage.HashMD5 || ref.Size != int64(len(data)) ||
@@ -421,7 +431,7 @@ func TestDrive_ResumeDetectsCompleteSession(t *testing.T) {
 		t.Fatalf("Commit = %+v, %v, want the file of the bytes", ref, err)
 	}
 	if files := e.objects(false); len(files) != 1 || files[0].ID != ref.ID {
-		t.Errorf("files at the fake %+v, want only %s", files, ref.ID)
+		t.Errorf("files at the fake %s, want only %s", describe(files), ref.ID)
 	}
 	if c := e.fake.Counts(); c["files.create.resumable"] != 1 || c["upload.status"] != 1 {
 		t.Errorf("the fake's counts %v, want one session and one status query", c)
@@ -520,10 +530,10 @@ func TestDrive_FolderCreateIsIdempotent(t *testing.T) {
 		t.Helper()
 		folders := e.objects(true)
 		if len(folders) != 1 || folders[0].ID != id || folders[0].Name != "ipcam" || folders[0].Parent != "root" {
-			t.Errorf("folders %+v, want one: ipcam in My Drive with ID %s", folders, id)
+			t.Errorf("folders %s, want one: ipcam in My Drive with ID %s", describe(folders), id)
 		}
 		if files := e.objects(false); len(files) != 1 || files[0].ID != ref.ID || files[0].Parent != id {
-			t.Errorf("files %+v, want %s in %s", files, ref.ID, id)
+			t.Errorf("files %s, want %s in %s", describe(files), ref.ID, id)
 		}
 	}
 	t.Run("a stored ID with no folder", func(t *testing.T) {
@@ -1156,7 +1166,7 @@ func testSuperseded(t *testing.T, during string) {
 	files := e.objects(false)
 	name := path.Base(string(outbox.KeyFor("H", "hub", seg, catalog.ClassContinuous)))
 	if len(files) != 1 || files[0].Name != name || !bytes.Equal(files[0].Data, newer) || p.RemoteRef != files[0].ID {
-		t.Errorf("files at the fake %+v (the placement's %s), want one: %s with the new bytes", files, p.RemoteRef, name)
+		t.Errorf("files at the fake %s (the placement's %s), want one: %s with the new %d bytes", describe(files), p.RemoteRef, name, len(newer))
 	}
 	if n := e.fake.Counts()["files.delete"]; n != 1 {
 		t.Errorf("%d files.delete calls, want 1: the old copy", n)

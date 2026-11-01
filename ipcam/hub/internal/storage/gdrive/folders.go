@@ -23,7 +23,8 @@ const (
 // under My Drive ("ipcam", "ipcam/hub/cam01", …), so that a restart finds
 // them with no files.list (P35, STO-07). The driver keeps the ID of each
 // file that PutSmall wrote there too, by the file's path, so that a README
-// or a catalog stays one file. catalog.DB implements it (Task 7b).
+// or a catalog stays one file. The driver's uploads use it concurrently.
+// catalog.DB implements it (Task 7b).
 type FolderStore interface {
 	Folder(ctx context.Context, destID, path string) (remoteID string, ok bool, err error)
 	PutFolder(ctx context.Context, destID, path, remoteID string) error // inserts only if absent: the first stored ID wins (Task 7b)
