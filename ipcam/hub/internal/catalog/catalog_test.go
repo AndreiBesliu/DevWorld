@@ -648,7 +648,9 @@ func TestCatalog_StaleWritesChangeNothing(t *testing.T) {
 // TestCatalog_PutPlacementTx_SupersedesUnverified (P03, g1-4, g2-06): new
 // bytes reset an unverified placement to pending from 0, and a lost
 // segment's placement that came back with the same bytes is due again; a
-// placement still due later keeps its row.
+// placement still due later keeps its row. A reset keeps the upload session's
+// row, which the next upload aborts at its provider before it begins anew,
+// or resumes when it names the same bytes (Task 5 review M2).
 func TestCatalog_PutPlacementTx_SupersedesUnverified(t *testing.T) {
 	db := openTest(t)
 	ctx := t.Context()
@@ -661,12 +663,14 @@ func TestCatalog_PutPlacementTx_SupersedesUnverified(t *testing.T) {
 		t.Errorf("the new placement is %+v, want pending with an id and 10 bytes", p)
 	}
 
+	stored := false // a session row was stored
 	for _, state := range []string{PlacementPending, PlacementUploading, PlacementFailed} {
 		setPlacement(t, db, Placement{ObjectID: s.ID, DestinationID: "dst-a", State: state, Attempts: 3, NextAttemptAtMs: 5000})
 		if state == PlacementUploading {
 			if err := db.PutUploadSession(ctx, p.ID, p.Bytes, []byte(`{}`), 4); err != nil {
 				t.Fatal(err)
 			}
+			stored = true
 		}
 		next := newPlacement(s, "dst-a", ClassContinuous)
 		next.Bytes = p.Bytes + 1
@@ -677,8 +681,8 @@ func TestCatalog_PutPlacementTx_SupersedesUnverified(t *testing.T) {
 		if got.ID != p.ID || got.State != PlacementPending || got.Bytes != next.Bytes || got.Attempts != 0 || got.NextAttemptAtMs != 0 {
 			t.Errorf("new bytes on a %s placement left %+v, want pending at 0 attempts with %d bytes and id %s", state, got, next.Bytes, p.ID)
 		}
-		if hasSession(t, db, p.ID) {
-			t.Errorf("new bytes on a %s placement kept its upload session", state)
+		if hasSession(t, db, p.ID) != stored {
+			t.Errorf("new bytes on a %s placement: a session row %v, want %v: the reset keeps it", state, hasSession(t, db, p.ID), stored)
 		}
 		p = got
 	}
@@ -700,8 +704,8 @@ func TestCatalog_PutPlacementTx_SupersedesUnverified(t *testing.T) {
 	if got := placementOf(t, db, s.ID, "dst-a"); got.State != PlacementPending || got.Attempts != 0 || got.NextAttemptAtMs != 0 || got.Bytes != p.Bytes {
 		t.Errorf("the same bytes on a failed placement never due again left %+v, want pending at 0 attempts", got)
 	}
-	if hasSession(t, db, p.ID) {
-		t.Error("the same bytes on a failed placement kept its upload session")
+	if !hasSession(t, db, p.ID) {
+		t.Error("the same bytes on a failed placement lost its upload session, which the next upload resumes or aborts")
 	}
 
 	// A failed placement due later keeps its row and its attempts.
@@ -853,5 +857,46 @@ func TestCatalog_DuePlacementsOnlyNamedDestinations(t *testing.T) {
 	}
 	if due, err := db.DuePlacements(t.Context(), 2000, nil, 10); err != nil || len(due) != 0 {
 		t.Errorf("DuePlacements for no destination = %+v, %v; want none", due, err)
+	}
+}
+
+// TestCatalog_UploadingPlacements (C2-R10): the outbox's start read takes
+// the uploading placements of its destinations only, through the
+// placements_queue index, with no read of every placement.
+func TestCatalog_UploadingPlacements(t *testing.T) {
+	db := openTest(t)
+	ctx := t.Context()
+	s, other := putTestSegment(t, db, "a", 1000, 10), putTestSegment(t, db, "b", 2000, 20)
+	for _, dest := range []string{"dst-a", "dst-gone"} {
+		putPlacement(t, db, newPlacement(s, dest, ClassContinuous))
+		setPlacement(t, db, Placement{ObjectID: s.ID, DestinationID: dest, State: PlacementUploading, Attempts: 1})
+	}
+	putPlacement(t, db, newPlacement(other, "dst-a", ClassContinuous)) // pending
+	got, err := db.UploadingPlacements(ctx, []string{"dst-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := placementOf(t, db, s.ID, "dst-a"); len(got) != 1 || got[0] != want {
+		t.Errorf("UploadingPlacements([dst-a]) = %+v, want only %+v", got, want)
+	}
+	if got, err := db.UploadingPlacements(ctx, nil); err != nil || len(got) != 0 {
+		t.Errorf("UploadingPlacements(nil) = %+v, %v; want none", got, err)
+	}
+	var plan []string
+	rows, err := db.sql.QueryContext(ctx, "EXPLAIN QUERY PLAN "+uploadingQuery, `["dst-a"]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if !slices.ContainsFunc(plan, func(d string) bool { return strings.Contains(d, "USING INDEX placements_queue") }) {
+		t.Errorf("the query plan %q reads no index of the placements' state", plan)
 	}
 }

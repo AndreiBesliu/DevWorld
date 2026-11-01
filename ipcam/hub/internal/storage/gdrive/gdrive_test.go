@@ -87,41 +87,30 @@ func (c *stepClock) SetStep(d time.Duration) {
 	c.step = d
 }
 
-// memFolders is a FolderStore in memory that, as the catalog's, keeps the
-// first ID stored for a path. beforePut, when set, runs at the start of
-// each PutFolder, as another process writing first.
+// memFolders is fakegdrive's FolderStore, which keeps the first ID stored
+// for a path as the catalog's does, with a hook: beforePut, when set, runs at
+// the start of each PutFolder, as another process writing first.
 type memFolders struct {
+	*fakegdrive.FolderStore
 	mu        sync.Mutex
-	ids       map[string]string
 	beforePut func(path string)
 }
 
-func newMemFolders() *memFolders { return &memFolders{ids: map[string]string{}} }
+func newMemFolders() *memFolders { return &memFolders{FolderStore: fakegdrive.NewFolderStore()} }
 
-func (m *memFolders) Folder(_ context.Context, destID, p string) (string, bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	id, ok := m.ids[destID+"|"+p]
-	return id, ok, nil
-}
-
-func (m *memFolders) PutFolder(_ context.Context, destID, p, remoteID string) error {
+func (m *memFolders) PutFolder(ctx context.Context, destID, p, remoteID string) error {
 	m.mu.Lock()
 	hook := m.beforePut
 	m.mu.Unlock()
 	if hook != nil {
 		hook(p)
 	}
-	m.put(destID, p, remoteID)
-	return nil
+	return m.FolderStore.PutFolder(ctx, destID, p, remoteID)
 }
 
+// put stores remoteID for p, as another process does, past the hook.
 func (m *memFolders) put(destID, p, remoteID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.ids[destID+"|"+p]; !ok {
-		m.ids[destID+"|"+p] = remoteID
-	}
+	_ = m.FolderStore.PutFolder(context.Background(), destID, p, remoteID)
 }
 
 func (m *memFolders) get(p string) string {

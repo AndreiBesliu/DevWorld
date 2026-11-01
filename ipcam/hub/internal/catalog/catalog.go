@@ -601,13 +601,19 @@ func scanPlacement(row rowScanner) (Placement, error) {
 //   - a new pair gets a pending row, with a new UUIDv7 id or p.ID when it is
 //     set;
 //   - a pair that is not verified and whose bytes differ from p's is reset to
-//     pending from 0 with p's bytes, class, rule IDs and encryption, and its
-//     upload session is deleted: it is superseded, so a worker still
-//     uploading the old bytes changes nothing more (g1-4);
+//     pending from 0 with p's bytes, class, rule IDs and encryption: it is
+//     superseded, so a worker still uploading the old bytes changes nothing
+//     more (g1-4);
 //   - a failed pair that is never due again, with p's bytes, is reset the
 //     same way: its segment was lost and its file came back (g2-06);
 //   - any other pair, a verified one included, stays as it is: a verified
 //     copy cannot be replaced yet.
+//
+// A reset keeps the pair's upload session (Task 5 review M2): a session of
+// other bytes may have made its object already (Drive makes the file at the
+// last chunk), and only the session names it, so the next upload aborts
+// that session at its provider before it begins a new one, after a restart
+// too, and a session of the same bytes resumes.
 func PutPlacementTx(ctx context.Context, tx *sql.Tx, p Placement) (superseded bool, err error) {
 	var id, state string
 	var bytes, next int64
@@ -639,9 +645,6 @@ func PutPlacementTx(ctx context.Context, tx *sql.Tx, p Placement) (superseded bo
 	if _, err := tx.ExecContext(ctx, `UPDATE placements SET bytes = ?, class = ?, rule_ids = ?, encrypt = ?, state = ?, attempts = 0, next_attempt_at_ms = 0,
 		remote_ref = '', remote_hash = '' WHERE id = ?`, p.Bytes, p.Class, p.RuleIDs, p.Encrypt, PlacementPending, id); err != nil {
 		return false, fmt.Errorf("catalog: reset placement %s: %w", id, err)
-	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM upload_sessions WHERE placement_id = ?", id); err != nil {
-		return false, fmt.Errorf("catalog: delete the upload session of %s: %w", id, err)
 	}
 	return superseded, nil
 }
@@ -676,6 +679,29 @@ func (db *DB) duePlacements(ctx context.Context, segState string, nowMs int64, d
 		LIMIT ?`, segState, string(dests), nowMs, nowMs, limit)
 	if err != nil {
 		return nil, fmt.Errorf("catalog: list the due placements: %w", err)
+	}
+	return collectPlacements(rows)
+}
+
+// uploadingQuery reads the uploading placements of the destinations in a
+// JSON array, through the placements_queue index (C2-R10).
+const uploadingQuery = `SELECT ` + placementColumns + ` FROM placements p
+	WHERE p.state = 'uploading' AND p.destination_id IN (SELECT value FROM json_each(?)) ORDER BY p.id`
+
+// UploadingPlacements returns the uploading placements of the destinations
+// destIDs, by id: the outbox's start read of the rows that an earlier run
+// left uploading (C2-R10), which reads no other row.
+func (db *DB) UploadingPlacements(ctx context.Context, destIDs []string) ([]Placement, error) {
+	if len(destIDs) == 0 {
+		return nil, nil
+	}
+	dests, err := json.Marshal(destIDs)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.sql.QueryContext(ctx, uploadingQuery, string(dests))
+	if err != nil {
+		return nil, fmt.Errorf("catalog: list the uploading placements: %w", err)
 	}
 	return collectPlacements(rows)
 }

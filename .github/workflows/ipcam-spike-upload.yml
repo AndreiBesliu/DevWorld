@@ -132,9 +132,11 @@ jobs:
           go test -count=1 -race ${TREES} 2>&1 | tee "${RUNNER_TEMP}/test.log"
       - name: Test times
         # g2-12: each package's -race test time on this runner, as a notice, since the job
-        # log cannot be read; c1's ipcam-spike-recording jobs run these tests too.
+        # log cannot be read; c1's ipcam-spike-recording jobs run these tests too. The sed
+        # drops any module path's owner and repository, so no handle reaches a notice (C2-R5).
         run: |
-          grep -E '^(ok|FAIL)\s' "${RUNNER_TEMP}/test.log" | sed 's|github.com/AndreiBesliu/DevWorld/ipcam/||' |
+          set -o pipefail
+          grep -E '^(ok|FAIL)\s' "${RUNNER_TEMP}/test.log" | sed -E 's|github\.com/[^/]+/[^/]+/ipcam/||' |
             tools/scripts/annotate.sh test-times 60 notice
       - name: Video build list
         # R04: the modules that join the workspace must not move a dependency of the video spike.

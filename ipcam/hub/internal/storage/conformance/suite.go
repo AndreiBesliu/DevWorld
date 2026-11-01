@@ -71,8 +71,8 @@ type Options struct {
 
 // Report names Run's subtests relative to its test, such as
 // "Resume/KillAtRandomOffset": those that ran, failed ones included, and
-// those that skipped, a check of a capability that the driver lacks or a
-// count that its List cannot make.
+// those that skipped, a check of a capability that the driver lacks, a
+// count that its List cannot make, or a quota that it reads as unknown.
 type Report struct{ Ran, Skipped []string }
 
 // suite is one Run: the driver's Caps, and the bytes of each upload with
@@ -393,7 +393,9 @@ func (s *suite) delete(t *testing.T) {
 }
 
 // quota reads the quota that Caps.Quota declares: an account's holds its
-// usage, and a filesystem has room.
+// usage, and a filesystem has room. A quota that the driver reads as
+// unknown holds nothing to check, so the check skips and Report.Skipped
+// names it (Task 7 review M2).
 func (s *suite) quota(t *testing.T) {
 	if s.caps.Quota == storage.QuotaNone {
 		t.Skip("Caps.Quota is QuotaNone")
@@ -401,6 +403,9 @@ func (s *suite) quota(t *testing.T) {
 	q, err := s.newDest(t).Quota(t.Context())
 	if err != nil {
 		t.Fatalf("Quota: %v", err)
+	}
+	if q.Unknown {
+		t.Skipf("Caps.Quota is %d, and Quota reads it as unknown: %+v", s.caps.Quota, q)
 	}
 	switch s.caps.Quota {
 	case storage.QuotaAccount:

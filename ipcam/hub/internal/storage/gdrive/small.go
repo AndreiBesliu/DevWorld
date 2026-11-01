@@ -26,6 +26,16 @@ import (
 // Drive keeps as the file's new revision, a reader seeing the old bytes or
 // the new. Either takes a create slot first. No data is refused before any
 // call (storage.Destination).
+//
+// The revisions bound (Task 5 review M9): Drive keeps a replaced revision
+// that is not marked keepForever for 30 days, and at most the newest 100 of
+// a file, and each counts against the quota. So a path holds at most
+// min(updates, 100) old revisions of at most its size, each for at most 30
+// days. In Phase 0 PutSmall writes only Probe's README.txt and Task 9's
+// visibility files, a few small writes per run; the catalog's day files of
+// §9.10 (.ipcam/<hubID>/catalog/days) come with Faza 1: a day file updated
+// every 15 min reaches the 100 revisions after 25 h, so its old revisions
+// then hold at most 100 times its size.
 func (d *Drive) PutSmall(ctx context.Context, key storage.ObjectKey, data []byte) (storage.ObjectRef, error) {
 	if err := checkKey(key); err != nil {
 		return storage.ObjectRef{}, err

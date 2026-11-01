@@ -136,7 +136,10 @@ type Queue struct {
 	// restart allows a placement up to 2 more mismatched uploads, and
 	// deletes, than maxMismatches. The report's «Limitări» states it.
 	mismatches map[string]int
-	failing    map[localKey]bool // the local errors reported, until their file or operation succeeds
+	// failing holds the local errors reported, until their file or operation
+	// succeeds; a spool file that is gone, which never reads well again,
+	// leaves once it is reported (Task 4b review M2).
+	failing map[localKey]bool
 }
 
 // New returns the queue of dests, by destination ID, on cat.
@@ -189,10 +192,10 @@ func (q *Queue) Enqueue(ctx context.Context, tx *sql.Tx, p catalog.Placement) er
 // destinations that no worker holds to pending, keeping its attempts and its
 // session: a row that a kill or a stop left uploading, or that an upload
 // could not settle (a full card fails both writes), is due again and
-// resumes. Run finds the rows that an earlier run left so in one read of
-// every placement before its first poll, repeated before each poll until it
-// succeeds; an upload of this queue that ends with its row uploading hands
-// that row to the polls (Queue.stranded).
+// resumes. Run finds the rows that an earlier run left so in one indexed
+// read of its destinations' uploading rows before its first poll (C2-R10),
+// repeated before each poll until it succeeds; an upload of this queue that
+// ends with its row uploading hands that row to the polls (Queue.stranded).
 func (q *Queue) Run(ctx context.Context) error {
 	found := false // the start read of the uploading rows succeeded
 	for ctx.Err() == nil {
@@ -241,18 +244,18 @@ func (q *Queue) State(destID string) DestState {
 	return d.state
 }
 
-// findUploading is Run's start read: it reads every placement and adds each
-// uploading one of the queue's destinations that no worker holds to
-// stranded, for the polls to reset. It reports whether the read succeeded.
+// findUploading is Run's start read: it reads the uploading placements of
+// the queue's destinations and adds each that no worker holds to stranded,
+// for the polls to reset. It reports whether the read succeeded.
 func (q *Queue) findUploading(ctx context.Context) bool {
-	all, err := q.cat.Placements(ctx)
-	if q.catalogFailed(ctx, opPlacements, err) {
+	uploading, err := q.cat.UploadingPlacements(ctx, q.ids)
+	if q.catalogFailed(ctx, opUploadingPlacements, err) {
 		return false
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for _, p := range all {
-		if p.State == catalog.PlacementUploading && q.dests[p.DestinationID] != nil && !q.inflight[p.ID] {
+	for _, p := range uploading {
+		if !q.inflight[p.ID] {
 			q.stranded[p.ID] = p
 		}
 	}
@@ -360,8 +363,13 @@ func (q *Queue) failLost(ctx context.Context, now time.Time) {
 		}
 		failed := p
 		failed.State, failed.NextAttemptAtMs = catalog.PlacementFailed, 0
-		if err := q.catalogErr(opUpdatePlacement, q.cat.UpdatePlacement(ctx, failed, p.State, p.Bytes)); err != nil {
-			q.localError(ctx, err) // ErrStalePlacement is none: the row changed since the read
+		err := q.catalogErr(opUpdatePlacement, q.cat.UpdatePlacement(ctx, failed, p.State, p.Bytes))
+		var local *localErr
+		switch {
+		case errors.Is(err, catalog.ErrStalePlacement):
+			continue // the row changed since the read: the next poll reads it as it is
+		case errors.As(err, &local):
+			q.localError(ctx, local)
 			continue
 		}
 		q.forget(p.ID)
@@ -462,81 +470,6 @@ func (q *Queue) notify(d *destination) {
 	if changed {
 		q.opts.Observer.DestState(d.id, s, alert)
 	}
-}
-
-// localKind is where a local error comes from.
-type localKind int
-
-const (
-	localCatalog localKind = iota
-	localSpool
-)
-
-// localKey names what a local error is of: a spool file, by its path, or a
-// catalog operation.
-type localKey struct {
-	kind localKind
-	name string
-}
-
-// The catalog operations of the queue, by which their local errors are told
-// apart.
-const (
-	opPlacements          = "Placements"
-	opDuePlacements       = "DuePlacements"
-	opLostPlacements      = "LostPlacements"
-	opUpdatePlacement     = "UpdatePlacement"
-	opSegmentByID         = "SegmentByID"
-	opUploadSession       = "UploadSession"
-	opPutUploadSession    = "PutUploadSession"
-	opDeleteUploadSession = "DeleteUploadSession"
-)
-
-// catalogErr takes err, what the catalog operation op returned. A success,
-// or ErrStalePlacement, which the catalog returns as it should, ends op's
-// local error; any other error is returned as op's *localErr.
-func (q *Queue) catalogErr(op string, err error) error {
-	key := localKey{kind: localCatalog, name: op}
-	if err == nil || errors.Is(err, catalog.ErrStalePlacement) {
-		q.localOK(key)
-		return err
-	}
-	return &localErr{key: key, err: err}
-}
-
-// catalogFailed reports err, what the catalog operation op returned, and
-// whether op failed; ErrStalePlacement is no failure of the catalog.
-func (q *Queue) catalogFailed(ctx context.Context, op string, err error) bool {
-	if err = q.catalogErr(op, err); err == nil || errors.Is(err, catalog.ErrStalePlacement) {
-		return false
-	}
-	q.localError(ctx, err)
-	return true
-}
-
-// localError reports err, a *localErr, unless the error of its file or
-// operation is already reported and that file or operation has not
-// succeeded since, or ctx is done: a stop is no error (g2-02).
-func (q *Queue) localError(ctx context.Context, err error) {
-	var local *localErr
-	if ctx.Err() != nil || !errors.As(err, &local) {
-		return
-	}
-	q.mu.Lock()
-	reported := q.failing[local.key]
-	q.failing[local.key] = true
-	q.mu.Unlock()
-	if !reported {
-		q.opts.Observer.LocalError(err)
-	}
-}
-
-// localOK ends the local error of key, a spool file that was read or a
-// catalog operation that succeeded, so its next error is reported again.
-func (q *Queue) localOK(key localKey) {
-	q.mu.Lock()
-	delete(q.failing, key)
-	q.mu.Unlock()
 }
 
 // PlacementFor is s's placement on destID in class, as Enqueue takes it. Its

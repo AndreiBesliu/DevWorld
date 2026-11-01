@@ -3,6 +3,7 @@ package outbox
 import (
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
@@ -66,13 +67,20 @@ func segment(name string) string {
 }
 
 // reserved reports whether base, a name's part before its first dot, is a
-// device name that Windows reserves in any case: CON, PRN, AUX, NUL, COM1 to
-// COM9 and LPT1 to LPT9. Spaces after it count for nothing.
+// device name that Windows reserves in any case: CON, PRN, AUX, NUL, CONIN$,
+// CONOUT$, and COM and LPT each followed by one of 0 to 9 or the superscript
+// digits ¹, ² and ³, which Windows's documentation also lists (Task 4b
+// review M3). Spaces after it count for nothing.
 func reserved(base string) bool {
-	switch b := strings.ToUpper(strings.TrimRight(base, " ")); b {
-	case "CON", "PRN", "AUX", "NUL":
+	b := strings.ToUpper(strings.TrimRight(base, " "))
+	switch b {
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
 		return true
-	default:
-		return len(b) == 4 && (strings.HasPrefix(b, "COM") || strings.HasPrefix(b, "LPT")) && b[3] >= '1' && b[3] <= '9'
 	}
+	for _, port := range []string{"COM", "LPT"} {
+		if digit, ok := strings.CutPrefix(b, port); ok && utf8.RuneCountInString(digit) == 1 && strings.ContainsAny(digit, "0123456789¹²³") {
+			return true
+		}
+	}
+	return false
 }

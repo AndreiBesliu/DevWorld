@@ -41,26 +41,6 @@ const maxSessionRestarts = 3
 // errPaused stops an upload whose destination paused before its next call.
 var errPaused = errors.New("outbox: the destination paused")
 
-// localErr is an error of the hub's own disk: of a catalog operation or of a
-// spool file, which key names.
-type localErr struct {
-	key localKey
-	err error
-}
-
-func (e *localErr) Error() string { return e.err.Error() }
-func (e *localErr) Unwrap() error { return e.err }
-
-// spoolErr is a read error of the spool file at path, with the file's name
-// and not its directory, as recorder's fileError writes them.
-func spoolErr(path string, err error) error {
-	var pe *fs.PathError
-	if errors.As(err, &pe) {
-		err = fmt.Errorf("%s: %w", pe.Op, pe.Err)
-	}
-	return &localErr{key: localKey{kind: localSpool, name: path}, err: fmt.Errorf("outbox: read %s: %w", filepath.Base(path), err)}
-}
-
 // readSpool is Options.ReadSpool's default: it opens the file, reads p at
 // off and closes the file.
 func readSpool(path string, off int64, p []byte) (int, error) {
@@ -162,14 +142,34 @@ func (u *upload) transfer(ctx context.Context, key storage.ObjectKey, meta stora
 }
 
 // open resumes the placement's session that the catalog holds (P25), or
-// begins a new one and stores it, and returns the offset to send from.
+// begins a new one and stores it, and returns the offset to send from. A
+// stored session of other bytes or another key, which a supersede left
+// (catalog.PutPlacementTx), is aborted first, and forgotten once its Abort
+// succeeded (Task 5 review M2): Drive makes a session's file at its last
+// chunk, so a new upload of the key would otherwise leave the old file
+// beside the new one. An Abort that fails fails the attempt, which tries it
+// again after its backoff, so no new session begins while the old one may
+// hold an object. The duplicate window that remains: a session that its
+// provider has forgotten (Drive's lives a week) can no longer name the file
+// that its last chunk made, so Abort finds nothing to delete; only
+// List-based reconciliation (diag uploads --list-remote) finds that copy.
 func (u *upload) open(ctx context.Context, key storage.ObjectKey, meta storage.Meta) (int64, error) {
 	saved, _, ok, err := u.q.cat.UploadSession(ctx, u.p.ID)
 	if err = u.q.catalogErr(opUploadSession, err); err != nil {
 		return 0, err
 	}
 	var st storage.UploadState
-	if ok && json.Unmarshal(saved, &st) == nil && st.Key == key && st.Size == u.p.Bytes {
+	ok = ok && json.Unmarshal(saved, &st) == nil
+	if ok && (st.Key != key || st.Size != u.p.Bytes) {
+		if err := u.d.d.Abort(ctx, &st); err != nil {
+			return 0, err
+		}
+		if err := u.q.catalogErr(opDeleteUploadSession, u.q.cat.DeleteUploadSession(ctx, u.p.ID)); err != nil {
+			return 0, err
+		}
+		ok = false
+	}
+	if ok {
 		u.st, u.session = st, true
 		next, err := u.d.d.Resume(ctx, &u.st)
 		switch {
@@ -264,35 +264,49 @@ func (u *upload) write(ctx context.Context, p catalog.Placement) error {
 }
 
 // settle is write for the end of an upload. A row that changed under the
-// upload stays as it is: it was superseded, so the upload's session is
-// aborted (g1-4) and the queue forgets the placement. An error of the
+// upload stays as it is: it was superseded, so the upload abandons its
+// session (g1-4) and the queue forgets the placement. An error of the
 // catalog is reported; the row then stays uploading until the next poll
 // resets it. It returns the write's error.
 func (u *upload) settle(ctx context.Context, p catalog.Placement) error {
 	err := u.write(ctx, p)
+	var local *localErr
 	switch {
 	case errors.Is(err, catalog.ErrStalePlacement):
-		u.abort(ctx)
+		u.abandon(ctx)
 		u.q.forget(u.p.ID)
-	case err != nil:
-		u.q.localError(ctx, err)
+	case errors.As(err, &local):
+		u.q.localError(ctx, local)
 	}
 	return err
 }
 
-// abort releases the upload's session at its provider, best effort.
-func (u *upload) abort(ctx context.Context) {
-	if u.session {
-		_ = u.d.d.Abort(ctx, &u.st)
-		u.session = false
+// abort releases the upload's session at its provider and returns Abort's
+// error; nil when the upload holds no session.
+func (u *upload) abort(ctx context.Context) error {
+	if !u.session {
+		return nil
 	}
+	u.session = false
+	return u.d.d.Abort(ctx, &u.st)
 }
 
-// dropSession aborts the upload's session and forgets it, so the next
-// upload of the placement starts from 0.
+// dropSession aborts the upload's session, best effort, and forgets it, so
+// the next upload of the placement starts from 0.
 func (u *upload) dropSession(ctx context.Context) {
-	u.abort(ctx)
+	_ = u.abort(ctx)
 	u.q.catalogFailed(ctx, opDeleteUploadSession, u.q.cat.DeleteUploadSession(ctx, u.p.ID))
+}
+
+// abandon aborts the session of an upload whose placement was superseded
+// under it, and forgets the session once its Abort succeeded. The worker
+// still holds the placement, so its session row is still this upload's;
+// after a failed Abort the row stays, and the next upload aborts it before
+// it begins (open).
+func (u *upload) abandon(ctx context.Context) {
+	if u.abort(ctx) == nil {
+		u.q.catalogFailed(ctx, opDeleteUploadSession, u.q.cat.DeleteUploadSession(ctx, u.p.ID))
+	}
 }
 
 // quotaFull reads the destination's quota before an upload over 1 GiB
@@ -338,7 +352,7 @@ func (u *upload) fail(ctx context.Context, err error) {
 		// The row changed under the upload (g1-4): the next poll uploads it as
 		// it is now, from 0 when its bytes changed, as a placement new to the
 		// queue.
-		u.abort(ctx)
+		u.abandon(ctx)
 		u.q.forget(u.p.ID)
 	case errors.Is(err, errPaused):
 		_ = u.settle(ctx, u.withState(catalog.PlacementPending))
@@ -381,6 +395,9 @@ func (u *upload) spoolFailed(ctx context.Context, err *localErr) {
 		return
 	}
 	if gone {
+		// The file never reads well again: the queue keeps nothing of it
+		// (Task 4b review M2).
+		u.q.localOK(err.key)
 		u.dropSession(ctx)
 		u.q.forget(p.ID)
 	}

@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	"golang.org/x/oauth2"
@@ -31,11 +30,13 @@ var ciOptions = conformance.Options{KillOffsets: 20, Seed: 1}
 // resumeChecks are the resume checks that each driver runs by name (P24).
 var resumeChecks = []string{"Resume/KillAtRandomOffset", "Resume/CompleteSessionDetected"}
 
-// wantResumeChecks fails t unless report ran both resume checks and skipped
-// neither.
-func wantResumeChecks(t *testing.T, report conformance.Report) {
+// wantChecks fails t unless report ran both resume checks and the quota
+// check, which skips on a quota that the driver reports unknown (Task 7
+// review M2), and skipped none of them: every Phase 0 driver and fake has a
+// quota.
+func wantChecks(t *testing.T, report conformance.Report) {
 	t.Helper()
-	for _, name := range resumeChecks {
+	for _, name := range append(slices.Clone(resumeChecks), "Quota") {
 		if !slices.Contains(report.Ran, name) {
 			t.Errorf("Report.Ran = %q, want it to hold %s", report.Ran, name)
 		}
@@ -56,7 +57,7 @@ func TestConformance_Local(t *testing.T) {
 		}
 		return d
 	}, ciOptions)
-	wantResumeChecks(t, report)
+	wantChecks(t, report)
 }
 
 // TestConformance_FakeDrive: the Drive driver passes the suite against
@@ -66,7 +67,7 @@ func TestConformance_FakeDrive(t *testing.T) {
 	fake := fakegdrive.New(fakegdrive.Options{})
 	srv := httptest.NewServer(fake.Handler())
 	t.Cleanup(srv.Close)
-	folders := newMemFolders()
+	folders := fakegdrive.NewFolderStore()
 	report := conformance.Run(t, func(t *testing.T) storage.Destination {
 		d, err := gdrive.New(gdrive.Options{
 			DestID: "dst-1", HubID: "H", HTTPClient: srv.Client(), Tokens: testTokens(), BaseURL: srv.URL,
@@ -77,11 +78,14 @@ func TestConformance_FakeDrive(t *testing.T) {
 		}
 		return d
 	}, ciOptions)
-	wantResumeChecks(t, report)
+	wantChecks(t, report)
 }
 
 // TestConformance_FakeGraph: the OneDrive personal driver passes the suite
-// against fakegraph, with PartSize 320 KiB (g2-12).
+// against fakegraph, with PartSize 320 KiB (g2-12). The suite's List-based
+// count of the objects at a key skips there (C2-R12), so the fake's side
+// shows it instead: its items and its recycle bin hold each of the suite's
+// keys once (Task 7 review M3).
 func TestConformance_FakeGraph(t *testing.T) {
 	fake := fakegraph.New(fakegraph.Options{})
 	srv := httptest.NewServer(fake.Handler())
@@ -96,7 +100,38 @@ func TestConformance_FakeGraph(t *testing.T) {
 		}
 		return d
 	}, ciOptions)
-	wantResumeChecks(t, report)
+	wantChecks(t, report)
+	keys := map[string]int{}
+	for _, o := range append(fake.Objects(), fake.Bin()...) {
+		if o.QuickXor != "" && strings.HasPrefix(o.Path, "conformance/") {
+			keys[o.Path]++
+		}
+	}
+	if len(keys) == 0 {
+		t.Fatal("the fake holds no object of the suite")
+	}
+	for key, n := range keys {
+		if n != 1 {
+			t.Errorf("the fake's items and recycle bin hold %d objects at %s, want 1", n, key)
+		}
+	}
+}
+
+// TestConformance_UnknownQuotaSkips (Task 7 review M2): a driver that
+// declares an account's quota and reads it as unknown has its Quota check
+// skipped, so Report.Skipped names it, never passed with nothing checked.
+func TestConformance_UnknownQuotaSkips(t *testing.T) {
+	root := t.TempDir()
+	report := conformance.Run(t, func(t *testing.T) storage.Destination {
+		d, err := local.New(root)
+		if err != nil {
+			t.Fatalf("local.New: %v", err)
+		}
+		return unknownQuota{d}
+	}, conformance.Options{KillOffsets: 1, Seed: 1, Size: 4 * kib})
+	if !slices.Contains(report.Skipped, "Quota") || slices.Contains(report.Ran, "Quota") {
+		t.Errorf("Report %+v, want Quota skipped", report)
+	}
 }
 
 // stubHelperEnv makes TestConformance_StubHelper run the suite on a driver
@@ -169,32 +204,22 @@ func (r resumeNone) Capabilities() storage.Caps {
 	return caps
 }
 
+// unknownQuota is a Destination that declares an account's quota and reads
+// it as unknown, with its other Caps and its methods those of the
+// Destination it holds.
+type unknownQuota struct{ storage.Destination }
+
+func (u unknownQuota) Capabilities() storage.Caps {
+	caps := u.Destination.Capabilities()
+	caps.Quota = storage.QuotaAccount
+	return caps
+}
+
+func (unknownQuota) Quota(context.Context) (storage.Quota, error) {
+	return storage.Quota{Unknown: true}, nil
+}
+
 // testTokens is the token source of the fakes, which accept any token.
 func testTokens() oauth2.TokenSource {
 	return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok-conformance", TokenType: "Bearer"})
-}
-
-// memFolders is a gdrive.FolderStore in memory that, as the catalog's, keeps
-// the first ID stored for a path.
-type memFolders struct {
-	mu  sync.Mutex
-	ids map[string]string
-}
-
-func newMemFolders() *memFolders { return &memFolders{ids: map[string]string{}} }
-
-func (m *memFolders) Folder(_ context.Context, destID, p string) (string, bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	id, ok := m.ids[destID+"|"+p]
-	return id, ok, nil
-}
-
-func (m *memFolders) PutFolder(_ context.Context, destID, p, remoteID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.ids[destID+"|"+p]; !ok {
-		m.ids[destID+"|"+p] = remoteID
-	}
-	return nil
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -23,6 +22,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
+	fakegdrive "github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/fakes/gdrive"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/gdrive"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/onedrive"
 )
@@ -122,7 +122,7 @@ func (p *providers) drive(t *testing.T, part int64) *gdrive.Drive {
 	t.Helper()
 	d, err := gdrive.New(gdrive.Options{
 		DestID: "dst-1", HubID: "H", HTTPClient: &http.Client{}, Tokens: tokens(),
-		BaseURL: p.urls["gdrive"], UploadBaseURL: p.urls["gdriveUpload"], PartSize: part, Folders: newMemFolders(),
+		BaseURL: p.urls["gdrive"], UploadBaseURL: p.urls["gdriveUpload"], PartSize: part, Folders: fakegdrive.NewFolderStore(),
 	})
 	if err != nil {
 		t.Fatalf("gdrive.New: %v", err)
@@ -283,28 +283,4 @@ func TestFakeProviders_Usage(t *testing.T) {
 			t.Errorf("run(%q) = %d with stdout %q, want 2 and nothing", args, code, stdout.String())
 		}
 	}
-}
-
-// memFolders is a gdrive.FolderStore in memory.
-type memFolders struct {
-	mu  sync.Mutex
-	ids map[string]string
-}
-
-func newMemFolders() *memFolders { return &memFolders{ids: map[string]string{}} }
-
-func (m *memFolders) Folder(_ context.Context, destID, p string) (string, bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	id, ok := m.ids[destID+"|"+p]
-	return id, ok, nil
-}
-
-func (m *memFolders) PutFolder(_ context.Context, destID, p, remoteID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.ids[destID+"|"+p]; !ok {
-		m.ids[destID+"|"+p] = remoteID
-	}
-	return nil
 }

@@ -521,8 +521,11 @@ func testSupersede(t *testing.T, during string) {
 	if len(aborts) != 1 || aborts[0].Session != "s1" {
 		t.Fatalf("Abort calls %+v, want one, of the old session s1", aborts)
 	}
-	if atAbort != superseded || sessionAtAbort {
-		t.Errorf("the worker's late writes changed the row to %+v (a session row: %v); want it as superseded, %+v, with no session", atAbort, sessionAtAbort, superseded)
+	// The supersede keeps the old session's row, which names what to abort
+	// even after a kill (Task 5 review M2); the worker forgets it once its
+	// Abort succeeded, so the next upload aborts nothing more.
+	if atAbort != superseded || !sessionAtAbort {
+		t.Errorf("the worker's late writes changed the row to %+v (a session row: %v); want it as superseded, %+v, with the old session", atAbort, sessionAtAbort, superseded)
 	}
 	var s2 []fakeCall
 	for _, c := range f.callsOf("PutChunk") {
@@ -557,6 +560,73 @@ func testSupersede(t *testing.T, during string) {
 	// again, with its new bytes.
 	if queued := h.obs.of("Queued"); len(queued) != 2 || queued[0].P.Bytes != s.Bytes || queued[1].P.Bytes != int64(len(newData)) {
 		t.Errorf("Queued calls %+v, want two: with the old bytes, then the new", queued)
+	}
+}
+
+// TestOutbox_SupersedeAbortsTheOldSessionFirst (Task 5 review M2): a
+// placement superseded while no worker holds it, after an attempt that sent
+// every byte and ended before its verified write, keeps its old session's
+// row; the next upload, after a restart too, aborts that session before it
+// begins a new one, so a provider that made the old object at the last chunk
+// (Drive) deletes it before the new bytes arrive at the key.
+func TestOutbox_SupersedeAbortsTheOldSessionFirst(t *testing.T) {
+	h := newHarness(t)
+	ctx := t.Context()
+	f := newFakeDest(storage.KindLocal, h.clk.Now)
+	s := h.segment("a", 0, randomBytes(2*fakePart+10, 1))
+	h.enqueue(s, "dst-a", catalog.ClassContinuous)
+	var commits atomic.Int32
+	f.setFault(func(_ context.Context, c fakeCall) error {
+		if c.Method == "Commit" && commits.Add(1) == 1 {
+			return storage.ErrTransient // every byte is sent; the attempt ends before its verified write
+		}
+		return nil
+	})
+	q := h.newQueue(map[string]storage.Destination{"dst-a": f})
+	h.run(q, time.Second, time.Minute, func() bool { return h.placementOf(s.ID, "dst-a").State == catalog.PlacementFailed })
+
+	newData := randomBytes(fakePart+77, 2)
+	if err := os.WriteFile(h.spoolPath(s.Path), newData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rewritten := s
+	rewritten.Bytes = int64(len(newData))
+	err := h.cat.WithTx(ctx, func(tx *sql.Tx) error {
+		if err := catalog.PutSegmentTx(ctx, tx, rewritten); err != nil {
+			return err
+		}
+		return q.Enqueue(ctx, tx, PlacementFor(rewritten, "dst-a", catalog.ClassContinuous))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := h.placementOf(s.ID, "dst-a"); p.State != catalog.PlacementPending || !h.hasSession(p.ID) {
+		t.Fatalf("superseded, the placement is %+v (a session row: %v); want pending with the old session's row", p, h.hasSession(p.ID))
+	}
+
+	// A new queue: the hub restarted before the next attempt.
+	h.run(h.newQueue(map[string]storage.Destination{"dst-a": f}), time.Second, 5*time.Minute,
+		h.verified(catalog.Placement{ObjectID: s.ID, DestinationID: "dst-a"}))
+	var order []string
+	for _, c := range f.callsOf("") {
+		if c.Method == "Abort" || c.Method == "BeginUpload" {
+			order = append(order, c.Method+" "+c.Session)
+		}
+	}
+	if want := []string{"BeginUpload ", "Abort s1", "BeginUpload "}; !slices.Equal(order, want) {
+		t.Errorf("Abort and BeginUpload calls %q, want %q: the old session aborted before the new one begins", order, want)
+	}
+	objects := f.objectMap()
+	if len(objects) != 1 {
+		t.Fatalf("%d objects, want 1", len(objects))
+	}
+	for key, data := range objects {
+		if !bytes.Equal(data, newData) {
+			t.Errorf("object %s holds %d bytes, want the new %d", key, len(data), len(newData))
+		}
+	}
+	if p := h.placementOf(s.ID, "dst-a"); h.hasSession(p.ID) {
+		t.Errorf("the verified placement %+v keeps a session row", p)
 	}
 }
 
@@ -997,8 +1067,13 @@ func TestOutbox_LocalErrorOncePerFile(t *testing.T) {
 // TestOutbox_RandNeedsNoLock: the queue calls Options.Rand with its mutex
 // held, so a Rand that is not safe for concurrent use, such as a PCG's, races
 // with nothing under -race while two destinations' workers draw the jitter
-// of their backoffs: after spool read errors and hash mismatches.
+// of their backoffs: after spool read errors and hash mismatches. Only the
+// race detector sees a race, so the test skips without it (Task 4b review
+// M7).
 func TestOutbox_RandNeedsNoLock(t *testing.T) {
+	if !raceEnabled {
+		t.Skip("only a -race run can see the race that this test is about")
+	}
 	h := newHarness(t)
 	dests := map[string]storage.Destination{}
 	for _, id := range []string{"dst-a", "dst-b"} {
@@ -1021,30 +1096,25 @@ func TestOutbox_RandNeedsNoLock(t *testing.T) {
 		s := h.segment("s"+strconv.Itoa(i), time.Duration(i)*time.Minute, randomBytes(100+i, byte(i)))
 		ps = append(ps, h.enqueue(s, "dst-a", catalog.ClassContinuous), h.enqueue(s, "dst-b", catalog.ClassContinuous))
 	}
-	// The first two reads of each file fail, and two failing reads return
-	// together, so that their workers draw the jitter at once.
+	// The first two reads of each file fail, and the first two failing reads
+	// return together, so that their workers draw the jitter at once. The
+	// first poll starts two workers of each destination, whose first reads
+	// all fail, so the second failing read always comes, with no wait on the
+	// real clock.
 	var mu sync.Mutex
 	reads := map[string]int{}
-	var waiting chan struct{}
+	var arrived int
+	both := make(chan struct{})
 	together := func() {
 		mu.Lock()
-		if waiting != nil {
-			close(waiting)
-			waiting = nil
-			mu.Unlock()
-			return
+		arrived++
+		if arrived == 2 {
+			close(both)
 		}
-		ch := make(chan struct{})
-		waiting = ch
+		first := arrived <= 2
 		mu.Unlock()
-		select {
-		case <-ch:
-		case <-time.After(100 * time.Millisecond): // no other failing read came
-			mu.Lock()
-			if waiting == ch {
-				waiting = nil
-			}
-			mu.Unlock()
+		if first {
+			<-both
 		}
 	}
 	q := h.newQueue(dests, func(o *Options) {
@@ -1066,7 +1136,8 @@ func TestOutbox_RandNeedsNoLock(t *testing.T) {
 
 // TestOutbox_DonePlacementsLeaveNoState (C2-R8): the queue keeps nothing in
 // RAM of a placement that is verified or failed for good, so its memory does
-// not grow over the hub's life.
+// not grow over the hub's life: nor of the spool file of one whose file
+// vanished, once that is reported (Task 4b review M2).
 func TestOutbox_DonePlacementsLeaveNoState(t *testing.T) {
 	h := newHarness(t)
 	a, b := newFakeDest(storage.KindLocal, h.clk.Now), newFakeDest(storage.KindLocal, h.clk.Now)
@@ -1081,6 +1152,7 @@ func TestOutbox_DonePlacementsLeaveNoState(t *testing.T) {
 		ps = append(ps, h.enqueue(s, "dst-a", catalog.ClassContinuous), h.enqueue(s, "dst-b", catalog.ClassContinuous))
 	}
 	refused := h.enqueue(h.segment("refused", 10*time.Minute, randomBytes(100, 9)), "dst-b", catalog.ClassContinuous)
+	gone := h.enqueue(h.segmentRow("gone", 11*time.Minute, 200), "dst-a", catalog.ClassContinuous) // no spool file
 	b.setFault(func(_ context.Context, c fakeCall) error {
 		if c.Method == "BeginUpload" && c.N == 100 { // the refused segment's size
 			return storage.ErrPermanent
@@ -1089,14 +1161,18 @@ func TestOutbox_DonePlacementsLeaveNoState(t *testing.T) {
 	})
 	q := h.newQueue(map[string]storage.Destination{"dst-a": a, "dst-b": b})
 	h.run(q, time.Second, 10*time.Minute, func() bool {
-		return h.verified(ps...)() && h.placementOf(refused.ObjectID, "dst-b").State == catalog.PlacementFailed
+		return h.verified(ps...)() && h.placementOf(refused.ObjectID, "dst-b").State == catalog.PlacementFailed &&
+			h.placementOf(gone.ObjectID, "dst-a").State == catalog.PlacementFailed
 	})
-	if fails := h.obs.of("Failed"); len(fails) != 2 || len(h.failsOf(refused.ID)) != 1 {
-		t.Errorf("Failed calls %+v, want one hash mismatch and one refusal", fails)
+	if fails := h.obs.of("Failed"); len(fails) != 3 || len(h.failsOf(refused.ID)) != 1 || len(h.failsOf(gone.ID)) != 1 {
+		t.Errorf("Failed calls %+v, want one hash mismatch, one refusal and one file gone", fails)
+	}
+	if local := h.obs.of("LocalError"); len(local) != 1 || !errors.Is(local[0].Err, fs.ErrNotExist) {
+		t.Errorf("LocalError calls %+v, want one, of the file gone", local)
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.seen) != 0 || len(q.mismatches) != 0 || len(q.stranded) != 0 {
-		t.Errorf("after every placement is done the queue keeps %v, %v and %v, want nothing", q.seen, q.mismatches, q.stranded)
+	if len(q.seen) != 0 || len(q.mismatches) != 0 || len(q.stranded) != 0 || len(q.failing) != 0 {
+		t.Errorf("after every placement is done the queue keeps %v, %v, %v and %v, want nothing", q.seen, q.mismatches, q.stranded, q.failing)
 	}
 }

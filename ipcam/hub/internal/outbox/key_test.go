@@ -40,8 +40,9 @@ func TestKeyFor_Deterministic(t *testing.T) {
 
 // TestKeyFor_SafeSegments (§9.10): every segment of a key is a name that
 // Windows and SMB accept and that walks nowhere: one left empty or made of
-// dots only is "_", a reserved device name, with or without an extension and
-// in any case, gets "_" after its base, and trailing dots and spaces go.
+// dots only is "_", a reserved device name (COM0 to COM9, COM¹ to COM³, the
+// same of LPT, CONIN$ and CONOUT$ among them), with or without an extension
+// and in any case, gets "_" after its base, and trailing dots and spaces go.
 func TestKeyFor_SafeSegments(t *testing.T) {
 	start := time.Date(2026, 10, 17, 8, 15, 0, 0, time.UTC).UnixMilli()
 	const tail = "/2026-10-17/20261017T081500Z_cont_main.mp4"
@@ -68,6 +69,16 @@ func TestKeyFor_SafeSegments(t *testing.T) {
 		{"H", "hub", "nul. ", false, "hub/nul_" + tail},
 		{"H", "hub", "COM10", false, "hub/COM10" + tail},
 		{"H", "CONSOLE", "lpt", false, "CONSOLE/lpt" + tail},
+		// Task 4b review M3: the names that Windows's documentation adds.
+		{"H", "hub", "COM0", false, "hub/COM0_" + tail},
+		{"H", "lpt0.x", "cam01", false, "lpt0_.x/cam01" + tail},
+		{"H", "hub", "COM¹", false, "hub/COM¹_" + tail},
+		{"H", "hub", "com³.cam", false, "hub/com³_.cam" + tail},
+		{"H", "LPT²", "cam01", false, "LPT²_/cam01" + tail},
+		{"H", "hub", "CONIN$", false, "hub/CONIN$_" + tail},
+		{"H", "conout$.log", "cam01", false, "conout$_.log/cam01" + tail},
+		{"H", "hub", "COM⁴", false, "hub/COM⁴" + tail},
+		{"H", "hub", "CONIN", false, "hub/CONIN" + tail},
 	} {
 		s := catalog.Segment{Cam: tc.cam, Profile: "main", StartMs: start, Encrypted: tc.encrypted}
 		if got := KeyFor(tc.hubID, tc.hubName, s, catalog.ClassContinuous); got != tc.want {
