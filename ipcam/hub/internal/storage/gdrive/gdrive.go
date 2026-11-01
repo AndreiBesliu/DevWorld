@@ -36,6 +36,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/rest"
 )
 
 const (
@@ -300,7 +301,7 @@ func (d *Drive) held(method string, a *answer, st *storage.UploadState) error {
 		return nil
 	}
 	var file driveFile
-	if err := a.decode(method, &file); err != nil {
+	if err := a.Decode(method, &file); err != nil {
 		return err
 	}
 	if file.ID == "" {
@@ -419,7 +420,7 @@ func (d *Drive) file(ctx context.Context, id, fields string, calls storage.CallC
 		return driveFile{}, err
 	}
 	var f driveFile
-	err = a.decode(methodGet, &f)
+	err = a.Decode(methodGet, &f)
 	return f, err
 }
 
@@ -439,38 +440,7 @@ func (d *Drive) OpenRange(ctx context.Context, ref storage.ObjectRef, off, n int
 	if err != nil {
 		return nil, err
 	}
-	m := &media{r: a.Body, a: a}
-	if a.StatusCode == http.StatusOK { // the whole file: skip to off
-		switch _, err := io.CopyN(io.Discard, m, off); {
-		case errors.Is(err, io.EOF): // the file ends before off
-			n = 0
-		case err != nil:
-			a.Close()
-			return nil, err
-		}
-	}
-	m.r = io.LimitReader(a.Body, n)
-	return m, nil
-}
-
-// media is a file's bytes as files.get.media answers them. Its read errors
-// are ErrTransient, with no URL in their text.
-type media struct {
-	r io.Reader
-	a *answer
-}
-
-func (m *media) Read(p []byte) (int, error) {
-	n, err := m.r.Read(p)
-	if err != nil && !errors.Is(err, io.EOF) {
-		err = networkError(methodGetMedia, err)
-	}
-	return n, err
-}
-
-func (m *media) Close() error {
-	m.a.Close()
-	return nil
+	return rest.RangeBody(a, methodGetMedia, off, n) // read errors are ErrTransient, with no URL in their text
 }
 
 // PlaybackURL is ErrProxyRequired: a Drive file has no link that a client
@@ -514,7 +484,7 @@ func (d *Drive) Quota(ctx context.Context) (storage.Quota, error) {
 			Trash int64  `json:"usageInDriveTrash,string"`
 		} `json:"storageQuota"`
 	}
-	if err := a.decode(methodAbout, &about); err != nil {
+	if err := a.Decode(methodAbout, &about); err != nil {
 		return storage.Quota{}, err
 	}
 	q := about.StorageQuota
@@ -561,7 +531,7 @@ func (d *Drive) walk(ctx context.Context, id, dir string, prefix storage.ObjectK
 			Files         []driveFile `json:"files"`
 		}
 		if err == nil {
-			err = a.decode(methodList, &page)
+			err = a.Decode(methodList, &page)
 		}
 		if err != nil {
 			yield(storage.ObjectInfo{}, err)

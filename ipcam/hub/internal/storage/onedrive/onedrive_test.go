@@ -641,10 +641,6 @@ func TestOneDrive_QuotaSelectOnly(t *testing.T) {
 	}
 }
 
-// probeText is the README that Probe writes (§8.7 step 6).
-const probeText = "Acest folder conține înregistrările unui hub ipcam. Fișierele .age sunt criptate cu age " +
-	"(https://age-encryption.org) și se deschid cu: age -d -i <cheia de recuperare> <fișier>.mp4.age > <fișier>.mp4"
-
 // TestOneDrive_Probe (P35): Probe writes .ipcam/<HubID>/README.txt under the
 // app folder, writes 1 MiB, reads a range of it, deletes it into the recycle
 // bin and reads the quota, with no folder create call; a second Probe
@@ -666,7 +662,7 @@ func TestOneDrive_Probe(t *testing.T) {
 	check := func(probes int) {
 		t.Helper()
 		files := e.files()
-		if len(files) != 1 || files[0].Path != ".ipcam/H/README.txt" || string(files[0].Data) != probeText {
+		if len(files) != 1 || files[0].Path != ".ipcam/H/README.txt" || string(files[0].Data) != storage.ProbeReadme {
 			t.Errorf("after %d probes the files are %s, want only .ipcam/H/README.txt with the fixed text", probes, describe(files))
 		}
 		bin := e.fake.Bin()

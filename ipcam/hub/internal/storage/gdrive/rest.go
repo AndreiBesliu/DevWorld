@@ -2,8 +2,6 @@ package gdrive
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -11,6 +9,7 @@ import (
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/rest"
 )
 
 const (
@@ -20,11 +19,6 @@ const (
 	// drops ends a call as ErrTransient instead of holding a worker.
 	metadataTimeout = 30 * time.Second
 	chunkTimeout    = 10 * time.Minute
-	// maxAnswer bounds the JSON answer that the driver reads.
-	maxAnswer = 1 << 20
-	// maxDrain is the most of an answer's rest that Close reads, so that the
-	// connection can serve the next request.
-	maxDrain = 64 << 10
 )
 
 // call is one request of the API.
@@ -45,28 +39,9 @@ type call struct {
 	calls   storage.CallCounts // the counts of the upload that the call serves, or nil
 }
 
-// answer is a response that send accepted. Close releases it.
-type answer struct {
-	*http.Response
-	cancel context.CancelFunc
-}
-
-// Close reads a little of the body's rest, closes it and ends the request's
-// deadline.
-func (a *answer) Close() {
-	_, _ = io.Copy(io.Discard, io.LimitReader(a.Body, maxDrain))
-	_ = a.Body.Close()
-	a.cancel()
-}
-
-// decode reads the answer's JSON into v and closes the answer.
-func (a *answer) decode(method string, v any) error {
-	defer a.Close()
-	if err := json.NewDecoder(io.LimitReader(a.Body, maxAnswer)).Decode(v); err != nil {
-		return fmt.Errorf("gdrive: %s: the answer: %w: %w", method, storage.ErrTransient, scrub(err))
-	}
-	return nil
-}
+// answer is a response that send accepted. Close releases it, and Decode
+// reads its JSON.
+type answer = rest.Answer
 
 // send makes c's request on the plain client with the bearer token that
 // Tokens gives now (P27), and returns the answer when its status is one of
@@ -78,7 +53,7 @@ func (a *answer) decode(method string, v any) error {
 func (d *Drive) send(ctx context.Context, c call, want ...int) (*answer, error) {
 	tok, err := d.tokens.Token()
 	if err != nil {
-		return nil, tokenError(c.method, err)
+		return nil, rest.TokenError(driverName, c.method, err)
 	}
 	if c.create {
 		if wait, ok := d.bucket.take(d.clock()); !ok {
@@ -93,7 +68,7 @@ func (d *Drive) send(ctx context.Context, c call, want ...int) (*answer, error) 
 	req, err := http.NewRequestWithContext(ctx, c.verb, c.url, c.body)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("gdrive: %s: %w: %w", c.method, storage.ErrPermanent, scrub(err))
+		return nil, rest.RequestError(driverName, c.method)
 	}
 	if c.body != nil {
 		req.ContentLength = c.length
@@ -106,9 +81,9 @@ func (d *Drive) send(ctx context.Context, c call, want ...int) (*answer, error) 
 	resp, err := d.client.Do(req)
 	if err != nil {
 		cancel()
-		return nil, networkError(c.method, err)
+		return nil, rest.NetworkError(driverName, c.method, err)
 	}
-	a := &answer{Response: resp, cancel: cancel}
+	a := rest.NewAnswer(driverName, resp, cancel)
 	if !slices.Contains(want, resp.StatusCode) {
 		err := statusError(&c, resp, d.clock())
 		a.Close()
@@ -123,7 +98,7 @@ func (d *Drive) send(ctx context.Context, c call, want ...int) (*answer, error) 
 // slot it returns ErrRateLimited.
 func (d *Drive) slot(method string) error {
 	if _, err := d.tokens.Token(); err != nil {
-		return tokenError(method, err)
+		return rest.TokenError(driverName, method, err)
 	}
 	if wait, ok := d.bucket.take(d.clock()); !ok {
 		return rateLimited(method, wait)

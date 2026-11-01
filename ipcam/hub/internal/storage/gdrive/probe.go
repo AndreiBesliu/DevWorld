@@ -1,27 +1,14 @@
 package gdrive
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"io"
-	"path"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
 )
 
-// readmeText is the README that Probe writes to .ipcam/<hubID>/README.txt
-// (§8.7 step 6).
-const readmeText = "Acest folder conține înregistrările unui hub ipcam. Fișierele .age sunt criptate cu age " +
-	"(https://age-encryption.org) și se deschid cu: age -d -i <cheia de recuperare> <fișier>.mp4.age > <fișier>.mp4"
-
 const (
-	// probeSize is Probe's write, and probeName its object's name in
-	// .ipcam/<hubID>.
-	probeSize = 1 << 20
-	probeName = "probe.bin"
 	// probeWaits bounds how many times one step of Probe waits for a create
 	// slot.
 	probeWaits = 10
@@ -34,11 +21,12 @@ const (
 // Probe checks the destination (§8.7 step 6, P35): it makes the root and
 // stores its ID, creates the root's ID again to confirm Drive's 409 for a
 // folder that exists, writes .ipcam/<hubID>/README.txt, uploads 1 MiB,
-// reads a range of it back, deletes it and reads the quota. The report holds
-// the steps that passed, and the error is the first step that failed. A
-// probe whose read fails deletes its object, best effort. Probe is a one-off
-// check that makes several creates, so where an upload returns
-// ErrRateLimited at once, Probe waits for its slot.
+// reads a range of it back and deletes it (storage.ProbeObject, with
+// md5Checksum), and reads the quota. The report holds the steps that passed,
+// and the error is the first step that failed. A probe whose read fails
+// deletes its object, best effort. Probe is a one-off check that makes
+// several creates, so where an upload returns ErrRateLimited at once, Probe
+// waits for its slot (C2-R11 (b)).
 func (d *Drive) Probe(ctx context.Context) (storage.ProbeReport, error) {
 	var report storage.ProbeReport
 	var root string
@@ -67,91 +55,21 @@ func (d *Drive) Probe(ctx context.Context) (storage.ProbeReport, error) {
 		}
 	}
 	err = waitForSlot(ctx, func() error {
-		_, err := d.PutSmall(ctx, storage.ObjectKey(path.Join(".ipcam", d.hubID, "README.txt")), []byte(readmeText))
+		_, err := d.PutSmall(ctx, storage.ProbeReadmeKey(d.hubID), []byte(storage.ProbeReadme))
 		return err
 	})
 	if err != nil {
 		return report, err
 	}
-	data := make([]byte, probeSize)
-	for i := range data {
-		data[i] = byte(i % 251)
-	}
-	ref, err := d.probeWrite(ctx, data)
+	err = storage.ProbeObject(ctx, d, storage.ProbeParams{
+		Driver: driverName, HubID: d.hubID, Hash: storage.HashMD5, PartSize: d.partSize,
+		Wait: func(step func() error) error { return waitForSlot(ctx, step) },
+	}, &report)
 	if err != nil {
 		return report, err
 	}
-	report.Writable = true
-	if err := d.probeRange(ctx, ref, data); err != nil {
-		_, _ = d.Delete(context.WithoutCancel(ctx), ref) // the error to report is the read's
-		return report, err
-	}
-	report.RangeRead = true
-	if _, err := d.Delete(ctx, ref); err != nil {
-		return report, err
-	}
-	report.Deletable = true
 	report.Quota, err = d.Quota(ctx)
 	return report, err
-}
-
-// probeWrite uploads data as Probe's object, through a session as a
-// segment's upload, and checks Commit's size and MD5.
-func (d *Drive) probeWrite(ctx context.Context, data []byte) (storage.ObjectRef, error) {
-	key := storage.ObjectKey(path.Join(".ipcam", d.hubID, probeName))
-	var st storage.UploadState
-	err := waitForSlot(ctx, func() (err error) {
-		st, err = d.BeginUpload(ctx, key, int64(len(data)), storage.Meta{ContentType: "application/octet-stream"})
-		return err
-	})
-	if err != nil {
-		return storage.ObjectRef{}, err
-	}
-	for off := int64(0); off < st.Size && err == nil; off = st.Offset {
-		n := min(d.partSize, st.Size-off)
-		err = d.PutChunk(ctx, &st, off, bytes.NewReader(data[off:off+n]), n)
-		if err == nil && st.Offset <= off {
-			err = fmt.Errorf("gdrive: probe: the session holds %d bytes after a chunk at %d: %w", st.Offset, off, storage.ErrTransient)
-		}
-	}
-	var ref storage.ObjectRef
-	if err == nil {
-		ref, err = d.Commit(ctx, &st)
-	}
-	if err != nil {
-		_ = d.Abort(context.WithoutCancel(ctx), &st) // the error to report is the write's
-		return storage.ObjectRef{}, err
-	}
-	want, err := storage.Digest(storage.HashMD5, bytes.NewReader(data))
-	if err == nil && (ref.Size != int64(len(data)) || ref.Hash != want) {
-		err = fmt.Errorf("gdrive: probe: Drive holds %d bytes with MD5 %s, want %d with %s: %w", ref.Size, ref.Hash, len(data), want, storage.ErrPermanent)
-	}
-	if err != nil {
-		_, _ = d.Delete(context.WithoutCancel(ctx), ref)
-		return storage.ObjectRef{}, err
-	}
-	return ref, nil
-}
-
-// probeRange reads a range of Probe's object, ref, and compares it with the
-// same range of data, the bytes that Probe wrote.
-func (d *Drive) probeRange(ctx context.Context, ref storage.ObjectRef, data []byte) error {
-	const off, n = 1000, 4096
-	r, err := d.OpenRange(ctx, ref, off, n)
-	if err != nil {
-		return err
-	}
-	got, err := io.ReadAll(r)
-	if cerr := r.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(got, data[off:off+n]) {
-		return fmt.Errorf("gdrive: probe: a range read returned %d bytes that differ from those written: %w", len(got), storage.ErrPermanent)
-	}
-	return nil
 }
 
 // waitForSlot runs step, and runs it again after each ErrRateLimited that it

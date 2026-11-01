@@ -101,7 +101,7 @@ func (d *Drive) createSmall(ctx context.Context, id string, key storage.ObjectKe
 		return storage.ObjectRef{}, false, nil
 	}
 	var f driveFile
-	if err := a.decode(methodCreate, &f); err != nil {
+	if err := a.Decode(methodCreate, &f); err != nil {
 		return storage.ObjectRef{}, false, err
 	}
 	return f.ref(key), true, nil
@@ -118,7 +118,7 @@ func (d *Drive) updateSmall(ctx context.Context, id string, key storage.ObjectKe
 		return storage.ObjectRef{}, err
 	}
 	var f driveFile
-	if err := a.decode(methodUpdate, &f); err != nil {
+	if err := a.Decode(methodUpdate, &f); err != nil {
 		return storage.ObjectRef{}, err
 	}
 	return f.ref(key), nil

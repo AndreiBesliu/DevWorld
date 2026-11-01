@@ -937,10 +937,6 @@ func TestDrive_AboutAsksStorageQuotaOnly(t *testing.T) {
 	}
 }
 
-// probeText is the README that Probe writes (§8.7 step 6).
-const probeText = "Acest folder conține înregistrările unui hub ipcam. Fișierele .age sunt criptate cu age " +
-	"(https://age-encryption.org) și se deschid cu: age -d -i <cheia de recuperare> <fișier>.mp4.age > <fișier>.mp4"
-
 // TestDrive_Probe (P35): Probe creates and remembers the root, confirms the
 // 409 of a create with its ID, writes the README, writes, reads and deletes
 // 1 MiB and reads the quota, waiting in real time for its create slots; a
@@ -964,7 +960,7 @@ func TestDrive_Probe(t *testing.T) {
 	if !report.Writable || !report.RangeRead || !report.Deletable || len(report.Warnings) != 0 {
 		t.Errorf("Probe's report %+v, want writable, range-readable and deletable, with no warning", report)
 	}
-	readme := int64(len(probeText))
+	readme := int64(len(storage.ProbeReadme))
 	if want := (storage.Quota{Total: 10 * 1000 * mib, Used: 5*mib + readme, Free: 10*1000*mib - 5*mib - readme}); report.Quota != want {
 		t.Errorf("Probe's quota %+v, want %+v", report.Quota, want)
 	}
@@ -981,7 +977,7 @@ func TestDrive_Probe(t *testing.T) {
 				}
 			case o.Name == "README.txt":
 				readmes++
-				if string(o.Data) != probeText || o.Parent != e.folders.get("ipcam/.ipcam/H") {
+				if string(o.Data) != storage.ProbeReadme || o.Parent != e.folders.get("ipcam/.ipcam/H") {
 					t.Errorf("README.txt holds %q in %s, want the fixed text in .ipcam/H", o.Data, o.Parent)
 				}
 			case !o.Folder:

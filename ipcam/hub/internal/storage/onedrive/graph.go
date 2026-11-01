@@ -2,8 +2,6 @@ package onedrive
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -13,6 +11,7 @@ import (
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/rest"
 )
 
 const (
@@ -22,11 +21,6 @@ const (
 	// drops ends a call as ErrTransient instead of holding a worker.
 	metadataTimeout = 30 * time.Second
 	transferTimeout = 10 * time.Minute
-	// maxAnswer bounds the JSON answer that the driver reads.
-	maxAnswer = 1 << 20
-	// maxDrain is the most of an answer's rest that Close reads, so that the
-	// connection can serve the next request.
-	maxDrain = 64 << 10
 )
 
 // The API methods, by the names that the errors give them: Graph's, and
@@ -60,28 +54,9 @@ type call struct {
 	calls   storage.CallCounts // the counts of the upload that the call serves, or nil
 }
 
-// answer is a response that send accepted. Close releases it.
-type answer struct {
-	*http.Response
-	cancel context.CancelFunc
-}
-
-// Close reads a little of the body's rest, closes it and ends the request's
-// deadline.
-func (a *answer) Close() {
-	_, _ = io.Copy(io.Discard, io.LimitReader(a.Body, maxDrain))
-	_ = a.Body.Close()
-	a.cancel()
-}
-
-// decode reads the answer's JSON into v and closes the answer.
-func (a *answer) decode(method string, v any) error {
-	defer a.Close()
-	if err := json.NewDecoder(io.LimitReader(a.Body, maxAnswer)).Decode(v); err != nil {
-		return fmt.Errorf("onedrive: %s: the answer: %w: %w", method, storage.ErrTransient, scrub(err))
-	}
-	return nil
-}
+// answer is a response that send accepted. Close releases it, and Decode
+// reads its JSON.
+type answer = rest.Answer
 
 // send makes c's request on the plain client, with the bearer token that
 // Tokens gives now unless c is an uploadUrl's (P27), and returns the answer
@@ -94,7 +69,7 @@ func (o *OneDrive) send(ctx context.Context, c call, want ...int) (*answer, erro
 	if !c.upload {
 		tok, err := o.tokens.Token()
 		if err != nil {
-			return nil, tokenError(c.method, err)
+			return nil, rest.TokenError(driverName, c.method, err)
 		}
 		token = tok.AccessToken
 	}
@@ -106,8 +81,7 @@ func (o *OneDrive) send(ctx context.Context, c call, want ...int) (*answer, erro
 	req, err := http.NewRequestWithContext(ctx, c.verb, c.url, c.body)
 	if err != nil {
 		cancel()
-		// Not err's text: url.Parse's quotes parts of the URL.
-		return nil, fmt.Errorf("onedrive: %s: the request cannot be made: %w", c.method, storage.ErrPermanent)
+		return nil, rest.RequestError(driverName, c.method)
 	}
 	if c.body != nil {
 		req.ContentLength = c.length
@@ -124,9 +98,9 @@ func (o *OneDrive) send(ctx context.Context, c call, want ...int) (*answer, erro
 	resp, err := o.client.Do(req)
 	if err != nil {
 		cancel()
-		return nil, networkError(c.method, err)
+		return nil, rest.NetworkError(driverName, c.method, err)
 	}
-	a := &answer{Response: resp, cancel: cancel}
+	a := rest.NewAnswer(driverName, resp, cancel)
 	if !slices.Contains(want, resp.StatusCode) {
 		err := statusError(&c, resp, o.clock())
 		a.Close()

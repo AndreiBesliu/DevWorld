@@ -30,7 +30,6 @@ import (
 	"iter"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +37,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/rest"
 )
 
 // Authority is the Microsoft identity platform's authority of a personal
@@ -159,7 +159,7 @@ func (o *OneDrive) BeginUpload(ctx context.Context, key storage.ObjectKey, size 
 		return storage.UploadState{}, err
 	}
 	var s sessionAnswer
-	if err := a.decode(methodCreateSession, &s); err != nil {
+	if err := a.Decode(methodCreateSession, &s); err != nil {
 		return storage.UploadState{}, err
 	}
 	if !absoluteURL(s.UploadURL) {
@@ -194,7 +194,7 @@ func (o *OneDrive) PutChunk(ctx context.Context, st *storage.UploadState, off in
 	}
 	if a.StatusCode != http.StatusAccepted {
 		var it driveItem
-		if err := a.decode(methodUploadPut, &it); err != nil {
+		if err := a.Decode(methodUploadPut, &it); err != nil {
 			return err
 		}
 		if it.ID == "" {
@@ -204,7 +204,7 @@ func (o *OneDrive) PutChunk(ctx context.Context, st *storage.UploadState, off in
 		return nil
 	}
 	var s sessionAnswer
-	if err := a.decode(methodUploadPut, &s); err != nil {
+	if err := a.Decode(methodUploadPut, &s); err != nil {
 		return err
 	}
 	next, ok := s.next(st.Size)
@@ -243,7 +243,7 @@ func (o *OneDrive) status(ctx context.Context, st *storage.UploadState) (*driveI
 		return nil, err
 	}
 	var s sessionAnswer
-	if err := a.decode(methodUploadStatus, &s); err != nil {
+	if err := a.Decode(methodUploadStatus, &s); err != nil {
 		return nil, err
 	}
 	next, ok := s.next(st.Size)
@@ -265,7 +265,7 @@ func (o *OneDrive) completed(ctx context.Context, st *storage.UploadState, gone 
 	}, http.StatusOK)
 	var it driveItem
 	if err == nil {
-		err = a.decode(methodGetByPath, &it)
+		err = a.Decode(methodGetByPath, &it)
 	}
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
@@ -371,7 +371,7 @@ func (o *OneDrive) item(ctx context.Context, id, sel string, calls storage.CallC
 		return driveItem{}, err
 	}
 	var it driveItem
-	err = a.decode(methodGet, &it)
+	err = a.Decode(methodGet, &it)
 	return it, err
 }
 
@@ -393,38 +393,9 @@ func (o *OneDrive) OpenRange(ctx context.Context, ref storage.ObjectRef, off, n 
 	if err != nil {
 		return nil, err
 	}
-	m := &media{r: a.Body, a: a}
-	if a.StatusCode == http.StatusOK { // the whole item: skip to off
-		switch _, err := io.CopyN(io.Discard, m, off); {
-		case errors.Is(err, io.EOF): // the item ends before off
-			n = 0
-		case err != nil:
-			a.Close()
-			return nil, err
-		}
-	}
-	m.r = io.LimitReader(a.Body, n)
-	return m, nil
-}
-
-// media is an item's bytes as the download URL answers them. Its read errors
-// are ErrTransient, with no URL in their text.
-type media struct {
-	r io.Reader
-	a *answer
-}
-
-func (m *media) Read(p []byte) (int, error) {
-	n, err := m.r.Read(p)
-	if err != nil && !errors.Is(err, io.EOF) {
-		err = networkError(methodContent, err)
-	}
-	return n, err
-}
-
-func (m *media) Close() error {
-	m.a.Close()
-	return nil
+	// Read errors are ErrTransient, with no URL in their text: not the
+	// download URL's either.
+	return rest.RangeBody(a, methodContent, off, n)
 }
 
 // PlaybackURL returns ref's item's pre-authenticated download URL
@@ -471,7 +442,7 @@ func (o *OneDrive) Quota(ctx context.Context) (storage.Quota, error) {
 			Deleted   int64 `json:"deleted"`
 		} `json:"quota"`
 	}
-	if err := a.decode(methodDrive, &drive); err != nil {
+	if err := a.Decode(methodDrive, &drive); err != nil {
 		return storage.Quota{}, err
 	}
 	q := drive.Quota
@@ -540,103 +511,25 @@ func validName(name string) bool {
 	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `"*:<>?/\|`)
 }
 
-// readmeText is the README that Probe writes to .ipcam/<hubID>/README.txt
-// (§8.7 step 6).
-const readmeText = "Acest folder conține înregistrările unui hub ipcam. Fișierele .age sunt criptate cu age " +
-	"(https://age-encryption.org) și se deschid cu: age -d -i <cheia de recuperare> <fișier>.mp4.age > <fișier>.mp4"
-
-const (
-	// probeSize is Probe's write, and probeName its object's name in
-	// .ipcam/<hubID>.
-	probeSize = 1 << 20
-	probeName = "probe.bin"
-)
-
 // Probe checks the destination (§8.7 step 6, P35) in the app folder, where
 // it creates no folder: it writes .ipcam/<hubID>/README.txt, uploads 1 MiB
-// through a session, reads a range of it back, deletes it and reads the
-// quota. The deleted 1 MiB goes to the recycle bin, as every delete does,
-// and the report's quota counts it in InBin. The report holds the steps that
-// passed, and the error is the first step that failed. A probe whose read
-// fails deletes its object, best effort.
+// through a session, reads a range of it back and deletes it
+// (storage.ProbeObject, with quickXorHash), and reads the quota. The deleted
+// 1 MiB goes to the recycle bin, as every delete does, and the report's
+// quota counts it in InBin. The report holds the steps that passed, and the
+// error is the first step that failed. A probe whose read fails deletes its
+// object, best effort. OneDrive has no create bucket, so Probe never waits.
 func (o *OneDrive) Probe(ctx context.Context) (storage.ProbeReport, error) {
 	var report storage.ProbeReport
-	dir := path.Join(".ipcam", o.hubID)
-	if _, err := o.PutSmall(ctx, storage.ObjectKey(path.Join(dir, "README.txt")), []byte(readmeText)); err != nil {
+	if _, err := o.PutSmall(ctx, storage.ProbeReadmeKey(o.hubID), []byte(storage.ProbeReadme)); err != nil {
 		return report, err
 	}
-	data := make([]byte, probeSize)
-	for i := range data {
-		data[i] = byte(i % 251)
-	}
-	ref, err := o.probeWrite(ctx, storage.ObjectKey(path.Join(dir, probeName)), data)
+	err := storage.ProbeObject(ctx, o, storage.ProbeParams{
+		Driver: driverName, HubID: o.hubID, Hash: storage.HashQuickXor, PartSize: o.partSize,
+	}, &report)
 	if err != nil {
 		return report, err
 	}
-	report.Writable = true
-	if err := o.probeRange(ctx, ref, data); err != nil {
-		_, _ = o.Delete(context.WithoutCancel(ctx), ref) // the error to report is the read's
-		return report, err
-	}
-	report.RangeRead = true
-	if _, err := o.Delete(ctx, ref); err != nil {
-		return report, err
-	}
-	report.Deletable = true
 	report.Quota, err = o.Quota(ctx)
 	return report, err
-}
-
-// probeWrite uploads data to key through a session, as a segment's upload,
-// and checks Commit's size and quickXorHash.
-func (o *OneDrive) probeWrite(ctx context.Context, key storage.ObjectKey, data []byte) (storage.ObjectRef, error) {
-	st, err := o.BeginUpload(ctx, key, int64(len(data)), storage.Meta{ContentType: "application/octet-stream"})
-	if err != nil {
-		return storage.ObjectRef{}, err
-	}
-	for off := int64(0); off < st.Size && err == nil; off = st.Offset {
-		n := min(o.partSize, st.Size-off)
-		err = o.PutChunk(ctx, &st, off, bytes.NewReader(data[off:off+n]), n)
-		if err == nil && st.Offset <= off {
-			err = fmt.Errorf("onedrive: probe: the session expects bytes from %d after a fragment at %d: %w", st.Offset, off, storage.ErrTransient)
-		}
-	}
-	var ref storage.ObjectRef
-	if err == nil {
-		ref, err = o.Commit(ctx, &st)
-	}
-	if err != nil {
-		_ = o.Abort(context.WithoutCancel(ctx), &st) // the error to report is the write's
-		return storage.ObjectRef{}, err
-	}
-	want, err := storage.Digest(storage.HashQuickXor, bytes.NewReader(data))
-	if err == nil && (ref.Size != int64(len(data)) || ref.Hash != want) {
-		err = fmt.Errorf("onedrive: probe: OneDrive holds %d bytes with quickXorHash %s, want %d with %s: %w", ref.Size, ref.Hash, len(data), want, storage.ErrPermanent)
-	}
-	if err != nil {
-		_, _ = o.Delete(context.WithoutCancel(ctx), ref)
-		return storage.ObjectRef{}, err
-	}
-	return ref, nil
-}
-
-// probeRange reads a range of Probe's object, ref, and compares it with the
-// same range of data, the bytes that Probe wrote.
-func (o *OneDrive) probeRange(ctx context.Context, ref storage.ObjectRef, data []byte) error {
-	const off, n = 1000, 4096
-	r, err := o.OpenRange(ctx, ref, off, n)
-	if err != nil {
-		return err
-	}
-	got, err := io.ReadAll(r)
-	if cerr := r.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(got, data[off:off+n]) {
-		return fmt.Errorf("onedrive: probe: a range read returned %d bytes that differ from those written: %w", len(got), storage.ErrPermanent)
-	}
-	return nil
 }

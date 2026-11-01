@@ -1,8 +1,15 @@
 package storage_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,4 +72,83 @@ func TestErrors_ProxyRequiredIs(t *testing.T) {
 	if err := fmt.Errorf("x: %w", storage.ErrProxyRequired); !errors.Is(err, storage.ErrProxyRequired) {
 		t.Errorf("errors.Is(%q, ErrProxyRequired) = false, want true", err)
 	}
+}
+
+// TestErrors_IsTypedKnowsEveryTypedError: IsTyped finds each typed error of
+// errors.go, bare and wrapped, the struct errors as values and as non-nil
+// pointers, and no other error. The table must name every Err sentinel and
+// Err type that errors.go declares, so a typed error added there fails this
+// test until the table, and with it IsTyped, knows it: a driver's token
+// errors rely on IsTyped to keep their kind (rest.TokenError).
+func TestErrors_IsTypedKnowsEveryTypedError(t *testing.T) {
+	typed := map[string][]error{
+		"ErrAuthExpired":    {storage.ErrAuthExpired},
+		"ErrQuotaFull":      {storage.ErrQuotaFull},
+		"ErrSessionExpired": {storage.ErrSessionExpired},
+		"ErrNotFound":       {storage.ErrNotFound},
+		"ErrTransient":      {storage.ErrTransient},
+		"ErrPermanent":      {storage.ErrPermanent},
+		"ErrProxyRequired":  {storage.ErrProxyRequired},
+		"ErrRateLimited":    {storage.ErrRateLimited{}, &storage.ErrRateLimited{RetryAfter: time.Second}},
+		"ErrDailyCap":       {storage.ErrDailyCap{ResetAfter: time.Hour}, &storage.ErrDailyCap{}},
+	}
+	declared := declaredErrors(t, "errors.go")
+	var named []string
+	for name := range typed {
+		named = append(named, name)
+	}
+	slices.Sort(named)
+	if !slices.Equal(named, declared) {
+		t.Errorf("errors.go declares the typed errors %v, and this test names %v: add the new one here and to IsTyped", declared, named)
+	}
+	for name, errs := range typed {
+		for _, err := range errs {
+			for _, e := range []error{err, fmt.Errorf("onedrive: token: %w", err), fmt.Errorf("a: %w", fmt.Errorf("b: %w", err))} {
+				if !storage.IsTyped(e) {
+					t.Errorf("IsTyped(%q) = false, want true: it wraps %s", e, name)
+				}
+			}
+		}
+	}
+	for _, err := range []error{
+		nil, errors.New("storage: transient error"), io.EOF, context.DeadlineExceeded,
+		(*storage.ErrRateLimited)(nil), (*storage.ErrDailyCap)(nil), fmt.Errorf("x: %w", io.ErrUnexpectedEOF),
+	} {
+		if storage.IsTyped(err) {
+			t.Errorf("IsTyped(%#v) = true, want false", err)
+		}
+	}
+}
+
+// declaredErrors returns, sorted, the names of the package-level variables
+// and types of file whose names start with Err.
+func declaredErrors(t *testing.T, file string) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	var names []string
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			switch spec := spec.(type) {
+			case *ast.ValueSpec:
+				for _, id := range spec.Names {
+					if strings.HasPrefix(id.Name, "Err") {
+						names = append(names, id.Name)
+					}
+				}
+			case *ast.TypeSpec:
+				if strings.HasPrefix(spec.Name.Name, "Err") {
+					names = append(names, spec.Name.Name)
+				}
+			}
+		}
+	}
+	slices.Sort(names)
+	return names
 }

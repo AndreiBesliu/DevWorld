@@ -2,26 +2,21 @@ package gdrive
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"strconv"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/rest"
 )
 
 const (
+	// driverName starts every error's text.
+	driverName = "gdrive"
 	// dailyCapPause is how long Drive's daily upload cap holds an account
 	// (750 GiB a day per user, §9.2).
 	dailyCapPause = 24 * time.Hour
-	// maxErrorBody is the most of an error's answer that the driver reads for
-	// its reason.
-	maxErrorBody = 64 << 10
-	// maxReason bounds the length of a reason that an error's text names.
-	maxReason = 64
 	// statusCancelled is what a cancelled session answers: 499 Client
 	// Closed Request, in Google's resumable upload protocol.
 	statusCancelled = 499
@@ -55,11 +50,11 @@ func statusError(c *call, resp *http.Response, now time.Time) error {
 	case status == http.StatusUnauthorized:
 		kind = storage.ErrAuthExpired
 	case status == http.StatusTooManyRequests:
-		kind = storage.ErrRateLimited{RetryAfter: retryAfter(resp.Header, now)}
+		kind = storage.ErrRateLimited{RetryAfter: rest.RetryAfter(resp.Header, now)}
 	case status == http.StatusForbidden && reason == "storageQuotaExceeded":
 		kind = storage.ErrQuotaFull
 	case status == http.StatusForbidden && (reason == "userRateLimitExceeded" || reason == "rateLimitExceeded"):
-		kind = storage.ErrRateLimited{RetryAfter: retryAfter(resp.Header, now)}
+		kind = storage.ErrRateLimited{RetryAfter: rest.RetryAfter(resp.Header, now)}
 	case status == http.StatusForbidden && (reason == "dailyLimitExceeded" || reason == "uploadLimitExceeded"):
 		kind = storage.ErrDailyCap{ResetAfter: dailyCapPause}
 	case c.session && (status == http.StatusNotFound || status == http.StatusGone || status == statusCancelled):
@@ -79,8 +74,8 @@ func statusError(c *call, resp *http.Response, now time.Time) error {
 // errorReason returns the reason of Drive's error body,
 // {"error":{"errors":[{"reason":…}]}} or, in the newer shape, a detail's
 // reason; "" when the body has none. A reason that is not a short word of
-// letters and digits is dropped, so the text never carries what a server
-// wrote there.
+// letters and digits is dropped (rest.Word), so the text never carries what
+// a server wrote there.
 func errorReason(body io.Reader) string {
 	var answer struct {
 		Error struct {
@@ -88,53 +83,16 @@ func errorReason(body io.Reader) string {
 			Details []struct{ Reason string } `json:"details"`
 		} `json:"error"`
 	}
-	if json.NewDecoder(io.LimitReader(body, maxErrorBody)).Decode(&answer) != nil {
+	if json.NewDecoder(io.LimitReader(body, rest.MaxErrorBody)).Decode(&answer) != nil {
 		return ""
 	}
-	var reason string
 	switch {
 	case len(answer.Error.Errors) > 0:
-		reason = answer.Error.Errors[0].Reason
+		return rest.Word(answer.Error.Errors[0].Reason)
 	case len(answer.Error.Details) > 0:
-		reason = answer.Error.Details[0].Reason
+		return rest.Word(answer.Error.Details[0].Reason)
 	}
-	if len(reason) > maxReason {
-		return ""
-	}
-	for _, r := range reason {
-		if !wordRune(r) {
-			return ""
-		}
-	}
-	return reason
-}
-
-// wordRune reports whether r is an ASCII letter, digit or underscore.
-func wordRune(r rune) bool {
-	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || r == '_'
-}
-
-// retryAfter is the wait that a Retry-After header asks for, in seconds or
-// as an HTTP date; 0 without one.
-func retryAfter(h http.Header, now time.Time) time.Duration {
-	v := h.Get("Retry-After")
-	if v == "" {
-		return 0
-	}
-	if s, err := strconv.ParseInt(v, 10, 64); err == nil {
-		return time.Duration(max(s, 0)) * time.Second
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		return max(t.Sub(now), 0)
-	}
-	return 0
-}
-
-// networkError is a request that got no answer: ErrTransient, with the
-// cause that the *url.Error wraps and not its text, which quotes the
-// request's URL (g2-03).
-func networkError(method string, err error) error {
-	return fmt.Errorf("gdrive: %s: %w: %w", method, storage.ErrTransient, scrub(err))
+	return ""
 }
 
 // rateLimited is the error of a create that the driver's own bucket holds
@@ -147,57 +105,4 @@ func rateLimited(method string, wait time.Duration) error {
 // driver's: a new upload starts.
 func sessionGone(method string) error {
 	return fmt.Errorf("gdrive: %s: not a session of this destination: %w", method, storage.ErrSessionExpired)
-}
-
-// scrub returns err without the *url.Error around it, whose text quotes the
-// request's URL: for a chunk, the session URI with its upload_id (g2-03).
-func scrub(err error) error {
-	for {
-		ue, ok := err.(*url.Error)
-		if !ok {
-			return err
-		}
-		if ue.Err == nil {
-			return errors.New(ue.Op + " failed")
-		}
-		err = ue.Err
-	}
-}
-
-// tokenError is an error of the token source. One that wraps a storage
-// error passes through: Task 9's source returns ErrAuthExpired for
-// invalid_grant and ErrTransient for a token endpoint that does not answer.
-// Any other is ErrTransient, never ErrPermanent, and its text is not kept,
-// since it may quote the token endpoint's request.
-func tokenError(method string, err error) error {
-	if isStorageError(err) {
-		return fmt.Errorf("gdrive: %s: token: %w", method, scrub(err))
-	}
-	return &tokenFailure{method: method, err: err}
-}
-
-// tokenFailure is a token source's error that wraps no storage error.
-type tokenFailure struct {
-	method string
-	err    error
-}
-
-func (e *tokenFailure) Error() string {
-	return fmt.Sprintf("gdrive: %s: the token source failed: %v", e.method, storage.ErrTransient)
-}
-
-func (e *tokenFailure) Unwrap() []error { return []error{storage.ErrTransient, e.err} }
-
-// isStorageError reports whether err wraps a typed error of package
-// storage.
-func isStorageError(err error) bool {
-	for _, target := range []error{
-		storage.ErrAuthExpired, storage.ErrQuotaFull, storage.ErrSessionExpired, storage.ErrNotFound,
-		storage.ErrTransient, storage.ErrPermanent, storage.ErrProxyRequired,
-	} {
-		if errors.Is(err, target) {
-			return true
-		}
-	}
-	return storage.Reason(err).Code == storage.ReasonRateLimited // ErrRateLimited and ErrDailyCap
 }

@@ -178,7 +178,7 @@ func (d *Drive) storeNewID(ctx context.Context, p string, calls storage.CallCoun
 	var generated struct {
 		IDs []string `json:"ids"`
 	}
-	if err := a.decode(methodGenerateIDs, &generated); err != nil {
+	if err := a.Decode(methodGenerateIDs, &generated); err != nil {
 		return "", err
 	}
 	if len(generated.IDs) != 1 || generated.IDs[0] == "" {
