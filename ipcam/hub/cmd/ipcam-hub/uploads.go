@@ -25,10 +25,14 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/onedrive"
 )
 
-// The chunk alignment of the cloud destinations' partSize (§9.2).
+// The chunk alignment of the cloud destinations' partSize (§9.2), and
+// OneDrive's largest request, under 60 MiB (the onedrive driver's
+// maxRequest): the drivers refuse another partSize, so the validator refuses
+// it first.
 const (
-	driveAlign    = 256 << 10
-	oneDriveAlign = 320 << 10
+	driveAlign      = 256 << 10
+	oneDriveAlign   = 320 << 10
+	oneDriveMaxPart = 60<<20 - 1
 )
 
 // uploadsStoppedMessage is the error event of the uploads' stop when the SD
@@ -55,7 +59,8 @@ type uploadsConfig struct {
 // absolute directory, or Drive's folder in My Drive ("ipcam" when empty);
 // TokenRef names its sealed token row. BaseURL and UploadBaseURL override
 // the provider's endpoints, for the fakes only, and PartSize (0: the
-// driver's own) is accepted only with BaseURL.
+// driver's own) is accepted only with BaseURL. A LOCAL destination takes
+// none of the three.
 type destDef struct {
 	ID            string       `json:"id"`
 	Kind          storage.Kind `json:"kind"`
@@ -126,26 +131,48 @@ func (d destDef) validate() error {
 	if d.ID == "" {
 		return errors.New("no id")
 	}
-	var align int64
 	switch d.Kind {
 	case storage.KindLocal:
-		if !filepath.IsAbs(d.Folder) {
-			return fmt.Errorf("folder %q is not an absolute directory", d.Folder)
-		}
+		return d.validateLocal()
 	case storage.KindGoogleDrive:
-		align = driveAlign
+		return d.validateCloud(driveAlign, 0)
 	case storage.KindOneDrivePersonal:
-		align = oneDriveAlign
-	default:
-		return fmt.Errorf("unknown kind %q", d.Kind)
+		return d.validateCloud(oneDriveAlign, oneDriveMaxPart)
 	}
+	return fmt.Errorf("unknown kind %q", d.Kind)
+}
+
+// validateLocal checks a LOCAL destination: an absolute folder, and none of
+// the cloud drivers' fields, which local.New would ignore.
+func (d destDef) validateLocal() error {
 	switch {
-	case d.Kind != storage.KindLocal && d.TokenRef == "":
+	case !filepath.IsAbs(d.Folder):
+		return fmt.Errorf("folder %q is not an absolute directory", d.Folder)
+	case d.PartSize != 0:
+		return errors.New("a LOCAL destination takes no partSize")
+	case d.BaseURL != "":
+		return errors.New("a LOCAL destination takes no baseUrl")
+	case d.UploadBaseURL != "":
+		return errors.New("a LOCAL destination takes no uploadBaseUrl")
+	}
+	return nil
+}
+
+// validateCloud checks a cloud destination whose driver sends parts that are
+// multiples of align (never 0) and, when maxPart is not 0, at most maxPart
+// bytes: a tokenRef, and a partSize only with baseUrl, the fakes'.
+func (d destDef) validateCloud(align, maxPart int64) error {
+	switch {
+	case d.TokenRef == "":
 		return errors.New("no tokenRef")
-	case d.PartSize != 0 && d.BaseURL == "":
+	case d.PartSize == 0:
+		return nil
+	case d.BaseURL == "":
 		return errors.New("partSize needs baseUrl: the providers take their own part size")
-	case d.PartSize != 0 && (d.PartSize < 0 || d.PartSize%align != 0):
+	case d.PartSize < 0 || d.PartSize%align != 0:
 		return fmt.Errorf("partSize %d is not a positive multiple of %d", d.PartSize, align)
+	case maxPart != 0 && d.PartSize > maxPart:
+		return fmt.Errorf("partSize %d is over the driver's largest request, %d bytes", d.PartSize, maxPart)
 	}
 	return nil
 }

@@ -152,12 +152,23 @@ func readHubIDFile(t *testing.T, dataDir string) string {
 // refused, exit 1 with a message that names what is wrong, for an unknown
 // field, an unknown kind, a route to an unknown destination, a duplicate
 // destination id, a partSize without baseUrl, a partSize off the driver's
-// alignment and a route whose non-zero untilMs is not after its fromMs. A
-// route from fromMs on with no end is valid.
+// alignment or over OneDrive's largest request, a LOCAL destination with a
+// partSize, a baseUrl or an uploadBaseUrl, or a folder that is not absolute,
+// a cloud destination with no tokenRef, a route of an unknown class and a
+// route whose non-zero untilMs is not after its fromMs. diag uploads, which
+// reads the same section, refuses it alike, and neither makes the data
+// directory or the LOCAL folder. A route from fromMs on with no end is valid.
 func TestRun_UploadsSection_Validates(t *testing.T) {
 	dir := t.TempDir()
 	drive := func(change func(map[string]any)) map[string]any {
 		d := map[string]any{"id": "dst-1", "kind": "GOOGLE_DRIVE", "folder": "ipcam", "tokenRef": "dst-1", "baseUrl": "", "uploadBaseUrl": "", "partSize": 0}
+		if change != nil {
+			change(d)
+		}
+		return d
+	}
+	localDest := func(change func(map[string]any)) map[string]any {
+		d := map[string]any{"id": "dst-1", "kind": "LOCAL", "folder": filepath.Join(dir, "local"), "tokenRef": "", "baseUrl": "", "uploadBaseUrl": "", "partSize": 0}
 		if change != nil {
 			change(d)
 		}
@@ -188,6 +199,23 @@ func TestRun_UploadsSection_Validates(t *testing.T) {
 		{"a OneDrive partSize off the alignment", "partSize 524288 is not a positive multiple of 327680", uploads([]any{drive(func(d map[string]any) {
 			d["kind"], d["baseUrl"], d["partSize"] = "ONEDRIVE_PERSONAL", "http://127.0.0.1:1", 512<<10
 		})}, route(nil))},
+		{"a OneDrive partSize over its largest request", "partSize 62914560 is over the driver's largest request, 62914559 bytes", uploads([]any{drive(func(d map[string]any) {
+			d["kind"], d["baseUrl"], d["partSize"] = "ONEDRIVE_PERSONAL", "http://127.0.0.1:1", 192*(320<<10)
+		})}, route(nil))},
+		{"a LOCAL partSize", "a LOCAL destination takes no partSize", uploads([]any{localDest(func(d map[string]any) {
+			d["baseUrl"], d["partSize"] = "http://127.0.0.1:1", 512<<10
+		})}, route(nil))},
+		{"a LOCAL baseUrl", "a LOCAL destination takes no baseUrl", uploads([]any{localDest(func(d map[string]any) {
+			d["baseUrl"] = "http://127.0.0.1:1"
+		})}, route(nil))},
+		{"a LOCAL uploadBaseUrl", "a LOCAL destination takes no uploadBaseUrl", uploads([]any{localDest(func(d map[string]any) {
+			d["uploadBaseUrl"] = "http://127.0.0.1:1"
+		})}, route(nil))},
+		{"a LOCAL folder that is not absolute", `folder "rel/dir" is not an absolute directory`, uploads([]any{localDest(func(d map[string]any) {
+			d["folder"] = "rel/dir"
+		})}, route(nil))},
+		{"a cloud destination with no tokenRef", "no tokenRef", uploads([]any{drive(func(d map[string]any) { d["tokenRef"] = "" })}, route(nil))},
+		{"a route of an unknown class", `unknown class "BOGUS"`, uploads([]any{drive(nil)}, route(func(r map[string]any) { r["class"] = "BOGUS" }))},
 		{"a route whose untilMs is not after its fromMs", "untilMs 5000 is not after its fromMs 5000", uploads([]any{drive(nil)}, route(func(r map[string]any) {
 			r["fromMs"], r["untilMs"] = 5000, 5000
 		}))},
@@ -202,8 +230,14 @@ func TestRun_UploadsSection_Validates(t *testing.T) {
 			if !strings.Contains(stderr.String(), tc.want) || !strings.Contains(stdout.String(), `"type":"error"`) {
 				t.Errorf("stdout %q, stderr %q; want an error event and %q", stdout.String(), stderr.String(), tc.want)
 			}
-			if _, err := os.Stat(filepath.Join(dir, "data")); !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("the refused configuration changed the data directory (%v)", err)
+			code, lines, diagErr := runDiag(t, "uploads", "--config", config)
+			if code != exitFatal || len(lines) != 0 || !strings.Contains(diagErr, tc.want) {
+				t.Errorf("diag uploads = %d, %v, stderr %q; want exit %d, no line and %q", code, lines, diagErr, exitFatal, tc.want)
+			}
+			for _, p := range []string{filepath.Join(dir, "data"), filepath.Join(dir, "local")} {
+				if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("the refused configuration made %s (%v)", p, err)
+				}
 			}
 		})
 	}
@@ -211,6 +245,22 @@ func TestRun_UploadsSection_Validates(t *testing.T) {
 		config := filepath.Join(t.TempDir(), "run.json")
 		writeJSON(t, config, map[string]any{"dataDir": filepath.Join(dir, "data"), "jobs": []any{},
 			"uploads": uploads([]any{drive(nil)}, route(func(r map[string]any) { r["fromMs"] = 5000 }))})
+		if _, _, _, err := loadRunConfig(config); err != nil {
+			t.Errorf("loadRunConfig: %v", err)
+		}
+	})
+	t.Run("a LOCAL, a Drive and a OneDrive destination at their limits", func(t *testing.T) {
+		config := filepath.Join(t.TempDir(), "run.json")
+		writeJSON(t, config, map[string]any{"dataDir": filepath.Join(dir, "data"), "jobs": []any{},
+			"uploads": uploads([]any{
+				localDest(func(d map[string]any) { d["id"] = "dst-l" }),
+				drive(func(d map[string]any) {
+					d["id"], d["baseUrl"], d["uploadBaseUrl"], d["partSize"] = "dst-g", "http://127.0.0.1:1", "http://127.0.0.1:2", 256<<10
+				}),
+				drive(func(d map[string]any) {
+					d["id"], d["kind"], d["baseUrl"], d["partSize"] = "dst-o", "ONEDRIVE_PERSONAL", "http://127.0.0.1:1", 191*(320<<10)
+				}),
+			}, route(func(r map[string]any) { r["destinations"] = []string{"dst-l", "dst-g", "dst-o"} }))})
 		if _, _, _, err := loadRunConfig(config); err != nil {
 			t.Errorf("loadRunConfig: %v", err)
 		}
