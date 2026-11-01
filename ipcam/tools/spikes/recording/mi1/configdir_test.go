@@ -2,10 +2,13 @@ package mi1
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubproc"
 )
@@ -57,7 +60,7 @@ func checkTrusted(t *testing.T, path string, d *Driver, vol Volume) {
 // the config anew.
 func TestHubConfig_ReplacesAFilePlantedAtItsName(t *testing.T) {
 	d, st, cur, vol := hubConfigRig(t)
-	d.protectDir = func(dir string) error { return os.MkdirAll(dir, 0o700) } // the PC's DACL: TestHubConfig_AdministratorsOnlyAfterAPlant
+	d.protectDir = func(dir string) error { return os.MkdirAll(dir, 0o700) } // the PC's DACL: TestHubConfig_AdministratorsOnlyInItsOwnFolder
 	if err := os.MkdirAll(d.ConfigDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +91,107 @@ func TestHubConfig_ReplacesAFilePlantedAtItsName(t *testing.T) {
 	}
 	if os.SameFile(planted, written) {
 		t.Errorf("the config is still the file planted at its name")
+	}
+	checkTrusted(t, path, d, vol)
+}
+
+// TestNotAFolder_NamesWhatItIsAndHowToRemoveIt (Final fix C review, minor):
+// anything at the protected folder's place that is not a plain folder is
+// refused, a plain file too, which any user may put there (ProgramData lets
+// every user add files). The line says what lies there, a file or a link,
+// and gives the exact command that removes it from an administrator window:
+// del for a file or a link to a file, rd for a link or junction to a folder,
+// which leaves the folder that it points to as it is.
+func TestNotAFolder_NamesWhatItIsAndHowToRemoveIt(t *testing.T) {
+	const dir = `C:\ProgramData\ipcam-recspike`
+	for _, c := range []struct {
+		name          string
+		isDir, isLink bool
+		what, command string
+	}{
+		{"a file", false, false, "nu este un folder, ci un fișier", `(del /f /a "C:\ProgramData\ipcam-recspike")`},
+		{"a junction", true, true, "nu este un folder obișnuit, ci o legătură spre alt loc", `(rd "C:\ProgramData\ipcam-recspike")`},
+		{"a link to a file", false, true, "nu este un folder, ci o legătură spre un fișier", `(del "C:\ProgramData\ipcam-recspike")`},
+	} {
+		err := notAFolder(dir, c.isDir, c.isLink)
+		if err == nil || !strings.HasPrefix(err.Error(), dir+" "+c.what) || !strings.Contains(err.Error(), "dintr-o fereastră de administrator "+c.command) ||
+			!strings.HasSuffix(err.Error(), "apoi porniți din nou comanda") {
+			t.Errorf("%s: %v; want %q, then the command %s from an administrator window", c.name, err, c.what, c.command)
+		}
+	}
+}
+
+// TestHubConfig_WriteErrorsSayWhy (Final fix C review, minor): a config
+// that cannot be written into the protected folder is not a protection
+// failure, which would send the owner to the administrator window: a full
+// disk, or a file that another program holds open at its name, each has
+// its own Romanian line, and any other write error says that the config
+// could not be written there.
+func TestHubConfig_WriteErrorsSayWhy(t *testing.T) {
+	d, st, cur, vol := hubConfigRig(t)
+	d.protectDir = func(dir string) error { return os.MkdirAll(dir, 0o700) }
+	path := filepath.Join(d.ConfigDir, HubConfigName)
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"a full disk", &os.PathError{Op: "write", Path: path, Err: diskFullErrno}, "nu pot scrie setările ipcam-hub în " + path + ": discul este plin"},
+		{"another error", &os.PathError{Op: "write", Path: path, Err: errors.New("the device is not ready")},
+			"nu pot scrie setările ipcam-hub în " + path + ": write " + path + ": the device is not ready"},
+	}
+	if inUseErrno != nil {
+		cases = append(cases, struct {
+			name string
+			err  error
+			want string
+		}{"a file held open", &os.PathError{Op: "remove", Path: path, Err: inUseErrno},
+			"nu pot scrie setările ipcam-hub în " + path + ": fișierul este folosit de alt program"})
+	}
+	for _, c := range cases {
+		d.writeProtected = func(string, []byte) error { return c.err }
+		if _, err := d.hubConfig(st, cur, vol); err == nil || err.Error() != c.want {
+			t.Errorf("%s: hubConfig = %v, want %q", c.name, err, c.want)
+		}
+	}
+}
+
+// TestHubConfig_LabRewritesRunJSONOnlyWhenItChanges (Final fix C review,
+// M2): the lab's runs, and a driver without a ConfigDir, start ipcam-hub
+// from the run's run.json, which a resume reads again after a reset. Before
+// each start hubConfig writes it only when its trusted values change it,
+// and then durably, synced, so that a reset during the write cannot leave
+// the run without its config; when nothing changed it is not written.
+func TestHubConfig_LabRewritesRunJSONOnlyWhenItChanges(t *testing.T) {
+	d, _, cur, vol := hubConfigRig(t)
+	st := &RunState{Mode: ModeLab}
+	path := filepath.Join(d.runDir(cur.RunID), "run.json")
+	var synced []string
+	realSync := syncPath
+	t.Cleanup(func() { syncPath = realSync })
+	syncPath = func(p string) error {
+		synced = append(synced, p)
+		return realSync(p)
+	}
+	// The run's run.json names no MediaMTX; the driver's release does.
+	if got, err := d.hubConfig(st, cur, vol); err != nil || got != path {
+		t.Fatalf("hubConfig = %s, %v; want the run's run.json", got, err)
+	}
+	if !slices.Contains(synced, path) {
+		t.Errorf("hubConfig changed %s without syncing it (synced %q)", path, synced)
+	}
+	checkTrusted(t, path, d, vol)
+
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	synced = nil
+	if _, err := d.hubConfig(st, cur, vol); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || !info.ModTime().Equal(old) || len(synced) != 0 {
+		t.Errorf("hubConfig wrote the unchanged run.json again: %v, %v, synced %q", info.ModTime(), err, synced)
 	}
 	checkTrusted(t, path, d, vol)
 }

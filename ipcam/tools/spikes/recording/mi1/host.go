@@ -4,6 +4,7 @@ package mi1
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -737,7 +738,8 @@ var HubConfigNames = []string{HubConfigName, HubConfigMI2, HubConfigMI3, HubConf
 // (WriteHubConfig): a folder that another account made there before
 // install is refused (ProtectConfigDir), and a file at the config's name is
 // replaced, not written through (Final fix C review, I2). The lab's runs,
-// and a driver without a ConfigDir, write it back into run.json.
+// and a driver without a ConfigDir, write it back into run.json when it
+// changes (rewriteRun).
 func (d *Driver) hubConfig(st *RunState, cur *CurrentRun, vol Volume) (string, error) {
 	path := filepath.Join(d.runDir(cur.RunID), "run.json")
 	saved, err := hubproc.ReadConfig(path)
@@ -749,13 +751,30 @@ func (d *Driver) hubConfig(st *RunState, cur *CurrentRun, vol Volume) (string, e
 		cfg.IdentityFile = filepath.Join(d.runDir(cur.RunID), "ri_g.key")
 	}
 	if d.ConfigDir == "" || st.Mode == ModeLab {
-		return path, hubproc.WriteConfig(path, cfg)
+		return path, rewriteRun(path, cfg)
 	}
-	protect := d.protectDir
+	protect, write := d.protectDir, d.writeProtected
 	if protect == nil {
 		protect = ProtectConfigDir
 	}
-	return writeHubConfig(protect, d.ConfigDir, HubConfigName, cfg)
+	if write == nil {
+		write = WriteProtected
+	}
+	return writeHubConfig(protect, write, d.ConfigDir, HubConfigName, cfg)
+}
+
+// rewriteRun writes cfg into the run's run.json at path when it changes
+// what is there, durably: a resume reads it again after a reset, which a
+// write that is not synced could leave empty (Final fix C review, M2).
+func rewriteRun(path string, cfg hubproc.Config) error {
+	data, err := hubproc.EncodeConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if saved, err := os.ReadFile(path); err == nil && bytes.Equal(saved, data) { //nolint:gosec // the run's own run.json
+		return nil
+	}
+	return WriteDurably(path, data, 0o600)
 }
 
 // identity reads the run's RI_g; nil for a clear run.

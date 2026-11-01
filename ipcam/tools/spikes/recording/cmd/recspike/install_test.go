@@ -60,8 +60,8 @@ type fakeOS struct {
 	// owner is the owner's SID of every file, as ownerSID reads it.
 	owner string
 	// myFault makes `sc query MyFault` succeed: NotMyFault's driver
-	// service is registered.
-	myFault bool
+	// service is registered; failDelete makes `sc delete` fail.
+	myFault, failDelete bool
 }
 
 // serviceDemandStart is SERVICE_DEMAND_START: W32Time's start type on a PC
@@ -136,6 +136,9 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 			}
 			if name == "schtasks" && slices.Contains(args, "/Query") && f.noTask {
 				return errors.New("schtasks: exit status 1: the task does not exist")
+			}
+			if name == "sc" && args[0] == "delete" && f.failDelete {
+				return errors.New("sc: exit status 1072: the service has been marked for deletion")
 			}
 			if name == "sc" && args[0] == "query" && !f.myFault {
 				return errors.New("sc: exit status 1060: the service does not exist")
@@ -1053,6 +1056,32 @@ func TestUninstall_CrashDumpsAndNotMyFaultsService(t *testing.T) {
 				t.Errorf("left %v: uninstall printed:\n%s\nwant %q only when NotMyFault left it", left, text, line)
 			}
 		}
+	}
+}
+
+// TestUninstall_DumpHintSurvivesAFailedServiceDelete (Final fix C review,
+// M4): when NotMyFault's service cannot be deleted, uninstall still says
+// that MEMORY.DMP is there and points to the guide's step that deletes it,
+// and then fails with the service's Romanian line.
+func TestUninstall_DumpHintSurvivesAFailedServiceDelete(t *testing.T) {
+	a, f, _ := newAutostart(t, "windows", true)
+	if err := a.install(`C:\proba\recspike.exe`); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	a.out, f.myFault, f.failDelete = &out, true, true
+	if err := os.MkdirAll(filepath.Dir(a.memoryDump), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.memoryDump, []byte("PAGEDU64"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := a.uninstall(`C:\proba\recspike.exe`)
+	if err == nil || !strings.HasPrefix(err.Error(), "nu pot șterge serviciul MyFault, lăsat de NotMyFault") {
+		t.Errorf("uninstall = %v, want the Romanian line of the service that stays", err)
+	}
+	if text := out.String(); !strings.Contains(text, a.memoryDump) || !strings.Contains(text, "pasul 14.3") {
+		t.Errorf("uninstall printed:\n%s\nwant the MEMORY.DMP hint and its guide step, although the service stays", text)
 	}
 }
 

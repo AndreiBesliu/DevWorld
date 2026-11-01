@@ -922,8 +922,11 @@ func TestResume_ElevatedHubStartsFromTrustedValues(t *testing.T) {
 	t.Setenv(fakeMediaMTXLogEnv, started)
 
 	d := r.driver(t)
+	// The release's own MediaMTX, not empty: a config that dropped it would
+	// show (Final fix C review, M11).
+	d.MediaMTX = filepath.Join(t.TempDir(), "proba-inregistrare", "mediamtx")
 	d.ConfigDir = filepath.Join(t.TempDir(), "ProgramData", "ipcam-recspike")
-	d.protectDir = func(dir string) error { return os.MkdirAll(dir, 0o700) } // the PC's DACL: TestHubConfig_AdministratorsOnlyAfterAPlant
+	d.protectDir = func(dir string) error { return os.MkdirAll(dir, 0o700) } // the PC's DACL: TestHubConfig_AdministratorsOnlyInItsOwnFolder
 	// Run 2 gets no cut: reccontroller's comes minutes after the ready, and
 	// a fake's at once would race the test's cancel at that ready, to an OS
 	// stop that this driver does not have (Windows CI, a0616ba).

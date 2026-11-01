@@ -84,8 +84,9 @@ func ProtectConfigDir(dir string) error {
 		if err := windows.GetFileInformationByHandle(h, &info); err != nil {
 			return err
 		}
-		if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			return fmt.Errorf("%s nu este un folder obișnuit, ci o legătură spre alt loc, pe care poate a pus-o alt cont", dir)
+		isDir, isLink := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0, info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0
+		if !isDir || isLink {
+			return notAFolder(dir, isDir, isLink)
 		}
 		current, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 		if err != nil {
@@ -164,4 +165,15 @@ func createProtected(path string) (*os.File, error) {
 		return nil, &os.PathError{Op: "create", Path: path, Err: err}
 	}
 	return os.NewFile(uintptr(h), path), nil
+}
+
+// diskFull reports whether err is a write that found the disk full.
+func diskFull(err error) bool {
+	return errors.Is(err, windows.ERROR_DISK_FULL) || errors.Is(err, windows.ERROR_HANDLE_DISK_FULL)
+}
+
+// inUse reports whether err is a file that another program holds open
+// without letting it be deleted, or locks.
+func inUse(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION)
 }

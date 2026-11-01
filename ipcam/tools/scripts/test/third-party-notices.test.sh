@@ -128,7 +128,7 @@ check 'a failing go-licenses fails the notices' 1 --has 'go-licenses: cannot loa
 
 # keywrap, which only the MediaMTX fork reaches, is ignored in the recording
 # release's reports alone: the video release's notices do not depend on it.
-notices FAKE_IGNORES="${tmp}/video-ignores" > /dev/null 2>&1
+check 'the video release writes its notices' 0 -- notices FAKE_IGNORES="${tmp}/video-ignores"
 check 'the video release ignores only the modules of this repository' 0 --is "ipcam github.com/AndreiBesliu/DevWorld/ipcam
 ipcam github.com/AndreiBesliu/DevWorld/ipcam
 ipcam github.com/AndreiBesliu/DevWorld/ipcam" -- cat "${tmp}/video-ignores"
@@ -167,7 +167,7 @@ ipcam linux/arm/6 on ${armv6}
 mediamtx windows/amd64/ off .
 mediamtx linux/arm64/ off .
 mediamtx linux/arm/7 off ." -- cat "${tmp}/calls"
-notices_of recording FAKE_IGNORES="${tmp}/recording-ignores" > /dev/null 2>&1
+check 'the recording release writes its notices' 0 -- notices_of recording FAKE_IGNORES="${tmp}/recording-ignores"
 ignored='github.com/AndreiBesliu/DevWorld/ipcam github.com/benburkert/openpgp/aes/keywrap'
 check 'the recording release ignores keywrap too, which it names by hand' 0 --is "ipcam ${ignored}
 ipcam ${ignored}

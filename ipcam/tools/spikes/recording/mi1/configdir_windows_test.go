@@ -244,11 +244,61 @@ func TestHubConfig_RefusesAJunctionForItsFolder(t *testing.T) {
 		t.Fatalf("mklink /J: %v: %s", err, out)
 	}
 	_, err := d.hubConfig(st, cur, vol)
-	if err == nil || !strings.Contains(err.Error(), "nu este un folder obișnuit") {
-		t.Errorf("hubConfig through a junction = %v, want a Romanian refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "ci o legătură spre alt loc") || !strings.Contains(err.Error(), `(rd "`+d.ConfigDir+`")`) {
+		t.Errorf("hubConfig through a junction = %v, want a Romanian refusal that names the link and gives rd", err)
 	}
 	if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
 		t.Errorf("the junction's target holds %v (%v), want nothing", entries, err)
+	}
+}
+
+// The system's errors of a full disk and of a file that another program
+// holds open, here.
+var (
+	diskFullErrno error = windows.ERROR_DISK_FULL
+	inUseErrno    error = windows.ERROR_SHARING_VIOLATION
+)
+
+// TestHubConfig_SaysWhenItsFileIsInUse (Final fix C review, minor): a
+// config that another program holds open, as an editor or a scanner may,
+// cannot be replaced; the owner reads that it is in use, not that the
+// folder could not be protected.
+func TestHubConfig_SaysWhenItsFileIsInUse(t *testing.T) {
+	requireElevated(t)
+	d, st, cur, vol := hubConfigRig(t)
+	path, err := d.hubConfig(st, cur, vol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path) //nolint:gosec // the test's config; it shares reading and writing, not deleting
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := d.hubConfig(st, cur, vol); err == nil || err.Error() != "nu pot scrie setările ipcam-hub în "+path+": fișierul este folosit de alt program" {
+		t.Errorf("hubConfig over an open config = %v, want the Romanian line that it is in use", err)
+	}
+}
+
+// TestHubConfig_RefusesAFileForItsFolder (Final fix C review, minor): a
+// file at the protected folder's place, which any user may put there, is
+// refused with the line that names a file and gives the del command, and
+// stays as it is.
+func TestHubConfig_RefusesAFileForItsFolder(t *testing.T) {
+	requireElevated(t)
+	d, st, cur, vol := hubConfigRig(t)
+	if err := os.MkdirAll(filepath.Dir(d.ConfigDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(d.ConfigDir, plantedConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := d.hubConfig(st, cur, vol)
+	if err == nil || !strings.Contains(err.Error(), "nu este un folder, ci un fișier") || !strings.Contains(err.Error(), `(del /f /a "`+d.ConfigDir+`")`) {
+		t.Errorf("hubConfig over a file = %v, want a Romanian refusal that names a file and gives del", err)
+	}
+	if got, err := os.ReadFile(d.ConfigDir); err != nil || !bytes.Equal(got, plantedConfig) {
+		t.Errorf("the file is now %q (%v), want it as planted", got, err)
 	}
 }
 

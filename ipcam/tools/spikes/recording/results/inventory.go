@@ -80,7 +80,26 @@ func (x expected) redo() string {
 // are skipped, and an AGE result that was interrupted or has no mbps does
 // not count (report-4).
 func Inventory(dir string, piSupported bool) (present, missing []string) {
+	return Collect(dir).Inventory(piSupported)
+}
+
+// Results is a results folder as Collect read it: its valid envelopes, at
+// any depth, for the gates' judges too, and whether its app/ folders hold
+// an AGE result that measured.
+type Results struct {
+	Envelopes []Envelope
+	AGE       bool
+}
+
+// Collect reads the results folder dir once, for Inventory and the judges.
+func Collect(dir string) Results {
 	envs, age := collect(dir)
+	return Results{Envelopes: envs, AGE: age}
+}
+
+// Inventory is the package's Inventory of the folder that r was read from.
+func (r Results) Inventory(piSupported bool) (present, missing []string) {
+	envs, age := r.Envelopes, r.AGE
 	for _, e := range envs {
 		present = append(present, Label(e.Code, e.Set, e.Host))
 	}
@@ -98,13 +117,6 @@ func Inventory(dir string, piSupported bool) (present, missing []string) {
 		missing = append(missing, ageResult)
 	}
 	return present, missing
-}
-
-// Envelopes are the valid envelopes of the results folder dir, at any
-// depth, as Inventory reads them, for the gates' judges.
-func Envelopes(dir string) []Envelope {
-	envs, _ := collect(dir)
-	return envs
 }
 
 // collect reads the results folder dir: its valid envelopes, and whether

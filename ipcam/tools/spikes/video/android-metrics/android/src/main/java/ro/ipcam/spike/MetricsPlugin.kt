@@ -90,11 +90,12 @@ internal fun autorunQuery(autorun: String?, hub: String?): String? {
  * Only a cold start honours the extras. `load()` reads them once and removes
  * them from the Activity's Intent, and the Activity's saved state (which the
  * system keeps across a process death) holds the scenario until the page has
- * been given it (AutorunHandoff). An Activity that is created again before that
- * runs the scenario; one restored after its page had it (it was created again,
- * or its process died and the system started it from the launch Intent it
- * kept, extras included) ignores the extras: its scenario ended with the old
- * page, and the next `am start` is the way to run it again. A warm start
+ * taken it: until the page that `load()` gave the query reads the metrics,
+ * which its run does first (AutorunHandoff). An Activity that is created again
+ * before that runs the scenario; one restored after its page took it (it was
+ * created again, or its process died and the system started it from the
+ * launch Intent it kept, extras included) ignores the extras: its scenario
+ * ended with the old page, and the next `am start` is the way to run it again. A warm start
  * (`onNewIntent`) does not read them at all.
  * The manifest's `configChanges` keep configuration changes from creating the
  * Activity again, because that would lose the run in progress. The Activity is exported
@@ -122,7 +123,8 @@ class MetricsPlugin : Plugin() {
         }
     }
 
-    /** The launch extras' scenario until the page has it; the Activity's saved state keeps it. */
+    /** The launch extras' scenario until the page takes it; the Activity's saved state keeps it. */
+    @Volatile
     private var handoff = AutorunHandoff.onLoad(extrasQuery = null, restored = false, savedPending = null)
 
     override fun load() {
@@ -159,8 +161,8 @@ class MetricsPlugin : Plugin() {
             Log.i(TAG, "load posted: attached=${webView.isAttachedToWindow} url=${pageForLog(webView.url)}")
             handoff.pendingQuery?.let { query ->
                 val url = "${bridge.localUrl}/?$query"
+                handoff.loaded() // before the new page can read
                 webView.loadUrl(url)
-                handoff.handed()
                 Log.i(TAG, "loadUrl: ${pageForLog(url)}")
             }
         }
@@ -197,6 +199,9 @@ class MetricsPlugin : Plugin() {
 
     @PluginMethod
     fun read(call: PluginCall) {
+        // A scenario's run reads the metrics first: the page that was loaded with
+        // the launch extras' query has taken its scenario now (AutorunHandoff).
+        handoff.handed()
         val metrics = JSObject()
         val power = context.getSystemService(PowerManager::class.java)
         power?.let { thermalName(it.currentThermalStatus) }?.let { metrics.put("thermal", it) }

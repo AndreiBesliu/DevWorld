@@ -5,6 +5,7 @@ package mi1
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -30,3 +31,10 @@ func TestProtectConfigDir_RootsAlone(t *testing.T) {
 		t.Errorf("the config folder's mode is %v, want 0700", info.Mode().Perm())
 	}
 }
+
+// The system's errors of a full disk and of a file that another program
+// holds open, here: Linux has no lock that keeps a file from being removed.
+var (
+	diskFullErrno error = syscall.ENOSPC
+	inUseErrno    error
+)

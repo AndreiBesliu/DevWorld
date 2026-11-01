@@ -4,7 +4,11 @@
 
 package mi1
 
-import "os"
+import (
+	"errors"
+	"os"
+	"syscall"
+)
 
 // ProtectConfigDir makes dir, the folder of recspike's own files and of
 // ipcam-hub's config, root's alone: recspike runs as root there, and the
@@ -21,3 +25,11 @@ func ProtectConfigDir(dir string) error {
 func createProtected(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // recspike's own folder
 }
+
+// diskFull reports whether err is a write that found the disk, or the
+// user's quota, full.
+func diskFull(err error) bool { return errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) }
+
+// inUse reports whether err is a file that another program holds: Linux
+// removes and replaces a file that is open.
+func inUse(error) bool { return false }

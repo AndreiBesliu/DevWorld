@@ -41,10 +41,12 @@
 # On failure it prints the cause as check annotations, which can be read where
 # the job log cannot. Each check and the outcome also go to the job's step
 # summary ($GITHUB_STEP_SUMMARY), which GitHub keeps whole, while it keeps only
-# ten annotations of a level per step: a full run of the S1 starts gives exactly
-# ten notices (the warm-up, which carries the network check, five starts, the
-# device facts, the probe, and the start before the process death with its
-# check), and the age mode two (its warm-up and AGE).
+# ten annotations of a level per step, and drops the rest without a word. So a
+# full run of the S1 starts gives eight notices: the warm-up, which carries the
+# network check, five starts, the first that stores a result with the device
+# facts, the probe, and the process death with the start before it. The age mode
+# gives two (its warm-up and AGE). A run that would give more than max_notices
+# fails, with an error that says so, before a notice can be lost.
 #
 #   apps/mobile/ci/emulator-smoke.sh <apk> <spikehub results folder> <spikehub log> [starts] [full|quick]
 #   apps/mobile/ci/emulator-smoke.sh <apk> <spikehub results folder> <spikehub log> age
@@ -73,6 +75,9 @@ app=ro.ipcam.spike
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 run_timeout=150 # seconds one start may take; S1 takes about a minute
 age_timeout=240 # seconds the AGE start may take; a phone needs a few seconds
+max_notices=8   # notices one run may give: two below GitHub's ten per step
+notices_log="$(mktemp)"
+trap 'rm -f "${notices_log}"' EXIT
 
 # Prints standard input as one annotation of level $1 (error, notice) titled $2.
 # GitHub shows about 4000 characters of an annotation: keep the first 3300.
@@ -81,6 +86,21 @@ annotate() {
   text="$(cat)"
   body="$(printf '%s' "${text:0:3300}" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk 'BEGIN { ORS = "" } { print (NR > 1 ? "%0A" : "") $0 }')"
   echo "::$1 title=$2::${body:-(nothing)}"
+  # A file, not a variable: annotate runs at the end of a pipe, in a subshell.
+  if [[ "$1" == notice ]]; then
+    echo "$2" >> "${notices_log}"
+  fi
+}
+
+# Fails the run with an error when it gave more than max_notices notices.
+check_notices() {
+  local given
+  given="$(wc -l < "${notices_log}")"
+  if ((given > max_notices)); then
+    echo "the run gave ${given} notices, more than ${max_notices}: GitHub keeps ten per step, so merge them" | annotate error "emulator notices"
+    summarize "- notices: ${given}, more than ${max_notices}"
+    return 1
+  fi
 }
 
 # Appends a line to the job's step summary, when there is one.
@@ -163,14 +183,27 @@ adb install -r "${apk}"
 
 # The S1 result that the last successful cold_start stored.
 stored_s1=""
+# A start's notice that waits for the check after it, which gives it with its
+# own line (held), titled held_title.
+held=""
+held_title=""
+
+# Gives the notice that waits, if one does, alone.
+release_held() {
+  if [[ -n "${held}" ]]; then
+    printf '%s\n' "${held}" | annotate notice "${held_title}"
+    held=""
+  fi
+}
 
 # Starts the app cold with the launch extras (the process is gone, so the app has
 # nothing but them) and waits for the S1 result. $1: the label of the start,
-# $2: "probe" to change the font scale 5 s after the launch. Returns 0 with a
-# notice when the result holds 20 samples (and sets stored_s1), else 1 with an
-# error and the diagnosis.
+# $2: "probe" to change the font scale 5 s after the launch, $3: "hold" to keep
+# the notice for the check that follows (held). Returns 0 with a notice when the
+# result holds 20 samples (and sets stored_s1), else 1 with an error and the
+# diagnosis.
 cold_start() {
-  local label="$1" probe="${2:-}" launch stored="" problem="" deadline file samples known line
+  local label="$1" probe="${2:-}" hold="${3:-}" launch stored="" problem="" deadline file samples known line body
   adb shell am force-stop "${app}"
   adb logcat -b all -c
   # Only a result stored from now on belongs to this start, not a late one of an earlier start.
@@ -194,7 +227,7 @@ cold_start() {
       if ((samples == 20)); then
         stored="${file}"
       else
-        problem="$(jq -r '"S1 stored with \(.samples.firstFrameMs // [] | length) of 20 samples; notes: \(.notes | join("; "))"' "${file}")"
+        problem="$(jq -r '"S1 stored with \(.samples.firstFrameMs // [] | length) of 20 samples; notes: \((.notes // []) | join("; "))"' "${file}")"
       fi
     done
     [[ -n "${stored}${problem}" ]] || sleep 3
@@ -212,21 +245,28 @@ cold_start() {
   # Nearest rank: p50 is the 10th and p90 the 18th of the 20 sorted samples.
   line="$(jq -r '(.samples.firstFrameMs | sort | map(round)) as $ms
     | "S1 stored with 20 samples: first frame p50 \($ms[9]) ms, p90 \($ms[17]) ms, max \($ms[19]) ms;"
-      + " \(.device.model) \(.device.os) \(.device.webview); notes: \(.notes | join("; "))"' "${stored}")"
+      + " \(.device.model) \(.device.os) \(.device.webview); notes: \((.notes // []) | join("; "))"' "${stored}")"
   summarize "- ${label}: ${line}"
-  {
+  body="$(
     echo "${line}"
     echo "launch: ${launch}"
     app_log 12
-  } | annotate notice "emulator S1 ${label}"
+  )"
   stored_s1="${stored}"
+  if [[ "${hold}" == hold ]]; then
+    held="${body}"
+    held_title="emulator S1 ${label}"
+  else
+    printf '%s\n' "${body}" | annotate notice "emulator S1 ${label}"
+  fi
 }
 
 # The device facts of the metrics plugin, with the app still on the page of the
 # start that stored $1: device.ramMb in the stored S1 result, and ramMb and
 # charging in what window.spikeNative.metrics() answers now, with charging
-# compared to the system's own power state. Returns 0 with a notice, else 1
-# with an error.
+# compared to the system's own power state. Returns 0 with the held notice of
+# that start, which then carries the facts' line, else 1 with that notice and
+# an error.
 device_facts() {
   local stored="$1" ram metrics="" pid powered system charging line problems=()
   ram="$(jq -c '.device.ramMb' "${stored}")"
@@ -254,21 +294,27 @@ device_facts() {
     fi
   fi
   if ((${#problems[@]} > 0)); then
+    release_held
     printf '%s\n' "${problems[@]}" | annotate error "emulator device facts"
     summarize "- device facts: failed: ${problems[*]}"
     return 1
   fi
   line="S1 device.ramMb ${ram}; metrics plugin: ramMb $(jq -c '.ramMb' <<<"${metrics}"), charging ${charging} (system:${powered:+ ${powered}})"
   summarize "- device facts: ${line}"
-  echo "${line}" | annotate notice "emulator device facts"
+  {
+    printf '%s\n' "${held}"
+    echo "device facts: ${line}"
+  } | annotate notice "${held_title}"
+  held=""
 }
 
-# After a start with its result: the app goes to the background (its Activity
-# stops and saves its state), the system kills its process, and the launcher
-# Intent starts it again. Returns 0 when the app is back in a new process and
-# did not load the page with the launch extras again, else 1 with the diagnosis.
+# After a start with its result, whose notice is held: the app goes to the
+# background (its Activity stops and saves its state), the system kills its
+# process, and the launcher Intent starts it again. Returns 0 when the app is
+# back in a new process and did not load the page with the launch extras again,
+# with one notice for both, else 1 with the start's notice and the diagnosis.
 survives_process_death() {
-  local label="process death" before after log deadline
+  local label="process death" before after log deadline problem=""
   before="$(adb shell pidof "${app}" | tr -d '\r')"
   adb shell input keyevent KEYCODE_HOME
   sleep 3
@@ -276,6 +322,7 @@ survives_process_death() {
   sleep 2
   after="$(adb shell pidof "${app}" | tr -d '\r')"
   if [[ -n "${after}" ]]; then
+    release_held
     echo "the process ${after} of the app is still alive after am kill" | annotate error "emulator S1 ${label}"
     return 1
   fi
@@ -286,21 +333,28 @@ survives_process_death() {
   after="$(adb shell pidof "${app}" | tr -d '\r')"
   log="$(app_log 14)"
   if [[ -z "${after}" || "${after}" == "${before}" ]]; then
-    echo "the app did not start again in a new process (pid ${before} before, ${after:-none} after)" | annotate error "emulator S1 ${label}"
+    problem="the app did not start again in a new process (pid ${before} before, ${after:-none} after)"
   elif grep -q 'loadUrl:' <<<"${log}"; then
-    echo "the restored Activity ran the launch extras again:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
+    problem="the restored Activity ran the launch extras again:"$'\n'"${log}"
   elif ! grep -q 'restored=true' <<<"${log}"; then
-    echo "the app started again, but its Activity was not restored from a saved state:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
+    problem="the app started again, but its Activity was not restored from a saved state:"$'\n'"${log}"
   elif ! grep -q 'page loaded' <<<"${log}"; then
-    echo "the restored app loaded no page within 30 s:"$'\n'"${log}" | annotate error "emulator S1 ${label}"
-  else
-    echo "new process ${after} after ${before}; no autorun again:"$'\n'"${log}" | annotate notice "emulator S1 ${label}"
-    summarize "- ${label}: the app came back in a new process and did not run the scenario again"
-    return 0
+    problem="the restored app loaded no page within 30 s:"$'\n'"${log}"
   fi
-  summarize "- ${label}: failed (see the annotations)"
-  diagnose
-  return 1
+  if [[ -n "${problem}" ]]; then
+    release_held
+    echo "${problem}" | annotate error "emulator S1 ${label}"
+    summarize "- ${label}: failed (see the annotations)"
+    diagnose
+    return 1
+  fi
+  {
+    printf '%s\n' "${held}"
+    echo "process death: new process ${after} after ${before}; no autorun again:"
+    echo "${log}"
+  } | annotate notice "emulator S1 ${label}"
+  held=""
+  summarize "- ${label}: the app came back in a new process and did not run the scenario again"
 }
 
 # The first launch after the emulator booted, not counted. The emulator is still
@@ -365,7 +419,7 @@ age_start() {
   if [[ -z "${stored}" ]]; then
     problem="no AGE result within ${age_timeout} s"
   elif ! jq -e '(.mbps | type == "number") and .mbps > 0 and .interrupted != true' "${stored}" >/dev/null; then
-    problem="$(jq -r '"AGE stored without mbps > 0: mbps \(.mbps), interrupted \(.interrupted); notes: \(.notes | join("; "))"' "${stored}")"
+    problem="$(jq -r '"AGE stored without mbps > 0: mbps \(.mbps), interrupted \(.interrupted); notes: \((.notes // []) | join("; "))"' "${stored}")"
   fi
   if [[ -n "${problem}" ]]; then
     {
@@ -377,7 +431,7 @@ age_start() {
     return 1
   fi
   line="$(jq -r '"AGE stored: \(.mbps * 10 | round / 10) Mbps, \(.bytes) bytes in \(.ms | round) ms (the emulator'"'"'s speed is not judged);"
-    + " \(.device.model) \(.device.os) \(.device.webview); notes: \(.notes | join("; "))"' "${stored}")"
+    + " \(.device.model) \(.device.os) \(.device.webview); notes: \((.notes // []) | join("; "))"' "${stored}")"
   summarize "- ${line}"
   {
     echo "${line}"
@@ -389,8 +443,10 @@ age_start() {
 if [[ "${mode}" == age ]]; then
   summarize "### AGE in the emulator's WebView (C1-R25)"
   warm_up "emulator AGE warm-up"
-  age_start
-  exit
+  code=0
+  age_start || code=$?
+  check_notices || code=1
+  exit "${code}"
 fi
 
 summarize "### Emulator smoke test (AND-3), ${mode} mode"
@@ -399,7 +455,11 @@ failures=0
 checks=$((starts + 1)) # the starts and the device facts
 facts=""
 for ((start = 1; start <= starts; start++)); do
-  if ! cold_start "start ${start} of ${starts}"; then
+  hold=""
+  if [[ -z "${facts}" ]]; then
+    hold=hold # the device facts' line goes into this start's notice
+  fi
+  if ! cold_start "start ${start} of ${starts}" "" "${hold}"; then
     failures=$((failures + 1))
   elif [[ -z "${facts}" ]]; then
     facts=checked
@@ -414,13 +474,14 @@ fi
 if [[ "${mode}" == full ]]; then
   checks=$((checks + 3))
   cold_start "probe (font scale change)" probe || failures=$((failures + 1))
-  if cold_start "start before process death"; then
+  if cold_start "start before process death" "" hold; then
     survives_process_death || failures=$((failures + 1))
   else
     failures=$((failures + 1))
   fi
 fi
 
+check_notices || failures=$((failures + 1))
 if ((failures == 0)); then
   summarize "All ${checks} checks passed."
 else

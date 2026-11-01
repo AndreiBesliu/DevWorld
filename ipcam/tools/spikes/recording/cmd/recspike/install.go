@@ -474,20 +474,22 @@ func (a autostart) removeHubConfig() error {
 const myFault = "MyFault"
 
 // removeBugcheckLeftovers deals with what the bugchecks leave on the PC
-// (mi1-7, security-3): it removes NotMyFault's driver service when it is
-// there, and when Windows' kernel dump is there, often of several GB, it
-// points to the guide's step that deletes the crash dumps.
+// (mi1-7, security-3): when Windows' kernel dump is there, often of
+// several GB, it points to the guide's step that deletes the crash dumps,
+// first, so that the owner reads it also when the service stays (Final
+// fix C review, M4); then it removes NotMyFault's driver service when it
+// is there.
 func (a autostart) removeBugcheckLeftovers() error {
+	if _, err := os.Stat(a.memoryDump); err == nil {
+		_, _ = fmt.Fprintf(a.out, "Ecranele albastre ale probei au lăsat pe PC %s, de obicei de câțiva GB, și alte fișiere de eroare: "+
+			"ștergeți-le cu „Curățare disc”, ca la pasul 14.3 din ghid.\n", a.memoryDump)
+	}
 	if a.run("sc", "query", myFault) == nil {
 		_ = a.run("sc", "stop", myFault) // a stopped driver is no error
 		if err := a.run("sc", "delete", myFault); err != nil {
 			return fmt.Errorf("nu pot șterge serviciul %s, lăsat de NotMyFault: %w", myFault, err)
 		}
 		_, _ = fmt.Fprintln(a.out, "Am șters serviciul MyFault, lăsat în Windows de NotMyFault.")
-	}
-	if _, err := os.Stat(a.memoryDump); err == nil {
-		_, _ = fmt.Fprintf(a.out, "Ecranele albastre ale probei au lăsat pe PC %s, de obicei de câțiva GB, și alte fișiere de eroare: "+
-			"ștergeți-le cu „Curățare disc”, ca la pasul 14.3 din ghid.\n", a.memoryDump)
 	}
 	return nil
 }

@@ -188,7 +188,7 @@ func inSet(set string) func(results.Envelope) bool {
 // nimic» comes only when no part is missing or incomplete.
 func TestCollection_ListsWhatTheJudgesCannotDecide(t *testing.T) {
 	t.Run("complete", func(t *testing.T) {
-		got := collection(completeOwnerResults(t).folder(t), true)
+		got := collection(results.Collect(completeOwnerResults(t).folder(t)), true)
 		if !strings.Contains(got, "Nu lipsește nimic.") || strings.Contains(got, "Lipsesc") || strings.Contains(got, "incomplete") {
 			t.Errorf("collection =\n%s\nwant «Nu lipsește nimic.» and nothing else missing", got)
 		}
@@ -241,7 +241,7 @@ func TestCollection_ListsWhatTheJudgesCannotDecide(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			o := completeOwnerResults(t)
 			tc.damage(o)
-			got := collection(o.folder(t), true)
+			got := collection(results.Collect(o.folder(t)), true)
 			for _, want := range tc.want {
 				if !strings.Contains(got, want) {
 					t.Errorf("collection =\n%s\nwant it to hold %q", got, want)
@@ -257,13 +257,13 @@ func TestCollection_ListsWhatTheJudgesCannotDecide(t *testing.T) {
 		// A crash of the 72 h run fails G11 (G27): nothing to redo.
 		o := completeOwnerResults(t).each(func(e results.Envelope) bool { return e.Code == "MI2" && e.Host == "pc" },
 			func(e *results.Envelope) { e.MI2.Hours, e.MI2.Crashes72h = 20, 1 })
-		if got := collection(o.folder(t), true); !strings.Contains(got, "Nu lipsește nimic.") {
+		if got := collection(results.Collect(o.folder(t)), true); !strings.Contains(got, "Nu lipsește nimic.") {
 			t.Errorf("collection =\n%s\nwant «Nu lipsește nimic.»", got)
 		}
 	})
 
 	t.Run("an absent part is only missing", func(t *testing.T) {
-		got := collection(completeOwnerResults(t).without(inSet(mi1.SetPiSysrq)).folder(t), true)
+		got := collection(results.Collect(completeOwnerResults(t).without(inSet(mi1.SetPiSysrq)).folder(t)), true)
 		if !strings.Contains(got, "Lipsesc: MI1 pi-sysrq (pi).") || strings.Contains(got, "MI1 pi-sysrq (pi):") {
 			t.Errorf("collection =\n%s\nwant MI1 pi-sysrq (pi) under «Lipsesc» alone", got)
 		}
@@ -272,7 +272,7 @@ func TestCollection_ListsWhatTheJudgesCannotDecide(t *testing.T) {
 	t.Run("an unsupported Pi", func(t *testing.T) {
 		o := completeOwnerResults(t).without(func(e results.Envelope) bool { return e.Host == "pi" })
 		o.envs = append(o.envs, results.PiProbeMarker("Raspberry Pi Zero W Rev 1.1", "9000c1", "device-tree", 1))
-		if got := collection(o.folder(t), false); !strings.Contains(got, "Nu lipsește nimic.") {
+		if got := collection(results.Collect(o.folder(t)), false); !strings.Contains(got, "Nu lipsește nimic.") {
 			t.Errorf("collection =\n%s\nwant nothing expected of the Pi", got)
 		}
 	})
