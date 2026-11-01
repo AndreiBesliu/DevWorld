@@ -1,6 +1,7 @@
 package mi1
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,26 +15,32 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/internal/spiketest"
 )
 
-// TestHubConfig_AdministratorsOnlyAfterAPlant (Final fix C review, I2):
-// %ProgramData% lets any user make a folder in it first. Before install,
-// the owner's user (anything that runs as the owner without a UAC prompt)
-// made %ProgramData%\ipcam-recspike and put there its own
-// ipcam-hub-run.json, owns both, and gave itself Full control of each,
-// beside the entries that they inherit or, more hostile, in a DACL of its
-// own that denies Administrators the right to change it. Once hubConfig
-// has run, as the elevated starts of ipcam-hub run it, the folder and the
-// config belong to Administrators, each with a protected DACL that only
-// Administrators and SYSTEM are in, and a standard window can neither
-// change the config, its DACL or the folder's, nor delete the config, nor
-// add a file to the folder. The windows CI job runs elevated, as the boot
-// task and the shortcut do.
-func TestHubConfig_AdministratorsOnlyAfterAPlant(t *testing.T) {
+// requireElevated skips t outside an elevated test process. The windows CI
+// job runs elevated, as the boot task and the shortcut do.
+func requireElevated(t *testing.T) {
+	t.Helper()
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		if os.Getenv("GITHUB_ACTIONS") == "true" {
 			t.Fatal("the windows job runs elevated, and this test needs it")
 		}
 		t.Skip("needs an elevated test process, as the boot task and the shortcut")
 	}
+}
+
+// TestHubConfig_RefusesAFolderThatAnotherAccountMade (Final fix C review,
+// I2): %ProgramData% lets any user make a folder in it first. Before
+// install, the owner's user (anything that runs as the owner without a UAC
+// prompt) made %ProgramData%\ipcam-recspike and put its own
+// ipcam-hub-run.json there. It owns both and has Full control of each:
+// through an entry of its own beside the ones that they inherit; or in a
+// DACL of its own that denies Administrators the right to change it; or
+// through a handle to the folder, opened with the right to change its DACL
+// and kept open, which no later change of that DACL takes back. So
+// hubConfig, as the elevated starts of ipcam-hub run it, never takes such a
+// folder as its own: it refuses it with the Romanian line that tells the
+// owner to delete it, and changes nothing in it.
+func TestHubConfig_RefusesAFolderThatAnotherAccountMade(t *testing.T) {
+	requireElevated(t)
 	sid, err := UserSID()
 	if err != nil {
 		t.Fatal(err)
@@ -41,12 +48,15 @@ func TestHubConfig_AdministratorsOnlyAfterAPlant(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		plant func(t *testing.T, path string)
+		// hold keeps a standard window's handle to the folder open, with
+		// the right to change its DACL.
+		hold bool
 	}{
 		{"an entry of its own", func(t *testing.T, path string) {
 			if err := spiketest.AddFull(path, sid); err != nil {
 				t.Fatalf("the plant's own entry in %s: %v", path, err)
 			}
-		}},
+		}, false},
 		{"Administrators denied", func(t *testing.T, path string) {
 			// DELETE, WRITE_DAC and WRITE_OWNER; FILE_DELETE_CHILD too on
 			// the folder.
@@ -55,12 +65,14 @@ func TestHubConfig_AdministratorsOnlyAfterAPlant(t *testing.T) {
 				deny, inherit = "0xd0040", "OICI"
 			}
 			setDACL(t, path, fmt.Sprintf("D:P(D;%s;%s;;;BA)(A;%s;FA;;;%s)", inherit, deny, inherit, sid))
-		}},
+		}, false},
+		{"a handle that it keeps open", func(*testing.T, string) {}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, st, cur, vol := hubConfigRig(t) // d.protectDir is nil: the PC's own
 			config := filepath.Join(d.ConfigDir, HubConfigName)
 			standard := spiketest.StandardToken(t)
+			var held windows.Handle
 			spiketest.AsStandard(t, standard, func() {
 				if err := os.MkdirAll(d.ConfigDir, 0o700); err != nil {
 					t.Fatal(err)
@@ -68,45 +80,140 @@ func TestHubConfig_AdministratorsOnlyAfterAPlant(t *testing.T) {
 				if err := os.WriteFile(config, plantedConfig, 0o600); err != nil {
 					t.Fatal(err)
 				}
+				if tc.hold {
+					held = openToChangeDACL(t, d.ConfigDir)
+				}
 			})
 			for _, path := range []string{d.ConfigDir, config} {
 				spiketest.SetOwner(t, path, sid)
 				tc.plant(t, path)
 				t.Logf("the planted %s: %s", filepath.Base(path), sddl(path))
 			}
-			spiketest.AsStandard(t, standard, func() {
-				if err := os.WriteFile(config, plantedConfig, 0o600); err != nil {
-					t.Fatalf("a standard window cannot write the config that it planted: %v", err)
-				}
-			})
 
 			path, err := d.hubConfig(st, cur, vol)
-			if err != nil {
-				t.Fatalf("hubConfig: %v", err)
-			}
-			if path != config {
-				t.Fatalf("hubConfig wrote %s, want %s", path, config)
-			}
-			for _, p := range []string{d.ConfigDir, config} {
-				t.Logf("after hubConfig, %s: %s", filepath.Base(p), sddl(p))
-				checkAdministratorsOnly(t, p)
-			}
-			spiketest.AsStandard(t, standard, func() {
-				for what, change := range map[string]func() error{
-					"wrote the config":           func() error { return os.WriteFile(config, plantedConfig, 0o600) },
-					"changed the config's DACL":  func() error { return spiketest.GrantFull(config, sid) },
-					"deleted the config":         func() error { return os.Remove(config) },
-					"changed the folder's DACL":  func() error { return spiketest.GrantFull(d.ConfigDir, sid) },
-					"added a file to the folder": func() error { return os.WriteFile(filepath.Join(d.ConfigDir, "other.json"), plantedConfig, 0o600) },
-				} {
-					if err := change(); err == nil {
-						t.Errorf("after hubConfig, a standard window %s", what)
-					}
+			if err == nil {
+				t.Errorf("hubConfig took %s, which a standard window made, as its own, and wrote %s", d.ConfigDir, path)
+				if held != 0 {
+					spiketest.AsStandard(t, standard, func() { regainThroughHandle(t, held, sid, config) })
 				}
-			})
-			checkTrusted(t, config, d, vol)
+				return
+			}
+			if want := "a fost făcut de alt cont, nu de probă"; !strings.Contains(err.Error(), want) {
+				t.Errorf("hubConfig in a folder that a standard window made = %v, want a Romanian refusal with %q", err, want)
+			}
+			if got, err := os.ReadFile(config); err != nil || !bytes.Equal(got, plantedConfig) { //nolint:gosec // the test's file
+				t.Errorf("hubConfig changed the config planted in the folder that it refused: %q (%v)", got, err)
+			}
+			t.Logf("after the refusal, %s: %s", filepath.Base(d.ConfigDir), sddl(d.ConfigDir))
 		})
 	}
+}
+
+// TestHubConfig_AdministratorsOnlyInItsOwnFolder (Final fix C review, I2):
+// the folder that hubConfig makes, and makes its own again before each
+// start of ipcam-hub, belongs to Administrators, as does the config in it,
+// each with a protected DACL that only Administrators and SYSTEM are in,
+// whatever entry an administrator added since. A standard window can
+// neither change the config, its DACL or the folder's, nor delete the
+// config, nor add a file to the folder.
+func TestHubConfig_AdministratorsOnlyInItsOwnFolder(t *testing.T) {
+	requireElevated(t)
+	sid, err := UserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, st, cur, vol := hubConfigRig(t) // d.protectDir is nil: the PC's own
+	config := filepath.Join(d.ConfigDir, HubConfigName)
+	standard := spiketest.StandardToken(t)
+	for _, start := range []struct {
+		name   string
+		before func(t *testing.T)
+	}{
+		{"the first start, with no folder", func(*testing.T) {}},
+		{"a start after an administrator gave the owner's user an entry in the folder and the config", func(t *testing.T) {
+			for _, path := range []string{d.ConfigDir, config} {
+				if err := spiketest.AddFull(path, sid); err != nil {
+					t.Fatalf("an entry for the owner's user in %s: %v", path, err)
+				}
+			}
+		}},
+	} {
+		start.before(t)
+		path, err := d.hubConfig(st, cur, vol)
+		if err != nil {
+			t.Fatalf("%s: hubConfig: %v", start.name, err)
+		}
+		if path != config {
+			t.Fatalf("%s: hubConfig wrote %s, want %s", start.name, path, config)
+		}
+		for _, p := range []string{d.ConfigDir, config} {
+			t.Logf("%s: after hubConfig, %s: %s", start.name, filepath.Base(p), sddl(p))
+			checkAdministratorsOnly(t, p)
+		}
+		spiketest.AsStandard(t, standard, func() {
+			for what, change := range map[string]func() error{
+				"wrote the config":           func() error { return os.WriteFile(config, plantedConfig, 0o600) },
+				"changed the config's DACL":  func() error { return spiketest.GrantFull(config, sid) },
+				"deleted the config":         func() error { return os.Remove(config) },
+				"changed the folder's DACL":  func() error { return spiketest.GrantFull(d.ConfigDir, sid) },
+				"added a file to the folder": func() error { return os.WriteFile(filepath.Join(d.ConfigDir, "other.json"), plantedConfig, 0o600) },
+			} {
+				if err := change(); err == nil {
+					t.Errorf("%s: after hubConfig, a standard window %s", start.name, what)
+				}
+			}
+		})
+		checkTrusted(t, config, d, vol)
+	}
+}
+
+// openToChangeDACL opens the folder dir with the right to change its DACL,
+// as a program of the owner's user that made the folder may, and keeps the
+// handle open until the test ends.
+func openToChangeDACL(t *testing.T, dir string) windows.Handle {
+	t.Helper()
+	name, err := windows.UTF16PtrFromString(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := windows.CreateFile(name, windows.READ_CONTROL|windows.WRITE_DAC,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		t.Fatalf("a standard window cannot open the folder that it made, %s, to change its DACL: %v", dir, err)
+	}
+	t.Cleanup(func() { _ = windows.CloseHandle(h) })
+	return h
+}
+
+// regainThroughHandle tries, as a standard window holding held, a handle
+// to the config's folder opened before hubConfig, to give the owner's user
+// Full control of that folder again and to put its own config in place of
+// hubConfig's, and reports each step that succeeds.
+func regainThroughHandle(t *testing.T, held windows.Handle, sid, config string) {
+	t.Helper()
+	sd, err := windows.SecurityDescriptorFromString(fmt.Sprintf("D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FA;;;%s)", sid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetSecurityInfo(held, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Logf("through the handle that it opened before hubConfig, a standard window cannot change the folder's DACL: %v", err)
+		return
+	}
+	t.Errorf("through the handle that it opened before hubConfig, a standard window gave itself Full control of the folder again: %s", sddl(filepath.Dir(config)))
+	if err := os.Remove(config); err != nil {
+		t.Logf("it cannot delete hubConfig's config: %v", err)
+		return
+	}
+	if err := os.WriteFile(config, plantedConfig, 0o600); err != nil {
+		t.Logf("it cannot put its own config in its place: %v", err)
+		return
+	}
+	t.Errorf("and put its own config in the place of hubConfig's, for ipcam-hub to start from")
 }
 
 // TestHubConfig_RefusesAJunctionForItsFolder (Final fix C review, I2): a
@@ -114,12 +221,7 @@ func TestHubConfig_AdministratorsOnlyAfterAPlant(t *testing.T) {
 // owner's user may rename, would let it swap the config after hubConfig
 // wrote it. hubConfig refuses it, and writes nothing where it points.
 func TestHubConfig_RefusesAJunctionForItsFolder(t *testing.T) {
-	if !windows.GetCurrentProcessToken().IsElevated() {
-		if os.Getenv("GITHUB_ACTIONS") == "true" {
-			t.Fatal("the windows job runs elevated, and this test needs it")
-		}
-		t.Skip("needs an elevated test process, as the boot task and the shortcut")
-	}
+	requireElevated(t)
 	d, st, cur, vol := hubConfigRig(t)
 	target := t.TempDir()
 	if err := os.MkdirAll(filepath.Dir(d.ConfigDir), 0o700); err != nil {
