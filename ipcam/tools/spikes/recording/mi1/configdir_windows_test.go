@@ -33,9 +33,10 @@ func requireElevated(t *testing.T) {
 // prompt) made %ProgramData%\ipcam-recspike and put its own
 // ipcam-hub-run.json there. It owns both and has Full control of each:
 // through an entry of its own beside the ones that they inherit; or in a
-// DACL of its own that denies Administrators the right to change it; or
-// through a handle to the folder, opened with the right to change its DACL
-// and kept open, which no later change of that DACL takes back. So
+// DACL of its own that denies Administrators the right to change it, or to
+// read who owns it; or through a handle to the folder, opened with the
+// right to change its DACL and kept open, which no later change of that
+// DACL takes back. So
 // hubConfig, as the elevated starts of ipcam-hub run it, never takes such a
 // folder as its own: it refuses it with the Romanian line that tells the
 // owner to delete it, and changes nothing in it.
@@ -67,6 +68,16 @@ func TestHubConfig_RefusesAFolderThatAnotherAccountMade(t *testing.T) {
 			setDACL(t, path, fmt.Sprintf("D:P(D;%s;%s;;;BA)(A;%s;FA;;;%s)", inherit, deny, inherit, sid))
 		}, false},
 		{"a handle that it keeps open", func(*testing.T, string) {}, true},
+		{"hidden from Administrators", func(t *testing.T, path string) {
+			if info, err := os.Stat(path); err != nil || !info.IsDir() {
+				setDACL(t, path, fmt.Sprintf("D:P(A;;FA;;;%s)", sid))
+				return
+			}
+			// Administrators may not read the folder's owner or DACL, and
+			// an OWNER RIGHTS entry takes the owner's own right to them
+			// away: only the backup privilege still reads them.
+			setDACL(t, path, fmt.Sprintf("D:P(D;OICI;RC;;;BA)(A;OICI;0x100000;;;OW)(A;OICI;FA;;;%s)", sid))
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, st, cur, vol := hubConfigRig(t) // d.protectDir is nil: the PC's own
@@ -84,7 +95,9 @@ func TestHubConfig_RefusesAFolderThatAnotherAccountMade(t *testing.T) {
 					held = openToChangeDACL(t, d.ConfigDir)
 				}
 			})
-			for _, path := range []string{d.ConfigDir, config} {
+			// The config first: a folder's new DACL passes its entries on to
+			// what still inherits from it.
+			for _, path := range []string{config, d.ConfigDir} {
 				spiketest.SetOwner(t, path, sid)
 				tc.plant(t, path)
 				t.Logf("the planted %s: %s", filepath.Base(path), sddl(path))
@@ -239,7 +252,9 @@ func TestHubConfig_RefusesAJunctionForItsFolder(t *testing.T) {
 	}
 }
 
-// setDACL gives path the DACL of sddl, as its owner may.
+// setDACL gives path the DACL of sddl, as its owner may, through a handle:
+// what a folder holds keeps its own DACL, and nothing reads path's new one,
+// which may hide itself.
 func setDACL(t *testing.T, path, sddl string) {
 	t.Helper()
 	sd, err := windows.SecurityDescriptorFromString(sddl)
@@ -250,7 +265,17 @@ func setDACL(t *testing.T, path, sddl string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := windows.CreateFile(name, windows.WRITE_DAC, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		t.Fatalf("open %s to change its DACL: %v", path, err)
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
 		t.Fatalf("the DACL of %s: %v", path, err)
 	}
