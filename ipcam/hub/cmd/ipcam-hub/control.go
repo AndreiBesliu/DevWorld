@@ -232,6 +232,7 @@ func (c *control) complete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	done, err := c.store.Complete(r.Context(), req.State, req.Code)
+	c.firstReport(req.State) // its end goes out here: a later status reports it no more
 	if err != nil {
 		c.failed(done.DestID, "complete", err)
 		writeFailure(w, http.StatusBadRequest, err)
@@ -242,10 +243,15 @@ func (c *control) complete(w http.ResponseWriter, r *http.Request) {
 }
 
 // status reports a login: pending, completed, expired or failed; a device
-// login is polled on the way.
+// login is polled on the way. A login's end goes out as an event once,
+// here or at its complete.
 func (c *control) status(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	status, done, err := c.store.Status(r.Context(), state)
+	stage := "complete"
+	if done.Plan == oauth.PlanB1 {
+		stage = "device"
+	}
 	switch {
 	case errors.Is(err, oauth.ErrStateUnknown):
 		writeFailure(w, http.StatusNotFound, err)
@@ -253,9 +259,9 @@ func (c *control) status(w http.ResponseWriter, r *http.Request) {
 	case status == oauth.StatusCompleted && c.firstReport(state):
 		c.completed(done)
 	case status == oauth.StatusFailed && c.firstReport(state):
-		c.failed(done.DestID, "device", err)
+		c.failed(done.DestID, stage, err)
 	case status == oauth.StatusExpired && c.firstReport(state):
-		c.failed(done.DestID, "device", fmt.Errorf("%w", oauth.ErrStateExpired))
+		c.failed(done.DestID, stage, oauth.ErrStateExpired)
 	}
 	answer := map[string]any{"status": status}
 	if status == oauth.StatusCompleted {

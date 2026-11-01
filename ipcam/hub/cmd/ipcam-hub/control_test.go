@@ -432,3 +432,43 @@ func TestControl_ResetConnections(t *testing.T) {
 		t.Errorf("%d connections before the reset and %d after, want a new one", before, after)
 	}
 }
+
+// TestControl_DeviceLoginStatus (P39): a B1 login through the control
+// endpoint (web × Google, the TV client): status answers pending until the
+// user approves on the device page, then completed with the Completion;
+// oauth_completed goes out once however often status is asked, and an
+// unknown state answers 404.
+func TestControl_DeviceLoginStatus(t *testing.T) {
+	f := newOAuthFixture(t)
+	var out syncBuffer
+	c := &control{token: testControlToken(), store: f.store, cat: f.cat, ev: &events{out: &out}, conns: &connTracker{conns: map[*trackedConn]bool{}},
+		reported: map[string]bool{}}
+	srv := httptest.NewServer(c.handler())
+	t.Cleanup(srv.Close)
+	cc := &controlClient{t: t, addr: strings.TrimPrefix(srv.URL, "http://"), token: testControlToken()}
+	status, begin := cc.do(http.MethodPost, "/control/v1/oauth/begin", oauth.BeginRequest{DestID: "g-web", Provider: "GOOGLE_DRIVE", Platform: oauth.PlatformWeb})
+	if status != http.StatusOK || begin["plan"] != "B1" || begin["userCode"] == "" || begin["authUrl"] != nil {
+		t.Fatalf("begin: HTTP %d %v, want B1 with a user code", status, begin)
+	}
+	state := url.QueryEscape(begin["state"].(string))
+	if _, s := cc.do(http.MethodGet, "/control/v1/oauth/status?state="+state, nil); s["status"] != "pending" {
+		t.Errorf("before the approval: %v, want pending", s)
+	}
+	if err := f.login.ApproveDevice(begin["userCode"].(string), "acct-1"); err != nil {
+		t.Fatal(err)
+	}
+	f.advance(time.Minute) // past the device flow's poll interval
+	for range 2 {
+		_, s := cc.do(http.MethodGet, "/control/v1/oauth/status?state="+state, nil)
+		done, _ := s["completion"].(map[string]any)
+		if s["status"] != "completed" || done["clientType"] != "tv" || done["plan"] != "B1" {
+			t.Errorf("after the approval: %v, want completed by the TV client", s)
+		}
+	}
+	if n := strings.Count(out.String(), `"type":"oauth_completed"`); n != 1 {
+		t.Errorf("%d oauth_completed events, want 1:\n%s", n, out.String())
+	}
+	if status, _ := cc.do(http.MethodGet, "/control/v1/oauth/status?state=unknown", nil); status != http.StatusNotFound {
+		t.Errorf("an unknown state: HTTP %d, want 404", status)
+	}
+}

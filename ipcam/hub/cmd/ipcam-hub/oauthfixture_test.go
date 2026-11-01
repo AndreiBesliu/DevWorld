@@ -6,7 +6,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
@@ -45,11 +47,19 @@ type oauthFixture struct {
 	drive           *fakegdrive.Fake
 	loginURL        string
 	driveURL        string
+	skew            atomic.Int64 // how far the store's and the fakes' clock runs ahead, in ns
 }
+
+// now is the fixture's clock: the real time, advance ahead.
+func (f *oauthFixture) now() time.Time { return time.Now().Add(time.Duration(f.skew.Load())) }
+
+// advance moves the fixture's clock on by d.
+func (f *oauthFixture) advance(d time.Duration) { f.skew.Add(int64(d)) }
 
 func newOAuthFixture(t *testing.T) *oauthFixture {
 	t.Helper()
-	f := &oauthFixture{login: fakeoauth.New(fakeoauth.Options{}), drive: fakegdrive.New(fakegdrive.Options{})}
+	f := &oauthFixture{}
+	f.login, f.drive = fakeoauth.New(fakeoauth.Options{Clock: f.now}), fakegdrive.New(fakegdrive.Options{Clock: f.now})
 	for _, c := range []fakeoauth.Client{
 		{Provider: fakeoauth.Google, Type: fakeoauth.TypeAndroid, ID: clientAndroid, Project: "p1", RedirectURIs: []string{"ro.ipcam.spike:/oauth2redirect"}},
 		{Provider: fakeoauth.Google, Type: fakeoauth.TypeDesktop, ID: clientDesktop, Secret: secretDesktop, Project: "p1"},
@@ -85,7 +95,7 @@ func newOAuthFixture(t *testing.T) *oauthFixture {
 		t.Fatal(err)
 	}
 	endpoints := oauth.Endpoints(fakeoauth.URLsAt(loginSrv.URL))
-	if f.store, err = oauth.New(oauth.Config{Endpoints: endpoints, Sealer: sealer, HTTP: http.DefaultClient, Secrets: cat}); err != nil {
+	if f.store, err = oauth.New(oauth.Config{Endpoints: endpoints, Clock: f.now, Sealer: sealer, HTTP: http.DefaultClient, Secrets: cat}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.store.SetClients(t.Context(), testClients()); err != nil {
