@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -183,7 +184,7 @@ func TestUploads_NoUploadEventAfterCardFailed(t *testing.T) {
 	obs := newObserver(ev, io.Discard, card)
 	t.Cleanup(obs.close)
 	u := &uploads{cfg: &uploadsConfig{HubName: "hub"}, hubID: testHubID, unlock: func() {}}
-	if err := u.build(cat, ev, obs, t.TempDir()); err != nil {
+	if err := u.build(cat, ev, obs, t.TempDir(), http.DefaultClient, storeTokens(t.Context(), nil)); err != nil {
 		t.Fatal(err)
 	}
 	u.start(card)

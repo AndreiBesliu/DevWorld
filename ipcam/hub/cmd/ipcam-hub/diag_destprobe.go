@@ -81,7 +81,8 @@ func diagDestProbeCommand(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "ipcam-hub: diag dest-probe:", err)
 		return exitFatal
 	}
-	dataDir, uploads, hubID, err := uploadsOf(*config)
+	cfg, hubID, err := uploadsOf(*config)
+	dataDir, uploads := cfg.DataDir, cfg.Uploads
 	if err != nil {
 		return failed(err)
 	}
@@ -103,7 +104,7 @@ func diagDestProbeCommand(args []string, stdout, stderr io.Writer) int {
 		return failed(err)
 	}
 	defer func() { _ = cat.Close() }()
-	d, err := newDestination(def, hubID, cat, newHTTPClient(hubTransport()))
+	d, err := diagDestination(ctx, cfg, cat, def, hubID)
 	if err != nil {
 		return failed(err)
 	}

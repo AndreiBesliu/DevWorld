@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/health"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/recorder"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/oauth"
 )
 
 // statusInterval is how often each job's status goes out as an event and
@@ -48,6 +50,9 @@ type runConfig struct {
 	// (uploads.go); without them, ipcam-hub uploads nothing and runs as c1's
 	// did (g2-01).
 	Uploads *uploadsConfig `json:"uploads"`
+	// OAuth is the token store's endpoints and Testing-mode life
+	// (control.go, Task 9); without it, the live providers' and 7 days.
+	OAuth *oauthSection `json:"oauth"`
 }
 
 type runJobDef struct {
@@ -82,6 +87,11 @@ func loadRunConfig(path string) (runConfig, []recorder.Job, *age.X25519Identity,
 	}
 	if cfg.Uploads != nil {
 		if err := cfg.Uploads.validate(); err != nil {
+			return cfg, nil, nil, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if cfg.OAuth != nil {
+		if err := cfg.OAuth.validate(); err != nil {
 			return cfg, nil, nil, fmt.Errorf("%s: %w", path, err)
 		}
 	}
@@ -151,7 +161,10 @@ func loadIdentity(path string) (*age.X25519Identity, error) {
 // runCommand is "ipcam-hub run": it reconciles, records the jobs of
 // run.json and reports, until SIGTERM, Ctrl-C or Ctrl-Break, or, with
 // --stop-on-stdin-eof, until its stdin ends: a stop that needs no console,
-// which recspike uses, also from a boot task that has none (G14).
+// which recspike uses, also from a boot task that has none (G14). With
+// IPCAM_CONTROL_TOKEN in its environment it serves the control endpoint on
+// 127.0.0.1 (control.go); with an uploads section or that token, its token
+// store refreshes each login daily (Task 9).
 func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ev := &events{out: stdout}
 	fail := func(err error) int {
@@ -170,6 +183,10 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fail(errors.New("usage: ipcam-hub run --config <run.json> [--stop-on-stdin-eof]"))
 	}
 	cfg, jobs, id, err := loadRunConfig(*configPath)
+	if err != nil {
+		return fail(err)
+	}
+	controlToken, err := readControlToken()
 	if err != nil {
 		return fail(err)
 	}
@@ -256,10 +273,31 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	obs := newObserver(ev, stderr, card)
 	defer obs.close()
 	rc.Observer = obs
-	if up != nil {
-		if err := up.build(cat, ev, obs, rc.RecDir); err != nil {
+	// The token store, on the drivers' client, whose connections the control
+	// endpoint resets (Task 9); c1's run, with neither uploads nor control,
+	// has none.
+	var store *oauth.Store
+	var conns *connTracker
+	if up != nil || controlToken != "" {
+		var client *http.Client
+		client, conns = newHubClient()
+		if store, err = newOAuthStore(cfg, cat, client); err != nil {
 			return fail(err)
 		}
+		if up != nil {
+			if err := up.build(cat, ev, obs, rc.RecDir, client, storeTokens(ctx, store)); err != nil {
+				return fail(err)
+			}
+		}
+	}
+	if controlToken != "" {
+		c := &control{token: controlToken, store: store, up: up, uc: cfg.Uploads, cat: cat, ev: ev, conns: conns, reported: map[string]bool{}}
+		addr, stopControl, err := c.serve(ctx)
+		if err != nil {
+			return fail(err)
+		}
+		defer stopControl()
+		ev.emit("control", map[string]any{"addr": addr})
 	}
 
 	// New gives the reconcile event out (observer.Reconciled), as later updates.
@@ -287,6 +325,9 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ev.emit("ready", map[string]any{"jobs": ready})
 	if up != nil {
 		up.start(card)
+	}
+	if store != nil {
+		defer runDaily(store, ev)()
 	}
 	sampled := make(chan struct{}) // closed once the card sampler has returned
 	if card != nil {

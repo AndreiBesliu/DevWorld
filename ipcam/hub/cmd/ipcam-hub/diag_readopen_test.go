@@ -52,7 +52,7 @@ func newDiagFixture(t *testing.T, uploads map[string]any, hubID string) *diagFix
 func runDiag(t *testing.T, args ...string) (int, []map[string]any, string) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := diagCommand(args, &stdout, &stderr)
+	code := diagCommand(args, strings.NewReader(""), &stdout, &stderr)
 	var lines []map[string]any
 	for line := range strings.SplitSeq(strings.TrimSpace(stdout.String()), "\n") {
 		if line == "" {

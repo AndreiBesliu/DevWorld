@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
 )
 
@@ -303,21 +304,24 @@ func (s *Store) authURL(p storage.Kind, route Route, client Client, state, chall
 // redirect URI and the state's verifier, seals the refresh token as the
 // login's row and keeps the access token in RAM. The state is used up
 // whatever the provider answers; an expired one is ErrStateExpired, and its
-// verifier is wiped.
+// verifier is wiped. On an error past an unknown state, the Completion
+// names the login, with no IssuedAt.
 func (s *Store) Complete(ctx context.Context, state, code string) (Completion, error) {
 	s.mu.Lock()
 	p := s.pending[state]
-	switch {
-	case p == nil || p.device != "":
+	if p == nil || p.device != "" {
 		s.mu.Unlock()
 		return Completion{}, ErrStateUnknown
+	}
+	named := p.named()
+	switch {
 	case p.used:
 		s.mu.Unlock()
-		return Completion{}, ErrStateUsed
+		return named, ErrStateUsed
 	case !s.cfg.Clock().Before(p.expires):
 		p.used, p.verifier = true, ""
 		s.mu.Unlock()
-		return Completion{}, ErrStateExpired
+		return named, ErrStateExpired
 	}
 	p.used = true
 	verifier := p.verifier
@@ -327,23 +331,35 @@ func (s *Store) Complete(ctx context.Context, state, code string) (Completion, e
 		"code_verifier": {verifier}}
 	tok, err := s.tokenCall(ctx, p.req.Provider, p.client, form)
 	if err != nil {
-		return Completion{}, err
+		return named, err
 	}
-	return s.completed(ctx, p, tok)
+	c, err := s.completed(ctx, p, tok)
+	if err != nil {
+		return named, err
+	}
+	return c, nil
+}
+
+// named is the Completion that names p's login, with no IssuedAt.
+func (p *pending) named() Completion {
+	return Completion{DestID: p.req.DestID, Provider: p.req.Provider, Platform: p.req.Platform, Plan: p.route.Plan, ClientType: p.route.ClientType}
 }
 
 // DeviceStatus is the B1 login of state: its Completion once the user
 // approved, ErrAuthorizationPending until then, while the hub polls the
 // provider's token endpoint no faster than its interval; the provider's
-// refusal (access_denied, expired_token) ends it.
+// refusal (access_denied, expired_token) ends it. On an error past an
+// unknown state, the Completion names the login, with no IssuedAt.
 func (s *Store) DeviceStatus(ctx context.Context, state string) (Completion, error) {
 	now := s.cfg.Clock()
 	s.mu.Lock()
 	p := s.pending[state]
-	switch {
-	case p == nil || p.device == "":
+	if p == nil || p.device == "" {
 		s.mu.Unlock()
 		return Completion{}, ErrStateUnknown
+	}
+	named := p.named()
+	switch {
 	case p.completion != nil:
 		c := *p.completion
 		s.mu.Unlock()
@@ -351,13 +367,13 @@ func (s *Store) DeviceStatus(ctx context.Context, state string) (Completion, err
 	case p.failed != nil:
 		err := p.failed
 		s.mu.Unlock()
-		return Completion{}, err
+		return named, err
 	case !now.Before(p.expires):
 		s.mu.Unlock()
-		return Completion{}, ErrStateExpired
+		return named, ErrStateExpired
 	case p.polling || now.Before(p.nextPoll):
 		s.mu.Unlock()
-		return Completion{}, ErrAuthorizationPending
+		return named, ErrAuthorizationPending
 	}
 	p.polling = true
 	s.mu.Unlock()
@@ -370,24 +386,28 @@ func (s *Store) DeviceStatus(ctx context.Context, state string) (Completion, err
 	case errors.As(err, &pe) && pe.Code == "authorization_pending":
 		p.nextPoll = now.Add(p.interval)
 		s.mu.Unlock()
-		return Completion{}, ErrAuthorizationPending
+		return named, ErrAuthorizationPending
 	case errors.As(err, &pe) && pe.Code == "slow_down":
 		p.interval += 5 * time.Second
 		p.nextPoll = now.Add(p.interval)
 		s.mu.Unlock()
-		return Completion{}, ErrAuthorizationPending
+		return named, ErrAuthorizationPending
 	case errors.As(err, &pe) && pe.Status < 500 && pe.Status != 429:
 		p.failed = err
 		s.mu.Unlock()
-		return Completion{}, err
+		return named, err
 	case err != nil:
 		p.nextPoll = now.Add(p.interval)
 		s.mu.Unlock()
-		return Completion{}, err
+		return named, err
 	}
 	p.used = true
 	s.mu.Unlock()
-	return s.completed(ctx, p, tok)
+	c, err := s.completed(ctx, p, tok)
+	if err != nil {
+		return named, err
+	}
+	return c, nil
 }
 
 // The statuses of a login that Status reports.
@@ -399,8 +419,9 @@ const (
 )
 
 // Status is the login of state: pending, completed with its Completion,
-// expired, or failed when the provider ended a device login. A device
-// login is polled as DeviceStatus does.
+// expired, or failed when the provider ended a device login, with its
+// error. A device login is polled as DeviceStatus does. The Completion
+// names the login whatever the status.
 func (s *Store) Status(ctx context.Context, state string) (string, Completion, error) {
 	s.mu.Lock()
 	p := s.pending[state]
@@ -414,11 +435,11 @@ func (s *Store) Status(ctx context.Context, state string) (string, Completion, e
 		case err == nil:
 			return StatusCompleted, c, nil
 		case errors.Is(err, ErrAuthorizationPending), errors.Is(err, storage.ErrTransient):
-			return StatusPending, Completion{}, nil
+			return StatusPending, c, nil
 		case errors.Is(err, ErrStateExpired):
-			return StatusExpired, Completion{}, nil
+			return StatusExpired, c, nil
 		}
-		return StatusFailed, Completion{}, err
+		return StatusFailed, c, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -426,9 +447,9 @@ func (s *Store) Status(ctx context.Context, state string) (string, Completion, e
 	case p.completion != nil:
 		return StatusCompleted, *p.completion, nil
 	case !s.cfg.Clock().Before(p.expires):
-		return StatusExpired, Completion{}, nil
+		return StatusExpired, p.named(), nil
 	}
-	return StatusPending, Completion{}, nil
+	return StatusPending, p.named(), nil
 }
 
 // completed stores the login that tok completes: the sealed row of its
@@ -468,4 +489,56 @@ func (s *Store) Login(ctx context.Context, ref string) (Completion, bool, error)
 	}
 	return Completion{DestID: ref, Provider: l.Provider, Platform: l.Platform, Plan: l.Plan, ClientType: l.ClientType,
 		IssuedAt: time.UnixMilli(l.IssuedAtMs).UTC()}, true, nil
+}
+
+// SecretReader reads sealed rows: catalog.DB is one, opened read-only too.
+type SecretReader interface {
+	Secret(ctx context.Context, id string) (sealed []byte, sealer string, ok bool, err error)
+	SecretIDs(ctx context.Context, prefix string) ([]string, error)
+}
+
+// KnownSecrets unseals, in RAM, every client row and every login row of
+// secrets and returns their secret values: the clients' IDs and secrets,
+// and the logins' refresh tokens, for the known-secrets scan (P45). A row
+// that does not open fails it, naming the row only: a scan without it
+// would miss its secret.
+func KnownSecrets(ctx context.Context, secrets SecretReader, sealer crypto.Sealer) ([]string, error) {
+	var values []string
+	for _, prefix := range []string{clientPrefix, loginPrefix} {
+		ids, err := secrets.SecretIDs(ctx, prefix)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			sealed, backend, ok, err := secrets.Secret(ctx, id)
+			switch {
+			case err != nil:
+				return nil, err
+			case !ok:
+				continue
+			case backend != sealer.Backend():
+				return nil, fmt.Errorf("oauth: the row %s was sealed by %s, not this hub's %s", id, backend, sealer.Backend())
+			}
+			plain, err := sealer.Unseal(ctx, id, sealed)
+			if err != nil {
+				return nil, fmt.Errorf("oauth: unseal %s: %w", id, err)
+			}
+			var row struct {
+				ID           string `json:"id"`
+				Secret       string `json:"secret"`
+				RefreshToken string `json:"refreshToken"`
+			}
+			err = json.Unmarshal(plain, &row)
+			clear(plain)
+			if err != nil {
+				return nil, fmt.Errorf("oauth: the row %s is not one of the store's", id)
+			}
+			for _, v := range []string{row.ID, row.Secret, row.RefreshToken} {
+				if v != "" {
+					values = append(values, v)
+				}
+			}
+		}
+	}
+	return values, nil
 }

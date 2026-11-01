@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
 )
 
 // diagLines are the diag subcommands' lines of a usage error.
@@ -21,7 +22,9 @@ const diagLines = "ipcam-hub diag host [--rec <dir>]\n       ipcam-hub diag pimo
 	"       ipcam-hub diag readopen --config <run.json> --cam <cam> [--profile main]\n" +
 	"       ipcam-hub diag dest-probe --config <run.json> --dest <id> [--delete-segment] [--poll 30s] [--for 10m]\n" +
 	"       ipcam-hub diag reach --hosts <host[:port],…> [--lan <host:port>]\n" +
-	"       ipcam-hub diag uploads --config <run.json> [--list-remote]"
+	"       ipcam-hub diag uploads --config <run.json> [--list-remote]\n" +
+	"       ipcam-hub diag visibility --config <run.json> --creator <destId> --reader <destId>\n" +
+	"       ipcam-hub diag scan-secrets [--config <run.json>] --dir <results dir> < {\"value\":…} lines"
 
 // diagUsage is the usage of the diag subcommands.
 const diagUsage = "usage: " + diagLines
@@ -31,8 +34,9 @@ const diagUsage = "usage: " + diagLines
 // throughput, and reads and seeks in an encrypted recording), as one JSON
 // object on stdout; or, for the upload spike (Task 7b), a read of the open
 // segment, a destination's probe, what the network reaches and the uploads'
-// counts, as JSON lines.
-func diagCommand(args []string, stdout, stderr io.Writer) int {
+// counts, as JSON lines; or a cell of the cross-client visibility matrix and
+// the known-secrets scan (Task 9). Only scan-secrets reads stdin.
+func diagCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
 		case "host":
@@ -53,6 +57,10 @@ func diagCommand(args []string, stdout, stderr io.Writer) int {
 			return diagReachCommand(args[1:], stdout, stderr)
 		case "uploads":
 			return diagUploadsCommand(args[1:], stdout, stderr)
+		case "visibility":
+			return diagVisibilityCommand(args[1:], stdout, stderr)
+		case "scan-secrets":
+			return diagScanSecretsCommand(args[1:], stdin, stdout, stderr)
 		}
 	}
 	_, _ = fmt.Fprintln(stderr, diagUsage)
@@ -99,24 +107,35 @@ func openExistingCatalog(ctx context.Context, dataDir string) (*catalog.DB, erro
 }
 
 // uploadsOf loads the run configuration at path for a diag command of the
-// uploads: its data directory, its uploads section, and the hub's ID, which
-// it reads and never creates (g2-11), after it checked that a run left a
-// catalog.
-func uploadsOf(path string) (dataDir string, uploads *uploadsConfig, hubID string, err error) {
-	cfg, _, _, err := loadRunConfig(path)
+// uploads, which has an uploads section, and the hub's ID, which it reads
+// and never creates (g2-11), after it checked that a run left a catalog.
+func uploadsOf(path string) (cfg runConfig, hubID string, err error) {
+	cfg, _, _, err = loadRunConfig(path)
 	switch {
 	case err != nil:
-		return "", nil, "", err
+		return cfg, "", err
 	case cfg.Uploads == nil:
-		return "", nil, "", fmt.Errorf("%s has no uploads section", path)
+		return cfg, "", fmt.Errorf("%s has no uploads section", path)
 	}
 	if err := haveCatalog(cfg.DataDir); err != nil {
-		return "", nil, "", err
+		return cfg, "", err
 	}
 	if hubID, err = readHubID(filepath.Join(cfg.DataDir, "state")); err != nil {
-		return "", nil, "", err
+		return cfg, "", err
 	}
-	return cfg.DataDir, cfg.Uploads, hubID, nil
+	return cfg, hubID, nil
+}
+
+// diagDestination builds def's driver for a diag command beside dataDir's
+// catalog cat, its tokens from the sealed token store of cfg's data
+// directory on cat.
+func diagDestination(ctx context.Context, cfg runConfig, cat *catalog.DB, def destDef, hubID string) (storage.Destination, error) {
+	client, _ := newHubClient()
+	store, err := newOAuthStore(cfg, cat, client)
+	if err != nil {
+		return nil, err
+	}
+	return newDestination(def, hubID, cat, client, storeTokens(ctx, store))
 }
 
 // destByID is the uploads section's destination id.

@@ -22,6 +22,7 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/gdrive"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/local"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/oauth"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/onedrive"
 )
 
@@ -41,8 +42,8 @@ const uploadsStoppedMessage = "ipcam-hub: the SD card failed: the uploads stoppe
 
 // testToken stands in for the token store in the tests of ipcam-hub's
 // process: their TestMain reads it from IPCAM_HUB_TEST_TOKEN, and the
-// shipped binary never sets it. Task 9 wires the sealed token store
-// (oauth.Store) in its place.
+// shipped binary never sets it, so its destinations take their tokens from
+// the sealed token store (oauth.Store, Task 9).
 var testToken string
 
 // uploadsConfig is run.json's uploads section (P01): the hub's name, which
@@ -273,14 +274,14 @@ func (u *uploads) enqueue(ctx context.Context, tx *sql.Tx, s catalog.Segment) er
 	return nil
 }
 
-// build makes each destination's driver, on a plain HTTP client, the Drive
-// driver's folder store being the catalog, and the queue that uploads to
-// them from recDir, its events on ev and its local errors through obs.
-func (u *uploads) build(cat *catalog.DB, ev *events, obs *observer, recDir string) error {
-	client := newHTTPClient(hubTransport())
+// build makes each destination's driver on client, the plain HTTP client,
+// with the bearer tokens of its tokenRef from tokens and, for Drive, the
+// catalog as its folder store, and the queue that uploads to them from
+// recDir, its events on ev and its local errors through obs.
+func (u *uploads) build(cat *catalog.DB, ev *events, obs *observer, recDir string, client *http.Client, tokens tokenSourceFunc) error {
 	dests := map[string]storage.Destination{}
 	for _, def := range u.cfg.Destinations {
-		d, err := newDestination(def, u.hubID, cat, client)
+		d, err := newDestination(def, u.hubID, cat, client, tokens)
 		if err != nil {
 			return fmt.Errorf("uploads: destination %s: %w", def.ID, err)
 		}
@@ -371,41 +372,62 @@ func (u *uploads) stop() {
 // release releases the hub lock.
 func (u *uploads) release() { u.unlock() }
 
-// newDestination builds def's driver on client: Drive's folder store is
-// folders, the catalog.
-func newDestination(def destDef, hubID string, folders gdrive.FolderStore, client *http.Client) (storage.Destination, error) {
+// unblock makes every BLOCKED_AUTH destination whose tokenRef is ref OK
+// again: a new login of ref completed (Task 9).
+func (u *uploads) unblock(ref string) {
+	if u.q == nil {
+		return
+	}
+	for _, d := range u.cfg.Destinations {
+		if d.TokenRef == ref {
+			u.q.Unblock(d.ID)
+		}
+	}
+}
+
+// newDestination builds def's driver on client, with the bearer tokens of
+// its tokenRef from tokens: Drive's folder store is folders, the catalog.
+func newDestination(def destDef, hubID string, folders gdrive.FolderStore, client *http.Client, tokens tokenSourceFunc) (storage.Destination, error) {
 	switch def.Kind {
 	case storage.KindLocal:
 		return local.New(def.Folder)
 	case storage.KindGoogleDrive:
-		tokens, err := tokenSource(def.TokenRef)
+		ts, err := tokens(def.TokenRef)
 		if err != nil {
 			return nil, err
 		}
 		return gdrive.New(gdrive.Options{
-			DestID: def.ID, HTTPClient: client, Tokens: tokens, BaseURL: def.BaseURL, UploadBaseURL: def.UploadBaseURL,
+			DestID: def.ID, HTTPClient: client, Tokens: ts, BaseURL: def.BaseURL, UploadBaseURL: def.UploadBaseURL,
 			PartSize: def.PartSize, Folders: folders, HubID: hubID, RootName: def.Folder,
 		})
 	case storage.KindOneDrivePersonal:
-		tokens, err := tokenSource(def.TokenRef)
+		ts, err := tokens(def.TokenRef)
 		if err != nil {
 			return nil, err
 		}
 		return onedrive.New(onedrive.Options{
-			DestID: def.ID, HubID: hubID, HTTPClient: client, Tokens: tokens, BaseURL: def.BaseURL, PartSize: def.PartSize,
+			DestID: def.ID, HubID: hubID, HTTPClient: client, Tokens: ts, BaseURL: def.BaseURL, PartSize: def.PartSize,
 		})
 	}
 	return nil, fmt.Errorf("unknown kind %q", def.Kind)
 }
 
-// tokenSource returns the bearer tokens of the destination whose sealed
-// token row tokenRef names. Until Task 9 wires the token store, only the
-// tests' token exists.
-func tokenSource(tokenRef string) (oauth2.TokenSource, error) {
-	if testToken == "" {
-		return nil, fmt.Errorf("no token store for tokenRef %s", tokenRef)
+// tokenSourceFunc gives a destination the bearer tokens of its tokenRef.
+type tokenSourceFunc func(tokenRef string) (oauth2.TokenSource, error)
+
+// storeTokens takes a tokenRef's tokens from store (P27), each refresh
+// within ctx; several destinations that name one tokenRef share its source.
+// The tests' token, when they set one, stands in for the store.
+func storeTokens(ctx context.Context, store *oauth.Store) tokenSourceFunc {
+	return func(tokenRef string) (oauth2.TokenSource, error) {
+		switch {
+		case testToken != "":
+			return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: testToken, TokenType: "Bearer"}), nil
+		case store == nil:
+			return nil, fmt.Errorf("no token store for tokenRef %s", tokenRef)
+		}
+		return store.TokenSource(ctx, tokenRef), nil
 	}
-	return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: testToken, TokenType: "Bearer"}), nil
 }
 
 // The timeouts of ipcam-hub's plain HTTP client, for the drivers' calls
@@ -419,13 +441,74 @@ const (
 )
 
 // hubTransport is http.DefaultTransport's, proxy from the environment
-// included, with the dial, TLS and response-header timeouts.
-func hubTransport() *http.Transport {
+// included, with the dial, TLS and response-header timeouts, its
+// connections dialled through conns.
+func hubTransport(conns *connTracker) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // the standard library's own
-	t.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	t.DialContext = conns.dial
 	t.TLSHandshakeTimeout = tlsHandshakeTimeout
 	t.ResponseHeaderTimeout = responseHeaderTimeout
 	return t
+}
+
+// newHubClient is the drivers' and the token store's plain HTTP client, and
+// the tracker of its connections, which reset-connections closes.
+func newHubClient() (*http.Client, *connTracker) {
+	conns := &connTracker{conns: map[*trackedConn]bool{}}
+	return newHTTPClient(hubTransport(conns)), conns
+}
+
+// connTracker dials the hub client's connections and keeps every open one,
+// so that reset closes them all: an idle one, and one that a request is on,
+// which that request then sees fail as a network error, ErrTransient, and is
+// retried on a new connection (Task 9, MI5's block: Windows Firewall
+// authorizes at connect, so a rule added under an established flow leaves
+// it open).
+type connTracker struct {
+	mu    sync.Mutex
+	conns map[*trackedConn]bool
+}
+
+func (t *connTracker) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	c, err := (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	tc := &trackedConn{Conn: c, t: t}
+	t.mu.Lock()
+	t.conns[tc] = true
+	t.mu.Unlock()
+	return tc, nil
+}
+
+// reset closes every open connection and returns how many.
+func (t *connTracker) reset() int {
+	t.mu.Lock()
+	open := make([]*trackedConn, 0, len(t.conns))
+	for c := range t.conns {
+		open = append(open, c)
+	}
+	t.mu.Unlock()
+	for _, c := range open {
+		_ = c.Close()
+	}
+	return len(open)
+}
+
+// trackedConn leaves its tracker once closed.
+type trackedConn struct {
+	net.Conn
+	t    *connTracker
+	once sync.Once
+}
+
+func (c *trackedConn) Close() error {
+	c.once.Do(func() {
+		c.t.mu.Lock()
+		delete(c.t.conns, c)
+		c.t.mu.Unlock()
+	})
+	return c.Conn.Close()
 }
 
 // newHTTPClient is the drivers' plain client on rt (P27): the drivers set

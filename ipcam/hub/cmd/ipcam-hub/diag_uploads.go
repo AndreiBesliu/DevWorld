@@ -77,7 +77,8 @@ func diagUploadsCommand(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "ipcam-hub: diag uploads:", err)
 		return exitFatal
 	}
-	dataDir, uploads, hubID, err := uploadsOf(*config)
+	cfg, hubID, err := uploadsOf(*config)
+	dataDir, uploads := cfg.DataDir, cfg.Uploads
 	if err != nil {
 		return failed(err)
 	}
@@ -99,7 +100,7 @@ func diagUploadsCommand(args []string, stdout, stderr io.Writer) int {
 	for _, def := range uploads.Destinations {
 		counts, routed := countUploads(uploads, hubID, def.ID, segs, placements)
 		if *list {
-			d, err := newDestination(def, hubID, cat, newHTTPClient(hubTransport()))
+			d, err := diagDestination(ctx, cfg, cat, def, hubID)
 			if err == nil {
 				err = listRemote(ctx, d, filepath.Join(dataDir, "rec"), routed, &counts)
 			}

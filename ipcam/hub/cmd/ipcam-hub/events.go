@@ -71,6 +71,23 @@ import (
 //
 // When the SD card fails, the uploads stop: one error event says so, and no
 // upload event follows (g2-04).
+//
+// The token store's and the control endpoint's events (Task 9). None
+// carries a token, a client secret, a code, a verifier, a URL or a
+// provider's own words: a failure goes out as its reason only.
+//   - control: addr ("127.0.0.1:<port>"), once the control endpoint
+//     listens, with IPCAM_CONTROL_TOKEN set; the token is never printed.
+//   - oauth_begin: destId, provider, platform, plan; a login began.
+//   - oauth_completed: destId, provider, platform, plan, clientType,
+//     issuedAtMs; its refresh token is sealed in the catalog, and the
+//     destinations of its tokenRef are unblocked.
+//   - oauth_failed: destId, stage ("complete", "device" or "refresh"),
+//     reason (invalid_grant, access_denied, redirect_uri_mismatch,
+//     invalid_client, expired_token, state for an unknown, used or expired
+//     state, transient when the provider did not answer, error otherwise).
+//   - oauth_refresh: destId, day, attempt, outcome ("ok", "failed" or
+//     "expected-expiry"), rotated; a day of the daily refresh, once decided
+//     (P53).
 type events struct {
 	mu  sync.Mutex
 	out io.Writer
