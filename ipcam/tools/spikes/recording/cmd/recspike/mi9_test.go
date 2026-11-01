@@ -16,6 +16,7 @@ import (
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/internal/spiketest"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi9"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
 )
@@ -126,6 +127,11 @@ func TestMI9Lan_RecordsSegmentWhenNoneExists(t *testing.T) {
 	realExecutable := executable
 	t.Cleanup(func() { executable = realExecutable })
 	executable = func() (string, error) { return filepath.Join(dir, "recspike"), nil }
+	fakeSystemFolders(t)
+	protected, err := protectedDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, jobs := spiketest.InstallFakeHub(t, dir)
 	ctl := startFakeController(t)
 
@@ -144,6 +150,11 @@ func TestMI9Lan_RecordsSegmentWhenNoneExists(t *testing.T) {
 	if got := spiketest.HubJobs(t, jobs); len(got) != 1 || got[0].Cam != "cam01" || got[0].Profile != "main" || got[0].SegmentSecs != 300 ||
 		len(got[0].Recipients) != 2 || !strings.HasPrefix(got[0].RestreamURL, "rtsp://") {
 		t.Errorf("ipcam-hub's jobs: %+v; want one encrypted cam01_main job of 300 s", got)
+	}
+	// ipcam-hub runs elevated: from MI9's config in the protected folder
+	// (Final fix C review, M9).
+	if starts := spiketest.HubStarts(t, dir); len(starts) != 1 || starts[0].Config != filepath.Join(protected, mi1.HubConfigMI9) {
+		t.Errorf("ipcam-hub started %+v, want once from %s", starts, filepath.Join(protected, mi1.HubConfigMI9))
 	}
 	host := ownerHost()
 	runID := host + "-mi9-1"

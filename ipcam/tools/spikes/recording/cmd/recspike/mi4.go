@@ -39,7 +39,11 @@ func mi4Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	if err != nil {
 		return err
 	}
-	return mi4.Run(ctx, mi4.Options{Controller: controllerAddr(*controller), Hub: f.hub, Results: f.results, Work: f.work, Out: out,
+	protected, err := protectedDir() // ipcam-hub runs elevated, as for MI2
+	if err != nil {
+		return err
+	}
+	return mi4.Run(ctx, mi4.Options{Controller: controllerAddr(*controller), Hub: f.hub, Results: f.results, Work: f.work, ConfigDir: protected, Out: out,
 		Euid: geteuid,
 		Host: func(ctx context.Context) (mi1.HostState, error) {
 			return mi1.OwnerHost(ctx, f.hub, f.work, runtime.GOOS, in, out)

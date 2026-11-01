@@ -44,8 +44,9 @@ type hubRig struct {
 
 // record records the camera, encrypted, into a segment of segmentSecs
 // through ipcam-hub (hubrec.Record) and returns that segment once it has
-// closed: <run>/<name> holds the recording, run.json, RI_g's identity
-// (RK's is never kept, PH0-22) and ipcam-hub's log.
+// closed: <run>/<name> holds the recording, RI_g's identity (RK's is never
+// kept, PH0-22) and ipcam-hub's log, and ipcam-hub starts from MI4's config
+// in the protected folder (Options.ConfigDir).
 func (h *hubRig) record(ctx context.Context, name string, segmentSecs int) (hubrec.Segment, error) {
 	if h.link == nil {
 		l, err := mi1.OpenHostLink(ctx, h.o.Controller, h.host.Pseudonym)
@@ -58,7 +59,7 @@ func (h *hubRig) record(ctx context.Context, name string, segmentSecs int) (hubr
 		}
 	}
 	return hubrec.Record(ctx, hubrec.Options{Hub: h.o.Hub, MediaMTX: h.o.MediaMTX, CameraURL: h.url, Run: h.dir, Name: name,
-		SegmentSecs: segmentSecs, SDCardConfirmed: h.host.SdConfirmation != nil, Say: h.o.say})
+		ConfigDir: h.o.ConfigDir, Config: mi1.HubConfigMI4, SegmentSecs: segmentSecs, SDCardConfirmed: h.host.SdConfirmation != nil, Say: h.o.say})
 }
 
 func (h *hubRig) readbench(ctx context.Context, seg hubrec.Segment, size string, reads int) (readSet, error) {

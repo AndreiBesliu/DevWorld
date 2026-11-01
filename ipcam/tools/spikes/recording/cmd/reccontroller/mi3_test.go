@@ -75,7 +75,7 @@ func TestMI3_SmokeEndToEnd(t *testing.T) {
 			out := &syncBuffer{}
 			err := mi3.Run(ctx, mi3.Options{
 				Host: c.host, Controller: lns.Link.Addr().String(), Hub: hub, MediaMTX: mediamtx, Self: recspike,
-				Results: filepath.Join(work, "results"), Work: filepath.Join(work, "work"), Out: out,
+				Results: filepath.Join(work, "results"), Work: filepath.Join(work, "work"), ConfigDir: filepath.Join(work, "config"), Out: out,
 				// An hour is 12 s, 15 min 3 s.
 				Window:       func(minutes int) time.Duration { return time.Duration(minutes) * 200 * time.Millisecond },
 				FixtureBytes: 4 << 20,

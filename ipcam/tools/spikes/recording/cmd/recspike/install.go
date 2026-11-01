@@ -3,7 +3,6 @@
 package main
 
 import (
-	"cmp"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
@@ -26,9 +25,6 @@ const (
 	autostartName   = "ipcam-recspike"
 	systemdUnitPath = "/etc/systemd/system/ipcam-recspike.service"
 	shortcutArgs    = "mi1 --real --resume"
-	// piModesPath keeps the modes of the Pi's release from before install,
-	// where only root writes.
-	piModesPath = "/var/lib/ipcam-recspike/release-modes.json"
 )
 
 // xmlText escapes s for an XML text node.
@@ -148,7 +144,9 @@ type autostart struct {
 	desktop     func() (string, error)
 	shortcut    func(path, target, args, dir string, runAsAdmin bool) error
 	unitPath    string
-	tempDir     string
+	// taskFile is the boot task's definition, which schtasks reads, in
+	// the protected folder.
+	taskFile    string
 	timeService timeService
 	// savedStart keeps the time service's settings from before install,
 	// outside the release folder (timeServiceFile), in a folder of
@@ -165,9 +163,9 @@ type autostart struct {
 	savedModes string
 	// memoryDump is Windows' kernel dump, which every bugcheck rewrites.
 	memoryDump string
-	// hubConfig is the config that the owner's MI1 runs start ipcam-hub
-	// with, in protectedDir; uninstall removes it.
-	hubConfig string
+	// protected is the folder of the configs that the owner's probes start
+	// ipcam-hub with (mi1.HubConfigNames); uninstall removes them.
+	protected string
 	// mkdirAll makes the PC's data folders; chown and chmod change the
 	// owner and the mode of the Pi's release (security-1).
 	mkdirAll func(path string) error
@@ -176,32 +174,69 @@ type autostart struct {
 	out      io.Writer
 }
 
-// protectedDir is recspike's folder that only Administrators and SYSTEM, or
-// root, may write: the saved settings of install, and the config that the
-// owner's MI1 runs start ipcam-hub with (mi1.Driver.ConfigDir).
-func protectedDir() string {
-	if runtime.GOOS == "windows" {
-		return filepath.Dir(timeServiceFile())
-	}
-	return filepath.Dir(piModesPath)
+// paths are where install, uninstall and the owner's runs keep recspike's
+// files outside the release folder on one OS, and Windows' kernel dump.
+// protected is the folder that only Administrators and SYSTEM, or root, may
+// write (mi1.ProtectConfigDir): it holds the time service's settings from
+// before install (savedStart) and the boot task's definition (taskFile) on
+// the PC, the release's modes from before install (savedModes) on the Pi,
+// and the configs that the owner's runs start ipcam-hub with
+// (mi1.HubConfigNames) on both.
+type paths struct {
+	protected, savedStart, taskFile, savedModes, memoryDump string
 }
 
-// timeServiceFile is where install keeps the time service's settings from
-// before it: under %ProgramData%\ipcam-recspike, outside the release folder,
-// so that an owner who deletes that folder and extracts a new release
-// there does not lose them (mi1-6).
-func timeServiceFile() string {
-	programData := os.Getenv("ProgramData")
-	if programData == "" {
-		programData = `C:\ProgramData`
+// systemFolders are the folders that paths come from: on the PC, Windows'
+// ProgramData and its own folder, as Windows itself reports them; on the
+// Pi, recspike's folder under /var/lib, where only root creates. Tests
+// replace them.
+var systemFolders = struct {
+	programData, windows func() (string, error)
+	pi                   string
+}{mi1.ProgramData, mi1.WindowsFolder, "/var/lib/ipcam-recspike"}
+
+// pathsFor is paths on goos. On the PC they come from Windows, never from
+// the environment (Final fix C review, M3): the boot task (S4U, highest
+// privileges, as the owner's user) and the shortcut, which Explorer starts,
+// run recspike elevated with the owner's user's environment, which a
+// program of that user may change without a UAC prompt (HKCU\Environment).
+// Through %ProgramData% it would choose a protected folder of its own, and
+// through %TEMP% change the boot task's definition before schtasks reads
+// it; the boot task's definition is therefore written in the protected
+// folder too.
+func pathsFor(goos string) (paths, error) {
+	if goos != "windows" {
+		dir := systemFolders.pi
+		return paths{protected: dir, savedModes: filepath.Join(dir, "release-modes.json")}, nil
 	}
-	return filepath.Join(programData, autostartName, "w32time-start.json")
+	programData, err := systemFolders.programData()
+	if err != nil {
+		return paths{}, fmt.Errorf("nu găsesc folderul ProgramData al Windows: %w", err)
+	}
+	windowsDir, err := systemFolders.windows()
+	if err != nil {
+		return paths{}, fmt.Errorf("nu găsesc folderul Windows: %w", err)
+	}
+	dir := filepath.Join(programData, autostartName)
+	return paths{protected: dir, savedStart: filepath.Join(dir, "w32time-start.json"), taskFile: filepath.Join(dir, autostartName+".xml"),
+		memoryDump: filepath.Join(windowsDir, "MEMORY.DMP")}, nil
 }
 
-// systemAutostart is this OS's.
-func systemAutostart(out io.Writer) autostart {
+// protectedDir is paths' protected folder on this OS: the owner's runs
+// start ipcam-hub elevated, from a config there (mi1.Driver.ConfigDir).
+func protectedDir() (string, error) {
+	p, err := pathsFor(runtime.GOOS)
+	return p.protected, err
+}
+
+// systemAutostart is goos's, on this OS's paths for goos.
+func systemAutostart(goos string, out io.Writer) (autostart, error) {
+	p, err := pathsFor(goos)
+	if err != nil {
+		return autostart{}, err
+	}
 	return autostart{
-		goos:       runtime.GOOS,
+		goos:       goos,
 		privileged: mi1.Privileged,
 		elevate:    mi1.RelaunchElevated,
 		run: func(name string, args ...string) error {
@@ -215,20 +250,20 @@ func systemAutostart(out io.Writer) autostart {
 		desktop:        mi1.DesktopDir,
 		shortcut:       mi1.CreateShortcut,
 		unitPath:       systemdUnitPath,
-		tempDir:        os.TempDir(),
+		taskFile:       p.taskFile,
 		timeService:    mi1.TimeService{},
-		savedStart:     timeServiceFile(),
+		savedStart:     p.savedStart,
 		ownerSID:       mi1.FileOwnerSID,
 		protect:        mi1.ProtectConfigDir,
 		writeProtected: mi1.WriteProtected,
-		savedModes:     piModesPath,
-		memoryDump:     filepath.Join(cmp.Or(os.Getenv("SystemRoot"), `C:\Windows`), "MEMORY.DMP"),
-		hubConfig:      filepath.Join(protectedDir(), mi1.HubConfigName),
+		savedModes:     p.savedModes,
+		memoryDump:     p.memoryDump,
+		protected:      p.protected,
 		mkdirAll:       func(path string) error { return os.MkdirAll(path, 0o700) },
 		chown:          os.Lchown,
 		chmod:          os.Chmod,
 		out:            out,
-	}
+	}, nil
 }
 
 // folderOf is the folder of exe, a path of the autostart's OS.
@@ -308,12 +343,11 @@ func (a autostart) install(exe string) error {
 	if err := a.saveTimeService(); err != nil {
 		return err
 	}
-	file := filepath.Join(a.tempDir, autostartName+".xml")
-	if err := os.WriteFile(file, utf16File(taskXML(exe, dir, sid)), 0o600); err != nil {
+	if err := a.writeTaskFile(taskXML(exe, dir, sid)); err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(file) }()
-	if err := a.run("schtasks", "/Create", "/TN", autostartName, "/XML", file, "/F"); err != nil {
+	defer func() { _ = os.Remove(a.taskFile) }()
+	if err := a.run("schtasks", "/Create", "/TN", autostartName, "/XML", a.taskFile, "/F"); err != nil {
 		return err
 	}
 	link, err := a.shortcutPath()
@@ -331,6 +365,20 @@ func (a autostart) install(exe string) error {
 	}
 	_, _ = fmt.Fprintln(a.out, "Serviciul de timp Windows pornește acum automat și nu mai are declanșatoare care să-l oprească, ca ceasul să se sincronizeze după fiecare repornire; dezinstalarea îi pune la loc setările de dinainte.")
 	_, _ = fmt.Fprintf(a.out, "Pornirea automată este instalată, iar pe desktop este scurtătura „%s”; când o deschideți, Windows cere permisiunea de administrator: răspundeți „Da”.\n", mi1.RealShortcut)
+	return nil
+}
+
+// writeTaskFile writes the boot task's definition, xml, as taskFile: a new
+// file that only Administrators and SYSTEM may change (mi1.WriteProtected),
+// in its folder, which install protects first (mi1.ProtectConfigDir).
+func (a autostart) writeTaskFile(xml string) error {
+	err := a.protect(filepath.Dir(a.taskFile))
+	if err == nil {
+		err = a.writeProtected(a.taskFile, utf16File(xml))
+	}
+	if err != nil {
+		return fmt.Errorf("nu pot scrie sarcina de pornire automată: %w", err)
+	}
 	return nil
 }
 
@@ -409,11 +457,14 @@ func exists(path string) bool {
 	return !errors.Is(err, os.ErrNotExist)
 }
 
-// removeHubConfig removes the config that the owner's MI1 runs started
-// ipcam-hub with: it names the session's camera addresses.
+// removeHubConfig removes the configs that the owner's probes started
+// ipcam-hub with: they name the session's camera addresses.
 func (a autostart) removeHubConfig() error {
-	if err := os.Remove(a.hubConfig); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("nu pot șterge %s: %w", a.hubConfig, err)
+	for _, name := range mi1.HubConfigNames {
+		path := filepath.Join(a.protected, name)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("nu pot șterge %s: %w", path, err)
+		}
 	}
 	return nil
 }

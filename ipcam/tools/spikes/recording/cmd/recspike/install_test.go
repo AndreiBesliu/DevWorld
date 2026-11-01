@@ -156,12 +156,12 @@ func newAutostart(t *testing.T, goos string, privileged bool) (autostart, *fakeO
 			return os.WriteFile(path, []byte("lnk"), 0o600)
 		},
 		unitPath:    filepath.Join(dir, "ipcam-recspike.service"),
-		tempDir:     dir,
+		taskFile:    filepath.Join(dir, "ProgramData", "ipcam-recspike", "ipcam-recspike.xml"),
 		timeService: f.time,
 		savedStart:  filepath.Join(dir, "ProgramData", "ipcam-recspike", "w32time-start.json"),
 		savedModes:  filepath.Join(dir, "var", "lib", "ipcam-recspike", "release-modes.json"),
 		memoryDump:  filepath.Join(dir, "Windows", "MEMORY.DMP"),
-		hubConfig:   filepath.Join(dir, "ProgramData", "ipcam-recspike", mi1.HubConfigName),
+		protected:   filepath.Join(dir, "ProgramData", "ipcam-recspike"),
 		ownerSID:    func(string) (string, error) { return f.owner, nil },
 		protect: func(dir string) error {
 			f.protected = append(f.protected, dir)
@@ -336,21 +336,26 @@ func TestInstall_SystemdUnit(t *testing.T) {
 // PC's boot task and its desktop shortcut, or the Pi's service, and is
 // content when they are already gone.
 func TestUninstall_RemovesTaskUnitAndShortcut(t *testing.T) {
-	// The config that the owner's MI1 runs started ipcam-hub with, which
-	// names the session's camera addresses, goes too.
+	// The configs that the owner's probes started ipcam-hub with, which
+	// name the session's camera addresses, go too: MI1's and each other
+	// probe's (Final fix C review, M9).
 	hubConfigLeft := func(t *testing.T, a autostart) {
 		t.Helper()
-		if _, err := os.Stat(a.hubConfig); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("ipcam-hub's config is still there (%v)", err)
+		for _, name := range mi1.HubConfigNames {
+			if _, err := os.Stat(filepath.Join(a.protected, name)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("ipcam-hub's config %s is still there (%v)", name, err)
+			}
 		}
 	}
 	writeHubConfig := func(t *testing.T, a autostart) {
 		t.Helper()
-		if err := os.MkdirAll(filepath.Dir(a.hubConfig), 0o700); err != nil {
+		if err := os.MkdirAll(a.protected, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(a.hubConfig, []byte("{}\n"), 0o600); err != nil {
-			t.Fatal(err)
+		for _, name := range []string{mi1.HubConfigName, mi1.HubConfigMI2, mi1.HubConfigMI3, mi1.HubConfigMI4, mi1.HubConfigMI9} {
+			if err := os.WriteFile(filepath.Join(a.protected, name), []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	a, f, desktop := newAutostart(t, "windows", true)
@@ -518,15 +523,18 @@ func TestInstall_OverAFileWithoutTriggers_KeepsThemForUninstall(t *testing.T) {
 
 // TestInstall_TimeServiceSettingsOutliveTheReleaseFolder (mi1-6): the time
 // service's settings from before the first install are kept outside the
-// release folder, under %ProgramData%\ipcam-recspike, so that an owner who
+// release folder, under ProgramData\ipcam-recspike, so that an owner who
 // deletes the folder and extracts a new release there installs again
 // without losing them: uninstall still puts back the settings of before
 // the first install, not the probe's.
 func TestInstall_TimeServiceSettingsOutliveTheReleaseFolder(t *testing.T) {
-	programData := filepath.Join(t.TempDir(), "ProgramData")
-	t.Setenv("ProgramData", programData)
+	programData, _ := fakeSystemFolders(t)
 	release := filepath.Join(t.TempDir(), "proba-inregistrare")
-	saved := systemAutostart(io.Discard).savedStart
+	system, err := systemAutostart("windows", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := system.savedStart
 	if want := filepath.Join(programData, "ipcam-recspike", "w32time-start.json"); saved != want {
 		t.Fatalf("the settings are saved at %s, want %s", saved, want)
 	}
@@ -562,6 +570,84 @@ func TestInstall_TimeServiceSettingsOutliveTheReleaseFolder(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(saved)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("%s is still there after uninstall (%v)", filepath.Dir(saved), err)
+	}
+}
+
+// fakeSystemFolders makes Windows' ProgramData and its own folder, as
+// Windows itself reports them, and the Pi's /var/lib/ipcam-recspike, folders
+// of the test's, until it ends; it returns the first two.
+func fakeSystemFolders(t *testing.T) (programData, windowsDir string) {
+	t.Helper()
+	programData, windowsDir = filepath.Join(t.TempDir(), "ProgramData"), filepath.Join(t.TempDir(), "Windows")
+	saved := systemFolders
+	t.Cleanup(func() { systemFolders = saved })
+	systemFolders.programData = func() (string, error) { return programData, nil }
+	systemFolders.windows = func() (string, error) { return windowsDir, nil }
+	systemFolders.pi = filepath.Join(t.TempDir(), "var", "lib", "ipcam-recspike")
+	return programData, windowsDir
+}
+
+// elsewhereEnvironment points every environment variable that names one of
+// Windows' folders, or the temporary one, at a folder of the user's own,
+// as a program of the owner's user can for the elevated boot task and
+// shortcut (HKCU\Environment, no UAC prompt), and returns that folder.
+func elsewhereEnvironment(t *testing.T) string {
+	t.Helper()
+	elsewhere := t.TempDir()
+	for _, name := range []string{"ProgramData", "ALLUSERSPROFILE", "PUBLIC", "SystemDrive", "SystemRoot", "windir",
+		"ProgramFiles", "ProgramW6432", "TEMP", "TMP", "TMPDIR"} {
+		t.Setenv(name, filepath.Join(elsewhere, name))
+	}
+	return elsewhere
+}
+
+// TestPaths_ComeFromWindowsNotFromTheEnvironment (Final fix C review, M3):
+// the boot task and the shortcut run recspike elevated with the owner's
+// user's environment, which a program of that user may change without a
+// UAC prompt. So the protected folder, the time service's saved settings,
+// the boot task's definition, the configs that ipcam-hub starts with and
+// Windows' kernel dump never follow %ProgramData%, %SystemRoot%, %windir%,
+// %ProgramFiles% or %TEMP%: they come from Windows (systemFolders), and
+// install and the owner's runs use them.
+func TestPaths_ComeFromWindowsNotFromTheEnvironment(t *testing.T) {
+	elsewhere := elsewhereEnvironment(t)
+	programData, windowsDir := fakeSystemFolders(t)
+	protected := filepath.Join(programData, "ipcam-recspike")
+	want := paths{protected: protected, savedStart: filepath.Join(protected, "w32time-start.json"),
+		taskFile: filepath.Join(protected, "ipcam-recspike.xml"), memoryDump: filepath.Join(windowsDir, "MEMORY.DMP")}
+	p, err := pathsFor("windows")
+	if err != nil || p != want {
+		t.Errorf("pathsFor(windows) = %+v, %v; want %+v, none under %s", p, err, want, elsewhere)
+	}
+	a, err := systemAutostart("windows", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{a.savedStart, a.taskFile, a.memoryDump, a.protected}
+	if wantA := []string{want.savedStart, want.taskFile, want.memoryDump, protected}; !slices.Equal(got, wantA) {
+		t.Errorf("the PC's install uses %q, want %q", got, wantA)
+	}
+}
+
+// TestInstall_TaskFileIsAdministrators (Final fix C review, M3): the boot
+// task's definition, which runs recspike elevated at every boot, is written
+// in the protected folder, as a new file that only Administrators and
+// SYSTEM may change (writeProtected), never in %TEMP%, which the owner's
+// user may write: a program of that user could otherwise change it between
+// install's write and schtasks' read. It is gone once the task is made.
+func TestInstall_TaskFileIsAdministrators(t *testing.T) {
+	a, f, _ := newAutostart(t, "windows", true)
+	if err := a.install(`C:\proba-inregistrare\recspike.exe`); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !slices.Contains(f.written, a.taskFile) || !slices.Contains(f.protected, filepath.Dir(a.taskFile)) {
+		t.Errorf("protected %q and wrote %q as Administrators' files; want %s among them, in its protected folder", f.protected, f.written, a.taskFile)
+	}
+	if !slices.ContainsFunc(f.commands, func(c []string) bool { return slices.Equal(c, []string{"schtasks", "/Create", "/TN", "ipcam-recspike", "/XML", a.taskFile, "/F"}) }) {
+		t.Errorf("commands %q, want schtasks /Create from %s", f.commands, a.taskFile)
+	}
+	if _, err := os.Stat(a.taskFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the task's definition is still there (%v)", err)
 	}
 }
 
@@ -820,11 +906,12 @@ func TestInstall_TimeServiceSettingsAreAdministrators(t *testing.T) {
 	if err := a.install(`C:\proba-inregistrare\recspike.exe`); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if folder := filepath.Dir(a.savedStart); !slices.Equal(f.protected, []string{folder}) {
-		t.Errorf("install protected %q, want %s", f.protected, folder)
+	// The boot task's definition goes there too (TestInstall_TaskFileIsAdministrators).
+	if folder := filepath.Dir(a.savedStart); !slices.Equal(f.protected, []string{folder, folder}) {
+		t.Errorf("install protected %q, want %s, for the settings and for the boot task", f.protected, folder)
 	}
-	if !slices.Equal(f.written, []string{a.savedStart}) {
-		t.Errorf("install wrote %q as Administrators' own, want the saved settings %s", f.written, a.savedStart)
+	if !slices.Equal(f.written, []string{a.savedStart, a.taskFile}) {
+		t.Errorf("install wrote %q as Administrators' own, want the saved settings %s and the boot task %s", f.written, a.savedStart, a.taskFile)
 	}
 	if got := named(f.commands, "icacls"); slices.ContainsFunc(got, func(c []string) bool { return strings.HasPrefix(c[1], filepath.Dir(a.savedStart)) }) {
 		t.Errorf("install ran icacls on the settings' folder: %q", got)

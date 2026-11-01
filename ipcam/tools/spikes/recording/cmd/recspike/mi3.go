@@ -57,8 +57,12 @@ func mi3Command(ctx context.Context, args []string, in *bufio.Reader, out io.Wri
 	if m := host.PiModel; m != nil && m.Known && !m.Supported {
 		return errors.New("acest Raspberry Pi nu este suportat (armv6): proba MI3 se amână în Faza 0-bis")
 	}
+	protected, err := protectedDir() // ipcam-hub runs elevated, as for MI2
+	if err != nil {
+		return err
+	}
 	return mi3.Run(ctx, mi3.Options{Host: host, Controller: controllerAddr(*controller), Hub: f.hub, Self: self,
-		Results: f.results, Work: f.work, Out: out})
+		Results: f.results, Work: f.work, ConfigDir: protected, Out: out})
 }
 
 // interfaceAddrs lists this device's addresses; tests replace it.

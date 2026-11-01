@@ -72,6 +72,19 @@ func DesktopDir() (string, error) {
 	return windows.KnownFolderPath(windows.FOLDERID_Desktop, windows.KF_FLAG_DEFAULT)
 }
 
+// ProgramData is Windows' folder of all users' program data, C:\ProgramData,
+// as Windows itself keeps it (the known folder, under HKLM), never from
+// %ProgramData%: the owner's user may set that variable in HKCU\Environment
+// without a UAC prompt, and the boot task and the shortcut run recspike
+// elevated with that user's environment (Final fix C review, M3).
+func ProgramData() (string, error) {
+	return windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
+}
+
+// WindowsFolder is Windows' own folder, C:\Windows, as the system reports
+// it, never from %SystemRoot% or %windir%, for the same reason.
+func WindowsFolder() (string, error) { return windows.GetSystemWindowsDirectory() }
+
 // shellLinkCS saves a shortcut through the shell's own link object, with
 // its Unicode interfaces (IShellLinkW, IPersistFile). WScript.Shell's
 // shortcut object is not Unicode-safe: on the Windows CI runner, whose ANSI

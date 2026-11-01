@@ -187,6 +187,9 @@ type Options struct {
 	// Results is recspike's published results folder; Work its private
 	// one, which holds the steps' recordings, keys and logs.
 	Results, Work string
+	// ConfigDir is the protected folder (mi1.ProtectConfigDir) of the
+	// config that each step's ipcam-hub starts with, mi1.HubConfigMI3.
+	ConfigDir string
 	// Out is the owner's screen.
 	Out io.Writer
 

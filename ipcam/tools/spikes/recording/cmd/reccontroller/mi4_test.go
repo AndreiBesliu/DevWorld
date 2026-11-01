@@ -75,7 +75,7 @@ func TestMI4_SmokeEndToEnd(t *testing.T) {
 	}
 	out := &syncBuffer{}
 	err = mi4.Run(ctx, mi4.Options{Controller: lns.Link.Addr().String(), Hub: hub, MediaMTX: mediamtx,
-		Results: filepath.Join(work, "results"), Work: filepath.Join(work, "work"), Out: out,
+		Results: filepath.Join(work, "results"), Work: filepath.Join(work, "work"), ConfigDir: filepath.Join(work, "config"), Out: out,
 		Host: func(context.Context) (mi1.HostState, error) {
 			return mi1.HostState{Pseudonym: "pi", OS: runtime.GOOS, Storage: "unknown", WriteCache: "unknown", PiModel: pi4, Cameras: 4}, nil
 		},

@@ -51,13 +51,17 @@ type Options struct {
 	// Results is recspike's published results folder, with the run's state
 	// in state/; Work is its private folder: the run's data and keys.
 	Results, Work string
+	// ConfigDir is the protected folder (mi1.ProtectConfigDir) of the
+	// config that each start of ipcam-hub reads, mi1.HubConfigMI2.
+	ConfigDir string
 	// Out is the owner's screen.
 	Out io.Writer
 	// CameraURLs gives the RTSP address of each stream, from the
 	// controller, a host-local reccontroller -local (G18, G19).
 	CameraURLs func(ctx context.Context, streams []string) (map[string]string, error)
 
-	// The rest are the system's when nil.
+	// The rest are the system's when nil; StartHub starts ipcam-hub on the
+	// config in the protected folder.
 	FreeBytes func() (uint64, error)
 	Clock     source.Clock
 	ThisBoot  func() (mi1.Boot, error)
@@ -176,7 +180,7 @@ func Run(ctx context.Context, o Options) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("nu pot pregăti rularea %s: %w", runID, err)
 	}
-	config, err := o.writeRun(dir, streams, urls)
+	cfg, err := o.runConfig(dir, streams, urls)
 	if err != nil {
 		return fmt.Errorf("nu pot pregăti rularea %s: %w", runID, err)
 	}
@@ -191,12 +195,14 @@ func Run(ctx context.Context, o Options) error {
 		return fmt.Errorf("nu pot deschide jurnalul ipcam-hub: %w", err)
 	}
 	// After the envelope and the run state, or after the interruption: the
-	// run's recordings are no longer needed.
+	// run's recordings are no longer needed, nor its config, which names
+	// the controller's cameras with their login.
 	defer func() {
 		_ = log.Close() // Windows removes no file that is open
 		if err := clearRun(dir); err != nil {
 			o.say("Înregistrările probei %s nu s-au putut șterge (%v); se șterg la următorul recspike mi2.", runID, err)
 		}
+		_ = os.Remove(filepath.Join(o.ConfigDir, mi1.HubConfigMI2))
 	}()
 
 	o.say("Proba MI2 %s începe: %s h, %d camere. Lăsați dispozitivul pornit, cu reccontroller -local pornit tot timpul.", runID, results.Decimal(o.Hours, -1), cameras)
@@ -208,7 +214,7 @@ func Run(ctx context.Context, o Options) error {
 			o.say("Crash-ul nu s-a putut salva în starea probei: %v", err)
 		}
 	}
-	data, err := o.record(ctx, config, log, window, streams, crashed)
+	data, err := o.record(ctx, cfg, log, window, streams, crashed)
 	switch {
 	case errors.Is(err, errNeverReady):
 		if serr := abandonRun(statePath, st, runID+": "+errNeverReady.Error()); serr != nil {
@@ -236,10 +242,11 @@ func Run(ctx context.Context, o Options) error {
 	return nil
 }
 
-// record runs ipcam-hub on config, which records streams, for the run's
-// hours and supervises it (C07): an exit that recspike did not ask for is
-// a crash when that ipcam-hub was ready, which crashed reports, a setup
-// failure before, and ipcam-hub starts again at once. After
+// record runs ipcam-hub on cfg, which records streams, for the run's hours
+// and supervises it (C07): an exit that recspike did not ask for is a
+// crash when that ipcam-hub was ready, which crashed reports, a setup
+// failure before, and ipcam-hub starts again at once. Every start reads
+// cfg written anew into the protected folder (startHub). After
 // maxStartsUnready setup failures in a row, the run ends: with
 // errNeverReady when no ipcam-hub of the run ever got ready, else with the
 // crashes measured. A restart after a crash that refuses its reconcile
@@ -251,7 +258,7 @@ func Run(ctx context.Context, o Options) error {
 // ctx is done, it stops ipcam-hub cleanly, waiting mi1.StopTimeout, long
 // enough for an SD card (Task 7.2d): that stop is no crash, even when it
 // ends in a kill.
-func (o Options) record(ctx context.Context, config string, stderr io.Writer, window time.Duration, streams []string,
+func (o Options) record(ctx context.Context, cfg hubproc.Config, stderr io.Writer, window time.Duration, streams []string,
 	crashed func(crashes int)) (results.Mi2Data, error) {
 	clock := o.clock()
 	start := clock.Now()
@@ -267,7 +274,7 @@ func (o Options) record(ctx context.Context, config string, stderr io.Writer, wi
 		}
 		t.event(e, clock.Now())
 	}
-	hub, err := o.startHub(config, stderr, onEvent)
+	hub, err := o.startHub(cfg, stderr, onEvent)
 	if err != nil {
 		return results.Mi2Data{}, fmt.Errorf("nu pot porni ipcam-hub: %w", err)
 	}
@@ -306,7 +313,7 @@ func (o Options) record(ctx context.Context, config string, stderr io.Writer, wi
 				}
 				o.say("ipcam-hub s-a oprit înainte să fie gata (codul %d): nu este un crash. Îl pornesc din nou.", hub.ExitCode())
 			}
-			if hub, err = o.startHub(config, stderr, onEvent); err != nil {
+			if hub, err = o.startHub(cfg, stderr, onEvent); err != nil {
 				return results.Mi2Data{}, fmt.Errorf("nu pot porni ipcam-hub: %w", err)
 			}
 		case now := <-tick.C():
@@ -353,8 +360,7 @@ func clearRuns(runs string) error {
 }
 
 // clearRun removes what the run in dir left but its ipcam-hub log: its
-// recordings and ipcam-hub's catalog in data/, run.json, and the RI_g
-// identity.
+// recordings and ipcam-hub's catalog in data/, and the RI_g identity.
 func clearRun(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -495,23 +501,24 @@ func (t *tally) data(d time.Duration) results.Mi2Data {
 		NotRecordingMinutes: math.Round(worst.Minutes()*10) / 10}
 }
 
-// writeRun writes the run's run.json in dir: each stream a job that pulls
-// the controller's camera, the odd ones encrypted to a fresh RI_g and RK of
-// the run (C11, PH0-22), whose RI_g is a 0600 file beside it and whose RK's
-// identity is never kept.
-func (o Options) writeRun(dir string, streams []string, urls map[string]string) (string, error) {
+// runConfig is the run's config, of the run in dir: each stream a job that
+// pulls the controller's camera, the odd ones encrypted to a fresh RI_g and
+// RK of the run (C11, PH0-22), whose RI_g is a 0600 file in dir, which it
+// writes, and whose RK's identity is never kept; the data folder is dir's
+// and MediaMTX the release's.
+func (o Options) runConfig(dir string, streams []string, urls map[string]string) (hubproc.Config, error) {
 	cfg := hubproc.Config{DataDir: filepath.Join(dir, "data"), MediaMTX: o.MediaMTX, SDCardConfirmed: o.Host.SdConfirmation != nil}
 	riG, err := age.GenerateX25519Identity()
 	if err != nil {
-		return "", err
+		return cfg, err
 	}
 	rk, err := age.GenerateX25519Identity()
 	if err != nil {
-		return "", err
+		return cfg, err
 	}
 	cfg.IdentityFile = filepath.Join(dir, "ri_g.key")
 	if err := mi1.WriteDurably(cfg.IdentityFile, []byte(riG.String()+"\n"), 0o600); err != nil {
-		return "", err
+		return cfg, err
 	}
 	for i, stream := range streams {
 		cam, profile, _ := strings.Cut(stream, "_")
@@ -521,8 +528,7 @@ func (o Options) writeRun(dir string, streams []string, urls map[string]string) 
 		}
 		cfg.Jobs = append(cfg.Jobs, job)
 	}
-	config := filepath.Join(dir, "run.json")
-	return config, hubproc.WriteConfig(config, cfg)
+	return cfg, nil
 }
 
 // sayWindow prints the free space that the run needs on this host and the
@@ -561,7 +567,15 @@ func (o Options) thisBoot() (mi1.Boot, error) {
 	return mi1.ThisBoot()
 }
 
-func (o Options) startHub(config string, stderr io.Writer, onEvent func(hubproc.Event)) (Hub, error) {
+// startHub starts ipcam-hub on cfg, written anew into the protected folder
+// first (mi1.WriteHubConfig): the guide runs MI2 elevated, from an
+// administrator window or with sudo, and work/ is the owner's (Final fix C
+// review, M9).
+func (o Options) startHub(cfg hubproc.Config, stderr io.Writer, onEvent func(hubproc.Event)) (Hub, error) {
+	config, err := mi1.WriteHubConfig(o.ConfigDir, mi1.HubConfigMI2, cfg)
+	if err != nil {
+		return nil, err
+	}
 	if o.StartHub != nil {
 		return o.StartHub(config, stderr, onEvent)
 	}

@@ -154,7 +154,7 @@ func stepOf(m link.Message) string {
 
 // cameraURL is the RTSP address of stream, with the session's credentials,
 // at the controller's host as recspike dialed it. It holds the
-// credentials: it goes only to the private run.json and to a load's stdin.
+// credentials: it goes only to the protected config and to a load's stdin.
 func (l *controllerLink) cameraURL(stream string) (string, error) {
 	base, err := url.Parse(l.session.RTSPBase)
 	if err != nil || base.Port() == "" {

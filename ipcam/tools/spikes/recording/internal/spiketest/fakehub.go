@@ -33,7 +33,20 @@ const (
 	// the segments that the fake closes, in order; unset, it closes one of
 	// the first job's segment length.
 	FakeHubSegmentsEnv = "RECSPIKE_FAKE_SEGMENTS"
+	// FakeHubStartsEnv names the file to which the fake appends, for each
+	// start, the config that it runs and the paths that the config names,
+	// as JSON (HubStart), one line per start.
+	FakeHubStartsEnv = "RECSPIKE_FAKE_STARTS"
 )
+
+// HubStart is one start of the fake ipcam-hub: the config that it read,
+// and the MediaMTX, the data folder and RI_g's file that it names.
+type HubStart struct {
+	Config       string `json:"config"`
+	MediaMTX     string `json:"mediamtx"`
+	DataDir      string `json:"dataDir"`
+	IdentityFile string `json:"identityFile"`
+}
 
 // fakeSegmentStart is when the fake's first segment starts.
 var fakeSegmentStart = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -65,6 +78,9 @@ func FakeHub(args []string) int {
 	}
 	cfg, err := hubproc.ReadConfig(args[2])
 	if err != nil {
+		return fail(err)
+	}
+	if err := logStart(HubStart{Config: args[2], MediaMTX: cfg.MediaMTX, DataDir: cfg.DataDir, IdentityFile: cfg.IdentityFile}); err != nil {
 		return fail(err)
 	}
 	log, err := os.OpenFile(os.Getenv(FakeHubLogEnv), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the test's own log
@@ -122,6 +138,23 @@ func FakeHub(args []string) int {
 	return 0
 }
 
+// logStart appends s to FakeHubStartsEnv's file, when it names one.
+func logStart(s HubStart) error {
+	path := os.Getenv(FakeHubStartsEnv)
+	if path == "" {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the test's own log
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(s)
+	if err == nil {
+		_, err = f.Write(append(b, '\n'))
+	}
+	return errors.Join(err, f.Close())
+}
+
 // fakeSegments is the lengths, in seconds, of the segments that the fake
 // closes: FakeHubSegmentsEnv's, or one of jobSecs (300 when 0).
 func fakeSegments(jobSecs int) ([]int, error) {
@@ -162,7 +195,32 @@ func InstallFakeHub(t *testing.T, dir string) (hub, jobs string) {
 	jobs = filepath.Join(dir, "jobs.log")
 	t.Setenv(FakeHubEnv, "1")
 	t.Setenv(FakeHubLogEnv, jobs)
+	t.Setenv(FakeHubStartsEnv, filepath.Join(dir, "starts.log"))
 	return hub, jobs
+}
+
+// HubStarts reads the starts of the fake ipcam-hub that InstallFakeHub put
+// in dir: none when it never ran.
+func HubStarts(t *testing.T, dir string) []HubStart {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "starts.log")) //nolint:gosec // the test's own log
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []HubStart
+	dec := json.NewDecoder(bytes.NewReader(b))
+	for {
+		var s HubStart
+		if err := dec.Decode(&s); errors.Is(err, io.EOF) {
+			return out
+		} else if err != nil {
+			t.Fatalf("the fake ipcam-hub's starts: %v", err)
+		}
+		out = append(out, s)
+	}
 }
 
 // HubJobs reads the jobs that the fake ipcam-hub ran, from the file that

@@ -36,6 +36,7 @@ import (
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/controller"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubrec"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi9"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/source"
 )
@@ -108,8 +109,10 @@ func record(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	camera := url.URL{Scheme: "rtsp", User: url.UserPassword(creds.User, creds.Pass), Host: ln.Addr().String(), Path: "/" + stream.Path}
 	say := func(format string, args ...any) { _, _ = fmt.Fprintf(stderr, format+"\n", args...) }
 	run, name := recordingPlace(*out)
+	// Nothing here runs elevated: the config's folder is one of the
+	// recording's own.
 	rec, err := hubrec.Record(ctx, hubrec.Options{Hub: *hub, MediaMTX: *mediamtx, CameraURL: camera.String(),
-		Run: run, Name: name, SegmentSecs: *secs, Say: say})
+		Run: run, Name: name, ConfigDir: filepath.Join(run, name, "config"), Config: mi1.HubConfigMI9, SegmentSecs: *secs, Say: say})
 	if err != nil {
 		return err
 	}

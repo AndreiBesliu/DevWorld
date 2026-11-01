@@ -708,9 +708,19 @@ func (d *Driver) writeRun(cur *CurrentRun, vol Volume, s *session) (string, erro
 	return config, errors.Join(syncPath(config), syncDir(dir), syncDir(d.Work))
 }
 
-// HubConfigName is the file, in Driver.ConfigDir, that the owner's runs
-// start ipcam-hub with.
-const HubConfigName = "ipcam-hub-run.json"
+// The configs, in the protected folder (ProtectConfigDir), that the owner's
+// probes start ipcam-hub with, elevated: one file per probe, so that no two
+// probes ever share one. HubConfigName is MI1's, in Driver.ConfigDir.
+const (
+	HubConfigName = "ipcam-hub-run.json"
+	HubConfigMI2  = "ipcam-hub-mi2.json"
+	HubConfigMI3  = "ipcam-hub-mi3.json"
+	HubConfigMI4  = "ipcam-hub-mi4.json"
+	HubConfigMI9  = "ipcam-hub-mi9.json"
+)
+
+// HubConfigNames are every probe's config, which uninstall removes.
+var HubConfigNames = []string{HubConfigName, HubConfigMI2, HubConfigMI3, HubConfigMI4, HubConfigMI9}
 
 // hubConfig writes the config that ipcam-hub starts with, before each of
 // its starts (the first, the resume after a reboot, the restarts after a
@@ -724,7 +734,7 @@ const HubConfigName = "ipcam-hub-run.json"
 // folder when the run state says that the run is encrypted. The owner's
 // runs write the config into d.ConfigDir, which only Administrators and
 // SYSTEM, or root, may write, as a new file that no one else may change
-// (WriteProtected): a folder that another account made there before
+// (WriteHubConfig): a folder that another account made there before
 // install is refused (ProtectConfigDir), and a file at the config's name is
 // replaced, not written through (Final fix C review, I2). The lab's runs,
 // and a driver without a ConfigDir, write it back into run.json.
@@ -745,18 +755,7 @@ func (d *Driver) hubConfig(st *RunState, cur *CurrentRun, vol Volume) (string, e
 	if protect == nil {
 		protect = ProtectConfigDir
 	}
-	path = filepath.Join(d.ConfigDir, HubConfigName)
-	data, err := hubproc.EncodeConfig(cfg)
-	if err == nil {
-		err = protect(d.ConfigDir)
-	}
-	if err == nil {
-		err = WriteProtected(path, data)
-	}
-	if err != nil {
-		return "", fmt.Errorf("nu pot proteja folderul %s, din care pornește ipcam-hub: %w", d.ConfigDir, err)
-	}
-	return path, nil
+	return writeHubConfig(protect, d.ConfigDir, HubConfigName, cfg)
 }
 
 // identity reads the run's RI_g; nil for a clear run.

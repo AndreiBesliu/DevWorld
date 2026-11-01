@@ -129,7 +129,7 @@ func newHarness(t *testing.T, dir string, host mi1.HostState, boot string) *harn
 	h := &harness{t: t, clock: &fakeClock{now: time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)}, hubs: make(chan *fakeHub, 8), out: &bytes.Buffer{}}
 	h.opts = Options{
 		Hours: 72, Host: host, Hub: filepath.Join(dir, "ipcam-hub"),
-		Results: filepath.Join(dir, "results"), Work: filepath.Join(dir, "work"), Out: h.out,
+		Results: filepath.Join(dir, "results"), Work: filepath.Join(dir, "work"), ConfigDir: filepath.Join(dir, "ProgramData", "ipcam-recspike"), Out: h.out,
 		FreeBytes: func() (uint64, error) { return 500e9, nil },
 		CameraURLs: func(_ context.Context, streams []string) (map[string]string, error) {
 			urls := map[string]string{}
@@ -983,5 +983,67 @@ func TestStability_RestartRefusedAfterACrashNamesTheCrash(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+// TestStability_ElevatedHubStartsFromTrustedValues (Final fix C review,
+// M9): the guide runs MI2 from an administrator window, and the run's
+// folder lies in work/, which the owner's own token may change, between
+// its write and any start of ipcam-hub, the restarts after each crash in
+// the 72 h included. Every start reads the probe's own config in the
+// protected folder (ConfigDir, mi1.ProtectConfigDir), written anew from the
+// run's trusted values: the release's MediaMTX, the run's data folder and
+// RI_g's file, and the controller's cameras. A run.json planted in the
+// run's folder changes nothing, and the protected config goes with the run.
+func TestStability_ElevatedHubStartsFromTrustedValues(t *testing.T) {
+	dir := t.TempDir()
+	h := newHarness(t, dir, pcHost, "boot-1")
+	h.opts.MediaMTX = filepath.Join(dir, "proba-inregistrare", "mediamtx")
+	run := filepath.Join(h.opts.Work, "mi2", "pc-72h-1")
+	planted := hubproc.Config{DataDir: filepath.Join(dir, "elsewhere", "data"), MediaMTX: filepath.Join(dir, "elsewhere", "mediamtx"),
+		IdentityFile: filepath.Join(dir, "elsewhere", "ri_g.key"), Jobs: []hubproc.Job{{Cam: "cam01", Profile: "main", RestreamURL: "rtsp://192.0.2.9/x"}}}
+	type start struct {
+		config string
+		cfg    hubproc.Config
+	}
+	var starts []start
+	fake := h.opts.StartHub
+	h.opts.StartHub = func(config string, stderr io.Writer, onEvent func(hubproc.Event)) (Hub, error) {
+		// What another program of the owner's user may write between the
+		// run's config and this start.
+		if err := hubproc.WriteConfig(filepath.Join(run, "run.json"), planted); err != nil {
+			return nil, err
+		}
+		cfg, err := hubproc.ReadConfig(config) // what ipcam-hub reads
+		if err != nil {
+			return nil, err
+		}
+		starts = append(starts, start{config, cfg})
+		return fake(config, stderr, onEvent)
+	}
+	h.start()
+	h.nextHub().exit() // a crash: ipcam-hub starts again
+	h.nextHub()
+	h.finish()
+
+	if len(starts) != 2 {
+		t.Fatalf("ipcam-hub started %d times, want 2", len(starts))
+	}
+	for i, s := range starts {
+		cfg := s.cfg
+		if s.config != filepath.Join(h.opts.ConfigDir, mi1.HubConfigMI2) || cfg.MediaMTX != h.opts.MediaMTX || cfg.DataDir != filepath.Join(run, "data") ||
+			cfg.IdentityFile != filepath.Join(run, "ri_g.key") || len(cfg.Jobs) != pcHost.Cameras {
+			t.Errorf("start %d of ipcam-hub read %s: %+v; want %s, with MediaMTX %s, the run's data folder and RI_g's file under %s, and %d cameras",
+				i+1, s.config, cfg, filepath.Join(h.opts.ConfigDir, mi1.HubConfigMI2), h.opts.MediaMTX, run, pcHost.Cameras)
+			continue
+		}
+		for _, j := range cfg.Jobs {
+			if j.RestreamURL != "rtsp://user:pass@127.0.0.1:8554/"+j.Cam+"_main" {
+				t.Errorf("start %d: job %+v, want the controller's camera", i+1, j)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(h.opts.ConfigDir, mi1.HubConfigMI2)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the protected config, with the cameras' login, is still there after the run (%v)", err)
 	}
 }

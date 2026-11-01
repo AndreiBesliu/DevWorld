@@ -1,6 +1,7 @@
 package hubrec
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"filippo.io/age"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/internal/spiketest"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 )
 
 // The test binary stands in for ipcam-hub when spiketest.FakeHubEnv is set
@@ -59,7 +61,8 @@ func TestRecord_WhereWorkFindsAndRemovesIt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		seg, err := Record(t.Context(), Options{Hub: hub, CameraURL: "rtsp://192.0.2.1:8554/cam01_main", Run: run, Name: FiveMin, SegmentSecs: 300})
+		seg, err := Record(t.Context(), Options{Hub: hub, CameraURL: "rtsp://192.0.2.1:8554/cam01_main", Run: run, Name: FiveMin, SegmentSecs: 300,
+			ConfigDir: filepath.Join(dir, "config"), Config: mi1.HubConfigMI4})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -183,7 +186,8 @@ func TestRecord_TakesOnlyAFullLengthSegment(t *testing.T) {
 		hub, _ := spiketest.InstallFakeHub(t, dir)
 		t.Setenv(spiketest.FakeHubSegmentsEnv, "80,300")
 		run := filepath.Join(dir, "run")
-		seg, err := Record(t.Context(), Options{Hub: hub, CameraURL: "rtsp://192.0.2.1:8554/cam01_main", Run: run, Name: FiveMin, SegmentSecs: 300})
+		seg, err := Record(t.Context(), Options{Hub: hub, CameraURL: "rtsp://192.0.2.1:8554/cam01_main", Run: run, Name: FiveMin, SegmentSecs: 300,
+			ConfigDir: filepath.Join(dir, "config"), Config: mi1.HubConfigMI4})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -197,7 +201,7 @@ func TestRecord_TakesOnlyAFullLengthSegment(t *testing.T) {
 		t.Setenv(spiketest.FakeHubSegmentsEnv, "80,90")
 		start := time.Now()
 		_, err := Record(t.Context(), Options{Hub: hub, CameraURL: "rtsp://192.0.2.1:8554/cam01_main", Run: filepath.Join(dir, "run"),
-			Name: FiveMin, SegmentSecs: 300})
+			Name: FiveMin, SegmentSecs: 300, ConfigDir: filepath.Join(dir, "config"), Config: mi1.HubConfigMI4})
 		if err == nil || !strings.HasPrefix(err.Error(), "segmentul s-a închis după 90 s, nu după 5 min: porniți din nou proba") {
 			t.Errorf("Record = %v, want the Romanian line of a segment that closed after 90 s", err)
 		}
@@ -205,4 +209,42 @@ func TestRecord_TakesOnlyAFullLengthSegment(t *testing.T) {
 			t.Errorf("Record waited %v for a segment that could no longer be full", waited)
 		}
 	})
+}
+
+// TestRecord_ElevatedHubStartsFromTheProtectedConfig (Final fix C review,
+// M9): the guide runs MI4 and MI9 from an administrator window, and the
+// recording's folder lies in work/, which the owner's own token may change.
+// So ipcam-hub starts from the probe's own config in the protected folder
+// (ConfigDir, mi1.ProtectConfigDir), written anew from the recording's
+// trusted values: the release's MediaMTX, the recording's data folder and
+// RI_g's file. A run.json planted in the recording's folder changes
+// nothing, and the protected config, which holds the camera's address
+// with its login, goes once ipcam-hub has stopped.
+func TestRecord_ElevatedHubStartsFromTheProtectedConfig(t *testing.T) {
+	dir := t.TempDir()
+	hub, _ := spiketest.InstallFakeHub(t, dir)
+	run, configDir := filepath.Join(dir, "work", "mi4", "20261029-090000"), filepath.Join(dir, "ProgramData", "ipcam-recspike")
+	mediamtx := filepath.Join(dir, "proba-inregistrare", "mediamtx")
+	planted := []byte(`{"dataDir":"C:\\Users\\Public\\data","mediamtx":"C:\\Users\\Public\\mediamtx.exe","sdCardConfirmed":false,"jobs":[]}` + "\n")
+	if err := os.MkdirAll(filepath.Join(run, FiveMin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(run, FiveMin, "run.json"), planted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Record(t.Context(), Options{Hub: hub, MediaMTX: mediamtx, CameraURL: "rtsp://192.0.2.1:8554/cam01_main", Run: run, Name: FiveMin,
+		SegmentSecs: 300, ConfigDir: configDir, Config: mi1.HubConfigMI4}); err != nil {
+		t.Fatal(err)
+	}
+	want := spiketest.HubStart{Config: filepath.Join(configDir, mi1.HubConfigMI4), MediaMTX: mediamtx, DataDir: filepath.Join(run, FiveMin, RecordingDir),
+		IdentityFile: filepath.Join(run, FiveMin, IdentityFile)}
+	if starts := spiketest.HubStarts(t, dir); len(starts) != 1 || starts[0] != want {
+		t.Errorf("ipcam-hub started %+v, want once %+v", starts, want)
+	}
+	if got, err := os.ReadFile(filepath.Join(run, FiveMin, "run.json")); err != nil || !bytes.Equal(got, planted) { //nolint:gosec // the test's file
+		t.Errorf("the run.json planted in the recording's folder is now %q (%v); want it left as planted, and unread", got, err)
+	}
+	if _, err := os.Stat(want.Config); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the protected config, with the camera's login, is still there (%v)", err)
+	}
 }

@@ -5,8 +5,9 @@
 // CI segment of MI9's job. A probe keeps its runs under recspike's work
 // folder, work/<probe>/<run>/, one folder per run named by its start; each
 // recording of a run is <run>/<name>/, with ipcam-hub's data folder data/,
-// RI_g's identity ri_g.key beside it (RK's is never kept, PH0-22), run.json
-// and ipcam-hub's log.
+// RI_g's identity ri_g.key beside it (RK's is never kept, PH0-22) and
+// ipcam-hub's log; the config that ipcam-hub starts with lies in the
+// protected folder (Options.ConfigDir).
 package hubrec
 
 import (
@@ -61,11 +62,15 @@ type Options struct {
 	// Hub is ipcam-hub; MediaMTX the fork, "" for the one next to Hub.
 	Hub, MediaMTX string
 	// CameraURL is the camera's RTSP address with its credentials, which
-	// go only to the private run.json.
+	// go only to the protected config.
 	CameraURL string
 	// Run is the run's folder (Work.Start) and Name the recording's in it:
 	// the recording lies in Run/Name.
 	Run, Name string
+	// ConfigDir is the protected folder (mi1.ProtectConfigDir) of the
+	// config that ipcam-hub starts with, and Config that config's name
+	// there, the probe's own (mi1.HubConfigMI4, mi1.HubConfigMI9).
+	ConfigDir, Config string
 	// SegmentSecs is the segment's length.
 	SegmentSecs int
 	// SDCardConfirmed is the owner's SD-card confirmation (G16).
@@ -81,7 +86,12 @@ type Options struct {
 // restart of MediaMTX) is not one: Record then waits, up to one more
 // segment length, for the next one of the full length, and fails with a
 // Romanian line when that one closes early too (mis-6). Run/Name holds the
-// recording, run.json, RI_g's identity and ipcam-hub's log.
+// recording, RI_g's identity and ipcam-hub's log. ipcam-hub starts from
+// the probe's own config, Config, in the protected folder ConfigDir
+// (mi1.WriteHubConfig): the guide runs MI4 and MI9 elevated, from an
+// administrator window or with sudo, and Run lies in work/, which the
+// owner's own token may change (Final fix C review, M9). That config,
+// which holds the camera's login, goes once ipcam-hub has stopped.
 func Record(ctx context.Context, o Options) (Segment, error) {
 	dir := filepath.Join(o.Run, o.Name)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -99,13 +109,13 @@ func Record(ctx context.Context, o Options) (Segment, error) {
 	if err := os.WriteFile(identity, []byte(riG.String()+"\n"), 0o600); err != nil {
 		return Segment{}, err
 	}
-	config := filepath.Join(dir, "run.json")
-	err = hubproc.WriteConfig(config, hubproc.Config{DataDir: filepath.Join(dir, RecordingDir), MediaMTX: o.MediaMTX, IdentityFile: identity,
-		SDCardConfirmed: o.SDCardConfirmed, Jobs: []hubproc.Job{{Cam: Camera, Profile: Profile, RestreamURL: o.CameraURL,
+	config, err := mi1.WriteHubConfig(o.ConfigDir, o.Config, hubproc.Config{DataDir: filepath.Join(dir, RecordingDir), MediaMTX: o.MediaMTX,
+		IdentityFile: identity, SDCardConfirmed: o.SDCardConfirmed, Jobs: []hubproc.Job{{Cam: Camera, Profile: Profile, RestreamURL: o.CameraURL,
 			SegmentSecs: o.SegmentSecs, Recipients: []string{riG.Recipient().String(), rk.Recipient().String()}}}})
 	if err != nil {
 		return Segment{}, err
 	}
+	defer func() { _ = os.Remove(config) }() // after ipcam-hub's stop, deferred below
 	logPath := filepath.Join(dir, "ipcam-hub.log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the recording's own folder
 	if err != nil {

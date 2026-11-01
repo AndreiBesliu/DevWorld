@@ -10,6 +10,7 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/hubproc"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/link"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/mi1"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/results"
@@ -143,11 +144,12 @@ func TestMI3_ShortLoadIsRedone(t *testing.T) {
 
 // TestMI3_FinishedStepKeepsOnlyItsLogs (mis-5): when a step ends, its
 // folder keeps only the step logs that keepStepLogs moves: its
-// recordings, its RI_g identity and its run.json, which holds the
-// controller's RTSP login, go with it.
+// recordings and its RI_g identity go with it, and so does its config in
+// the protected folder, which holds the controller's RTSP login.
 func TestMI3_FinishedStepKeepsOnlyItsLogs(t *testing.T) {
 	work := t.TempDir()
-	o := Options{Host: mi1.HostState{Pseudonym: "pc"}, Work: work, Out: &strings.Builder{}, FreeBytes: func() (uint64, error) { return 1e12, nil }}
+	o := Options{Host: mi1.HostState{Pseudonym: "pc"}, Work: work, ConfigDir: filepath.Join(work, "config"), Out: &strings.Builder{},
+		FreeBytes: func() (uint64, error) { return 1e12, nil }}
 	r := &stepRunner{o: o, l: deadLink(t), dir: filepath.Join(work, "mi3"), tier: TierH3}
 	if _, err := r.measure(t.Context(), 2, FullMinutes, 1); err == nil {
 		t.Fatal("a step on a dead link succeeded")
@@ -162,5 +164,53 @@ func TestMI3_FinishedStepKeepsOnlyItsLogs(t *testing.T) {
 	}
 	if want := []string{"ipcam-hub.log", "loads.log", "recspike.log"}; !slices.Equal(names, want) {
 		t.Errorf("the finished step's folder holds %q, want only %q", names, want)
+	}
+	if _, err := os.Stat(filepath.Join(o.ConfigDir, mi1.HubConfigMI3)); !os.IsNotExist(err) {
+		t.Errorf("the step's protected config, with the RTSP login, is still there (%v)", err)
+	}
+}
+
+// TestMI3_ElevatedHubStartsFromTrustedValues (Final fix C review, M9): the
+// guide runs MI3 from an administrator window, and a step's folder lies in
+// work/, which the owner's own token may change between the step's config
+// and ipcam-hub's start (the controller's offers come in between). So the
+// step's ipcam-hub starts from the probe's own config in the protected
+// folder (ConfigDir, mi1.ProtectConfigDir), with the step's trusted values:
+// the release's MediaMTX, the step's data folder and RI_g's file, the
+// controller's cameras, the even ones encrypted. A run.json planted in the
+// step's folder changes nothing.
+func TestMI3_ElevatedHubStartsFromTrustedValues(t *testing.T) {
+	dir := t.TempDir()
+	step := filepath.Join(dir, "work", "mi3", "01-2cam-60min-1")
+	if err := os.MkdirAll(step, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	o := Options{Host: mi1.HostState{Pseudonym: "pc"}, MediaMTX: filepath.Join(dir, "proba-inregistrare", "mediamtx"),
+		ConfigDir: filepath.Join(dir, "ProgramData", "ipcam-recspike")}
+	l := &controllerLink{session: link.Session{RTSPBase: "rtsp://192.0.2.1:8554", User: "u", Pass: "p"}, host: "192.0.2.1"}
+	s := &stepRun{r: &stepRunner{o: o, l: l, tier: TierH3}, dir: step, cameras: 2, minutes: FullMinutes}
+	config, _, err := s.writeRun([]string{"cam01_main", "cam02_main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	camera, err := l.cameraURL("cam02_main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What another program of the owner's user may write before ipcam-hub
+	// starts.
+	planted := hubproc.Config{DataDir: filepath.Join(dir, "elsewhere", "data"), MediaMTX: filepath.Join(dir, "elsewhere", "mediamtx"), Jobs: []hubproc.Job{}}
+	if err := hubproc.WriteConfig(filepath.Join(step, "run.json"), planted); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := hubproc.ReadConfig(config) // what ipcam-hub reads
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config != filepath.Join(o.ConfigDir, mi1.HubConfigMI3) || cfg.MediaMTX != o.MediaMTX || cfg.DataDir != filepath.Join(step, "data") ||
+		cfg.IdentityFile != filepath.Join(step, "ri_g.key") || len(cfg.Jobs) != 2 || cfg.Jobs[0].Recipients != nil || len(cfg.Jobs[1].Recipients) != 2 ||
+		cfg.Jobs[1].RestreamURL != camera {
+		t.Errorf("ipcam-hub starts from %s: %+v; want %s, with MediaMTX %s, the step's data folder and RI_g's file under %s, and the controller's 2 cameras",
+			config, cfg, filepath.Join(o.ConfigDir, mi1.HubConfigMI3), o.MediaMTX, step)
 	}
 }
