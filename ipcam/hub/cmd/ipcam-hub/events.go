@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/outbox"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/recorder"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
 )
 
 // events writes one JSON object per line on stdout, the run event schema.
@@ -45,6 +49,30 @@ import (
 //   - sd_card_unconfirmed: rec/ is on an SD card and run.json does not
 //     confirm the wear warning (HUB-17, T40); ipcam-hub has changed nothing
 //     and exits 4.
+//
+// With an uploads section only (Task 7b), the uploads' events. None carries
+// a session URI, an uploadUrl, a token or a provider's error text: a
+// driver's error goes out only as upload_failed's reason, and only the
+// outbox's local errors, of the catalog and the spool, as error events,
+// without directories.
+//   - upload_queued: placementId, cam, profile, startMs, dest, class, bytes;
+//     when a worker first reads the placement, so only committed placements
+//     are reported, before or after the segment's segment_closed. A
+//     placement superseded by new bytes is queued again.
+//   - upload_resumed: placementId, dest, offset; the upload continues at the
+//     offset that its provider confirmed.
+//   - upload_progress: placementId, dest, offset (confirmed), size.
+//   - upload_verified: placementId, dest, bytes, hashKind, hash, attempts,
+//     calls ({method: n}, the upload's API calls, P18).
+//   - upload_failed: placementId, dest, reason, attempts; reason is one of
+//     auth_expired, quota_full, rate_limited, daily_cap, not_found,
+//     transient, permanent, hash_mismatch and local_unreadable (a spool file
+//     that is gone, never due again, or unreadable, due again after its
+//     backoff).
+//   - dest_state: dest, state, alert; each change of a destination's state.
+//
+// When the SD card fails, the uploads stop: one error event says so, and no
+// upload event follows (g2-04).
 type events struct {
 	mu  sync.Mutex
 	out io.Writer
@@ -133,5 +161,67 @@ func (o *observer) Error(err error) {
 	o.ev.emit("error", map[string]any{"message": err.Error()})
 	if o.card != nil {
 		o.card.hubError(err)
+	}
+}
+
+// uploadEvents turns what the outbox reports into the uploads' events
+// (outbox.Observer); the outbox writes nothing to stderr itself. Its local
+// errors go through obs.Error, so the card monitor counts an I/O error of
+// the spool or the catalog.
+type uploadEvents struct {
+	ev  *events
+	obs *observer
+	cat *catalog.DB // the queued placements' segments
+	// stopped is set once the uploads stopped on a failed card: nothing more
+	// goes out.
+	stopped atomic.Bool
+}
+
+var _ outbox.Observer = (*uploadEvents)(nil)
+
+func (u *uploadEvents) emit(typ string, fields map[string]any) {
+	if !u.stopped.Load() {
+		u.ev.emit(typ, fields)
+	}
+}
+
+// Queued emits upload_queued with the stream and the start of p's segment,
+// which the catalog holds; a segment it cannot read leaves them out, and
+// the worker's own read reports the catalog's error.
+func (u *uploadEvents) Queued(p catalog.Placement) {
+	fields := map[string]any{"placementId": p.ID, "dest": p.DestinationID, "class": p.Class, "bytes": p.Bytes}
+	if s, err := u.cat.SegmentByID(context.Background(), p.ObjectID); err == nil {
+		fields["cam"], fields["profile"], fields["startMs"] = s.Cam, s.Profile, s.StartMs
+	}
+	u.emit("upload_queued", fields)
+}
+
+func (u *uploadEvents) Resumed(p catalog.Placement, offset int64) {
+	u.emit("upload_resumed", map[string]any{"placementId": p.ID, "dest": p.DestinationID, "offset": offset})
+}
+
+func (u *uploadEvents) Progress(p catalog.Placement, confirmedOffset, size int64) {
+	u.emit("upload_progress", map[string]any{"placementId": p.ID, "dest": p.DestinationID, "offset": confirmedOffset, "size": size})
+}
+
+func (u *uploadEvents) Verified(p catalog.Placement, ref storage.ObjectRef, calls storage.CallCounts) {
+	if calls == nil {
+		calls = storage.CallCounts{}
+	}
+	u.emit("upload_verified", map[string]any{"placementId": p.ID, "dest": p.DestinationID, "bytes": ref.Size,
+		"hashKind": ref.HashKind, "hash": ref.Hash, "attempts": p.Attempts, "calls": calls})
+}
+
+func (u *uploadEvents) Failed(p catalog.Placement, reason string, attempts int) {
+	u.emit("upload_failed", map[string]any{"placementId": p.ID, "dest": p.DestinationID, "reason": reason, "attempts": attempts})
+}
+
+func (u *uploadEvents) DestState(destID string, s outbox.DestState, alert string) {
+	u.emit("dest_state", map[string]any{"dest": destID, "state": s, "alert": alert})
+}
+
+func (u *uploadEvents) LocalError(err error) {
+	if !u.stopped.Load() {
+		u.obs.Error(err)
 	}
 }

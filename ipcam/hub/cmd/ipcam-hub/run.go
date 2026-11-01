@@ -44,6 +44,10 @@ type runConfig struct {
 	// without it, ipcam-hub writes nothing while rec/ is on an SD card.
 	SDCardConfirmed bool        `json:"sdCardConfirmed"`
 	Jobs            []runJobDef `json:"jobs"`
+	// Uploads are the destinations and routes of the segments' copies
+	// (uploads.go); without them, ipcam-hub uploads nothing and runs as c1's
+	// did (g2-01).
+	Uploads *uploadsConfig `json:"uploads"`
 }
 
 type runJobDef struct {
@@ -75,6 +79,11 @@ func loadRunConfig(path string) (runConfig, []recorder.Job, *age.X25519Identity,
 	}
 	if cfg.DataDir == "" {
 		return cfg, nil, nil, fmt.Errorf("%s: no dataDir", path)
+	}
+	if cfg.Uploads != nil {
+		if err := cfg.Uploads.validate(); err != nil {
+			return cfg, nil, nil, fmt.Errorf("%s: %w", path, err)
+		}
 	}
 	var id *age.X25519Identity
 	if cfg.IdentityFile != "" {
@@ -187,6 +196,15 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 	}
+	// The uploads' files and folders come after the SD gate too: the hub
+	// lock, state/hub_id and each LOCAL destination's folder.
+	var up *uploads
+	if cfg.Uploads != nil {
+		if up, err = prepareUploads(cfg.Uploads, stateDir); err != nil {
+			return fail(err)
+		}
+		defer up.release()
+	}
 	mediamtx := cfg.MediaMTX
 	if mediamtx == "" {
 		self, err := os.Executable()
@@ -216,7 +234,14 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// opens a console window in the owner's session.
 		ensureConsole()
 	}
-	cat, err := catalog.Open(ctx, filepath.Join(stateDir, "catalog.db"))
+	// With uploads, each segment that turns complete enqueues its
+	// placements in its row's transaction (P03): the queue is built before
+	// recorder.New, the first writer of a segment.
+	var catOpts catalog.Options
+	if up != nil {
+		catOpts.OnSegmentComplete = up.enqueue
+	}
+	cat, err := catalog.OpenWith(ctx, filepath.Join(stateDir, "catalog.db"), catOpts)
 	if err != nil {
 		return fail(err)
 	}
@@ -231,6 +256,11 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	obs := newObserver(ev, stderr, card)
 	defer obs.close()
 	rc.Observer = obs
+	if up != nil {
+		if err := up.build(cat, ev, obs, rc.RecDir); err != nil {
+			return fail(err)
+		}
+	}
 
 	// New gives the reconcile event out (observer.Reconciled), as later updates.
 	rec, _, err := recorder.New(ctx, rc)
@@ -255,6 +285,9 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		ready = append(ready, map[string]any{"cam": j.Cam, "profile": j.Profile, "encrypted": j.Scope != nil, "padLowBitrate": j.PadLowBitrate})
 	}
 	ev.emit("ready", map[string]any{"jobs": ready})
+	if up != nil {
+		up.start(card)
+	}
 	sampled := make(chan struct{}) // closed once the card sampler has returned
 	if card != nil {
 		go func() {
@@ -275,8 +308,11 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				// The recorder stopped after SIGTERM or Ctrl-C. The card sampler
 				// returns once its goroutines have ended (cardSampler.join), so
 				// that its stop of the jobs, which writes the catalog, ends before
-				// the catalog closes.
+				// the catalog closes; so do the uploads.
 				<-sampled
+				if up != nil {
+					up.stop()
+				}
 				return exitOK
 			}
 			ev.emit("segment_closed", map[string]any{"cam": s.Cam, "profile": s.Profile, "path": s.Path,

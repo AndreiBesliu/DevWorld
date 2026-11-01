@@ -1,0 +1,407 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
+	"sync"
+	"time"
+
+	"golang.org/x/oauth2"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/health"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/outbox"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/gdrive"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/local"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/onedrive"
+)
+
+// The chunk alignment of the cloud destinations' partSize (§9.2).
+const (
+	driveAlign    = 256 << 10
+	oneDriveAlign = 320 << 10
+)
+
+// uploadsStoppedMessage is the error event of the uploads' stop when the SD
+// card fails (g2-04).
+const uploadsStoppedMessage = "ipcam-hub: the SD card failed: the uploads stopped"
+
+// testToken stands in for the token store in the tests of ipcam-hub's
+// process: their TestMain reads it from IPCAM_HUB_TEST_TOKEN, and the
+// shipped binary never sets it. Task 9 wires the sealed token store
+// (oauth.Store) in its place.
+var testToken string
+
+// uploadsConfig is run.json's uploads section (P01): the hub's name, which
+// names its clear copies (§9.10), its destinations, and the routes that send
+// a stream's segments to them. A segment of a stream that no route names is
+// not uploaded.
+type uploadsConfig struct {
+	HubName      string     `json:"hubName"`
+	Destinations []destDef  `json:"destinations"`
+	Routes       []routeDef `json:"routes"`
+}
+
+// destDef is a destination of the uploads section. Folder is LOCAL's root, an
+// absolute directory, or Drive's folder in My Drive ("ipcam" when empty);
+// TokenRef names its sealed token row. BaseURL and UploadBaseURL override
+// the provider's endpoints, for the fakes only, and PartSize (0: the
+// driver's own) is accepted only with BaseURL.
+type destDef struct {
+	ID            string       `json:"id"`
+	Kind          storage.Kind `json:"kind"`
+	Folder        string       `json:"folder"`
+	TokenRef      string       `json:"tokenRef"`
+	BaseURL       string       `json:"baseUrl"`
+	UploadBaseURL string       `json:"uploadBaseUrl"`
+	PartSize      int64        `json:"partSize"`
+}
+
+// routeDef sends the segments of a stream to destinations, in a class. Its
+// window, FromMs and UntilMs (0: open), bounds the segments that it places
+// by their StartMs: FromMs ≤ StartMs < UntilMs.
+type routeDef struct {
+	Cam          string   `json:"cam"`
+	Profile      string   `json:"profile"`
+	Class        string   `json:"class"`
+	Destinations []string `json:"destinations"`
+	FromMs       int64    `json:"fromMs"`
+	UntilMs      int64    `json:"untilMs"`
+}
+
+// holds reports whether the route places s: its stream, and its start in
+// the window.
+func (r routeDef) holds(s catalog.Segment) bool {
+	return r.Cam == s.Cam && r.Profile == s.Profile && s.StartMs >= r.FromMs && (r.UntilMs == 0 || s.StartMs < r.UntilMs)
+}
+
+// validate checks the section as loadRunConfig reads it: it touches no disk
+// and builds no driver. Its errors name what is wrong.
+func (u *uploadsConfig) validate() error {
+	if u.HubName == "" {
+		return errors.New("uploads: no hubName")
+	}
+	known := map[string]bool{}
+	for i, d := range u.Destinations {
+		if err := d.validate(); err != nil {
+			return fmt.Errorf("uploads: destination %d (%q): %w", i+1, d.ID, err)
+		}
+		if known[d.ID] {
+			return fmt.Errorf("uploads: duplicate destination id %q", d.ID)
+		}
+		known[d.ID] = true
+	}
+	for i, r := range u.Routes {
+		switch {
+		case r.Cam == "" || r.Profile == "":
+			return fmt.Errorf("uploads: route %d names no cam and profile", i+1)
+		case !validClass(r.Class):
+			return fmt.Errorf("uploads: route %d: unknown class %q", i+1, r.Class)
+		case len(r.Destinations) == 0:
+			return fmt.Errorf("uploads: route %d names no destination", i+1)
+		case r.FromMs < 0 || r.UntilMs < 0:
+			return fmt.Errorf("uploads: route %d: a negative fromMs or untilMs", i+1)
+		case r.UntilMs != 0 && r.UntilMs <= r.FromMs:
+			return fmt.Errorf("uploads: route %d: untilMs %d is not after its fromMs %d", i+1, r.UntilMs, r.FromMs)
+		}
+		for _, id := range r.Destinations {
+			if !known[id] {
+				return fmt.Errorf("uploads: route %d: unknown destination %q", i+1, id)
+			}
+		}
+	}
+	return nil
+}
+
+func (d destDef) validate() error {
+	if d.ID == "" {
+		return errors.New("no id")
+	}
+	var align int64
+	switch d.Kind {
+	case storage.KindLocal:
+		if !filepath.IsAbs(d.Folder) {
+			return fmt.Errorf("folder %q is not an absolute directory", d.Folder)
+		}
+	case storage.KindGoogleDrive:
+		align = driveAlign
+	case storage.KindOneDrivePersonal:
+		align = oneDriveAlign
+	default:
+		return fmt.Errorf("unknown kind %q", d.Kind)
+	}
+	switch {
+	case d.Kind != storage.KindLocal && d.TokenRef == "":
+		return errors.New("no tokenRef")
+	case d.PartSize != 0 && d.BaseURL == "":
+		return errors.New("partSize needs baseUrl: the providers take their own part size")
+	case d.PartSize != 0 && (d.PartSize < 0 || d.PartSize%align != 0):
+		return fmt.Errorf("partSize %d is not a positive multiple of %d", d.PartSize, align)
+	}
+	return nil
+}
+
+func validClass(class string) bool {
+	switch class {
+	case catalog.ClassEventClip, catalog.ClassThumbnail, catalog.ClassContinuous, catalog.ClassExport:
+		return true
+	}
+	return false
+}
+
+// placementsFor returns s's placements: one on each destination of each
+// route that holds s, the first route's class for a destination that two
+// routes name.
+func (u *uploadsConfig) placementsFor(s catalog.Segment) []catalog.Placement {
+	var ps []catalog.Placement
+	for _, r := range u.Routes {
+		if !r.holds(s) {
+			continue
+		}
+		for _, dest := range r.Destinations {
+			if !slices.ContainsFunc(ps, func(p catalog.Placement) bool { return p.DestinationID == dest }) {
+				ps = append(ps, outbox.PlacementFor(s, dest, r.Class))
+			}
+		}
+	}
+	return ps
+}
+
+// uploads are ipcam-hub's uploads (P01, Task 7b): the outbox queue on the
+// catalog, which uploads its destinations' placements, and the events that
+// it emits. run creates them only with an uploads section, after the SD
+// gate: without one, run is c1's (g2-01).
+type uploads struct {
+	cfg    *uploadsConfig
+	hubID  string
+	q      *outbox.Queue
+	events *uploadEvents
+	unlock func() // releases the hub lock
+
+	cancel context.CancelFunc // stops q.Run; nil until start
+	done   chan struct{}      // closed once q.Run has returned
+	halt   sync.Once
+}
+
+// prepareUploads makes what the uploads need on the disk, after the SD gate:
+// it takes the hub lock (C2-R11), reads or creates state/hub_id, and makes
+// each LOCAL destination's folder, never its parents: a missing parent is a
+// disk that is not mounted.
+func prepareUploads(cfg *uploadsConfig, stateDir string) (*uploads, error) {
+	unlock, err := lockHub(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	hubID, err := readOrCreateHubID(stateDir)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	for _, d := range cfg.Destinations {
+		if d.Kind != storage.KindLocal {
+			continue
+		}
+		if err := os.Mkdir(d.Folder, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+			unlock()
+			return nil, fmt.Errorf("uploads: destination %s: %w", d.ID, err)
+		}
+	}
+	return &uploads{cfg: cfg, hubID: hubID, unlock: unlock}, nil
+}
+
+// enqueue is the catalog's OnSegmentComplete: it enqueues s's placements in
+// s's transaction (S3, P03). run builds the queue before anything can write
+// a segment: recorder.New comes after it.
+func (u *uploads) enqueue(ctx context.Context, tx *sql.Tx, s catalog.Segment) error {
+	for _, p := range u.cfg.placementsFor(s) {
+		if err := u.q.Enqueue(ctx, tx, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// build makes each destination's driver, on a plain HTTP client, the Drive
+// driver's folder store being the catalog, and the queue that uploads to
+// them from recDir, its events on ev and its local errors through obs.
+func (u *uploads) build(cat *catalog.DB, ev *events, obs *observer, recDir string) error {
+	client := newHTTPClient(hubTransport())
+	dests := map[string]storage.Destination{}
+	for _, def := range u.cfg.Destinations {
+		d, err := newDestination(def, u.hubID, cat, client)
+		if err != nil {
+			return fmt.Errorf("uploads: destination %s: %w", def.ID, err)
+		}
+		dests[def.ID] = d
+	}
+	ram, err := health.RAMMb(health.SystemRoots)
+	if err != nil {
+		ram = 0 // unknown: the default
+	}
+	u.events = &uploadEvents{ev: ev, obs: obs, cat: cat}
+	u.q = outbox.New(cat, dests, outbox.Options{
+		Workers: uploadWorkers(ram), RecDir: recDir, HubID: u.hubID, HubName: u.cfg.HubName, Observer: u.events,
+	})
+	return nil
+}
+
+// uploadWorkers is how many uploads each destination runs at a time (C2-R8):
+// 2, and 1 on a host with less than 1.5 GB of RAM, a board sold with less
+// than 2 GB, as a 1 GB Raspberry Pi (a 2 GB one reports about 1.8 GB). An
+// upload holds two buffers of its destination's PartSize, so the peak is
+// about the sum over the destinations of Workers × 2 × PartSize: with 2
+// workers, 64 MiB for a Drive destination (16 MiB parts), 40 MiB for
+// OneDrive (10 MiB) and 32 MiB for LOCAL (8 MiB); with 1, half of each.
+func uploadWorkers(ramMb int) int {
+	if ramMb > 0 && ramMb < 1536 {
+		return 1
+	}
+	return 2
+}
+
+// start runs the queue on a context of its own, after the ready event, so
+// the exit-3 and Apply-failure paths never start it. With card set, the
+// card's failure stops it (g2-04), also when the card failed already.
+func (u *uploads) start(card *cardSampler) {
+	ctx, cancel := context.WithCancel(context.Background())
+	u.cancel, u.done = cancel, make(chan struct{})
+	var failed <-chan struct{}
+	if card != nil {
+		failed = card.failedC()
+	}
+	go func() {
+		defer close(u.done)
+		select {
+		case <-failed:
+			u.cardFailed()
+			return
+		default:
+		}
+		_ = u.q.Run(ctx)
+	}()
+	if failed != nil {
+		go func() {
+			select {
+			case <-failed:
+				u.cardFailed()
+			case <-u.done:
+			}
+		}()
+	}
+}
+
+// cardFailed stops the uploads once the SD card has failed: every job stops,
+// and nothing of the uploads writes the catalog in a loop or emits more
+// (g2-04). One error event says so.
+func (u *uploads) cardFailed() {
+	u.halt.Do(func() {
+		u.events.stopped.Store(true)
+		u.cancel()
+		u.events.ev.emit("error", map[string]any{"message": uploadsStoppedMessage})
+	})
+}
+
+// stop cancels the queue and waits for it for at most shutdownWait, so its
+// uploads end before the catalog closes. A context that the stop cancelled
+// is no upload failure (g2-02).
+func (u *uploads) stop() {
+	if u.cancel == nil {
+		return
+	}
+	u.cancel()
+	select {
+	case <-u.done:
+	case <-time.After(shutdownWait):
+	}
+}
+
+// release releases the hub lock.
+func (u *uploads) release() { u.unlock() }
+
+// newDestination builds def's driver on client: Drive's folder store is
+// folders, the catalog.
+func newDestination(def destDef, hubID string, folders gdrive.FolderStore, client *http.Client) (storage.Destination, error) {
+	switch def.Kind {
+	case storage.KindLocal:
+		return local.New(def.Folder)
+	case storage.KindGoogleDrive:
+		tokens, err := tokenSource(def.TokenRef)
+		if err != nil {
+			return nil, err
+		}
+		return gdrive.New(gdrive.Options{
+			DestID: def.ID, HTTPClient: client, Tokens: tokens, BaseURL: def.BaseURL, UploadBaseURL: def.UploadBaseURL,
+			PartSize: def.PartSize, Folders: folders, HubID: hubID, RootName: def.Folder,
+		})
+	case storage.KindOneDrivePersonal:
+		tokens, err := tokenSource(def.TokenRef)
+		if err != nil {
+			return nil, err
+		}
+		return onedrive.New(onedrive.Options{
+			DestID: def.ID, HubID: hubID, HTTPClient: client, Tokens: tokens, BaseURL: def.BaseURL, PartSize: def.PartSize,
+		})
+	}
+	return nil, fmt.Errorf("unknown kind %q", def.Kind)
+}
+
+// tokenSource returns the bearer tokens of the destination whose sealed
+// token row tokenRef names. Until Task 9 wires the token store, only the
+// tests' token exists.
+func tokenSource(tokenRef string) (oauth2.TokenSource, error) {
+	if testToken == "" {
+		return nil, fmt.Errorf("no token store for tokenRef %s", tokenRef)
+	}
+	return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: testToken, TokenType: "Bearer"}), nil
+}
+
+// The timeouts of ipcam-hub's plain HTTP client, for the drivers' calls
+// (P26): a route that drops ends a call as ErrTransient instead of holding a
+// worker; the drivers bound each call besides.
+const (
+	dialTimeout           = 30 * time.Second
+	tlsHandshakeTimeout   = 15 * time.Second
+	responseHeaderTimeout = 2 * time.Minute
+	maxRedirects          = 10
+)
+
+// hubTransport is http.DefaultTransport's, proxy from the environment
+// included, with the dial, TLS and response-header timeouts.
+func hubTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // the standard library's own
+	t.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	t.TLSHandshakeTimeout = tlsHandshakeTimeout
+	t.ResponseHeaderTimeout = responseHeaderTimeout
+	return t
+}
+
+// newHTTPClient is the drivers' plain client on rt (P27): the drivers set
+// the bearer token on each request. It follows redirects, as OneDrive's
+// /content answers 302, strips Authorization when a redirect leaves the
+// first request's host and port (Go's own rule compares hosts alone), and
+// refuses a redirect from https to http (Task 7 review M5).
+func newHTTPClient(rt http.RoundTripper) *http.Client {
+	return &http.Client{Transport: rt, CheckRedirect: checkRedirect}
+}
+
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("ipcam-hub: stopped after %d redirects", maxRedirects)
+	}
+	if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme != "https" {
+		return errors.New("ipcam-hub: refused a redirect from https to http")
+	}
+	if req.URL.Host != via[0].URL.Host {
+		req.Header.Del("Authorization")
+	}
+	return nil
+}

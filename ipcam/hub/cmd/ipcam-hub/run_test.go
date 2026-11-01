@@ -30,13 +30,15 @@ import (
 // command that MediaMTX runs inherits the variable, so it is this binary
 // with "hook segment-complete". As ipcam-hub, it reads the mount table that
 // mountInfoEnv names, none when it is unset, and never the host's, and its
-// card monitor probes every probeEveryEnv when that is set. Started on a
-// MediaMTX configuration with fakeMediaMTXEnv set, it is a fake MediaMTX
-// (cardsampler_test.go).
+// card monitor probes every probeEveryEnv when that is set. Its cloud
+// destinations take the bearer token that testTokenEnv holds, in place of
+// the token store (testToken). Started on a MediaMTX configuration with
+// fakeMediaMTXEnv set, it is a fake MediaMTX (cardsampler_test.go).
 const (
 	mainEnv       = "IPCAM_HUB_TEST_MAIN"
 	mountInfoEnv  = "IPCAM_HUB_TEST_MOUNTINFO"
 	probeEveryEnv = "IPCAM_HUB_TEST_PROBE_EVERY"
+	testTokenEnv  = "IPCAM_HUB_TEST_TOKEN" //nolint:gosec // G101: the name of a variable, which holds a test token
 )
 
 func TestMain(m *testing.M) {
@@ -48,6 +50,7 @@ func TestMain(m *testing.M) {
 		if d, err := time.ParseDuration(os.Getenv(probeEveryEnv)); err == nil {
 			probeEvery = d
 		}
+		testToken = os.Getenv(testTokenEnv)
 		os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
 	os.Exit(m.Run())

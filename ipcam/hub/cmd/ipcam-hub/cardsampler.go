@@ -119,6 +119,10 @@ func (s *cardSampler) begin() {
 	s.ev.emit("card", map[string]any{"state": s.state.String()})
 }
 
+// failedC is closed once the card has failed: the uploads stop then
+// (g2-04).
+func (s *cardSampler) failedC() <-chan struct{} { return s.failed }
+
 // attach gives the sampler the recorder, which a failed write and a failed
 // card go to.
 func (s *cardSampler) attach(rec cardRecorder) {
