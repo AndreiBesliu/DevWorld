@@ -213,14 +213,24 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 	}
-	// The uploads' files and folders come after the SD gate too: the hub
-	// lock, state/hub_id and each LOCAL destination's folder.
+	// The hub lock comes after the SD gate too (C2-R11, C2-R15 (a)): a run
+	// whose uploads or control endpoint's token store write the catalog
+	// beside the recording holds <dataDir>/state/hub.lock until it ends, so
+	// diag dest-probe and a second hub refuse meanwhile. c1's run, with
+	// neither, takes none.
+	if cfg.Uploads != nil || controlToken != "" {
+		release, err := lockHub(stateDir)
+		if err != nil {
+			return fail(err)
+		}
+		defer release()
+	}
+	// Then the uploads' state/hub_id and each LOCAL destination's folder.
 	var up *uploads
 	if cfg.Uploads != nil {
 		if up, err = prepareUploads(cfg.Uploads, stateDir); err != nil {
 			return fail(err)
 		}
-		defer up.release()
 	}
 	mediamtx := cfg.MediaMTX
 	if mediamtx == "" {

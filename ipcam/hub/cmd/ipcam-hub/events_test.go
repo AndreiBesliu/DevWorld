@@ -183,7 +183,7 @@ func TestUploads_NoUploadEventAfterCardFailed(t *testing.T) {
 	t.Cleanup(func() { _ = cat.Close() })
 	obs := newObserver(ev, io.Discard, card)
 	t.Cleanup(obs.close)
-	u := &uploads{cfg: &uploadsConfig{HubName: "hub"}, hubID: testHubID, unlock: func() {}}
+	u := &uploads{cfg: &uploadsConfig{HubName: "hub"}, hubID: testHubID}
 	if err := u.build(cat, ev, obs, t.TempDir(), http.DefaultClient, storeTokens(t.Context(), nil)); err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -133,6 +134,56 @@ func TestControl_RequiresBearer(t *testing.T) {
 		!strings.Contains(stderr.String(), controlTokenEnv) || strings.Contains(stderr.String()+stdout.String(), "INEL-short") {
 		t.Errorf("a short token: exit %d, stderr %q; want exit 1 naming %s, not the value", code, stderr.String(), controlTokenEnv)
 	}
+}
+
+// TestControl_HoldsTheHubLock (C2-R15 (a), C2-R16 (f)): a run that serves
+// the control endpoint holds the inner hub lock <dataDir>/state/hub.lock
+// with no uploads section too, since its store writes the catalog (the
+// clients, the logins, the daily refreshes): diag dest-probe on that data
+// directory refuses while it runs, and the lock is free once it has
+// stopped.
+func TestControl_HoldsTheHubLock(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	config := uploadConfig(t, dataDir, nil)
+	h, _ := startControlHub(t, config)
+	h.next(t, 30*time.Second, "ready event", ofType("ready"))
+	stateDir := filepath.Join(dataDir, "state")
+	if release, err := lockHub(stateDir); !errors.Is(err, errHubRunning) {
+		if err == nil {
+			release()
+		}
+		t.Errorf("the hub lock beside a control-only run: %v, want errHubRunning", err)
+	}
+	// dest-probe's own configuration names the same data directory, with
+	// an uploads section.
+	b, err := os.ReadFile(config) //nolint:gosec // the test's configuration
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "local")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg["uploads"] = uploadsTo(localDest(root), 0)
+	probeConfig := filepath.Join(t.TempDir(), "probe.json")
+	writeJSON(t, probeConfig, cfg)
+	if err := os.WriteFile(filepath.Join(stateDir, "hub_id"), []byte(testHubID+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, lines, stderr := runDiag(t, "dest-probe", "--config", probeConfig, "--dest", "dst-1", "--poll", "1ms", "--for", "1ms")
+	if code != exitFatal || len(lines) != 0 || !strings.Contains(stderr, "hub lock") {
+		t.Errorf("diag dest-probe beside a control-only run = %d, %v, %q; want exit 1 naming the hub lock", code, lines, stderr)
+	}
+	stopAndDrain(t, h)
+	release, err := lockHub(stateDir)
+	if err != nil {
+		t.Fatalf("the hub lock once the run stopped: %v", err)
+	}
+	release()
 }
 
 // TestControl_BindsLoopbackOnly (P40): the control endpoint listens on

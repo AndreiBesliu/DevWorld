@@ -229,25 +229,19 @@ type uploads struct {
 	hubID  string
 	q      *outbox.Queue
 	events *uploadEvents
-	unlock func() // releases the hub lock
 
 	cancel context.CancelFunc // stops q.Run; nil until start
 	done   chan struct{}      // closed once q.Run has returned
 	halt   sync.Once
 }
 
-// prepareUploads makes what the uploads need on the disk, after the SD gate:
-// it takes the hub lock (C2-R11), reads or creates state/hub_id, and makes
-// each LOCAL destination's folder, never its parents: a missing parent is a
-// disk that is not mounted.
+// prepareUploads makes what the uploads need on the disk, after the SD gate
+// and with the hub lock held (run takes it, C2-R11): it reads or creates
+// state/hub_id, and makes each LOCAL destination's folder, never its
+// parents: a missing parent is a disk that is not mounted.
 func prepareUploads(cfg *uploadsConfig, stateDir string) (*uploads, error) {
-	unlock, err := lockHub(stateDir)
-	if err != nil {
-		return nil, err
-	}
 	hubID, err := readOrCreateHubID(stateDir)
 	if err != nil {
-		unlock()
 		return nil, err
 	}
 	for _, d := range cfg.Destinations {
@@ -255,11 +249,10 @@ func prepareUploads(cfg *uploadsConfig, stateDir string) (*uploads, error) {
 			continue
 		}
 		if err := os.Mkdir(d.Folder, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-			unlock()
 			return nil, fmt.Errorf("uploads: destination %s: %w", d.ID, err)
 		}
 	}
-	return &uploads{cfg: cfg, hubID: hubID, unlock: unlock}, nil
+	return &uploads{cfg: cfg, hubID: hubID}, nil
 }
 
 // enqueue is the catalog's OnSegmentComplete: it enqueues s's placements in
@@ -368,9 +361,6 @@ func (u *uploads) stop() {
 	case <-time.After(shutdownWait):
 	}
 }
-
-// release releases the hub lock.
-func (u *uploads) release() { u.unlock() }
 
 // unblock makes every BLOCKED_AUTH destination whose tokenRef is ref OK
 // again: a new login of ref completed (Task 9).

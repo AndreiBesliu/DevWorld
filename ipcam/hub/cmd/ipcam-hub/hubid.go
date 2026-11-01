@@ -18,10 +18,10 @@ const (
 	// (§9.10). The first run with an uploads section writes it (0600), and
 	// every later run reads it.
 	hubIDName = "hub_id"
-	// hubLockName is the hub lock (C2-R11): a run with an uploads section
-	// holds it for as long as it runs, and diag dest-probe, whose Drive
-	// creates would add to the running hub's 2 a second, refuses while it
-	// is held.
+	// hubLockName is the hub lock (C2-R11): a run with an uploads section,
+	// or with the control endpoint (C2-R16 (f)), holds it for as long as it
+	// runs, and diag dest-probe, whose Drive creates would add to the
+	// running hub's 2 a second, refuses while it is held.
 	hubLockName = "hub.lock"
 )
 
