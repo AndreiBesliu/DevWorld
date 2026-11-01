@@ -177,6 +177,49 @@ jobs:
             fi
           done
 
+  step4-time:
+    # One-off, removed by the next commit (Task 7, review fix round 1): the -race wall time
+    # of Task 7 Step 4's command on this runner, alone on it, as one notice (C32). Pass 1
+    # also compiles what the restored build cache lacks; pass 2 runs warm. The command sets
+    # no MEDIAMTX_BIN or MEDIAGEN_DIR, so ipcam-hub's three process tests skip.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/hub/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+      - name: Time Step 4's command
+        run: |
+          set -o pipefail
+          out="${RUNNER_TEMP}/step4-time.txt"
+          echo "$(nproc) CPUs, $(go version)" > "${out}"
+          failed=0
+          for pass in 1 2; do
+            log="${RUNNER_TEMP}/step4-time-${pass}.log"
+            status=0
+            start=$(date +%s%N)
+            go test -count=1 -race ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/cmd/ipcam-hub/... \
+              > "${log}" 2>&1 || status=$?
+            end=$(date +%s%N)
+            echo "pass ${pass}: exit ${status}, wall $(( (end - start) / 1000000 )) ms" >> "${out}"
+            grep -E '^(ok|FAIL|--- FAIL)' "${log}" | sed -E 's|github\.com/[^/]+/[^/]+/ipcam/||' >> "${out}" || true
+            [[ ${status} -eq 0 ]] || failed=1
+          done
+          tools/scripts/annotate.sh step4-time 60 notice < "${out}"
+          exit "${failed}"
+
   windows:
     # On windows-latest: the same trees' tests and build (the markers test reads a CRLF
     # checkout here), without -race, which needs a C compiler there; the upload job runs
