@@ -17,7 +17,7 @@ import { createI18n, minutesAndSeconds, type MessageKey, type Translate } from '
 import { sampleLoss, sampleStats } from './metrics';
 import { readNativeMetrics, spikeNative } from './native';
 import { completeFor, fetchProgress, remainingLines, type Progress } from './progress';
-import { publish, ResultsQueue, SCENARIO_IDS, type KeyValueStore, type ScenarioId, type ScenarioResult } from './results';
+import { publish, ResultsQueue, SCENARIO_IDS, type InterruptReason, type KeyValueStore, type ScenarioId, type ScenarioResult } from './results';
 import type { Clock, IntersectionWatch, ScenarioEnv, Stage } from './scenarios/context';
 import { runScenario } from './scenarios/index';
 import { NotStarted } from './scenarios/runner';
@@ -659,6 +659,41 @@ export function offersRepeat(status: Status): boolean {
 }
 
 /**
+ * Why a scenario of the automatic run was interrupted, for its banner and the
+ * line that stops the run. Without the start page's «Repetă» advice
+ * (interruptionText): the run starts the scenario again by itself.
+ */
+function queueReason(reason: InterruptReason, t: Translate): string {
+  switch (reason.kind) {
+    case 'hidden':
+      return t('autoReasonHidden');
+    case 'session-lost':
+      return t('autoReasonSessionLost');
+    case 'charging':
+      return t('autoReasonCharging');
+    case 'early-return':
+      return t('autoReasonEarlyReturn', { time: minutesAndSeconds(reason.backgroundS) });
+    case 'pip-left':
+      return t('autoReasonPipLeft', { time: minutesAndSeconds(reason.pipS) });
+  }
+}
+
+/** What to do before pressing the button again, after a run stopped by the third interruption of `reason`. */
+function againAfter(reason: InterruptReason): MessageKey {
+  switch (reason.kind) {
+    case 'hidden':
+      return 'autoAgainHidden';
+    case 'session-lost':
+      return 'autoAgainSessionLost';
+    case 'charging':
+      return 'autoAgainCharging';
+    case 'early-return':
+    case 'pip-left':
+      return 'autoAgainPerson';
+  }
+}
+
+/**
  * What the page says for an event of the automatic run; undefined for an event
  * that changes no line (a result: the scenario's row shows it).
  */
@@ -673,9 +708,9 @@ export function queueEventLines(event: QueueEvent, t: Translate): string[] | und
     case 'result':
       return undefined;
     case 'interrupted':
-      return [t('autoInterrupted', { id: event.id })];
+      return [t('autoInterrupted', { id: event.id, reason: queueReason(event.reason, t) })];
     case 'resumed':
-      return [t('autoResumed', { id: event.id, count: event.count })];
+      return [t('autoResumed', { id: event.id, count: event.count, reason: queueReason(event.reason, t) })];
     case 'retry':
       return [t('autoRetry', { id: event.id })];
     case 'pause':
@@ -696,7 +731,7 @@ export function queueOutcomeLines(outcome: QueueOutcome, t: Translate): string[]
       if (outcome.ran.length === 0) return [t('autoNothingLeft')];
       return outcome.failed.length === 0 ? [t('autoDone')] : [t('autoDone'), t('autoDoneFailed', { ids: outcome.failed.join(', ') })];
     case 'interrupted-too-often':
-      return [t('autoTooManyInterruptions', { id: outcome.id })];
+      return [t('autoTooManyInterruptions', { id: outcome.id, reason: queueReason(outcome.reason, t) }), t(againAfter(outcome.reason))];
     case 'no-h264':
       return [t('openh264'), `1. ${t('openh264Step1')}`, `2. ${t('openh264Step2')}`, `3. ${t('openh264Step3')}`];
   }

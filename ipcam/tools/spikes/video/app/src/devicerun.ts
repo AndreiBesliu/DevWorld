@@ -13,12 +13,13 @@
 //   run from the start page does (runner.ts); the run then waits until the page
 //   is visible and starts that scenario again from its beginning. Any other
 //   interruption (the hub session lost, S5 back too early, S6's window closed)
-//   starts it again too. The third interruption of one scenario stops the run.
+//   starts it again too. The events carry the reason, so that the banner says
+//   which. The third interruption of one scenario stops the run.
 // - A scenario that fails (a `failed:` note) is repeated once, then the run
 //   goes on, as the guide says for «eșuat: …».
 // - The screen stays on for the whole run (a wake lock), pauses included.
 import type { DevicePlan } from './deviceplan';
-import type { ScenarioId, ScenarioResult } from './results';
+import type { InterruptReason, ScenarioId, ScenarioResult } from './results';
 import type { Clock } from './scenarios/context';
 import type { VisibilitySource, WakeLock } from './wakelock';
 
@@ -40,10 +41,10 @@ export type QueueEvent =
   /** Scenario `index` of `total` (1-based) starts; `attempt` counts its runs, 1 for the first. */
   | { kind: 'scenario'; id: ScenarioId; index: number; total: number; attempt: number }
   | { kind: 'result'; id: ScenarioId; result: ScenarioResult }
-  /** The scenario was interrupted for the `count`-th time; the run waits until the page is visible. */
-  | { kind: 'interrupted'; id: ScenarioId; count: number }
-  /** The page is visible again: the scenario starts again from its beginning. */
-  | { kind: 'resumed'; id: ScenarioId; count: number }
+  /** The scenario was interrupted for the `count`-th time, for `reason`; the run waits until the page is visible. */
+  | { kind: 'interrupted'; id: ScenarioId; count: number; reason: InterruptReason }
+  /** The page is visible: the scenario starts again from its beginning. */
+  | { kind: 'resumed'; id: ScenarioId; count: number; reason: InterruptReason }
   /** The scenario failed once and runs again. */
   | { kind: 'retry'; id: ScenarioId }
   /** The cooling pause, with the time left. */
@@ -58,8 +59,8 @@ export type QueueEvent =
 export type QueueOutcome =
   /** Every scenario ran (`ran`) or was complete already (`skipped`); `failed` failed twice. */
   | { kind: 'done'; ran: ScenarioId[]; skipped: ScenarioId[]; failed: ScenarioId[] }
-  /** `id` was interrupted MAX_INTERRUPTIONS times: the run stopped there. */
-  | { kind: 'interrupted-too-often'; id: ScenarioId }
+  /** `id` was interrupted MAX_INTERRUPTIONS times, the last time for `reason`: the run stopped there. */
+  | { kind: 'interrupted-too-often'; id: ScenarioId; reason: InterruptReason }
   /** The browser does not decode H.264 (Firefox without OpenH264): nothing ran. */
   | { kind: 'no-h264' };
 
@@ -161,6 +162,12 @@ function pause(env: QueueEnv, ms: number): Promise<void> {
 
 const failed = (result: ScenarioResult): boolean => result.notes.some((note) => note.startsWith('failed:'));
 
+/**
+ * Why an interrupted result was interrupted. A result without the reason (written
+ * before the field existed) reads as hidden, as results.ts says, at its end.
+ */
+const reasonOf = (result: ScenarioResult): InterruptReason => result.interruption ?? { kind: 'hidden', atS: Math.round(result.durationS) };
+
 /** What the run does: the scenarios that are not complete, and a pause only between two that run. */
 function stepsToRun(env: QueueEnv): { steps: DevicePlan['steps']; skipped: ScenarioId[] } {
   const runs = (step: DevicePlan['steps'][number] | undefined): boolean =>
@@ -206,7 +213,7 @@ export async function runQueue(env: QueueEnv): Promise<QueueOutcome> {
       }
       index += 1;
       const outcome = await runOne(env, step.id, index, scenarios.length);
-      if (outcome === 'interrupted-too-often') return { kind: 'interrupted-too-often', id: step.id };
+      if (typeof outcome === 'object') return { kind: 'interrupted-too-often', id: step.id, reason: outcome.tooOften };
       if (outcome === 'failed') failures.push(step.id);
     }
   } finally {
@@ -215,8 +222,16 @@ export async function runQueue(env: QueueEnv): Promise<QueueOutcome> {
   return { kind: 'done', ran: scenarios, skipped, failed: failures };
 }
 
-/** Runs one scenario until it completes, fails twice or is interrupted too often. */
-async function runOne(env: QueueEnv, id: ScenarioId, index: number, total: number): Promise<'done' | 'failed' | 'interrupted-too-often'> {
+/**
+ * Runs one scenario until it completes, fails twice or is interrupted too
+ * often; for the last, with the reason of the last interruption.
+ */
+async function runOne(
+  env: QueueEnv,
+  id: ScenarioId,
+  index: number,
+  total: number,
+): Promise<'done' | 'failed' | { tooOften: InterruptReason }> {
   let interruptions = 0;
   let failedRuns = 0;
   for (let attempt = 1; ; attempt += 1) {
@@ -241,10 +256,11 @@ async function runOne(env: QueueEnv, id: ScenarioId, index: number, total: numbe
     env.show({ kind: 'result', id, result });
     if (result.interrupted) {
       interruptions += 1;
-      if (interruptions >= MAX_INTERRUPTIONS) return 'interrupted-too-often';
-      env.show({ kind: 'interrupted', id, count: interruptions });
+      const reason = reasonOf(result);
+      if (interruptions >= MAX_INTERRUPTIONS) return { tooOften: reason };
+      env.show({ kind: 'interrupted', id, count: interruptions, reason });
       await untilVisible(env.doc);
-      env.show({ kind: 'resumed', id, count: interruptions });
+      env.show({ kind: 'resumed', id, count: interruptions, reason });
       continue;
     }
     if (failed(result)) {

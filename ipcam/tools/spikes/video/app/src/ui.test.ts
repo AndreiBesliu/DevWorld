@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { createI18n } from './i18n';
-import type { ScenarioResult } from './results';
+import type { InterruptReason, ScenarioResult } from './results';
 import { ConnectError } from './session';
 import { connectErrorLines, defaultHubUrl, offersRepeat, queueEventLines, queueOutcomeLines, statusText, type Status } from './ui';
 
@@ -178,10 +178,35 @@ describe('the automatic run on the page', () => {
   const { t } = createI18n({ lang: 'ro' });
 
   it('autoRun_bannerSaysWhatHappenedAndThatTheRunContinued', () => {
-    expect(queueEventLines({ kind: 'resumed', id: 'S3-9', count: 1 }, t)).toEqual([
+    expect(queueEventLines({ kind: 'resumed', id: 'S3-9', count: 1, reason: { kind: 'hidden', atS: 40 } }, t)).toEqual([
       'S3-9 s-a întrerupt (1 din 3): fereastra nu mai era vizibilă. A pornit din nou de la început, iar rularea continuă.',
     ]);
     expect(queueEventLines({ kind: 'retry', id: 'S2' }, t)).toEqual(['S2 a eșuat și pornește încă o dată; rularea continuă.']);
+  });
+
+  // Requirement 5: the banner says what happened, whatever interrupted the scenario.
+  const reasons: [string, InterruptReason, string][] = [
+    ['hidden', { kind: 'hidden', atS: 40 }, 'fereastra nu mai era vizibilă'],
+    ['session-lost', { kind: 'session-lost', atS: 9, how: 'connection failed' }, 'conexiunea cu hub-ul s-a pierdut'],
+    ['charging', { kind: 'charging', atS: 61 }, 'telefonul era la încărcător'],
+    ['early-return', { kind: 'early-return', backgroundS: 100 }, 'v-ați întors după 1 min 40 s, iar S5 are nevoie de cel puțin 2 minute'],
+    ['pip-left', { kind: 'pip-left', pipS: 130 }, 'fereastra mică s-a închis după 2 min 10 s, iar S6 are nevoie de 5 minute'],
+  ];
+
+  it.each(reasons)('autoRun_interruptedBanner_%s_saysWhy', (_kind, reason, why) => {
+    expect(queueEventLines({ kind: 'resumed', id: 'S9', count: 2, reason }, t)).toEqual([
+      `S9 s-a întrerupt (2 din 3): ${why}. A pornit din nou de la început, iar rularea continuă.`,
+    ]);
+    expect(queueEventLines({ kind: 'interrupted', id: 'S9', count: 2, reason }, t)).toEqual([
+      `S9 s-a întrerupt: ${why}. Rularea continuă de îndată ce fereastra e vizibilă.`,
+    ]);
+  });
+
+  it('autoRun_interruptedBanner_onlyAHiddenWindowBlamesTheWindow', () => {
+    for (const [kind, reason] of reasons) {
+      const [line] = queueEventLines({ kind: 'resumed', id: 'S9', count: 1, reason }, t) ?? [];
+      expect(line?.includes('fereastra nu mai era vizibilă'), kind).toBe(kind === 'hidden');
+    }
   });
 
   it('autoRun_pauseIsCountedDown', () => {
@@ -195,9 +220,39 @@ describe('the automatic run on the page', () => {
   });
 
   it('autoRun_threeInterruptionsStopWithAClearLine', () => {
-    expect(queueOutcomeLines({ kind: 'interrupted-too-often', id: 'S4' }, t)).toEqual([
-      'Rularea s-a oprit: S4 s-a întrerupt de 3 ori. Lăsați fereastra vizibilă și apăsați din nou «Rulează tot pentru acest dispozitiv»; ce e gata nu se mai rulează.',
+    expect(queueOutcomeLines({ kind: 'interrupted-too-often', id: 'S4', reason: { kind: 'hidden', atS: 600 } }, t)).toEqual([
+      'Rularea s-a oprit: S4 s-a întrerupt de 3 ori, ultima dată pentru că fereastra nu mai era vizibilă.',
+      'Lăsați fereastra vizibilă și apăsați din nou «Rulează tot pentru acest dispozitiv»; ce e gata nu se mai rulează.',
     ]);
+  });
+
+  it.each([
+    [
+      'session-lost',
+      { kind: 'session-lost', atS: 9, how: 'connection failed' },
+      'Rularea s-a oprit: S9 s-a întrerupt de 3 ori, ultima dată pentru că conexiunea cu hub-ul s-a pierdut.',
+      'Verificați că fereastra spikehub e deschisă și că rețeaua merge, apoi apăsați din nou «Rulează tot pentru acest dispozitiv»; ce e gata nu se mai rulează.',
+    ],
+    [
+      'charging',
+      { kind: 'charging', atS: 61 },
+      'Rularea s-a oprit: S9 s-a întrerupt de 3 ori, ultima dată pentru că telefonul era la încărcător.',
+      'Scoateți telefonul din încărcător și apăsați din nou «Rulează tot pentru acest dispozitiv»; ce e gata nu se mai rulează.',
+    ],
+    [
+      'early-return',
+      { kind: 'early-return', backgroundS: 45 },
+      'Rularea s-a oprit: S9 s-a întrerupt de 3 ori, ultima dată pentru că v-ați întors după 45 s, iar S5 are nevoie de cel puțin 2 minute.',
+      'Apăsați din nou «Rulează tot pentru acest dispozitiv» și urmați instrucțiunea de pe ecran până la capăt; ce e gata nu se mai rulează.',
+    ],
+    [
+      'pip-left',
+      { kind: 'pip-left', pipS: 200 },
+      'Rularea s-a oprit: S9 s-a întrerupt de 3 ori, ultima dată pentru că fereastra mică s-a închis după 3 min 20 s, iar S6 are nevoie de 5 minute.',
+      'Apăsați din nou «Rulează tot pentru acest dispozitiv» și urmați instrucțiunea de pe ecran până la capăt; ce e gata nu se mai rulează.',
+    ],
+  ] satisfies [string, InterruptReason, string, string][])('autoRun_threeInterruptions_%s_stopLineSaysWhyAndWhatToDo', (_kind, reason, stop, advice) => {
+    expect(queueOutcomeLines({ kind: 'interrupted-too-often', id: 'S9', reason }, t)).toEqual([stop, advice]);
   });
 
   it('autoRun_doneAndNothingLeft', () => {

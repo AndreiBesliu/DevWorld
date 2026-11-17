@@ -291,7 +291,7 @@ describe('interruptions resume', () => {
     // Paused: nothing runs while the page is hidden, however long.
     await vi.advanceTimersByTimeAsync(3 * 3_600_000);
     expect(ran(h)).toEqual(['S10', 'S1', 'S2']);
-    expect(h.events.at(-1)).toEqual({ kind: 'interrupted', id: 'S2', count: 1 });
+    expect(h.events.at(-1)).toEqual({ kind: 'interrupted', id: 'S2', count: 1, reason: { kind: 'hidden', atS: 3 } });
 
     const shownAt = performance.now();
     h.doc.show();
@@ -299,7 +299,7 @@ describe('interruptions resume', () => {
 
     expect(ran(h)).toEqual(['S10', 'S1', 'S2', 'S2', 'S3-9', 'S9']);
     expect(h.starts[3]?.at).toBeGreaterThanOrEqual(shownAt);
-    expect(h.events).toContainEqual({ kind: 'resumed', id: 'S2', count: 1 });
+    expect(h.events).toContainEqual({ kind: 'resumed', id: 'S2', count: 1, reason: { kind: 'hidden', atS: 3 } });
     expect(outcome).toMatchObject({ kind: 'done', failed: [] });
   });
 
@@ -308,9 +308,42 @@ describe('interruptions resume', () => {
 
     const outcome = await finish(runQueue(h.env));
 
-    expect(outcome).toEqual<QueueOutcome>({ kind: 'interrupted-too-often', id: 'S1' });
+    expect(outcome).toEqual<QueueOutcome>({ kind: 'interrupted-too-often', id: 'S1', reason: { kind: 'hidden', atS: 3 } });
     expect(ran(h)).toEqual(['S10', 'S1', 'S1', 'S1']);
     expect(h.wakeLock.released).toBe(1);
+  });
+
+  it('resume_eventsSayWhyTheScenarioWasInterrupted', async () => {
+    // A Wi-Fi drop while the window is visible: the banner must name the hub
+    // connection, not a hidden window, so the events carry the reason.
+    const lost: InterruptReason = { kind: 'session-lost', atS: 9, how: 'connection failed' };
+    const h = harness('edge', { outcomes: { S9: [interrupted('S9', lost)] } });
+
+    await finish(runQueue(h.env));
+
+    expect(h.events).toContainEqual({ kind: 'interrupted', id: 'S9', count: 1, reason: lost });
+    expect(h.events).toContainEqual({ kind: 'resumed', id: 'S9', count: 1, reason: lost });
+  });
+
+  it('resume_threeInterruptions_theOutcomeSaysWhyTheLastOneHappened', async () => {
+    const early: InterruptReason = { kind: 'early-return', backgroundS: 40 };
+    const h = harness('phone', {
+      complete: ['S10', 'S1', 'S2', 'S3-9', 'S3-4', 'S4'],
+      outcomes: { S5: [interrupted('S5'), interrupted('S5', { kind: 'session-lost', atS: 5, how: 'connection closed' }), interrupted('S5', early)] },
+    });
+
+    const outcome = await finish(runQueue(h.env));
+
+    expect(outcome).toEqual<QueueOutcome>({ kind: 'interrupted-too-often', id: 'S5', reason: early });
+  });
+
+  it('resume_resultWithoutAReason_readsAsHidden', async () => {
+    // results.ts: a result without `interruption` reads as hidden.
+    const h = harness('edge', { outcomes: { S1: [result('S1', { interrupted: true, durationS: 12 })] } });
+
+    await finish(runQueue(h.env));
+
+    expect(h.events).toContainEqual({ kind: 'resumed', id: 'S1', count: 1, reason: { kind: 'hidden', atS: 12 } });
   });
 
   it('resume_otherInterruptions_restartToo', async () => {
