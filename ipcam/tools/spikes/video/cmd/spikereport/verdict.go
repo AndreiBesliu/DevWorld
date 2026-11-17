@@ -5,6 +5,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/resultrules"
 )
 
 // Verdict is the outcome of a gate (spec 16.3, the rule of decision A3).
@@ -208,7 +210,7 @@ func deviceName(platform string) string {
 		return "Firefox"
 	}
 	if unexpectedOS(platform) {
-		return deviceName(basePlatform(platform)) + " pe " + osName(platform)
+		return deviceName(resultrules.BasePlatform(platform)) + " pe " + osName(platform)
 	}
 	return platform
 }
@@ -268,7 +270,7 @@ func (ev evaluation) withoutMDNS() []string {
 
 // codeOfPair is the threshold that S10 measures on a device: MV12 in the shells, MV13 in a browser.
 func codeOfPair(platform string) string {
-	if slices.Contains(webPlatforms, basePlatform(platform)) {
+	if resultrules.IsBrowser(resultrules.BasePlatform(platform)) {
 		return "MV13"
 	}
 	return "MV12"

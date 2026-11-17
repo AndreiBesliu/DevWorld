@@ -59,7 +59,7 @@ describe('the device the page runs on', () => {
   });
 
   it('deviceKey_isSpikehubsAndTheReportsKey', () => {
-    // cmd/spikehub/progress.go and cmd/spikereport/metrics.go key the results the same way.
+    // spikehub and the report key the results with resultrules.Key: the same cases as its TestKey.
     expect(deviceKey('chrome', 'Windows')).toBe('chrome');
     expect(deviceKey('chrome', 'Linux')).toBe('chrome-linux');
     expect(deviceKey('chrome', 'macOS')).toBe('chrome-macos');
@@ -67,5 +67,9 @@ describe('the device the page runs on', () => {
     expect(deviceKey('edge', 'Android')).toBe('edge-android');
     expect(deviceKey('android', 'Android 15 (API 35)')).toBe('android');
     expect(deviceKey('windows-tauri', 'Windows 11')).toBe('windows-tauri');
+    expect(deviceKey('chrome', '  Windows 11')).toBe('chrome');
+    expect(deviceKey('edge', 'Chrome_OS 141')).toBe('edge-chromeos');
+    expect(deviceKey('chrome', 'averyveryverylongosname 1')).toBe('chrome-averyveryverylon');
+    expect(deviceKey('firefox', '--- 1')).toBe('firefox');
   });
 });

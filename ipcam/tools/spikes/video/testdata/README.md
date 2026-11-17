@@ -11,3 +11,14 @@ address, URL, serial number or SSID (PH0-22).
 v0.1.1 reads such a folder unchanged (post-release task A, requirement 9):
 spikehub's progress (`cmd/spikehub/progress_test.go`), the report
 (`cmd/spikereport/main_test.go`) and the app (`app/src/results.test.ts`).
+
+`classes/` holds results files of every class that the report knows (usable,
+interrupted, failed, on the charger, informative) and of every kind of device
+key, and `classes.json` what each one counts for: its device key and its class.
+spikehub's progress and the report decide both with the same Go package
+(`resultrules`), and three tests read these fixtures against `classes.json`,
+each through its own reading of the files: `resultrules`, spikehub's
+`TestProgress_CountsTheRunsThatTheReportUses` and the report's
+`TestClassify_TheSharedFixtures`. The automatic run then skips a scenario
+exactly when the report can use its run. The files are synthetic: user agents,
+models and version strings only (PH0-22).

@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/resultrules"
 )
 
 // The thresholds (spec 16.3, Global Constraints), each with the reading that is judged.
@@ -172,7 +174,7 @@ const mv2NoMainText = "principal: n/a, browserul nu oferă H.264 Main (în produ
 // offers no H.264 Main. The phone and the Windows app keep both streams: there it is a failure
 // to show, not a property of the browser.
 func (e *evaluator) browserWithoutH264Main(r *Run) bool {
-	return slices.Contains(webPlatforms, basePlatform(e.platform)) && hasNote(r, "main: bind error CODEC_UNSUPPORTED")
+	return resultrules.IsBrowser(resultrules.BasePlatform(e.platform)) && hasNote(r, "main: bind error CODEC_UNSUPPORTED")
 }
 
 func countValue(values []float64, v float64) int {
@@ -479,7 +481,7 @@ func (e *evaluator) mv7() {
 	default:
 		notes = append(notes, "memoria = heap-ul JS al paginii (Chromium); memoria procesului browserului nu e măsurată")
 	}
-	if basePlatform(e.platform) == platformAndroid {
+	if resultrules.BasePlatform(e.platform) == platformAndroid {
 		notes = append(notes, "grila a paginat între 4 și 9 plăci (plafonul telefonului, A6)")
 	} else {
 		notes = append(notes, "grila a paginat între 9 și 16 plăci: pe PC, MV7 se judecă doar cu 16 plăci (G6, R45)")
@@ -603,7 +605,7 @@ func (e *evaluator) pair() {
 		return
 	}
 	var code string
-	switch basePlatform(e.platform) {
+	switch resultrules.BasePlatform(e.platform) {
 	case platformAndroid, platformWindows:
 		code = "MV12"
 	case "chrome", "edge", "firefox":
@@ -702,7 +704,7 @@ func (e *evaluator) g9() {
 
 // expectedCodes are the thresholds that each device measures in the plan of spec §16.3 (R45),
 // in report order. WIN-1 runs MV1–MV7 with 16 tiles, MV10 (hls.js on MSE) and G9: S1, S2,
-// S3-16, S4, S7, S9 and S10. A browser on an unexpected OS (deviceKey) is expected nothing.
+// S3-16, S4, S7, S9 and S10. A browser on an unexpected OS (resultrules.Key) is expected nothing.
 func expectedCodes(platform string) []string {
 	switch platform {
 	case platformAndroid:

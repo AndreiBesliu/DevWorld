@@ -12,87 +12,24 @@ import (
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/deviceplan"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/resultrules"
 )
 
 // The automatic run (post-release task A) asks the hub, before it starts,
 // which scenarios this device has already completed, so that it skips them;
 // and the page shows «Rămase pe acest PC:», the devices of the guide that
 // still lack results. Both come from GET /spike/v1/progress, which reads the
-// results folder: the files of every release, v0.1.0's included.
+// results folder: the files of every release, v0.1.0's included. A scenario
+// is complete when the report can use its run, and a result belongs to the
+// device that the report keys it to: both are spikereport's own rules
+// (resultrules), so that the run skips nothing that the report cannot judge.
 
 // scenarioOrder is the order of the scenario ids in the answers (results.ts SCENARIO_IDS).
 var scenarioOrder = []string{"S1", "S2", "S3-4", "S3-9", "S3-16", "S4", "S5", "S6", "S7", "S8", "S9", "S10"}
 
-// webPlatforms are the browsers, which the guide runs on the owner's Windows PC.
-var webPlatforms = []string{"chrome", "edge", "firefox"}
-
-// desktopGridTiles is the grid of a desktop S4 that MV7 is judged on (R45).
-const desktopGridTiles = 16
-
 // maxProgressFileBytes is the largest results file that the progress reads;
 // the hub stores at most 2 MiB, which its re-encoding hardly changes.
 const maxProgressFileBytes = 8 << 20
-
-// resultFacts is what the progress reads of a results file.
-type resultFacts struct {
-	Scenario string `json:"scenario"`
-	Device   struct {
-		Platform string `json:"platform"`
-		Model    string `json:"model"`
-		OS       string `json:"os"`
-	} `json:"device"`
-	Interrupted bool     `json:"interrupted"`
-	Notes       []string `json:"notes"`
-	Samples     struct {
-		Charging     []float64 `json:"charging"`
-		MainCharging []float64 `json:"mainCharging"`
-		Tiles        []float64 `json:"tiles"`
-	} `json:"samples"`
-}
-
-// complete says whether the report can use the run (spikereport's classify):
-// it was not interrupted and did not fail (a `failed:` note), an S3 run was
-// not on the charger (R48), and a desktop S4 paged 16 tiles (R45). The start
-// page shows «gata» for the first two; the last two are rare, and such a run
-// is repeated rather than left without a verdict.
-func (r resultFacts) complete() bool {
-	if r.Interrupted || slices.ContainsFunc(r.Notes, func(n string) bool { return strings.HasPrefix(n, "failed:") }) {
-		return false
-	}
-	if strings.HasPrefix(r.Scenario, "S3-") && (slices.Contains(r.Samples.Charging, 1) || slices.Contains(r.Samples.MainCharging, 1)) {
-		return false
-	}
-	if r.Scenario == "S4" && r.Device.Platform != "android" && (len(r.Samples.Tiles) == 0 || r.Samples.Tiles[0] != desktopGridTiles) {
-		return false
-	}
-	return true
-}
-
-// osFamily is the OS family of a device in lower case ("windows", "android",
-// "linux", "macos"), as spikereport reads it: the first word, letters and
-// digits only, at most 16 of them.
-func osFamily(os string) string {
-	first, _, _ := strings.Cut(strings.TrimSpace(os), " ")
-	family := strings.Map(func(c rune) rune {
-		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
-			return c
-		}
-		return -1
-	}, strings.ToLower(first))
-	return family[:min(len(family), 16)]
-}
-
-// deviceKey is the device of a result as spikereport keys it: its platform,
-// except for a browser on another OS family than Windows, which adds the
-// family ("chrome-android"), so that Chrome on the phone never counts for the
-// PC's Chrome (hub-4). The app computes the same key (deviceplan.ts).
-func deviceKey(platform, os string) string {
-	family := osFamily(os)
-	if !slices.Contains(webPlatforms, platform) || family == "" || family == "windows" {
-		return platform
-	}
-	return platform + "-" + family
-}
 
 // progressGroup is what one device has completed. The phone and the Windows
 // shell are told apart by their model too; the browsers report none.
@@ -129,17 +66,17 @@ type progressAnswer struct {
 type cachedFacts struct {
 	size    int64
 	modTime time.Time
-	facts   *resultFacts
+	facts   *resultrules.Facts
 }
 
 // readFacts reads the facts of the results file name, or nil when it is not a
 // result of a known scenario and platform.
-func readFacts(path string) *resultFacts {
+func readFacts(path string) *resultrules.Facts {
 	data, err := os.ReadFile(path) //nolint:gosec // a file of the results folder
 	if err != nil {
 		return nil
 	}
-	var r resultFacts
+	var r resultrules.Facts
 	if json.Unmarshal(data, &r) != nil || !slices.Contains(scenarioOrder, r.Scenario) || r.Device.Platform == "" {
 		return nil
 	}
@@ -176,10 +113,10 @@ func (h *hub) progress() (progressAnswer, error) {
 			h.progressCache[name] = cached
 		}
 		r := cached.facts
-		if r == nil || !r.complete() {
+		if r == nil || r.Class() != resultrules.Usable {
 			continue
 		}
-		id := groupID{deviceKey(r.Device.Platform, r.Device.OS), r.Device.Platform, r.Device.Model}
+		id := groupID{r.Key(), r.Device.Platform, r.Device.Model}
 		if done[id] == nil {
 			done[id] = map[string]bool{}
 		}
@@ -212,7 +149,7 @@ func (h *hub) progress() (progressAnswer, error) {
 		return strings.Compare(a.Model, b.Model)
 	})
 	for _, d := range deviceplan.Devices() {
-		completed := byKey[deviceKey(d.Platform, "")]
+		completed := byKey[resultrules.Key(d.Platform, "")]
 		remaining := slices.DeleteFunc(d.Scenarios(), func(s string) bool { return completed[s] })
 		answer.Devices = append(answer.Devices, progressDevice{ID: d.ID, Label: d.Label, PC: d.PC, Remaining: remaining})
 	}

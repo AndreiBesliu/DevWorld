@@ -3,65 +3,25 @@ package main
 import (
 	"fmt"
 	"math"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/resultrules"
 )
 
 // The platforms of a result (app/src/device.ts). A device here is a platform:
-// the owner has one phone (AND-1) and one PC (WIN-1, and its browsers).
+// the owner has one phone (AND-1) and one PC (WIN-1, and its browsers). A
+// browser run on another OS family than Windows is a device of its own: its key
+// adds the family (resultrules.Key, hub-4).
 const (
-	platformAndroid = "android"
+	platformAndroid = resultrules.PlatformAndroid
 	platformWindows = "windows-tauri"
 )
 
-// webPlatforms are the browsers. The guide runs them on the owner's Windows PC (spec §16.3,
-// WEB), so a browser run on another OS family is a device of its own (deviceKey, hub-4).
-var webPlatforms = []string{"chrome", "edge", "firefox"}
-
-// expectedWebOS is the OS family of the browsers' runs that the verdicts read.
-const expectedWebOS = "windows"
-
-// osFamily is the OS family of a browser result in lower case ("windows", "android", "linux",
-// "macos"), as device.ts names it; empty when the result does not say. It names a CSV file, so
-// it keeps only letters and digits, and at most 16 of them.
-func osFamily(os string) string {
-	first, _, _ := strings.Cut(strings.TrimSpace(os), " ")
-	family := strings.Map(func(c rune) rune {
-		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
-			return c
-		}
-		return -1
-	}, strings.ToLower(first))
-	return family[:min(len(family), 16)]
-}
-
-// deviceKey is the device that a result belongs to in the report: its platform, except for a
-// browser on an OS family other than Windows, whose key adds the family ("chrome-android").
-// A run of Chrome on the phone then never replaces nor merges with the PC's Chrome (hub-4).
-// A browser result that names no OS stays with its platform.
-func deviceKey(d Device) string {
-	family := osFamily(d.OS)
-	if !slices.Contains(webPlatforms, d.Platform) || family == "" || family == expectedWebOS {
-		return d.Platform
-	}
-	return d.Platform + "-" + family
-}
-
-// basePlatform is the platform of a device key: "chrome" for "chrome-android".
-func basePlatform(key string) string {
-	for _, p := range webPlatforms {
-		if strings.HasPrefix(key, p+"-") {
-			return p
-		}
-	}
-	return key
-}
-
 // unexpectedOS says whether a device key is a browser on an OS that the guide does not use.
-func unexpectedOS(key string) bool { return basePlatform(key) != key }
+func unexpectedOS(key string) bool { return resultrules.BasePlatform(key) != key }
 
 // Device is the device of a result. Nothing in it names an address, a network
 // or a serial number (PH0-22); the user agent is not read at all.
@@ -117,7 +77,7 @@ type MV struct {
 	Unit      string
 	Threshold string
 	Pass      bool
-	// Device is the device key of the results (deviceKey): android, windows-tauri, chrome,
+	// Device is the device key of the results (resultrules.Key): android, windows-tauri, chrome,
 	// edge, firefox, or a browser on an unexpected OS such as chrome-android.
 	Device string
 	// Text is the "Valoare" cell of the report; Value and Unit when empty.
@@ -173,39 +133,32 @@ func (r Result) startedAt() time.Time {
 	return t
 }
 
-// onCharger: an S3 run with a reading that says the phone was charging (R48), in the grid
-// (`charging`) or in the fullscreen part (`mainCharging`).
-func (r Result) onCharger() bool {
-	if !strings.HasPrefix(r.Scenario, "S3-") {
-		return false
+// facts is what the rules that spikehub shares with the report read of the run (resultrules).
+func (r Result) facts() resultrules.Facts {
+	return resultrules.Facts{
+		Scenario:    r.Scenario,
+		Device:      resultrules.Device{Platform: r.Device.Platform, Model: r.Device.Model, OS: r.Device.OS},
+		Interrupted: r.Interrupted,
+		Notes:       r.Notes,
+		Samples: resultrules.Readings{
+			Charging:     r.Samples["charging"],
+			MainCharging: r.Samples["mainCharging"],
+			Tiles:        r.Samples["tiles"],
+		},
 	}
-	return slices.Contains(r.Samples["charging"], 1) || slices.Contains(r.Samples["mainCharging"], 1)
 }
 
 // desktopTiles is the number of tiles of an S4 run (its `tiles` sample), 0 when it has none.
-func (r Result) desktopTiles() int {
-	if t := r.Samples["tiles"]; len(t) > 0 {
-		return int(t[0])
-	}
-	return 0
-}
+func (r Result) desktopTiles() int { return resultrules.DesktopTiles(r.Samples["tiles"]) }
 
-// desktopGridTiles is the grid that MV7 needs on a desktop path (R45, spec G6).
-const desktopGridTiles = 16
-
-// informativeOnly: an S4 run of a desktop path that did not page 16 tiles (R45).
-func (r Result) informativeOnly() bool {
-	return r.Scenario == "S4" && basePlatform(r.Device.Platform) != platformAndroid && r.desktopTiles() != desktopGridTiles
-}
-
-// failed: the scenario ended with an error (runner.ts notes `failed: ...`).
-func (r Result) failed() bool {
-	for _, n := range r.Notes {
-		if strings.HasPrefix(n, "failed:") {
-			return true
-		}
-	}
-	return false
+// statusOf is the status of a run of class c, before the newest usable run of each
+// scenario and device is told from the ones it supersedes.
+var statusOf = map[resultrules.Class]RunStatus{
+	resultrules.Usable:      RunUsed,
+	resultrules.Interrupted: RunInterrupted,
+	resultrules.Failed:      RunFailed,
+	resultrules.OnCharger:   RunInvalid,
+	resultrules.Informative: RunInformative,
 }
 
 func (r Result) hubJitterMax() float64 {
@@ -232,12 +185,15 @@ func orderOf(order map[string]int, name string) int {
 // classify sorts the results (device, scenario, start time) and says what each counts for:
 // interrupted, failed and invalid runs are left out, a desktop S4 without 16 tiles is only
 // informative, and of the valid runs of one scenario on one device only the newest counts.
-// The device of a run is its deviceKey, which it keeps in Device.Platform from here on.
+// The class and the device of a run are spikehub's too (resultrules): the automatic run
+// skips exactly the scenarios that have a usable run here. The device is the run's key,
+// which it keeps in Device.Platform from here on.
 func classify(results []Result) []Run {
 	runs := make([]Run, len(results))
 	for i, r := range results {
-		runs[i] = Run{Result: r}
-		runs[i].Device.Platform = deviceKey(r.Device)
+		facts := r.facts()
+		runs[i] = Run{Result: r, Status: statusOf[facts.Class()]}
+		runs[i].Device.Platform = facts.Key()
 	}
 	sort.SliceStable(runs, func(i, j int) bool {
 		a, b := runs[i], runs[j]
@@ -260,23 +216,14 @@ func classify(results []Result) []Run {
 	})
 	newest := map[string]int{} // platform + scenario -> index of the newest valid run
 	for i := range runs {
-		switch {
-		case runs[i].Interrupted:
-			runs[i].Status = RunInterrupted
-		case runs[i].failed():
-			runs[i].Status = RunFailed
-		case runs[i].onCharger():
-			runs[i].Status = RunInvalid
-		case runs[i].informativeOnly():
-			runs[i].Status = RunInformative
-		default:
-			key := runs[i].Device.Platform + "|" + runs[i].Scenario
-			if j, ok := newest[key]; ok {
-				runs[j].Status = RunSuperseded
-			}
-			newest[key] = i
-			runs[i].Status = RunUsed
+		if runs[i].Status != RunUsed {
+			continue
 		}
+		key := runs[i].Device.Platform + "|" + runs[i].Scenario
+		if j, ok := newest[key]; ok {
+			runs[j].Status = RunSuperseded
+		}
+		newest[key] = i
 	}
 	return runs
 }

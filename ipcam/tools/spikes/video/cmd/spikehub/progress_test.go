@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -233,5 +234,84 @@ func TestProgress_ReadsTheResultsOfV010(t *testing.T) {
 	}
 	if got := deviceOf(t, p, "chrome").Remaining; !slices.Equal(got, []string{"S2", "S3-9", "S3-16", "S4"}) {
 		t.Errorf("chrome: remaining %v", got)
+	}
+}
+
+// classesDir holds results files of every class that the report knows, and
+// classesFile what each one counts for: the same fixtures that spikereport's
+// TestClassify_TheSharedFixtures reads, so that the automatic run skips a
+// scenario exactly when the report can use its run.
+var (
+	classesDir  = filepath.Join("..", "..", "testdata", "classes")
+	classesFile = filepath.Join("..", "..", "testdata", "classes.json")
+)
+
+// expectedClass is an entry of testdata/classes.json: the device key of a
+// results file and what the report uses it for (usable, interrupted, failed,
+// on-charger or informative).
+type expectedClass struct {
+	Key   string `json:"key"`
+	Class string `json:"class"`
+}
+
+func readExpectedClasses(t *testing.T) map[string]expectedClass {
+	t.Helper()
+	data, err := fs.ReadFile(os.DirFS(filepath.Dir(classesFile)), filepath.Base(classesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var classes map[string]expectedClass
+	if err := json.Unmarshal(data, &classes); err != nil {
+		t.Fatal(err)
+	}
+	if len(classes) == 0 {
+		t.Fatal("testdata/classes.json lists no file")
+	}
+	return classes
+}
+
+func TestProgress_CountsTheRunsThatTheReportUses(t *testing.T) {
+	hub := newTestHub(t, 1)
+	if err := os.CopyFS(hub.resultsDir, os.DirFS(classesDir)); err != nil {
+		t.Fatal(err)
+	}
+	classes := readExpectedClasses(t)
+	type groupID struct{ key, model string }
+	want := map[groupID][]string{}
+	fixtures := os.DirFS(classesDir)
+	for file, class := range classes {
+		data, err := fs.ReadFile(fixtures, file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r struct {
+			Scenario string `json:"scenario"`
+			Device   struct {
+				Model string `json:"model"`
+			} `json:"device"`
+		}
+		if err := json.Unmarshal(data, &r); err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+		if class.Class != "usable" {
+			continue
+		}
+		id := groupID{class.Key, r.Device.Model}
+		if !slices.Contains(want[id], r.Scenario) {
+			want[id] = append(want[id], r.Scenario)
+		}
+	}
+
+	p := hub.getProgress(t)
+
+	got := map[groupID][]string{}
+	for _, g := range p.Complete {
+		got[groupID{g.Key, g.Model}] = slices.Sorted(slices.Values(g.Scenarios))
+	}
+	for id := range want {
+		slices.Sort(want[id])
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("complete per device:\n got %v\nwant %v (testdata/classes.json)", got, want)
 	}
 }

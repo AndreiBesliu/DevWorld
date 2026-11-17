@@ -64,9 +64,10 @@ function osFamily(os: string | undefined): string {
 }
 
 /**
- * The device that a result counts for, as spikehub (progress.go) and the
- * report (metrics.go) key it: the platform, except for a browser on another OS
- * family than Windows, which adds the family (`chrome-android`, hub-4).
+ * The device that a result counts for, as spikehub and the report key it (Go
+ * package resultrules, Key): the platform, except for a browser on another OS
+ * family than Windows, which adds the family (`chrome-android`, hub-4). A copy
+ * of the Go function, pinned by deviceplan.test.ts against the cases of its test.
  */
 export function deviceKey(platform: string, os: string | undefined): string {
   const family = osFamily(os);
