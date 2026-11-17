@@ -37,6 +37,7 @@ const (
 // left to hold.
 var (
 	errHandedOver       = errors.New("handed over")
+	errHubStopped error = ownerError(msgHubStoppedWait)
 	errMI5Running error = ownerError(msgMI5Running)
 	errHubBusy    error = ownerError(msgHubBusy)
 )
@@ -65,10 +66,11 @@ func mi5State(st *runstate.State) (open, live bool) {
 }
 
 // loginEnd is the end of a login: its pair, the hub's stage and reason of
-// a failure, or its plan on success.
+// a failure, or its plan on success; hubRestarted when the hub crashed
+// and restarted during it.
 type loginEnd struct {
 	dest, stage, reason, plan string
-	ok                        bool
+	ok, hubRestarted          bool
 }
 
 // holder is the uploadspike process that holds the device's hub.lock, its
@@ -555,6 +557,9 @@ func (h *holder) heartbeat() {
 // again after a growing wait (retry), its error printed once; the gap
 // ends once a hub is ready again. A handover cuts the wait.
 func (h *holder) restartAfterCrash(ctx context.Context) {
+	if ctx.Err() != nil {
+		return // a signal ends the holder: nothing to restart
+	}
 	wake := h.handoverRequested()
 	select {
 	case <-wake:
@@ -579,6 +584,9 @@ func (h *holder) restartAfterCrash(ctx context.Context) {
 	}
 	h.crashes.e = h.e
 	if err := h.startHub(ctx); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		h.crashes.failed(ctx, err, h.e.crashRestart(), wake)
 		return
 	}
@@ -641,7 +649,13 @@ func (h *holder) AllowBegin(dest, platform, plan string) error {
 	}
 	for _, d := range append(append([]mi6.PairDef{}, mi6.Drive...), mi6.OneDrive...) {
 		if d.Dest == dest && d.Platform == platform {
-			return mi6.AllowHandoff(st.Handoffs, mi6.ClientFor(d, plan))
+			err := mi6.AllowHandoff(st.Handoffs, mi6.ClientFor(d, plan))
+			if err != nil {
+				// The owner reads it where they wait, not only in the app
+				// (Task 9B review M7).
+				h.e.printf("%s", err)
+			}
+			return err
 		}
 	}
 	return fmt.Errorf("unknown pair %s", dest)
@@ -660,14 +674,21 @@ func (h *holder) Begun(dest string, res hubproc.BeginResult) {
 }
 
 // pollDevice asks the hub for a device login's status every 5 s until the
-// login ends, its hub stops, or it expires.
+// login ends, its hub stops, it expires, or the holder accepted a handover:
+// a login must not complete into a hub that is being handed over (Task 9B
+// review M2).
 func (h *holder) pollDevice(ctl *hubproc.ControlClient, state string) {
 	deadline := time.Now().Add(31 * time.Minute)
+	wake := h.handoverRequested()
 	for time.Now().Before(deadline) {
-		time.Sleep(devicePoll)
+		select {
+		case <-wake:
+			return
+		case <-time.After(h.e.devicePoll()):
+		}
 		h.mu.Lock()
 		_, open := h.open[state]
-		current := h.ctl == ctl && !h.stopping
+		current := h.ctl == ctl && !h.stopping && !h.handedOver
 		h.mu.Unlock()
 		if !open || !current {
 			return
@@ -770,7 +791,7 @@ func (h *holder) handoverRequested() <-chan struct{} {
 // Setup serves /setup while `setup` holds the hub.
 func (h *holder) Setup(w http.ResponseWriter, r *http.Request) {
 	if h.setupHandler == nil {
-		http.NotFound(w, r)
+		http.Error(w, pageNotFound, http.StatusNotFound)
 		return
 	}
 	h.setupHandler(w, r)
@@ -781,7 +802,7 @@ func (h *holder) Setup(w http.ResponseWriter, r *http.Request) {
 func (h *holder) Status(w http.ResponseWriter, r *http.Request) {
 	lines, err := statusLines(h.e)
 	if err != nil {
-		http.Error(w, "the run state cannot be read", http.StatusInternalServerError)
+		http.Error(w, pageRunStateUnread, http.StatusInternalServerError)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/spike/v1/") {

@@ -260,6 +260,9 @@ func (h *holder) login(ctx context.Context, def mi6.PairDef, plan string) error 
 		if err != nil {
 			return err
 		}
+		if end.hubRestarted {
+			continue // the new hub holds no state of the cut login: ask again
+		}
 		if end.ok {
 			h.e.printf(promptDone, platform, provider, end.plan)
 			return nil
@@ -304,13 +307,25 @@ func (h *holder) printAddresses() {
 	}
 }
 
-// waitEnd waits for the end of dest's login, a handover or ctx's end.
+// waitEnd waits for the end of dest's login, a handover or ctx's end. A
+// hub that ends on its own meanwhile is said and restarted (Task 9B review
+// M6), and the login ends with hubRestarted once a new hub runs: the cut
+// login's state died with the old one.
 func (h *holder) waitEnd(ctx context.Context, dest string) (loginEnd, error) {
 	for {
+		gone := h.gone()
 		select {
 		case end := <-h.ends:
 			if end.dest == dest {
 				return end, nil
+			}
+		case <-gone:
+			if h.isStopping() {
+				return loginEnd{}, errHubStopped
+			}
+			h.restartAfterCrash(ctx)
+			if g := h.gone(); g != gone {
+				return loginEnd{dest: dest, hubRestarted: true}, nil
 			}
 		case <-h.handoverRequested():
 			return loginEnd{}, errHandedOver
@@ -359,7 +374,11 @@ func (h *holder) matrix(ctx context.Context) error {
 			_ = json.Unmarshal(lines[0], &v)
 		}
 		if err != nil || v.Error != "" || v.Schema == "" {
-			h.e.printf("%s visibility %s → %s: %v %s", msgError, want.Creator, want.Reader, err, v.Error)
+			why := v.Error
+			if err != nil {
+				why = scanErrorText(err)
+			}
+			h.e.printf(msgVisibilityFailed, want.Creator, want.Reader, why)
 			continue
 		}
 		want.Listed, want.Read = v.Listed, v.Read
@@ -422,6 +441,11 @@ func (h *holder) webReader(ctx context.Context, byClient map[string]string) erro
 			if err := saveCells(h.e, []results.VisibilityCell{c}); err != nil {
 				return err
 			}
+		case <-h.gone():
+			if h.isStopping() {
+				return errHubStopped
+			}
+			h.restartAfterCrash(ctx) // the page's next call reaches the new hub
 		case <-h.handoverRequested():
 			return errHandedOver
 		case <-ctx.Done():
@@ -521,7 +545,7 @@ func runReader(ctx context.Context, e *env, args []string) error {
 	h.remoteReader = "http://" + remoteBase
 	h.awaiting, h.open = map[string]handoff.Next{}, map[string]string{}
 	h.ends, h.webCells, h.handover = make(chan loginEnd, 1), make(chan results.VisibilityCell, 64), make(chan struct{})
-	h.srv = handoff.New(nil, handoff.Options{Clock: e.now, Port: e.port, RemoteHub: *hub, Driver: h})
+	h.srv = handoff.New(nil, handoff.Options{Clock: e.now, Port: e.port, Driver: h})
 	if err := h.srv.ServeLoopback(ctx); err != nil {
 		return err
 	}

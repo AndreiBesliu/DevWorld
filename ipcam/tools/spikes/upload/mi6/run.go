@@ -158,10 +158,11 @@ func (r *Run) CloseAt() time.Time {
 }
 
 // Reanchorable reports whether day 0 may still move: no pair has a login,
-// and nothing was measured yet (no refusal of plan A or B1, no visibility
-// cell). A transient failure judges nothing (C2-R16 (c)).
+// nothing was measured yet (no refusal of plan A or B1, no visibility
+// cell), and no scan failed the run (C2-R23: a new day 0 must not clear a
+// failed scan). A transient failure judges nothing (C2-R16 (c)).
 func (r *Run) Reanchorable() bool {
-	if len(r.Visibility) > 0 {
+	if len(r.Visibility) > 0 || r.ScanFailed != "" {
 		return false
 	}
 	for _, p := range r.Pairs {

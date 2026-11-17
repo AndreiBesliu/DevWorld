@@ -46,14 +46,23 @@ document.querySelectorAll("[data-legend]").forEach((el) => { el.textContent = na
 const field = (n) => document.querySelector("[name='" + n + "']");
 
 // kindOf recognises a client JSON: "web" is the Web client; "installed"
-// with a localhost redirect is Desktop; "installed" without one is TV.
+// without a client secret is Android (a public client); with a secret and
+// a localhost redirect it is Desktop, with a secret and no such redirect
+// TV (limited-input devices).
 function kindOf(json) {
   if (json.web) return ["web", json.web];
   if (json.installed) {
+    if (!json.installed.client_secret) return ["android", json.installed];
     const redirects = json.installed.redirect_uris || [];
     return [redirects.some((u) => u.startsWith("http://localhost")) ? "desktop" : "tv", json.installed];
   }
   return ["", null];
+}
+
+// fill puts a value read from a file into a field, never an empty one: a
+// later file never clears what an earlier one filled.
+function fill(name, value) {
+  if (field(name) && value) field(name).value = value;
 }
 
 document.getElementById("files").addEventListener("change", async (ev) => {
@@ -63,8 +72,8 @@ document.getElementById("files").addEventListener("change", async (ev) => {
     try {
       const [kind, c] = kindOf(JSON.parse(await file.text()));
       if (!kind) { li.textContent = file.name + ": " + unknown; list.append(li); continue; }
-      field(kind + "-id").value = c.client_id || "";
-      if (field(kind + "-secret")) field(kind + "-secret").value = c.client_secret || "";
+      fill(kind + "-id", c.client_id);
+      fill(kind + "-secret", c.client_secret);
       li.textContent = file.name + ": " + detected.replace("%s", names[kind]);
     } catch (e) {
       li.textContent = file.name + ": " + unknown;

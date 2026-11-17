@@ -170,6 +170,15 @@ func (e *env) goneGrace() time.Duration {
 	return waitGoneGrace
 }
 
+// devicePoll is how often a device login's status is asked: 5 s, 300 ms
+// in the tests.
+func (e *env) devicePoll() time.Duration {
+	if e.fast {
+		return 300 * time.Millisecond
+	}
+	return devicePoll
+}
+
 // crashRestart is how long a holder waits before it restarts a hub that
 // ended on its own: 5 s, a second in the tests.
 func (e *env) crashRestart() time.Duration {
@@ -238,7 +247,9 @@ func (h *holder) closeDueMI6(ctx context.Context) {
 		h.e.printf("%s %v", msgError, err)
 		return
 	}
-	closingScan(ctx, h.e, h.tokens, func() error { return rewriteMI6(ctx, h.e, host, info) })
+	if _, last := closingScan(ctx, h.e, h.tokens, func() error { return rewriteMI6(ctx, h.e, host, info) }); last != nil && last.rewriteFailed {
+		return // the next heartbeat writes the failed run's envelope again
+	}
 	_ = runstate.Update(h.e.statePath(), func(s *runstate.State) error {
 		delete(s.Open, "MI6")
 		return nil

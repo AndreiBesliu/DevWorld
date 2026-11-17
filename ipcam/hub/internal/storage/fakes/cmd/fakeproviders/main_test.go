@@ -296,12 +296,16 @@ func TestFakeProviders_Throttle(t *testing.T) {
 
 // TestFakeProviders_Usage: fakeproviders refuses a missing -listen, a
 // negative -throttle and stray arguments with exit 2, printing nothing on
-// stdout.
+// stdout, and a usage line on stderr that names every flag, -known
+// included.
 func TestFakeProviders_Usage(t *testing.T) {
 	for _, args := range [][]string{{}, {"-listen", "127.0.0.1:0", "-throttle", "-1"}, {"-listen", "127.0.0.1:0", "extra"}} {
 		var stdout, stderr bytes.Buffer
 		if code := run(args, &stdout, &stderr); code != 2 || stdout.Len() != 0 {
 			t.Errorf("run(%q) = %d with stdout %q, want 2 and nothing", args, code, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "[-known <kind>=<value>]...") {
+			t.Errorf("run(%q)'s usage %q does not name -known", args, stderr.String())
 		}
 	}
 }

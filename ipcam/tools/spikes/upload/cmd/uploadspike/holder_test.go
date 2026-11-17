@@ -63,7 +63,7 @@ func TestSetup_PiTerminalTakesJSONOrValues(t *testing.T) {
 	}
 	// A client missing: refused, in Romanian.
 	p = r.run("android-client-0001.apps.example\n", nil, "setup", "--terminal")
-	if p.code == 0 || !strings.Contains(p.stderr.String(), "Clienții nu sunt completi") {
+	if p.code == 0 || !strings.Contains(p.stderr.String(), "Clienții nu sunt compleți") {
 		t.Errorf("an incomplete setup: exit %d, stderr %q", p.code, p.stderr)
 	}
 }

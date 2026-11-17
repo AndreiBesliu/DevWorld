@@ -86,7 +86,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *listen == "" || *throttle < 0 || flags.NArg() != 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: fakeproviders -listen <ip:port> [-throttle <bytes/s>]")
+		_, _ = fmt.Fprintln(stderr, "usage: fakeproviders -listen <ip:port> [-throttle <bytes/s>] [-known <kind>=<value>]...")
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

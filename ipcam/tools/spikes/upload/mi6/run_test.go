@@ -206,6 +206,9 @@ func TestRun_ReanchorWhileNoLogin(t *testing.T) {
 		"visibility cell": func(r *Run) {
 			r.Visibility = append(r.Visibility, results.VisibilityCell{Creator: "android", Reader: "tv"})
 		},
+		// A failed scan fails the run (C2-R20); a new day 0 must not
+		// clear it (C2-R23).
+		"a failed scan": func(r *Run) { r.ScanFailed = "scan-secrets: moved 1, unmoved 0" },
 	} {
 		run := NewRun("mi6-1", t0, "test", false, []string{"android"})
 		edit(run)

@@ -71,7 +71,11 @@ const (
 	msgB1NotNeeded       = "%s × %s nu are nevoie de B1 acum."
 	msgSetupSaved        = "Clienții au fost dați hub-ului și sigilați în catalog; nimic nu a rămas pe disc."
 	msgSetupWaitPage     = "Completați pagina de configurare din browser; aștept." //nolint:gosec // G101: an owner's line
-	msgSetupClientsWrong = "Clienții nu sunt completi: %s"
+	msgSetupClientsWrong = "Clienții nu sunt compleți: %s"
+	msgNoLocalAppData    = "LOCALAPPDATA nu este setat"
+	msgNotAPort          = "%s nu este un port"
+	msgHubStoppedWait    = "Hub-ul s-a oprit în timpul așteptării; rulați comanda din nou."
+	msgVisibilityFailed  = "Vizibilitatea %s → %s nu s-a putut măsura (%s)."
 )
 
 // The MI6 login prompts, per platform and plan.
@@ -151,4 +155,9 @@ const (
 	pageClientUnknown   = "nerecunoscut: alegeți tipul"
 	pageClientDetected  = "recunoscut: %s"
 	pageSetupAutoButton = "Configurare automată"
+	pageRunStateUnread  = "Starea probei nu se poate citi."
+	pageNotShown        = "Pagina nu se poate afișa."
+	pageNotFound        = "Pagina nu există aici."
+	pageSetupBadBody    = "pagina nu a trimis clienții în forma așteptată"
+	pageSetupHubRefused = "hub-ul nu i-a putut sigila; vedeți fereastra uploadspike"
 )

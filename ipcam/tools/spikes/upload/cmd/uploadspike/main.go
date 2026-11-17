@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/handoff"
@@ -77,6 +78,10 @@ type env struct {
 	in                                                   io.Reader
 	out, errOut                                          io.Writer
 	now                                                  func() time.Time
+	// termRestore gives the terminal its state back while a secret is
+	// read without echo (readSecret).
+	termMu      sync.Mutex
+	termRestore func()
 }
 
 // newEnv reads the environment.
@@ -89,7 +94,7 @@ func newEnv(in io.Reader, out, errOut io.Writer) (*env, error) {
 		if runtime.GOOS == "windows" {
 			local := os.Getenv("LOCALAPPDATA")
 			if local == "" {
-				return nil, errors.New("LOCALAPPDATA nu este setat")
+				return nil, ownerError(msgNoLocalAppData)
 			}
 			e.base = filepath.Join(local, baseDirName)
 		} else {
@@ -110,7 +115,7 @@ func newEnv(in io.Reader, out, errOut io.Writer) (*env, error) {
 	if p := os.Getenv(envPort); p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n <= 0 || n > 65535 {
-			return nil, fmt.Errorf("%s nu este un port", envPort)
+			return nil, ownerError(fmt.Sprintf(msgNotAPort, envPort))
 		}
 		e.port = n
 	}

@@ -59,7 +59,7 @@ func renderPage(w http.ResponseWriter, name string, data pageData) {
 	data.L = pageLabels
 	var b bytes.Buffer
 	if err := pages.ExecuteTemplate(&b, name, data); err != nil {
-		http.Error(w, "the page cannot be shown", http.StatusInternalServerError)
+		http.Error(w, pageNotShown, http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -76,7 +76,7 @@ func (h *holder) DevicePage(w http.ResponseWriter, res hubproc.BeginResult) {
 func (h *holder) ReaderPage(w http.ResponseWriter, _ *http.Request) {
 	st, err := runstate.Load(h.e.statePath())
 	if err != nil {
-		http.Error(w, "the run state cannot be read", http.StatusInternalServerError)
+		http.Error(w, pageRunStateUnread, http.StatusInternalServerError)
 		return
 	}
 	renderPage(w, "reader.html", pageData{Title: pageReaderTitle, Reader: readerConfig{WebClientID: st.WebClientID, Remote: h.remoteReader}})

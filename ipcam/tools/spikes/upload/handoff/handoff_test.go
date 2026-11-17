@@ -536,3 +536,108 @@ func TestHandoffServer_RecordsReaderInterruptions(t *testing.T) {
 		t.Errorf("the driver got %d interruptions; want 1", d.interruptions)
 	}
 }
+
+// doHost sends a request to url with the Host header host and the headers
+// given as name, value pairs.
+func doHost(t *testing.T, method, url, host, body string, headers ...string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = host
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil}}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp
+}
+
+// TestHandoffServer_OwnHostsAndOriginsOnly (Task 9B review M1): a request
+// whose Host is not one of the server's own names (localhost, 127.0.0.1,
+// [::1] or an open LAN address, at its port) is refused, so a DNS
+// rebinding page reaches nothing, a same-origin GET with no Origin
+// included; an Origin that only echoes such a Host is no own origin; and
+// /setup's POST refuses another site's origin, a text/plain form with the
+// clients' JSON included.
+func TestHandoffServer_OwnHostsAndOriginsOnly(t *testing.T) {
+	s, d, _ := startServer(t, Options{})
+	port := strconv.Itoa(s.Port())
+	base := "http://127.0.0.1:" + port
+	rebound := "rebind.example:" + port
+	for _, tc := range []struct {
+		method, path string
+		headers      []string
+	}{
+		{http.MethodGet, "/spike/v1/oauth/next?platform=android", nil},
+		{http.MethodGet, "/spike/v1/oauth/next?platform=android", []string{"Origin", "http://" + rebound}},
+		{http.MethodGet, "/status", nil},
+		{http.MethodGet, "/setup", nil},
+		{http.MethodPost, "/spike/v1/visibility/web", []string{"Origin", "http://" + rebound}},
+	} {
+		resp := doHost(t, tc.method, base+tc.path, rebound, `{"creator":"tv","listed":true,"read":true}`, tc.headers...)
+		if resp.StatusCode != http.StatusForbidden || resp.Header.Get("Access-Control-Allow-Origin") != "" {
+			t.Errorf("%s %s with Host %s %v: %d; want 403 without CORS", tc.method, tc.path, rebound, tc.headers, resp.StatusCode)
+		}
+	}
+	if len(d.cells) != 0 {
+		t.Errorf("a rebound page recorded cells %v", d.cells)
+	}
+	for _, host := range []string{"127.0.0.1:" + port, "localhost:" + port, "LOCALHOST:" + port, "[::1]:" + port} {
+		if resp := doHost(t, http.MethodGet, base+"/spike/v1/oauth/next?platform=android", host, ""); resp.StatusCode != http.StatusOK {
+			t.Errorf("next with Host %s: %d; want 200", host, resp.StatusCode)
+		}
+	}
+	clients := `{"google":{"web":{"id":"w"}}}`
+	for _, origin := range []string{"https://evil.example", "http://localhost", "null"} {
+		resp := do(t, http.MethodPost, base+"/setup", clients, "Origin", origin, "Content-Type", "text/plain")
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("/setup POST from %s: %d; want 403", origin, resp.StatusCode)
+		}
+	}
+	for _, origin := range []string{"http://localhost:" + port, "http://127.0.0.1:" + port, ""} {
+		var h []string
+		if origin != "" {
+			h = []string{"Origin", origin}
+		}
+		if resp := do(t, http.MethodPost, base+"/setup", clients, h...); resp.StatusCode != http.StatusOK {
+			t.Errorf("/setup POST from %q: %d; want 200", origin, resp.StatusCode)
+		}
+	}
+}
+
+// TestHandoffServer_CompleteClosesItsOwnSession (Task 9B review M5): a
+// login that completes on the loopback listener leaves another device's
+// open LAN session alone; one that completes on the LAN session closes
+// that session.
+func TestHandoffServer_CompleteClosesItsOwnSession(t *testing.T) {
+	lanAddrs = func() ([]net.IP, error) { return []net.IP{net.IPv4(127, 0, 0, 2)}, nil }
+	t.Cleanup(func() { lanAddrs = RFC1918Addrs })
+	skipWithoutLoopbackAlias(t)
+	s, _, _ := startServer(t, Options{})
+	if err := s.OpenLAN(t.Context(), "g-android"); err != nil {
+		t.Fatal(err)
+	}
+	loop, lan := fmt.Sprintf("http://127.0.0.1:%d", s.Port()), fmt.Sprintf("http://127.0.0.2:%d", s.Port())
+	if resp := do(t, http.MethodPost, loop+"/spike/v1/oauth/complete", `{"state":"st-1","code":"c-1"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("complete on the loopback: %d", resp.StatusCode)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if key, open := s.LANOpen(); !open || key != "g-android" {
+		t.Fatalf("a loopback login's complete closed the LAN session (open %v, key %q)", open, key)
+	}
+	if resp := do(t, http.MethodPost, lan+"/spike/v1/oauth/complete", `{"state":"st-1","code":"c-1"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("complete on the LAN: %d", resp.StatusCode)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for _, open := s.LANOpen(); open && time.Now().Before(deadline); _, open = s.LANOpen() {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, open := s.LANOpen(); open {
+		t.Error("the LAN session stays open after its login completed on it")
+	}
+}

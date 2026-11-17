@@ -150,8 +150,10 @@ func (h *holder) setupTerminal(ctx context.Context) error {
 		}
 		return saveClients(ctx, h, a.c)
 	case <-h.handoverRequested():
+		h.e.restoreTerminal()
 		return errHandedOver
 	case <-ctx.Done():
+		h.e.restoreTerminal()
 		return ctx.Err()
 	}
 }
@@ -299,13 +301,40 @@ func readAnswer(in io.Reader) (string, error) {
 }
 
 // readSecret reads a secret without echo from a terminal, else a line.
+// While it reads, the terminal's state is kept, so that a handover or a
+// signal that ends setup mid-secret gives the owner's terminal its echo
+// back (restoreTerminal).
 func readSecret(e *env) (string, error) {
 	if f, ok := e.in.(*os.File); ok && term.IsTerminal(int(f.Fd())) { //nolint:gosec // a file descriptor
-		b, err := term.ReadPassword(int(f.Fd())) //nolint:gosec // a file descriptor
+		fd := int(f.Fd()) //nolint:gosec // a file descriptor
+		if old, err := term.GetState(fd); err == nil {
+			e.keepTerminal(func() { _ = term.Restore(fd, old) })
+			defer e.keepTerminal(nil)
+		}
+		b, err := term.ReadPassword(fd)
 		_, _ = fmt.Fprintln(e.out)
 		return string(b), err
 	}
 	return readAnswer(e.in)
+}
+
+// keepTerminal records how to give the terminal its state back while a
+// secret is read without echo; nil once the read ended.
+func (e *env) keepTerminal(restore func()) {
+	e.termMu.Lock()
+	defer e.termMu.Unlock()
+	e.termRestore = restore
+}
+
+// restoreTerminal gives the terminal its state back if a secret's read
+// without echo is cut.
+func (e *env) restoreTerminal() {
+	e.termMu.Lock()
+	defer e.termMu.Unlock()
+	if e.termRestore != nil {
+		e.termRestore()
+		e.termRestore = nil
+	}
 }
 
 // setupPageHandler serves the setup page and takes its clients.
@@ -320,7 +349,7 @@ func (h *holder) setupPageHandler() http.HandlerFunc {
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&c); err != nil {
-			writeError(w, http.StatusBadRequest, "the body is not the clients' JSON")
+			writeError(w, http.StatusBadRequest, pageSetupBadBody)
 			return
 		}
 		if err := c.check(); err != nil {
@@ -328,7 +357,8 @@ func (h *holder) setupPageHandler() http.HandlerFunc {
 			return
 		}
 		if err := saveClients(r.Context(), h, c); err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			h.e.printf("%s %v", msgError, err)
+			writeError(w, http.StatusBadGateway, pageSetupHubRefused)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

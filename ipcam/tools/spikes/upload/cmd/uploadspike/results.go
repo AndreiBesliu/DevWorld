@@ -77,7 +77,10 @@ func runResults(ctx context.Context, e *env, args []string) error {
 // (nil: none) writes the run's envelope again, and the scan runs once
 // more, so the last write of results/ is always scanned (PH0-22). It
 // reports whether a scan failed, and the last scan's failure, nil when
-// results/ came out clean.
+// results/ came out clean. When the envelope cannot be written again, the
+// owner reads why, results/ is scanned once more, and the last failure
+// is never clean: the envelope on disk does not say that the run failed,
+// so it is not zipped, and the day-7 close tries again.
 func closingScan(ctx context.Context, e *env, tokens []string, rewrite func() error) (bool, *scanFailure) {
 	f := scanResults(ctx, e, tokens)
 	if f == nil {
@@ -89,7 +92,11 @@ func closingScan(ctx context.Context, e *env, tokens []string, rewrite func() er
 		return true, f
 	}
 	if err := rewrite(); err != nil {
-		return true, &scanFailure{line: fmt.Sprintf("%s %v", msgError, err)}
+		e.printf("%s %v", msgError, err)
+		if last := scanResults(ctx, e, tokens); last != nil {
+			e.printf("%s", last.line)
+		}
+		return true, &scanFailure{line: fmt.Sprintf("%s %v", msgError, err), reason: f.reason, rewriteFailed: true}
 	}
 	if last := scanResults(ctx, e, tokens); last != nil {
 		e.printf("%s", last.line)
@@ -148,6 +155,10 @@ type scanFailure struct {
 	// could not read: each one moved to the quarantine, so the folder may
 	// be zipped.
 	clean bool
+	// rewriteFailed is set when the envelope could not be written again
+	// after a failed scan: the envelope on disk does not say that the run
+	// failed.
+	rewriteFailed bool
 }
 
 // scanResults runs `ipcam-hub diag scan-secrets --config <run.json> --dir

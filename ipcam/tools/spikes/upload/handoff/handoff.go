@@ -92,8 +92,6 @@ type Driver interface {
 // Options configure a Server.
 type Options struct {
 	Clock func() time.Time
-	// RemoteHub is `mi6 reader --hub`'s Pi address; "" otherwise.
-	RemoteHub string
 	// Port is 0 for HandoffPort; tests pass a free port.
 	Port int
 	// ResultsDir is the results root: the app's results go to its app/.
@@ -125,9 +123,11 @@ type begun struct {
 	res  hubproc.BeginResult
 }
 
-// lanSession is the LAN listener of a remote login or reader session.
+// lanSession is the LAN listener of a remote login or reader session, on
+// addrs.
 type lanSession struct {
 	key   string
+	addrs []net.IP
 	srvs  []*http.Server
 	timer *time.Timer
 }
@@ -182,7 +182,7 @@ func (s *Server) ServeLoopback(ctx context.Context) error {
 	if ln6, err := listenRetry(ctx, "tcp6", net.JoinHostPort("::1", strconv.Itoa(s.port))); err == nil {
 		listeners = append(listeners, ln6)
 	}
-	handler := s.handler(true)
+	handler := s.handler(nil)
 	s.mu.Lock()
 	for _, ln := range listeners {
 		srv := newHTTPServer(handler)
@@ -252,8 +252,8 @@ func (s *Server) OpenLAN(ctx context.Context, key string) error {
 		return errors.New("handoff: the host has no RFC 1918 IPv4 address for the other device to reach")
 	}
 	s.CloseLAN()
-	sess := &lanSession{key: key}
-	handler := s.handler(false)
+	sess := &lanSession{key: key, addrs: addrs}
+	handler := s.handler(sess)
 	for _, ip := range addrs {
 		ln, err := listenRetry(ctx, "tcp4", net.JoinHostPort(ip.String(), strconv.Itoa(s.port)))
 		if err != nil {
@@ -341,17 +341,20 @@ func RFC1918Addrs() ([]net.IP, error) {
 	return out, nil
 }
 
-// handler is the server's routes: on the loopback listener all of them, on
-// the LAN one only what the other device needs (the login handoff, the
-// device page, OneDrive's callback, the app's endpoints and the
-// visibility endpoints); the rest answers 404 there.
-func (s *Server) handler(loopback bool) http.Handler {
+// handler is the server's routes: on the loopback listener (sess nil) all
+// of them, on the LAN session sess's only what the other device needs (the
+// login handoff, the device page, OneDrive's callback, the app's endpoints
+// and the visibility endpoints); the rest answers 404 there. A request
+// whose Host is not one of the server's own (ownHost) is refused, so a
+// DNS-rebinding page reaches nothing.
+func (s *Server) handler(sess *lanSession) http.Handler {
+	loopback := sess == nil
 	mux := http.NewServeMux()
 	shell := func(h http.HandlerFunc) http.Handler { return s.cors(shellOrigins, h) }
 	reader := func(h http.HandlerFunc) http.Handler { return s.cors([]string{s.readerOrigin()}, h) }
 	mux.Handle("/spike/v1/oauth/next", shell(s.next))
 	mux.Handle("/spike/v1/oauth/begin", shell(s.beginLogin))
-	mux.Handle("/spike/v1/oauth/complete", shell(s.complete))
+	mux.Handle("/spike/v1/oauth/complete", shell(func(w http.ResponseWriter, r *http.Request) { s.complete(w, r, sess) }))
 	mux.Handle("/spike/v1/cameras", shell(s.cameras))
 	mux.Handle("/spike/v1/results", shell(s.results))
 	mux.Handle("/spike/v1/visibility/targets", reader(s.targets))
@@ -367,7 +370,7 @@ func (s *Server) handler(loopback bool) http.Handler {
 		if s.opts.OneDrive {
 			mux.HandleFunc("GET /oauth/f6", s.readerPage)
 		}
-		mux.HandleFunc("/setup", s.setup)
+		mux.Handle("/setup", s.ownOriginOnly(s.setup))
 		mux.HandleFunc("GET /status", s.status)
 		mux.HandleFunc("GET /spike/v1/status", s.status)
 		mux.HandleFunc("POST /spike/v1/run/handover", s.handover)
@@ -375,7 +378,54 @@ func (s *Server) handler(loopback bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Cache-Control", "no-store")
+		if !s.ownHost(r.Host) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not allowed"})
+			return
+		}
 		mux.ServeHTTP(w, r)
+	})
+}
+
+// ownNames are the server's own host names, at its port: the loopback
+// ones, and each address of the open LAN session.
+func (s *Server) ownNames() []string {
+	port := strconv.Itoa(s.port)
+	names := []string{"localhost:" + port, "127.0.0.1:" + port, "[::1]:" + port}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lan != nil {
+		for _, ip := range s.lan.addrs {
+			names = append(names, net.JoinHostPort(ip.String(), port))
+		}
+	}
+	return names
+}
+
+// ownHost reports whether a request's Host is one of the server's own
+// names (Task 9B review M1): a page whose name a DNS rebinding pointed at
+// this host sends its own name, which is none of them.
+func (s *Server) ownHost(host string) bool {
+	return slices.ContainsFunc(s.ownNames(), func(n string) bool { return strings.EqualFold(n, host) })
+}
+
+// ownOrigin reports whether origin is one of the server's own pages'
+// origins: http:// and one of its own names. An Origin is never compared
+// with the request's Host, which the client controls.
+func (s *Server) ownOrigin(origin string) bool {
+	rest, ok := strings.CutPrefix(origin, "http://")
+	return ok && slices.ContainsFunc(s.ownNames(), func(n string) bool { return strings.EqualFold(n, rest) })
+}
+
+// ownOriginOnly refuses a request that carries another site's Origin: a
+// cross-site form, whose text/plain body may hold valid JSON, never
+// reaches h. A request without Origin (no browser's) goes on.
+func (s *Server) ownOriginOnly(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" && !s.ownOrigin(origin) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "origin not allowed"})
+			return
+		}
+		h(w, r)
 	})
 }
 
@@ -387,7 +437,7 @@ func (s *Server) readerOrigin() string { return "http://localhost:" + strconv.It
 // withCORS: their preflight gets 204, with private network access when it
 // asks for it; a request of another origin gets no CORS header and 403, a
 // GET too, since a begin starts a login. A request without Origin, or of
-// the server's own origin, goes on.
+// one of the server's own pages (ownOrigin), goes on.
 func (s *Server) cors(allowed []string, h http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Vary", "Origin")
@@ -406,7 +456,7 @@ func (s *Server) cors(allowed []string, h http.HandlerFunc) http.Handler {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
-		case origin == "http://"+r.Host && r.Method != http.MethodOptions:
+		case s.ownOrigin(origin) && r.Method != http.MethodOptions:
 		default:
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "origin not allowed"})
 			return
@@ -414,6 +464,13 @@ func (s *Server) cors(allowed []string, h http.HandlerFunc) http.Handler {
 		h(w, r)
 	})
 }
+
+// notFoundText is what a browser shows for a page that is not served
+// here, or whose login expired: the owner reads it, so it is Romanian.
+const notFoundText = "Pagina nu există sau a expirat."
+
+// notFound answers 404 with notFoundText.
+func notFound(w http.ResponseWriter) { http.Error(w, notFoundText, http.StatusNotFound) }
 
 // writeJSON answers v with status.
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -505,8 +562,9 @@ func writeHubFailure(w http.ResponseWriter, err error) {
 // complete forwards a plan A login's code to the hub: the body must be a
 // JSON object with exactly state and code, both set (the app sends it as
 // text/plain, as results.ts does, so it needs no preflight). A login that
-// completes ends the LAN session.
-func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
+// completes on a LAN session ends that session, never another one (Task
+// 9B review M5); one completed on the loopback listener ends none.
+func (s *Server) complete(w http.ResponseWriter, r *http.Request, sess *lanSession) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
 		return
@@ -534,7 +592,9 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, done)
 	// The session ends once this answer is out: its listener closes at
 	// once, and its connections after their answers (closeSession).
-	go s.CloseLAN()
+	if sess != nil {
+		go s.closeSession(sess) //nolint:gosec // G118: the session ends after this request, on its own drain bound
+	}
 }
 
 // decodeExact decodes r's body, at most maxSmallBody bytes, into v,
@@ -555,7 +615,7 @@ func (s *Server) devicePage(w http.ResponseWriter, r *http.Request) {
 	b, ok := s.begun[r.URL.Query().Get("state")]
 	s.mu.Unlock()
 	if !ok || b.res.UserCode == "" || s.opts.Driver == nil {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	s.opts.Driver.DevicePage(w, b.res)
@@ -566,7 +626,7 @@ func (s *Server) devicePage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	hub := s.control()
 	if hub == nil || s.opts.Driver == nil {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	q := r.URL.Query()
@@ -583,7 +643,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 // readerPage serves the web reader (loopback only).
 func (s *Server) readerPage(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Driver == nil {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	s.opts.Driver.ReaderPage(w, r)
@@ -671,7 +731,7 @@ func (s *Server) webInterrupted(w http.ResponseWriter, r *http.Request) {
 // setup serves the setup page (loopback only).
 func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Driver == nil || r.Method != http.MethodGet && r.Method != http.MethodPost {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	s.opts.Driver.Setup(w, r)
@@ -680,7 +740,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 // status serves the status page or its JSON (loopback only).
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Driver == nil {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	s.opts.Driver.Status(w, r)
@@ -690,7 +750,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 // it needs the run state's handover token, else 401.
 func (s *Server) handover(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Driver == nil {
-		http.NotFound(w, r)
+		notFound(w)
 		return
 	}
 	token := s.opts.Driver.HandoverToken()

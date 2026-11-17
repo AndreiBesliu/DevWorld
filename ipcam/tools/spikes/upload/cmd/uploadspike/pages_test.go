@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -115,5 +116,72 @@ func TestReaderInterruptions_InTheEnvelope(t *testing.T) {
 	}
 	if n := strings.Count(out.String(), msgReaderInterrupted); n != 2 {
 		t.Errorf("the holder said %q %d times; want 2\n%s", msgReaderInterrupted, n, out.String())
+	}
+}
+
+// TestSetupPage_RecognisesEachClient (Task 9B review M8): dropped all at
+// once, the Google client JSON files are recognised by their shape: web
+// by "web"; installed without a client secret is Android, with one and a
+// localhost redirect Desktop, with one and no such redirect TV. An
+// Android file never overwrites the TV client, and a later file never
+// clears a field that an earlier one filled. The page's own script runs
+// in Node (testdata/setup-harness.mjs).
+func TestSetupPage_RecognisesEachClient(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv("UPLOADSPIKE_REQUIRE_NODE") == "1" {
+			t.Fatalf("UPLOADSPIKE_REQUIRE_NODE=1, but node is missing: %v", err)
+		}
+		t.Skip("node is missing")
+	}
+	w := httptest.NewRecorder()
+	renderPage(w, "setup.html", pageData{Title: pageSetupTitle, Lines: googleTypes})
+	page := filepath.Join(t.TempDir(), "setup.html")
+	if err := os.WriteFile(page, w.Body.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secret := func(kind string) string { return "SENT" + "INEL-" + kind + "-secret" }
+	installed := func(id, secret string, redirects ...string) string {
+		c := map[string]any{"client_id": id, "project_id": "p", "auth_uri": "https://a.invalid", "token_uri": "https://t.invalid"} //nolint:gosec // G101: a test's fake client
+		if secret != "" {
+			c["client_secret"] = secret
+		}
+		if redirects != nil {
+			c["redirect_uris"] = redirects
+		}
+		b, _ := json.Marshal(map[string]any{"installed": c}) //nolint:errchkjson // the test's own map
+		return string(b)
+	}
+	type file struct {
+		Name string `json:"name"`
+		Text string `json:"text"`
+	}
+	files := []file{
+		{"desktop.json", installed("desktop-id", secret("desktop"), "http://localhost")},
+		{"tv.json", installed("tv-id", secret("tv"))},
+		{"android.json", installed("android-id", "")},
+		{"web.json", `{"web":{"client_id":"web-id","client_secret":"` + secret("web") + `"}}`},
+		// A later file of a kind already filled, with empty values: it
+		// clears nothing.
+		{"desktop-empty.json", installed("", "", "http://localhost")},
+	}
+	arg, err := json.Marshal(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, filepath.Join("testdata", "setup-harness.mjs"), page, string(arg)).CombinedOutput() //nolint:gosec // the test's own harness
+	if err != nil {
+		t.Fatalf("the harness: %v\n%s", err, out)
+	}
+	var got struct {
+		Values map[string]string `json:"values"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("the harness said %s (%v)", out, err)
+	}
+	want := map[string]string{"android-id": "android-id", "desktop-id": "desktop-id", "desktop-secret": secret("desktop"),
+		"tv-id": "tv-id", "tv-secret": secret("tv"), "web-id": "web-id", "microsoft-id": ""}
+	if !maps.Equal(got.Values, want) {
+		t.Errorf("the fields after the drop:\n%v\nwant\n%v", got.Values, want)
 	}
 }
