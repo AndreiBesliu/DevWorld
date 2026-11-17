@@ -82,6 +82,9 @@ type Envelope struct {
 	Runs []Run `json:"runs"`
 	// MI6 is an MI6 envelope's logins, refreshes and visibility (G15).
 	MI6 *Mi6Data `json:"mi6,omitempty"`
+	// MI5 is an MI5 envelope's upload during the outage (G14); the
+	// pi-probe marker has none.
+	MI5 *Mi5Data `json:"mi5,omitempty"`
 }
 
 // PiModelInfo is the Pi's model as ipcam-hub's diag host reports it.
@@ -218,5 +221,6 @@ func (e Envelope) Validate() error {
 	check(e.Account == "" || accountPattern.MatchString(e.Account), "results: account %q is not a pseudonym", e.Account)
 	check(e.AccountKind == "" || slices.Contains(accountKinds, e.AccountKind), "results: unknown account kind %q", e.AccountKind)
 	check((e.MI6 != nil) == (e.Code == "MI6"), "results: MI6 data belongs to an MI6 envelope only")
+	check(e.MI5 == nil || e.Code == "MI5", "results: MI5 data belongs to an MI5 envelope only")
 	return errors.Join(errs...)
 }
