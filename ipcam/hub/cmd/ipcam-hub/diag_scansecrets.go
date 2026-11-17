@@ -429,7 +429,7 @@ func (q *quarantine) move(rel string) error {
 	if beforeQuarantineMove != nil {
 		beforeQuarantineMove(rel)
 	}
-	if err := restrictFile(q.parent, from); err != nil {
+	if err := restrictFile(q.parent, q.parentDir, from); err != nil {
 		return err
 	}
 	return q.parent.Rename(from, to)

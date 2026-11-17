@@ -44,4 +44,4 @@ func restrictDir(_ *os.Root, rootDir, rel string, _ bool) error {
 
 // restrictFile leaves a file to be quarantined as it is: on Linux the
 // quarantine's directories, 0700, keep every other identity from it.
-func restrictFile(*os.Root, string) error { return nil }
+func restrictFile(*os.Root, string, string) error { return nil }

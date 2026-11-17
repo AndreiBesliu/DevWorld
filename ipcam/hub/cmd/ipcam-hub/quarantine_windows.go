@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -27,11 +28,12 @@ const (
 // belong to the scan's uid: an owner may always rewrite its DACL.
 func restrictDir(root *os.Root, rootDir, rel string, created bool) error {
 	path := filepath.Join(rootDir, rel)
-	h, err := openChecked(root, rel, true, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER)
+	f, err := openChecked(root, rootDir, rel, true, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER)
 	if err != nil {
 		return &fs.PathError{Op: "restrict", Path: path, Err: err}
 	}
-	defer func() { _ = windows.CloseHandle(h) }()
+	defer func() { _ = f.Close() }()
+	h := windows.Handle(f.Fd())
 	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		return err
@@ -47,83 +49,78 @@ func restrictDir(root *os.Root, rootDir, rel string, created bool) error {
 	return setProtectedDACL(h, path, info, owner, quarantineDirSDDL)
 }
 
-// restrictFile gives the results' file rel of root, before it moves into
-// the quarantine, the DACL of a quarantined file: a move keeps a file's
-// own DACL, which grants the owner's account what the results folder
-// granted. The DACL goes on through a handle on the file that root's walk
-// reaches, which follows no link or junction out of root (openChecked), so
-// a directory of its path swapped for a junction meanwhile leaves every
-// file outside as it was (C2-R21). A file that then fails to move stays in
-// the results, and the scan names it in unmoved.
-func restrictFile(root *os.Root, rel string) error {
-	h, err := openChecked(root, rel, false, windows.READ_CONTROL|windows.WRITE_DAC)
+// restrictFile gives the results' file rel of root (at rootDir), before it
+// moves into the quarantine, the DACL of a quarantined file: a move keeps a
+// file's own DACL, which grants the owner's account what the results
+// folder granted. The DACL goes on through a handle on the very file that
+// root's walk reaches (openChecked), so a directory of its path swapped
+// for a junction meanwhile leaves every file outside as it was (C2-R21). A
+// file that then fails to move stays in the results, and the scan names it
+// in unmoved.
+func restrictFile(root *os.Root, rootDir, rel string) error {
+	path := filepath.Join(rootDir, rel)
+	f, err := openChecked(root, rootDir, rel, false, windows.READ_CONTROL|windows.WRITE_DAC)
 	if err != nil {
-		return &fs.PathError{Op: "restrict", Path: rel, Err: err}
+		return &fs.PathError{Op: "restrict", Path: path, Err: err}
 	}
-	defer func() { _ = windows.CloseHandle(h) }()
-	return setProtectedDACL(h, rel,
+	defer func() { _ = f.Close() }()
+	return setProtectedDACL(windows.Handle(f.Fd()), path,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, quarantineFileSDDL)
 }
 
-// openChecked opens rel in root, as the walk does, and opens that very
-// object again with access through its handle (ReOpenFile), resolving no
-// name. root.Lstat must show it as a directory (dir) or a regular file,
-// never a link or a junction, the object opened must be the one it showed,
-// and the new handle must hold no reparse point, a directory when dir is
-// set, else a file of one link.
-func openChecked(root *os.Root, rel string, dir bool, access uint32) (windows.Handle, error) {
+// openChecked opens rel of root (at rootDir) with access for its security
+// descriptor, as the object that root's walk reaches. root.Lstat, which
+// follows no link or junction out of root, must show it as a directory
+// (dir) or a regular file, never a link or a junction. The handle is
+// opened by path, not following a reparse point at its end
+// (FILE_FLAG_OPEN_REPARSE_POINT), and must hold that very object (the same
+// volume and file index): a directory of the path swapped for a junction
+// meanwhile leads the handle to another object, which is refused, as is a
+// reparse point, another type, or a file of more than one link.
+func openChecked(root *os.Root, rootDir, rel string, dir bool, access uint32) (*os.File, error) {
 	want := fs.FileMode(0)
 	if dir {
 		want = fs.ModeDir
 	}
-	info, err := root.Lstat(rel)
+	seen, err := root.Lstat(rel)
 	if err != nil {
-		return windows.InvalidHandle, err
+		return nil, err
 	}
-	if info.Mode().Type() != want {
-		return windows.InvalidHandle, fmt.Errorf("a link, a junction or another type (%v)", info.Mode().Type())
+	if seen.Mode().Type() != want {
+		return nil, fmt.Errorf("a link, a junction or another type (%v)", seen.Mode().Type())
 	}
-	f, err := root.Open(rel)
+	path := filepath.Join(rootDir, rel)
+	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return windows.InvalidHandle, err
+		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-	opened, err := f.Stat()
+	h, err := windows.CreateFile(p, access|windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
-		return windows.InvalidHandle, err
+		return nil, err
 	}
-	if !os.SameFile(info, opened) {
-		return windows.InvalidHandle, fmt.Errorf("replaced while it was opened")
-	}
-	h, err := reOpenFile(windows.Handle(f.Fd()), access)
-	if err != nil {
-		return windows.InvalidHandle, err
-	}
+	f := os.NewFile(uintptr(h), path)
 	var bhfi windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &bhfi); err != nil {
-		_ = windows.CloseHandle(h)
-		return windows.InvalidHandle, err
+		_ = f.Close()
+		return nil, err
 	}
 	isDir := bhfi.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 	if bhfi.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || isDir != dir || (!dir && bhfi.NumberOfLinks != 1) {
-		_ = windows.CloseHandle(h)
-		return windows.InvalidHandle, fmt.Errorf("a reparse point, another type or a file of %d links", bhfi.NumberOfLinks)
+		_ = f.Close()
+		return nil, fmt.Errorf("a reparse point, another type or a file of %d links", bhfi.NumberOfLinks)
 	}
-	return h, nil
-}
-
-// procReOpenFile is kernel32's ReOpenFile, which x/sys/windows lacks.
-var procReOpenFile = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
-
-// reOpenFile opens the object of h again with access, following no name.
-func reOpenFile(h windows.Handle, access uint32) (windows.Handle, error) {
-	r, _, err := procReOpenFile.Call(uintptr(h), uintptr(access),
-		uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE),
-		uintptr(windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT))
-	if nh := windows.Handle(r); nh != windows.InvalidHandle {
-		return nh, nil
+	opened, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
 	}
-	return windows.InvalidHandle, err
+	if !os.SameFile(seen, opened) {
+		_ = f.Close()
+		return nil, errors.New("not the object in the results: a name of its path was swapped")
+	}
+	return f, nil
 }
 
 // checkOwner refuses an object of h that belongs to neither SYSTEM nor the
