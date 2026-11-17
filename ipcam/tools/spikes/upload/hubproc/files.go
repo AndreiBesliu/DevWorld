@@ -48,6 +48,9 @@ func prepareFiles(cfg Config, owner *fileOwner) error {
 	}
 	defer func() { _ = root.Close() }()
 	if owner != nil {
+		if err := traversable(filepath.Dir(dataDir)); err != nil {
+			return err
+		}
 		if err := ownDir(root, dataDir, ".", owner); err != nil {
 			return err
 		}
@@ -79,6 +82,21 @@ func prepareFiles(cfg Config, owner *fileOwner) error {
 		if err := reownFile(root, dataDir, filepath.Join("state", name), owner); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// traversable lets every identity search base, root's folder that holds
+// the hub's data directory (<base>/hub) beside uploadspike's own state/
+// (0700), so that the hub's identity reaches its directory: a <base> that
+// an earlier command made 0700 gets search permission, nothing more.
+func traversable(base string) error {
+	info, err := os.Stat(base)
+	if err != nil {
+		return err
+	}
+	if perm := info.Mode().Perm(); perm&0o011 != 0o011 {
+		return os.Chmod(base, perm|0o711)
 	}
 	return nil
 }

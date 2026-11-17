@@ -56,7 +56,8 @@ func spikeConfig(base string) Config {
 // TestHubproc_LinuxFilesOwnedBySpikeUser (Files for the hub): run.json and
 // the identity file are in <base>/hub/spike/, 0600 and the seam's uid's;
 // every directory from <base>/hub down to them is the seam's uid's with
-// search permission, so the hub can open the files, not only own them;
+// search permission, and <base>, root's, may be searched, so the hub can
+// open the files, not only own them;
 // the files that a root-run diag left under <dataDir>/state/ (catalog.db's
 // -wal and -shm, the inner hub.lock, hub_id) are the seam's uid's again
 // before the start. A missing user gives ErrNoSpikeUser.
@@ -89,6 +90,9 @@ func TestHubproc_LinuxFilesOwnedBySpikeUser(t *testing.T) {
 		if _, err := os.Stat(p + ".tmp"); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s.tmp is left: %v", name, err)
 		}
+	}
+	if _, mode := ownerOf(t, base); mode.Perm()&0o001 == 0 {
+		t.Errorf("%s: mode %v; want search permission for the hub's identity", base, mode)
 	}
 	for _, dir := range []string{filepath.Join(base, "hub"), filepath.Join(base, "hub", "spike"), state} {
 		uid, mode := ownerOf(t, dir)
