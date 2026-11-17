@@ -23,6 +23,8 @@ import (
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/handoff"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/hubproc"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/install"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/mi5"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/runstate"
 )
 
@@ -82,7 +84,16 @@ type env struct {
 	// read without echo (readSecret).
 	termMu      sync.Mutex
 	termRestore func()
+	// isRoot is set when uploadspike runs as root on Linux.
+	isRoot bool
+	// The tests' seams of install, uninstall and the WAN block: what
+	// they touch of the system.
+	sys         *installSys
+	firewallFor func(binDir string) mi5.WanBlock
 }
+
+// root reports whether uploadspike runs as root (Linux).
+func (e *env) root() bool { return e.isRoot }
 
 // newEnv reads the environment.
 func newEnv(in io.Reader, out, errOut io.Writer) (*env, error) {
@@ -101,7 +112,15 @@ func newEnv(in io.Reader, out, errOut io.Writer) (*env, error) {
 			e.base = linuxBase
 		}
 	}
+	e.isRoot = runtime.GOOS == "linux" && os.Geteuid() == 0
 	e.hubBin = os.Getenv(envHubBin)
+	if e.hubBin == "" && e.isRoot {
+		// After `sudo ./uploadspike install`, every command uses
+		// /opt/ipcam-spike's binaries, run from the bundle or from there.
+		if _, err := os.Stat(filepath.Join(install.OptDir, defaultHubName)); err == nil {
+			e.hubBin = filepath.Join(install.OptDir, defaultHubName)
+		}
+	}
 	if e.hubBin == "" {
 		self, err := os.Executable()
 		if err != nil {
@@ -223,6 +242,14 @@ func run(ctx context.Context, e *env, args []string) error {
 		return runStatus(ctx, e, rest)
 	case "results":
 		return runResults(ctx, e, rest)
+	case "install":
+		return runInstall(ctx, e, rest)
+	case "uninstall":
+		return runUninstall(ctx, e, rest)
+	case "unblock":
+		return runUnblock(ctx, e, rest)
+	case "annotate":
+		return runAnnotate(ctx, e, rest)
 	}
 	_, _ = fmt.Fprint(e.out, usage)
 	return ownerError(fmt.Sprintf(msgUnknownCommand, cmd))

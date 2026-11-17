@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/hubproc"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/install"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/internal/cli"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/mi6"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/runstate"
@@ -201,6 +202,9 @@ func (e *env) heartbeatEvery() time.Duration {
 // hub that ends on its own restarts with a hub-crash gap, and MI6 closes
 // at day 7.
 func (h *holder) hold(ctx context.Context) holdEnd {
+	if release, err := install.KeepAwake(); err == nil {
+		defer release() // the PC must not sleep while it holds the runs' hub
+	}
 	tick := time.NewTicker(h.e.heartbeatEvery())
 	defer tick.Stop()
 	h.heartbeat()

@@ -52,7 +52,22 @@ func CleanupAt(start time.Time, blockFor time.Duration) time.Time {
 }
 
 // commander runs one system command with stdin; tests replace it.
-type commander func(ctx context.Context, name string, args []string, stdin string) (string, error)
+type commander = func(ctx context.Context, name string, args []string, stdin string) (string, error)
+
+// FirewallFor is the WAN block of goos ("windows" or "linux") for binDir,
+// whose commands run through run (RunCommand on the host; tests give
+// their own).
+func FirewallFor(goos, binDir string, run func(ctx context.Context, name string, args []string, stdin string) (string, error)) WanBlock {
+	if goos == "windows" {
+		return newWindowsFirewall(binDir, run)
+	}
+	return newLinuxFirewall(binDir, run)
+}
+
+// RunCommand runs a system command (the hosts' commander).
+func RunCommand(ctx context.Context, name string, args []string, stdin string) (string, error) {
+	return runCommand(ctx, name, args, stdin)
+}
 
 // runCommand runs name with args and stdin, and returns its combined
 // output; a failure carries the output's last line.

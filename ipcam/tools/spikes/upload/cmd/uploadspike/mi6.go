@@ -251,6 +251,7 @@ func (h *holder) login(ctx context.Context, def mi6.PairDef, plan string) error 
 				h.e.printf(msgNoLANAddress)
 			} else {
 				h.printAddresses()
+				firewallHint(ctx, h.e)
 			}
 		}
 		h.e.printf("%s", loginPrompt(def, plan))

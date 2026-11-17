@@ -26,6 +26,14 @@ const usage = `Folosire:
       starea probelor deschise.
   uploadspike results
       scrie rezultatele și le pune în results-<gazdă>.zip, în folderul curent.
+  uploadspike install [--lab]
+      pe PC (fereastră de administrator): pornirea automată a probei; pe Pi: sudo ./uploadspike install.
+  uploadspike uninstall
+      scoate pornirea automată, blocarea și utilizatorul probei; datele rămân.
+  uploadspike unblock
+      scoate blocarea internetului hub-ului (proba MI5), oricând.
+  uploadspike annotate emit --code COD --set SET
+      laboratorul: fiecare rezultat ca o linie JSON.
 `
 
 // The commands' lines.
@@ -76,6 +84,16 @@ const (
 	msgNotAPort          = "%s nu este un port"
 	msgHubStoppedWait    = "Hub-ul s-a oprit în timpul așteptării; rulați comanda din nou."
 	msgVisibilityFailed  = "Vizibilitatea %s → %s nu s-a putut măsura (%s)."
+	msgNeedsSudo         = "Rulați comanda cu sudo: sudo ./uploadspike …"
+	msgFirewallBlocks    = "Windows Firewall blochează conexiunile din rețeaua locală către uploadspike (fereastra de permisiune a fost închisă sau lipsesc regulile): rulați uploadspike install dintr-o fereastră de administrator, apoi încercați din nou."
+	msgUnblocked         = "Blocarea internetului hub-ului a fost scoasă."
+	msgInstalledPC       = "Pornirea automată a probei este instalată și pornită; regulile firewall-ului pentru rețeaua locală sunt adăugate."
+	msgInstalledPi       = "Proba este instalată în /opt/ipcam-spike, datele în /var/lib/ipcam-spike; pornirea automată rulează."
+	msgInstalledLab      = "Laboratorul: utilizatorul și folderele probei sunt pregătite, fără pornire automată."
+	msgUninstalled       = "Pornirea automată, blocarea și utilizatorul probei au fost scoase; datele au rămas."
+	msgAnnotateUsage     = "folosire: uploadspike annotate emit --code COD --set SET"
+	msgAnnotateTooMany   = "setul are %d rezultate; o adnotare primește cel mult %d"
+	msgAnnotateTooLong   = "%s are %d octeți după escapare; o adnotare primește cel mult %d"
 )
 
 // The MI6 login prompts, per platform and plan.
