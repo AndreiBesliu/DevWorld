@@ -336,3 +336,46 @@ func TestMI6_FailedRefreshDay_StatusAsksB1(t *testing.T) {
 		t.Error("resume ended")
 	}
 }
+
+// TestMI6_ReanchorsDay0UntilALogin (P53, C2-R1): an MI6 run that a first
+// `mi6` opened a day ago, whose hub never started (or whom the owner
+// stopped before any login), takes its day 0 and its settings from the
+// next `mi6`, which prints the schedule again; once a pair has a login,
+// a later `mi6` keeps the run's day 0 and settings and says so.
+func TestMI6_ReanchorsDay0UntilALogin(t *testing.T) {
+	r := newRig(t)
+	r.openMI6("android")
+	dayAgo := time.Now().Add(-30 * time.Hour).UnixMilli()
+	r.editMI6(func(run *mi6.Run) { run.StartMs = dayAgo })
+	signalFile := filepath.Join(t.TempDir(), "signal")
+	began := time.Now()
+	m := r.start([]string{envSignalFile + "=" + signalFile}, "mi6", "--platforms", "android,web", "--drive", "personal")
+	until(t, time.Minute, "the holder's hub", func() bool { return len(r.startsBy(m.cmd.Process.Pid)) == 1 })
+	until(t, 10*time.Second, "the schedule", func() bool { return strings.Contains(m.stdout.String(), scheduleTitle) })
+	stopHolder(t, m, signalFile)
+	run, err := mi6.Decode(r.state().Open["MI6"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.RunID != "mi6-test" || run.StartMs < began.UnixMilli()-1000 || run.Drive != "personal" ||
+		!slices.Equal(run.Platforms, []string{"android", "web"}) || len(run.Pairs) != 2 {
+		t.Fatalf("the run after a second mi6 with no login: %+v; want day 0 now (%d) and the new settings", run, began.UnixMilli())
+	}
+	if s := r.startsBy(m.cmd.Process.Pid); !slices.Equal(s[0].Destinations, []string{"g-android", "g-web"}) {
+		t.Errorf("the hub's destinations %v; want the new run's", s[0].Destinations)
+	}
+	// A login fixes day 0 and the settings.
+	startMs := run.StartMs
+	r.editMI6(func(run *mi6.Run) { run.Completed("g-android", mi6.PlanA, "android", time.Now().UnixMilli()) })
+	m = r.start([]string{envSignalFile + "=" + signalFile}, "mi6", "--platforms", "android", "--drive", "test")
+	until(t, time.Minute, "the holder's hub", func() bool { return len(r.startsBy(m.cmd.Process.Pid)) == 1 })
+	keeps := "rămâne cu setările de atunci (--drive personal, --platforms android,web)"
+	until(t, 10*time.Second, "the kept settings' line", func() bool { return strings.Contains(m.stdout.String(), keeps) })
+	stopHolder(t, m, signalFile)
+	if run, err = mi6.Decode(r.state().Open["MI6"]); err != nil || run.StartMs != startMs || run.Drive != "personal" || len(run.Pairs) != 2 {
+		t.Errorf("the run after mi6 with a login: %+v (%v); want it kept", run, err)
+	}
+	if strings.Contains(m.stdout.String(), scheduleTitle) {
+		t.Errorf("mi6 printed the schedule again for a kept run:\n%s", m.stdout)
+	}
+}

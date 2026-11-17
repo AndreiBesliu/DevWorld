@@ -149,3 +149,68 @@ func TestMI6_StatusAsksB1ForAFailedDay(t *testing.T) {
 		t.Errorf("status with the day blocked by the test %q; want no reconnection", lines)
 	}
 }
+
+// TestRun_CloseAtCoversEveryDay0Login (Review Focus 1, P53): pair days
+// count from each login's issuance, so the run closes 7 days and 2 h after
+// the last of day 0's first logins, not after the run's open: a login
+// made a day after the open (a second sitting of day 0) still has its
+// days 1 to 6 before the close. A later B1 login (after a failed refresh
+// day) does not extend the 7-day schedule.
+func TestRun_CloseAtCoversEveryDay0Login(t *testing.T) {
+	r := NewRun("mi6-1", t0, "test", false, []string{"android", "windows", "web"})
+	r.Completed("g-android", PlanA, "android", at(time.Hour))
+	r.Completed("g-windows", PlanA, "desktop", at(20*time.Hour))
+	r.Completed("g-web", PlanB1, "tv", at(30*time.Hour))
+	if want := t0.Add(30*time.Hour + Days*day + 2*time.Hour); !r.CloseAt().Equal(want) {
+		t.Errorf("CloseAt %v; want %v, 7 days and 2 h after the last day-0 login", r.CloseAt(), want)
+	}
+	for _, p := range r.Pairs {
+		for d := 1; d <= 6; d++ {
+			r.Refreshed(p.Dest, d, 1, results.OutcomeOK, p.IssuedAtMs+int64(d)*day.Milliseconds()+time.Minute.Milliseconds())
+		}
+	}
+	env := r.Envelope(Meta{Host: "pc", Set: "pc", OS: "windows", Storage: "ssd"}, nil, nil, r.CloseAt().UnixMilli())
+	for _, p := range env.MI6.Pairs {
+		if len(p.Refresh) != 6 || p.Refresh[5].Day != 6 || p.Refresh[5].Outcome != results.OutcomeOK {
+			t.Errorf("%s at the close: %+v; want days 1 to 6 ok", p.Dest, p.Refresh)
+		}
+	}
+	r.LoginsDone = true
+	closeAt := r.CloseAt()
+	r.Completed("g-android", PlanB1, "tv", at(3*24*time.Hour))
+	if !r.CloseAt().Equal(closeAt) {
+		t.Errorf("a B1 login on day 3 moved the close from %v to %v", closeAt, r.CloseAt())
+	}
+}
+
+// TestRun_ReanchorWhileNoLogin (P53, C2-R1): a run whose pairs have no
+// login yet, nor any measured refusal, takes a new day 0 and the new
+// command's settings, keeping its ID and its transient failures; a run
+// with a login, or with a measured refusal, keeps its day 0.
+func TestRun_ReanchorWhileNoLogin(t *testing.T) {
+	old := NewRun("mi6-1", t0, "test", false, []string{"android"})
+	old.Failed("g-android", "complete", "transient")
+	if !old.Reanchorable() {
+		t.Fatal("a run with a transient failure alone is not reanchorable")
+	}
+	later := t0.Add(30 * time.Hour)
+	r := old.Reanchor(later, "personal", false, []string{"android", "web"})
+	if r.RunID != "mi6-1" || r.StartMs != later.UnixMilli() || r.Drive != "personal" || !slices.Equal(r.Platforms, []string{"android", "web"}) ||
+		len(r.Pairs) != 2 || r.Pair("g-android").Transient != 1 || r.Pair("g-web") == nil {
+		t.Errorf("the reanchored run %+v; want day 0 at %v, the new settings, the ID and the transient count", r, later)
+	}
+	for name, edit := range map[string]func(*Run){
+		"a login":        func(r *Run) { r.Completed("g-android", PlanA, "android", at(time.Hour)) },
+		"plan A refused": func(r *Run) { r.Failed("g-android", "complete", "invalid_grant") },
+		"B1 refused":     func(r *Run) { r.Failed("g-android", "device", "access_denied") },
+		"visibility cell": func(r *Run) {
+			r.Visibility = append(r.Visibility, results.VisibilityCell{Creator: "android", Reader: "tv"})
+		},
+	} {
+		run := NewRun("mi6-1", t0, "test", false, []string{"android"})
+		edit(run)
+		if run.Reanchorable() {
+			t.Errorf("a run with %s is reanchorable", name)
+		}
+	}
+}

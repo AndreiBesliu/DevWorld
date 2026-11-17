@@ -62,6 +62,7 @@ const (
 	msgUnknownDrive      = "valoare greșită pentru --drive: %s (test, test+personal sau personal)"
 	msgOneDriveNeedsA5   = "--onedrive cere clientul Microsoft (A5): rulați întâi uploadspike setup cu ID-ul lui."
 	msgNoMI6Run          = "Nicio probă MI6 deschisă: rulați întâi uploadspike mi6."
+	msgMI6KeepsSettings  = "Proba MI6 a început pe %s și are deja autentificări: rămâne cu setările de atunci (--drive %s, --platforms %s%s)."
 	msgReaderHubNeeded   = "lipsește --hub ADRESA (adresa Pi-ului, pe care uploadspike mi6 o afișează)"
 	msgReaderOpen        = "Lăsați pagina cititorului deschisă până scrie «Gata», apoi închideți această fereastră (Ctrl+C)."
 	msgSdNeedsSetup      = "Hub-ul nu pornește: cardul SD nu este confirmat. Rulați sudo ./uploadspike setup și scrieți DA."

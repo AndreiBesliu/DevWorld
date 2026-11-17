@@ -87,12 +87,17 @@ func assertNotUnder(t *testing.T, dir string, values ...string) {
 	})
 }
 
-// startHolder starts `uploadspike mi6 --platforms android` on an open MI6
-// run, which holds the hub while it waits for the Android login, and
-// waits until its hub started.
+// startHolder starts `uploadspike mi6 --platforms <the run's>` on an open
+// MI6 run, which holds the hub while it waits for the run's first login,
+// and waits until its hub started. The run's own platforms, since a run
+// with no login takes the settings of the next `mi6` (Reanchor).
 func startHolder(t *testing.T, r *rig, extra ...string) *proc {
 	t.Helper()
-	p := r.start(extra, "mi6", "--platforms", "android")
+	run, err := mi6.Decode(r.state().Open["MI6"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := r.start(extra, "mi6", "--platforms", strings.Join(run.Platforms, ","))
 	until(t, time.Minute, "the holder's hub", func() bool { return len(r.startsBy(p.cmd.Process.Pid)) == 1 })
 	until(t, 30*time.Second, "the holder's server", func() bool { code, _ := r.get("/spike/v1/status"); return code == http.StatusOK })
 	return p

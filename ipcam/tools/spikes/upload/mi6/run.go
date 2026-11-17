@@ -57,8 +57,12 @@ const (
 // Open["MI6"].
 type Run struct {
 	RunID string `json:"runId"`
-	// StartMs is day 0's start: the run's open.
+	// StartMs is day 0's start: the run's open, or the open of the last
+	// `mi6` before any login (Reanchor).
 	StartMs int64 `json:"startMs"`
+	// Day0IssuedMs is the issuance of the last of day 0's logins: the
+	// latest first login of a pair before LoginsDone.
+	Day0IssuedMs int64 `json:"day0IssuedMs,omitempty"`
 	// Drive is D1's setting (C2-R1): "test", "test+personal" or "personal".
 	Drive string `json:"drive"`
 	// OneDrive is set when A5 passed and --onedrive was given.
@@ -143,19 +147,54 @@ func (r *Run) Day(now time.Time) int {
 	return int(now.Sub(time.UnixMilli(r.StartMs)) / day)
 }
 
-// CloseAt is when the run closes: day 7, after its refresh had 2 h to
-// show the expected expiry.
+// CloseAt is when the run closes: day 7 of the last of day 0's logins,
+// since each pair's days count from its own issuance (Review Focus 1),
+// after its refresh had 2 h to show the expected expiry.
 func (r *Run) CloseAt() time.Time {
-	return time.UnixMilli(r.StartMs).Add(Days*day + 2*time.Hour)
+	return time.UnixMilli(max(r.StartMs, r.Day0IssuedMs)).Add(Days*day + 2*time.Hour)
+}
+
+// Reanchorable reports whether day 0 may still move: no pair has a login,
+// and nothing was measured yet (no refusal of plan A or B1, no visibility
+// cell). A transient failure judges nothing (C2-R16 (c)).
+func (r *Run) Reanchorable() bool {
+	if len(r.Visibility) > 0 {
+		return false
+	}
+	for _, p := range r.Pairs {
+		if p.HandoffOK || p.IssuedAtMs != 0 || p.PlanAFailure != "" || p.B1Failure != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// Reanchor is the run with day 0 at start and a later `mi6`'s settings:
+// a first attempt whose hub never started, or that the owner stopped
+// before any login, fixes neither day 0 nor the settings. It keeps the
+// run's ID, so its envelope replaces the earlier one, and the transient
+// failures of the pairs that it keeps.
+func (r *Run) Reanchor(start time.Time, drive string, oneDrive bool, platforms []string) *Run {
+	n := NewRun(r.RunID, start, drive, oneDrive, platforms)
+	for _, p := range n.Pairs {
+		if o := r.Pair(p.Dest); o != nil {
+			p.Transient = o.Transient
+		}
+	}
+	return n
 }
 
 // Completed records a login that completed: its plan and client type, and
 // its issuance, day 0 of its refresh days; a new login's series starts
-// anew.
+// anew. A pair's first login before LoginsDone is one of day 0's, which
+// the close waits for.
 func (r *Run) Completed(dest, plan, clientType string, issuedAtMs int64) {
 	p := r.Pair(dest)
 	if p == nil {
 		return
+	}
+	if p.IssuedAtMs == 0 && !r.LoginsDone {
+		r.Day0IssuedMs = max(r.Day0IssuedMs, issuedAtMs)
 	}
 	p.Plan, p.HandoffOK, p.ClientType, p.IssuedAtMs, p.Attempts = plan, true, clientType, issuedAtMs, nil
 	if plan == PlanB1 {

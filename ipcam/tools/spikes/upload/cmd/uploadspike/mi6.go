@@ -67,22 +67,48 @@ func runMI6(ctx context.Context, e *env, args []string) error {
 	if err != nil {
 		return err
 	}
-	opened := false
+	set := map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	opened, kept := false, (*mi6.Run)(nil)
 	if err := runstate.Update(e.statePath(), func(s *runstate.State) error {
-		if _, ok := s.Open["MI6"]; ok {
-			return nil
+		var old *mi6.Run
+		if raw, ok := s.Open["MI6"]; ok {
+			run, err := mi6.Decode(raw)
+			if err != nil {
+				return err
+			}
+			if !run.Reanchorable() {
+				kept = run
+				return nil
+			}
+			// No login and nothing measured yet (the first attempt's hub
+			// did not start, or the owner stopped it before any login):
+			// day 0 starts now, with this command's settings (I3).
+			old = run
 		}
 		withOneDrive := *oneDrive && s.EntraClientID != ""
 		if *oneDrive && !withOneDrive {
 			e.printf(msgOneDriveNeedsA5)
 		}
 		now := e.now()
-		s.Open["MI6"] = mi6.NewRun("mi6-"+now.UTC().Format("20060102T150405Z"), now, *drive, withOneDrive, platforms).Encode()
+		run := mi6.NewRun("mi6-"+now.UTC().Format("20060102T150405Z"), now, *drive, withOneDrive, platforms)
+		if old != nil {
+			run = old.Reanchor(now, *drive, withOneDrive, platforms)
+		}
+		s.Open["MI6"] = run.Encode()
 		opened = true
 		return nil
 	}); err != nil {
 		h.giveBack()
 		return err
+	}
+	if kept != nil && (set["drive"] && *drive != kept.Drive || set["onedrive"] && *oneDrive != kept.OneDrive ||
+		set["platforms"] && !slices.Equal(platforms, kept.Platforms)) {
+		withOneDrive := ""
+		if kept.OneDrive {
+			withOneDrive = ", --onedrive"
+		}
+		e.printf(msgMI6KeepsSettings, time.UnixMilli(kept.StartMs).Format(dateLayout), kept.Drive, strings.Join(kept.Platforms, ","), withOneDrive)
 	}
 	if err := h.startHub(ctx); err != nil {
 		h.giveBack()
