@@ -126,6 +126,10 @@ type Mi6Data struct {
 	Pairs           []Mi6Pair        `json:"pairs"`
 	Visibility      []VisibilityCell `json:"visibility"`
 	Handoffs        []Handoff        `json:"handoffs"`
+	// ReaderInterruptions counts the web reader's readings that the page's
+	// going to the background interrupted, each restarted on its return
+	// (C2-R18 (d)).
+	ReaderInterruptions int `json:"readerInterruptions,omitempty"`
 }
 
 // Mi6Pair is one platform × provider pair (P39):

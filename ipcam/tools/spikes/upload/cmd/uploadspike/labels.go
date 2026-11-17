@@ -65,6 +65,7 @@ const (
 	msgMI6KeepsSettings  = "Proba MI6 a început pe %s și are deja autentificări: rămâne cu setările de atunci (--drive %s, --platforms %s%s)."
 	msgReaderHubNeeded   = "lipsește --hub ADRESA (adresa Pi-ului, pe care uploadspike mi6 o afișează)"
 	msgReaderOpen        = "Lăsați pagina cititorului deschisă până scrie «Gata», apoi închideți această fereastră (Ctrl+C)."
+	msgReaderInterrupted = "Pagina cititorului a trecut în fundal în timpul citirii: întreruperea a fost notată, iar citirea reîncepe când pagina revine."
 	msgSdNeedsSetup      = "Hub-ul nu pornește: cardul SD nu este confirmat. Rulați sudo ./uploadspike setup și scrieți DA."
 	msgB1NotNeeded       = "%s × %s nu are nevoie de B1 acum."
 	msgSetupSaved        = "Clienții au fost dați hub-ului și sigilați în catalog; nimic nu a rămas pe disc."

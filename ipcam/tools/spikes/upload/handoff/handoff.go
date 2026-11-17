@@ -68,9 +68,12 @@ type Driver interface {
 	AllowBegin(dest, platform, plan string) error
 	// Begun tells the driver that a login began.
 	Begun(dest string, res hubproc.BeginResult)
-	// WebCell records a cell of the web reader; WebClientID is the web
-	// reader's client ID, which a reader page on another device reads.
+	// WebCell records a cell of the web reader; WebInterrupted records
+	// that the reader page went to the background during a reading, which
+	// it restarts on return (C2-R18 (d)); WebClientID is the web reader's
+	// client ID, which a reader page on another device reads.
 	WebCell(creator string, listed, read bool) error
+	WebInterrupted()
 	WebClientID() string
 	// HandoverToken is the run state's; Handover is the holder's answer to
 	// a request that carries it: 204, or 409 while an MI5 run is open.
@@ -353,6 +356,7 @@ func (s *Server) handler(loopback bool) http.Handler {
 	mux.Handle("/spike/v1/results", shell(s.results))
 	mux.Handle("/spike/v1/visibility/targets", reader(s.targets))
 	mux.Handle("/spike/v1/visibility/web", reader(s.webCell))
+	mux.Handle("/spike/v1/visibility/interrupted", reader(s.webInterrupted))
 	mux.Handle("/spike/v1/visibility/config", reader(s.readerConfig))
 	mux.HandleFunc("GET /oauth/device", s.devicePage)
 	if s.opts.OneDrive {
@@ -642,6 +646,25 @@ func (s *Server) webCell(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// webInterrupted records an interrupted reading of the web reader: a POST
+// without a body.
+func (s *Server) webInterrupted(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	if s.opts.Driver == nil {
+		noLogin(w)
+		return
+	}
+	if n, _ := io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, maxSmallBody)); n > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "the body must be empty"})
+		return
+	}
+	s.opts.Driver.WebInterrupted()
 	w.WriteHeader(http.StatusNoContent)
 }
 

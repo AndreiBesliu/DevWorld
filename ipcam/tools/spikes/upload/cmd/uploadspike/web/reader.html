@@ -27,8 +27,10 @@ button { font-size: 1.2rem; padding: 0.6rem 1.4rem; }
 // drive.file token through Google Identity Services and keeps it in page
 // memory only; for each creator's folder it lists the folder and reads
 // the probe file vis-<creator>.txt (16 bytes), and posts only booleans.
-// A run that the page's going to the background interrupts restarts by
-// itself on return (C2-R18 (d)).
+// A run that the page's going to the background interrupts is posted as
+// interrupted, and restarts by itself on return (C2-R18 (d)): from the
+// visibility handler when the attempt has ended, else from the attempt's
+// own end.
 const cfg = {{.Reader}};
 const drive = "https://www.googleapis.com/drive/v3/files";
 let token = "", running = false, interrupted = false, finished = false;
@@ -75,14 +77,24 @@ async function runRead() {
     log(String(e));
   } finally {
     running = false;
+    if (interrupted && !document.hidden && !finished) setTimeout(runRead, 500);
   }
 }
 
+// recordInterruption tells uploadspike that an attempt was interrupted: a
+// simple POST without a body, which survives the page going away.
+function recordInterruption() {
+  fetch(cfg.remote + "/spike/v1/visibility/interrupted", {method: "POST", keepalive: true}).catch(() => {});
+}
+
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden && running) { interrupted = true; return; }
-  if (!document.hidden && interrupted && !finished) {
+  if (document.hidden) {
+    if (running && !interrupted) { interrupted = true; recordInterruption(); }
+    return;
+  }
+  if (interrupted && !finished) {
     document.getElementById("resumed").hidden = false;
-    setTimeout(runRead, 500);
+    if (!running) setTimeout(runRead, 500);
   }
 });
 

@@ -71,6 +71,9 @@ type Run struct {
 	Pairs     []*Pair  `json:"pairs"`
 	// Visibility is the matrix's measured cells.
 	Visibility []results.VisibilityCell `json:"visibility,omitempty"`
+	// ReaderInterruptions counts the web reader's interrupted readings
+	// (C2-R18 (d)).
+	ReaderInterruptions int `json:"readerInterruptions,omitempty"`
 	// LoginsDone is set once day 0's logins and the matrix are over.
 	LoginsDone bool `json:"loginsDone,omitempty"`
 	// ScanFailed is why a scan of the results failed the run (C2-R20): a
@@ -357,7 +360,7 @@ func (r *Run) Envelope(m Meta, gaps []results.Gap, handoffs map[string]int, endM
 		}
 	}
 	data := &results.Mi6Data{OneDriveEnabled: r.OneDrive, Pairs: []results.Mi6Pair{}, Visibility: slices.Clone(r.Visibility),
-		Handoffs: []results.Handoff{}}
+		Handoffs: []results.Handoff{}, ReaderInterruptions: r.ReaderInterruptions}
 	for _, p := range r.Pairs {
 		data.Pairs = append(data.Pairs, results.Mi6Pair{Provider: p.Provider, Platform: p.Platform, Dest: p.Dest, Plan: p.Plan,
 			HandoffOK: p.HandoffOK, PlanAFailure: p.PlanAFailure, B1Failure: p.B1Failure, Transient: p.Transient,

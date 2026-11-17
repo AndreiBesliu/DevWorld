@@ -146,14 +146,15 @@ jobs:
           } 2>&1 | tee "${RUNNER_TEMP}/cross.log"
       - name: Test
         # -count=1: a result restored from the Go build cache would hide a flaky test. The
-        # variables make the tests that need the fork, and uploadspike's LAN listener test,
-        # which binds the real port 7091 on the runner's RFC 1918 addresses, fail instead of
-        # skipping.
+        # variables make the tests that need the fork, uploadspike's LAN listener test, which
+        # binds the real port 7091 on the runner's RFC 1918 addresses, and its reader page
+        # test, which runs the page's script in the runner's Node, fail instead of skipping.
         id: test
         env:
           MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx
           RECSPIKE_REQUIRE_MEDIAMTX: '1'
           UPLOADSPIKE_REQUIRE_LAN: '1'
+          UPLOADSPIKE_REQUIRE_NODE: '1'
         run: |
           set -o pipefail
           go test -count=1 -race ${TREES} 2>&1 | tee "${RUNNER_TEMP}/test.log"

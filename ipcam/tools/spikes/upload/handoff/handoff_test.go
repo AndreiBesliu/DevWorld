@@ -28,6 +28,8 @@ type fakeDriver struct {
 	refuse  error
 	cells   []string
 	begun   []string
+	// interruptions counts the reader page's interrupted attempts.
+	interruptions int
 }
 
 func newFakeDriver() *fakeDriver {
@@ -54,6 +56,11 @@ func (d *fakeDriver) WebCell(c string, l, r bool) error {
 	defer d.mu.Unlock()
 	d.cells = append(d.cells, fmt.Sprintf("%s %v %v", c, l, r))
 	return nil
+}
+func (d *fakeDriver) WebInterrupted() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.interruptions++
 }
 func (d *fakeDriver) WebClientID() string   { return "web-client.apps" }
 func (d *fakeDriver) HandoverToken() string { return strings.Repeat("ab", 32) }
@@ -491,5 +498,41 @@ func TestHandoffServer_BeginOnlyTheAwaitedLogin(t *testing.T) {
 	}
 	if resp := do(t, http.MethodPost, base+"/spike/v1/visibility/web", `{"creator":"desktop","listed":true,"read":false,"token":"x"}`); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("a cell with another field: %d", resp.StatusCode)
+	}
+}
+
+// TestHandoffServer_RecordsReaderInterruptions (C2-R18 (d)): the reader
+// page's POST /spike/v1/visibility/interrupted, without a body, reaches the
+// driver, from the reader page's origin only and on POST only; a body is
+// refused.
+func TestHandoffServer_RecordsReaderInterruptions(t *testing.T) {
+	d := newFakeDriver()
+	s := New(nil, Options{Port: freePort(t), Driver: d})
+	if err := s.ServeLoopback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	base := fmt.Sprintf("http://127.0.0.1:%d", s.Port())
+	reader := fmt.Sprintf("http://localhost:%d", s.Port())
+	if resp := do(t, http.MethodPost, base+"/spike/v1/visibility/interrupted", "", "Origin", reader); resp.StatusCode != http.StatusNoContent ||
+		resp.Header.Get("Access-Control-Allow-Origin") != reader {
+		t.Errorf("an interruption from the reader page: %d %v", resp.StatusCode, resp.Header)
+	}
+	for _, tc := range []struct {
+		method, body, origin string
+		want                 int
+	}{
+		{http.MethodPost, "", "http://localhost", http.StatusForbidden},
+		{http.MethodGet, "", reader, http.StatusMethodNotAllowed},
+		{http.MethodPost, `{"creator":"tv"}`, reader, http.StatusBadRequest},
+	} {
+		if resp := do(t, tc.method, base+"/spike/v1/visibility/interrupted", tc.body, "Origin", tc.origin); resp.StatusCode != tc.want {
+			t.Errorf("%s from %s with %q: %d; want %d", tc.method, tc.origin, tc.body, resp.StatusCode, tc.want)
+		}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.interruptions != 1 {
+		t.Errorf("the driver got %d interruptions; want 1", d.interruptions)
 	}
 }

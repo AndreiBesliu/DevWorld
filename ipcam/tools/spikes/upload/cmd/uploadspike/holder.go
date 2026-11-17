@@ -699,6 +699,28 @@ func (h *holder) WebCell(creator string, listed, read bool) error {
 	}
 }
 
+// WebInterrupted records a reading of the web reader that the page's
+// going to the background interrupted (C2-R18 (d)): counted in the open
+// MI6 run, and said on the terminal; the page restarts it on return.
+func (h *holder) WebInterrupted() {
+	if err := runstate.Update(h.e.statePath(), func(s *runstate.State) error {
+		raw, ok := s.Open["MI6"]
+		if !ok {
+			return nil
+		}
+		run, err := mi6.Decode(raw)
+		if err != nil {
+			return err
+		}
+		run.ReaderInterruptions++
+		s.Open["MI6"] = run.Encode()
+		return nil
+	}); err != nil {
+		h.e.printf("%s %v", msgError, err)
+	}
+	h.e.printf(msgReaderInterrupted)
+}
+
 // WebClientID is the web reader's client ID, from the run state.
 func (h *holder) WebClientID() string {
 	st, err := runstate.Load(h.e.statePath())
