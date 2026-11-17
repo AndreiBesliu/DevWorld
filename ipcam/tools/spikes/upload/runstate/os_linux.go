@@ -94,3 +94,12 @@ func ProcStartMs(pid int) (int64, error) {
 	}
 	return ticks * 1000 / clockTicks, nil
 }
+
+// replaceFile renames from over to: Linux replaces a file that another
+// process has open.
+func replaceFile(from, to string) error { return os.Rename(from, to) }
+
+// readFile reads the run state.
+func readFile(path string) ([]byte, error) {
+	return os.ReadFile(path) //nolint:gosec // uploadspike's own run state
+}

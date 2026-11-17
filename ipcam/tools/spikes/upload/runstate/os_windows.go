@@ -119,3 +119,44 @@ func ProcStartMs(pid int) (int64, error) {
 	}
 	return creation.Nanoseconds() / int64(time.Millisecond), nil
 }
+
+// shareRetry bounds how long a rename over the run state, or its read,
+// is tried again while Windows refuses it because another process has the
+// file open: Go opens files without FILE_SHARE_DELETE, so MoveFileEx
+// cannot replace the run state while another uploadspike reads it (Load
+// takes no lock: status, a holder's driver), nor while an antivirus scans
+// it. Without the retry such an Update failed, and an ignored failure lost
+// what it recorded (a refresh day, a close).
+const shareRetry = 2 * time.Second
+
+// replaceFile renames from over to, trying again while the file is in use.
+func replaceFile(from, to string) error {
+	return whileInUse(func() error { return os.Rename(from, to) })
+}
+
+// readFile reads the run state, trying again while it is being replaced.
+func readFile(path string) ([]byte, error) {
+	var b []byte
+	err := whileInUse(func() error {
+		var err error
+		b, err = os.ReadFile(path) //nolint:gosec // uploadspike's own run state
+		return err
+	})
+	return b, err
+}
+
+// whileInUse runs op until it succeeds, fails otherwise than with access
+// denied or a sharing violation, or shareRetry has passed.
+func whileInUse(op func() error) error {
+	deadline := time.Now().Add(shareRetry)
+	wait := time.Millisecond
+	for {
+		err := op()
+		if err == nil || !errors.Is(err, windows.ERROR_ACCESS_DENIED) && !errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+			time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(wait)
+		wait = min(2*wait, 50*time.Millisecond)
+	}
+}

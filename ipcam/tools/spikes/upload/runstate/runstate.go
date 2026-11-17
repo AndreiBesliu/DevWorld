@@ -120,7 +120,7 @@ func (s *State) init() {
 // Load reads the run state at path; a missing file is an empty state.
 func Load(path string) (*State, error) {
 	s := &State{}
-	b, err := os.ReadFile(path) //nolint:gosec // uploadspike's own run state
+	b, err := readFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 	case err != nil:
@@ -192,7 +192,7 @@ func writeAtomic(path string, s *State) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
+	if err := replaceFile(tmp.Name(), path); err != nil {
 		return err
 	}
 	return syncDir(filepath.Dir(path))

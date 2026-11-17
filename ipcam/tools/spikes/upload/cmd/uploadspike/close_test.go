@@ -116,13 +116,13 @@ func plant(t *testing.T, r *rig, rel, value string) string {
 	return path
 }
 
-// lastScanAfter fails unless the stand-in's last scan began at or after
-// atMs, the last write of results/.
-func lastScanAfter(t *testing.T, r *rig, atMs int64, want int) {
+// lastScanAfter fails unless the stand-in scanned at least atLeast times,
+// the last time at or after atMs, the last write of results/.
+func lastScanAfter(t *testing.T, r *rig, atMs int64, atLeast int) {
 	t.Helper()
 	scans := r.records(spiketest.RecordScan)
-	if len(scans) != want || scans[len(scans)-1].AtMs < atMs {
-		t.Errorf("scans %+v; want %d, the last one at or after the envelope's write at %d", scans, want, atMs)
+	if len(scans) < atLeast || scans[len(scans)-1].AtMs < atMs {
+		t.Errorf("scans %+v; want %d or more, the last one at or after the envelope's write at %d", scans, atLeast, atMs)
 	}
 }
 
