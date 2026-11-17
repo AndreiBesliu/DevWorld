@@ -81,8 +81,10 @@ jobs:
       # 4, 7b, 9 and 10 each add theirs (P12). ./hub runs hub/spikeonly_test.go, which keeps
       # the spike marker out of the production module. The Lint and Cross steps lint the
       # trees under ./hub with hub/.golangci.yml and the others with the upload spike's.
-      # ipcam-hub's process tests that need the fork or the media skip here: c1's
-      # ipcam-spike-recording runs them, c2's included, with both (Task 7b).
+      # The Test step has the fork as MEDIAMTX_BIN (Task 9: uploadspike's end-to-end tests run
+      # the real ipcam-hub, which starts MediaMTX even without jobs), so ipcam-hub's process
+      # tests that need only the fork run here too, as c1's ipcam-spike-recording runs them:
+      # accepted double coverage. Those that need the media skip here.
       TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/... ./hub/internal/crypto/...
     defaults:
       run:
@@ -98,13 +100,29 @@ jobs:
             ipcam/go.work.sum
             ipcam/tools/go.sum
             ipcam/hub/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
             ipcam/tools/spikes/video/go.sum
             ipcam/tools/spikes/recording/go.sum
+            ipcam/tools/spikes/upload/go.sum
       - name: Build
         id: build
         run: |
           set -o pipefail
           go build ${TREES} 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: Build the MediaMTX fork
+        # For the Test step's MEDIAMTX_BIN, as ipcam-spike-recording builds it (Task 9; moved
+        # here from v2's Task 7b: TestMI6_TokenNotInResults is the first test of this job
+        # that needs it).
+        id: fork-build
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          {
+            go build -o "${RUNNER_TEMP}/bin/mediamtx" . &&
+              "${RUNNER_TEMP}/bin/mediamtx" --version
+          } 2>&1 | tee "${RUNNER_TEMP}/fork-build.log"
       - name: Lint
         # tools/scripts/lint-trees.sh lints each module's trees with that module's config:
         # golangci-lint takes the config of the first path it analyses.
@@ -127,11 +145,31 @@ jobs:
               tools/scripts/lint-trees.sh windows
           } 2>&1 | tee "${RUNNER_TEMP}/cross.log"
       - name: Test
-        # -count=1: a result restored from the Go build cache would hide a flaky test.
+        # -count=1: a result restored from the Go build cache would hide a flaky test. The
+        # variables make the tests that need the fork, and uploadspike's LAN listener test,
+        # which binds the real port 7091 on the runner's RFC 1918 addresses, fail instead of
+        # skipping.
         id: test
+        env:
+          MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx
+          RECSPIKE_REQUIRE_MEDIAMTX: '1'
+          UPLOADSPIKE_REQUIRE_LAN: '1'
         run: |
           set -o pipefail
           go test -count=1 -race ${TREES} 2>&1 | tee "${RUNNER_TEMP}/test.log"
+      - name: Test as root
+        # Task 9: hubproc gives the hub's files to ipcam-spike when uploadspike runs as root on
+        # the Pi, and never follows a link planted in the hub's data directory. Those tests
+        # chown to another uid, so they run as root; the test binary is built as the runner's
+        # user, so that root writes nothing into its Go caches.
+        id: test-root
+        run: |
+          set -o pipefail
+          {
+            go test -c -o "${RUNNER_TEMP}/bin/hubproc.test" ./tools/spikes/upload/hubproc &&
+              sudo UPLOADSPIKE_REQUIRE_ROOT=1 "${RUNNER_TEMP}/bin/hubproc.test" -test.count=1 -test.v \
+                -test.run '^TestHubproc_(LinuxFilesOwnedBySpikeUser|PlantedLinksNeverFollowed)$'
+          } 2>&1 | tee "${RUNNER_TEMP}/test-root.log"
       - name: Test times
         # g2-12: each package's -race test time on this runner, as a notice, since the job
         # log cannot be read; c1's ipcam-spike-recording jobs run these tests too. The sed
@@ -186,8 +224,8 @@ jobs:
     # checkout here), without -race, which needs a C compiler there; the upload job runs
     # the tests with it. Then the S4U smoke (P49): ci/s4u-run.ps1 runs whoami.exe in a
     # temporary Task Scheduler task with an S4U logon, the logon of uploadspike's
-    # autostart, and the sealer's round trip in it: sealed in a normal step, unsealed in the S4U
-    # task (Task 9).
+    # autostart, the sealer's round trip in it: sealed in a normal step, unsealed in the S4U
+    # task, and hubproc's clean stop of a hub without a console (Task 9).
     runs-on: windows-latest
     timeout-minutes: 30
     env:
@@ -209,6 +247,7 @@ jobs:
             ipcam/hub/go.sum
             ipcam/tools/spikes/video/go.sum
             ipcam/tools/spikes/recording/go.sum
+            ipcam/tools/spikes/upload/go.sum
       - name: Test
         id: test
         run: |
@@ -279,6 +318,27 @@ jobs:
           cat "${out}" 2> /dev/null | tee -a "${log}"
           if [[ ${status} -ne 0 ]] || ! grep -qF -- '--- PASS: TestSealer_UnsealFromFile' "${out}"; then
             echo "S4U seal round trip: want exit 0 and '--- PASS: TestSealer_UnsealFromFile' in the S4U output" | tee -a "${log}"
+            exit 1
+          fi
+      - name: S4U hub stop
+        # Task 9: hubproc.Stop ends the stand-in hub through its stdin's end, never through a
+        # kill, inside an S4U task, which gives the test no console: the autostart's case.
+        id: s4u-hubproc
+        run: |
+          set -o pipefail
+          log="${RUNNER_TEMP}/s4u-hubproc.log"
+          exe="${RUNNER_TEMP}/bin/hubproc.test.exe"
+          out="${RUNNER_TEMP}/s4u-hubproc.txt"
+          go test -c -o "${exe}" ./tools/spikes/upload/hubproc 2>&1 | tee "${log}"
+          status=0
+          pwsh -File tools/spikes/upload/ci/s4u-run.ps1 -Exe "${exe}" \
+            "-Arguments:-test.run ^TestHubproc_StopIsCleanWithoutConsole\$ -test.count=1 -test.v" -Out "${out}" 2>&1 |
+            tee -a "${log}" || status=$?
+          echo "s4u-run.ps1 exited ${status}; the S4U task printed:" | tee -a "${log}"
+          cat "${out}" 2> /dev/null | tee -a "${log}"
+          if [[ ${status} -ne 0 ]] || ! grep -qF -- '--- PASS: TestHubproc_StopIsCleanWithoutConsole' "${out}"; then
+            echo "S4U hub stop: want exit 0 and '--- PASS: TestHubproc_StopIsCleanWithoutConsole' in the S4U output" |
+              tee -a "${log}"
             exit 1
           fi
       - name: Show failures as annotations
