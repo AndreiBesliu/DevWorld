@@ -96,9 +96,9 @@ func (Credentials) LogValue() slog.Value { return slog.StringValue(redacted) }
 const writeQueueSize = 4096
 
 // Server serves the streams over RTSP/TCP. Each path is fed by one
-// simulator, which keeps the GOP since its last keyframe; each session gets
-// a stream of its own that starts with that cached GOP, as a camera does, and
-// every access unit carries its index in an SEI.
+// simulator, which keeps the GOP since its last keyframe; each session
+// starts with that cached GOP, as a camera does, and every access unit
+// carries its index in an SEI.
 type Server struct {
 	srv    *gortsplib.Server
 	creds  Credentials
@@ -112,6 +112,11 @@ type Server struct {
 
 	mu       sync.Mutex
 	stopping bool // no new describe stream after the server's close
+
+	// beforePlayReply, a seam for the tests, runs at the end of OnPlay
+	// once the session's writer has started, before gortsplib makes the
+	// session a reader of its stream and answers the PLAY; nil otherwise.
+	beforePlayReply func(*rtspSession)
 }
 
 // servedPath is one stream and its simulator.
@@ -132,14 +137,19 @@ func (p *servedPath) newDesc() (*description.Session, *description.Media, *forma
 
 // rtspSession is one client session that set a path up.
 type rtspSession struct {
-	path        *servedPath
-	stream      *gortsplib.ServerStream
-	medi        *description.Media
-	forma       *format.H264
-	ctx         context.Context
-	cancel      context.CancelFunc
-	playing     atomic.Bool
-	writeErrors atomic.Int64 // packets that did not fit the session's write queue
+	path *servedPath
+	// session is gortsplib's session, which play writes to.
+	session *gortsplib.ServerSession
+	// stream is the session's own, which gortsplib needs to set it up;
+	// nothing is written to it (play).
+	stream  *gortsplib.ServerStream
+	medi    *description.Media
+	forma   *format.H264
+	ctx     context.Context
+	cancel  context.CancelFunc
+	playing atomic.Bool
+	// cachedWritten is closed once the writer has written the cached GOP.
+	cachedWritten chan struct{}
 }
 
 // ServePrecoded serves streams at addr, an IPv4 address, until ctx is done
@@ -159,17 +169,26 @@ func ServePrecoded(ctx context.Context, addr string, streams []Stream, creds Cre
 
 // ServePrecodedOn is ServePrecoded on a listener that ListenAll opened.
 func ServePrecodedOn(ctx context.Context, ln net.Listener, streams []Stream, creds Credentials, log *SendLog, clock source.Clock) (*Server, error) {
+	return servePrecodedOn(ctx, ln, streams, creds, log, clock, nil)
+}
+
+// servePrecodedOn is ServePrecodedOn with the tests' seam beforePlayReply
+// (Server), nil outside them.
+func servePrecodedOn(ctx context.Context, ln net.Listener, streams []Stream, creds Credentials, log *SendLog, clock source.Clock,
+	beforePlayReply func(*rtspSession),
+) (*Server, error) {
 	if creds.User == "" || creds.Pass == "" {
 		return nil, errors.New("controller: the RTSP server needs a user and a password")
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	s := &Server{
-		creds:  creds,
-		clock:  clock,
-		log:    slog.Default().With("component", "rtsp"),
-		paths:  map[string]*servedPath{},
-		cancel: cancel,
-		closed: make(chan struct{}),
+		creds:           creds,
+		clock:           clock,
+		log:             slog.Default().With("component", "rtsp"),
+		paths:           map[string]*servedPath{},
+		cancel:          cancel,
+		closed:          make(chan struct{}),
+		beforePlayReply: beforePlayReply,
 	}
 	fail := func(err error) (*Server, error) {
 		cancel()
@@ -332,8 +351,9 @@ func (s *Server) describeStream(p *servedPath) (*gortsplib.ServerStream, error) 
 	return p.describe, nil
 }
 
-// OnSetup gives the session a stream of its own, so that its first access
-// unit is the cached keyframe whenever it starts.
+// OnSetup sets the session up on a stream of its own; play writes to the
+// session itself, so that its first access unit is the cached keyframe
+// whenever it starts.
 func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
 	p, name := s.lookup(ctx.Path)
 	if !s.authorised(ctx.Conn, ctx.Request, name) {
@@ -356,7 +376,8 @@ func (s *Server) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response
 		return &base.Response{StatusCode: base.StatusInternalServerError}, nil, err
 	}
 	sctx, cancel := context.WithCancel(context.Background())
-	ctx.Session.SetUserData(&rtspSession{path: p, stream: stream, medi: medi, forma: forma, ctx: sctx, cancel: cancel})
+	ctx.Session.SetUserData(&rtspSession{path: p, session: ctx.Session, stream: stream, medi: medi, forma: forma,
+		ctx: sctx, cancel: cancel, cachedWritten: make(chan struct{})})
 	s.log.Info("rtsp: session set up", "path", name)
 	return &base.Response{StatusCode: base.StatusOK}, stream, nil
 }
@@ -372,6 +393,9 @@ func (s *Server) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, 
 	}
 	if ss.playing.CompareAndSwap(false, true) {
 		s.wg.Go(func() { s.play(ss) })
+		if s.beforePlayReply != nil {
+			s.beforePlayReply(ss)
+		}
 	}
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
@@ -382,14 +406,6 @@ func (s *Server) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseCtx) {
 		ss.cancel()
 		ss.stream.Close()
 		s.log.Info("rtsp: session closed", "path", ss.path.stream.Path)
-	}
-}
-
-// OnStreamWriteError counts a packet that did not fit the session's write
-// queue; the session's writer turns it into a skipped access unit.
-func (s *Server) OnStreamWriteError(ctx *gortsplib.ServerHandlerOnStreamWriteErrorCtx) {
-	if ss, ok := ctx.Session.UserData().(*rtspSession); ok {
-		ss.writeErrors.Add(1)
 	}
 }
 
@@ -405,6 +421,13 @@ func (s *Server) OnDecodeError(*gortsplib.ServerHandlerOnDecodeErrorCtx) {}
 // access unit, each with its index in an SEI, until the session or the
 // simulator ends. An access unit that the subscription dropped, or one with
 // a packet that did not fit the write queue, counts as skipped (R07).
+//
+// It writes to the session, never to the session's stream: gortsplib makes
+// a session a reader of its stream only after OnPlay has returned, and a
+// stream drops what is written before, with no error, so a cached GOP that
+// play wrote first would never reach the client (post-release fix P). The
+// session's write queue exists before OnPlay, and gortsplib sends what it
+// holds after the PLAY's answer.
 func (s *Server) play(ss *rtspSession) {
 	cached, live, cancel := ss.path.sim.Subscribe()
 	defer cancel()
@@ -415,7 +438,7 @@ func (s *Server) play(ss *rtspSession) {
 	}
 	var prev uint64
 	first := true
-	write := func(au source.AccessUnit) bool {
+	write := func(au source.AccessUnit) {
 		index := frameIndex(au.Loop, au.Frame, ss.path.frames)
 		if !first && index > prev+1 {
 			s.pacing.skipped(s.clock.Now(), int(index-prev-1)) //nolint:gosec // a subscriber drops at most a few GOPs
@@ -425,37 +448,33 @@ func (s *Server) play(ss *rtspSession) {
 		if err != nil {
 			s.log.Warn("rtsp: cannot packetise an access unit", "path", ss.path.stream.Path, "err", err)
 			s.pacing.skipped(s.clock.Now(), 1)
-			return true
+			return
 		}
-		before := ss.writeErrors.Load()
+		failed := false
 		ts := rtpTimestamp(au.PTS)
 		for _, pkt := range pkts {
 			pkt.Timestamp = ts
-			if err := ss.stream.WritePacketRTP(ss.medi, pkt); err != nil {
-				if errors.As(err, new(liberrors.ErrServerStreamClosed)) {
-					return false
-				}
-				ss.writeErrors.Add(1)
+			if err := ss.session.WritePacketRTP(ss.medi, pkt); err != nil {
+				failed = true
 			}
 		}
-		if ss.writeErrors.Load() != before {
+		if failed {
 			s.pacing.skipped(s.clock.Now(), 1)
 		}
-		return true
 	}
 	for _, au := range cached {
-		if !write(au) {
-			return
-		}
+		write(au)
 	}
+	close(ss.cachedWritten)
 	for {
 		select {
 		case <-ss.ctx.Done():
 			return
 		case au, ok := <-live:
-			if !ok || !write(au) {
+			if !ok {
 				return
 			}
+			write(au)
 		}
 	}
 }

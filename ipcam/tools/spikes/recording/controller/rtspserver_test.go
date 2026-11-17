@@ -191,30 +191,71 @@ func TestServePrecoded_NewSessionStartsAtCachedIDR(t *testing.T) {
 	srv := serveMain(t, creds, sendLog)
 
 	for session := range uint64(2) {
-		// Join 10 frames into a GOP (main.h264 has a keyframe every 20).
-		waitUntil(t, "the simulator is in the middle of a GOP", func() bool {
-			n, ok := newestIndex(sendLog, "cam01_main")
-			return ok && n%20 == 10 && n > 20*(session+1)
-		})
-		aus := play(t, srv.Addr().String(), "cam01_main", creds.User, creds.Pass)
-		// The newest frame sent when PLAY returned: a session that waited for
-		// the next keyframe would start after it.
-		atPlay, _ := newestIndex(sendLog, "cam01_main")
-		first := receive(t, aus)
-		index, ok := ReadIndex(first)
-		if !ok {
-			t.Fatalf("session %d: the first access unit carries no index", session)
+		startsAtCachedIDR(t, srv, creds, sendLog, session)
+	}
+}
+
+// TestServePrecoded_CachedGOPWrittenBeforePlayReply (post-release fix P):
+// gortsplib makes a session a reader of its stream only after OnPlay has
+// returned, and the session's writer, which OnPlay starts, may write the
+// whole cached GOP before that: a GOP of a few small frames, on a loaded
+// host. The seam holds OnPlay until the writer has written it; the session
+// must still start at the cached keyframe.
+func TestServePrecoded_CachedGOPWrittenBeforePlayReply(t *testing.T) {
+	creds := testCredentials(t)
+	sendLog := NewSendLog()
+	streams := []Stream{{Path: "cam01_main", File: writeSynthStream(t, 40, 20), FPS: 20, Camera: 1}}
+	ln, err := listenTCP4(t.Context(), "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := servePrecodedOn(t.Context(), ln, streams, creds, sendLog, source.SystemClock{}, func(ss *rtspSession) {
+		select {
+		case <-ss.cachedWritten:
+		case <-time.After(10 * time.Second):
+			t.Error("the session's writer did not write the cached GOP within 10 s")
 		}
-		if !h264.IsRandomAccess(first) || index%20 != 0 {
-			t.Errorf("session %d: the first access unit (index %d) is not a keyframe", session, index)
-		}
-		if index > atPlay {
-			t.Errorf("session %d: the first index %d came after PLAY (newest %d then); want the cached keyframe", session, index, atPlay)
-		}
-		for i := uint64(1); i <= 25; i++ {
-			if got, _ := ReadIndex(receive(t, aus)); got != index+i {
-				t.Fatalf("session %d: index %d after %d", session, got, index+i-1)
-			}
+	})
+	if err != nil {
+		_ = ln.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Close)
+
+	for session := range uint64(2) {
+		startsAtCachedIDR(t, srv, creds, sendLog, session)
+	}
+}
+
+// startsAtCachedIDR plays cam01_main, a stream with a keyframe every 20
+// frames, from srv as its session-th session, 10 frames into a GOP, and
+// checks that the session starts at the cached keyframe, sent before PLAY
+// returned, and goes on with the next 25 frames in order.
+func startsAtCachedIDR(t *testing.T, srv *Server, creds Credentials, sendLog *SendLog, session uint64) {
+	t.Helper()
+	// Join 10 frames into a GOP.
+	waitUntil(t, "the simulator is in the middle of a GOP", func() bool {
+		n, ok := newestIndex(sendLog, "cam01_main")
+		return ok && n%20 == 10 && n > 20*(session+1)
+	})
+	aus := play(t, srv.Addr().String(), "cam01_main", creds.User, creds.Pass)
+	// The newest frame sent when PLAY returned: a session that waited for
+	// the next keyframe would start after it.
+	atPlay, _ := newestIndex(sendLog, "cam01_main")
+	first := receive(t, aus)
+	index, ok := ReadIndex(first)
+	if !ok {
+		t.Fatalf("session %d: the first access unit carries no index", session)
+	}
+	if !h264.IsRandomAccess(first) || index%20 != 0 {
+		t.Errorf("session %d: the first access unit (index %d) is not a keyframe", session, index)
+	}
+	if index > atPlay {
+		t.Errorf("session %d: the first index %d came after PLAY (newest %d then); want the cached keyframe", session, index, atPlay)
+	}
+	for i := uint64(1); i <= 25; i++ {
+		if got, _ := ReadIndex(receive(t, aus)); got != index+i {
+			t.Fatalf("session %d: index %d after %d", session, got, index+i-1)
 		}
 	}
 }
