@@ -216,3 +216,26 @@ func TestSealer_ErrorKinds(t *testing.T) {
 		t.Errorf("Unseal with a done ctx = %v; want the plaintext", err)
 	}
 }
+
+// TestSealer_KeyLeftoversRemoved (C2-R16 (e)): the temporary file that a
+// cut first key creation leaves in state/keys is removed at the hub's next
+// start, beside a whole key; the key stays.
+func TestSealer_KeyLeftoversRemoved(t *testing.T) {
+	dataDir, key, sealed := sealedIn(t)
+	leftover := key + ".123456"
+	if err := os.WriteFile(leftover, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveKeyLeftovers(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(leftover); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the leftover is still there (%v)", err)
+	}
+	if plain, err := unsealWithin(t, dataDir, sealed); err != nil || !bytes.Equal(plain, roundTripPlain()) {
+		t.Errorf("Unseal after the clean-up = %v; want the key kept", err)
+	}
+	if err := RemoveKeyLeftovers(t.TempDir()); err != nil {
+		t.Errorf("RemoveKeyLeftovers of a data directory with no key = %v; want nothing to do", err)
+	}
+}

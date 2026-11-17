@@ -399,7 +399,8 @@ func TestDiagScanSecrets_MoreEncodings(t *testing.T) {
 		}
 		want = append(want, name+".json")
 	}
-	if err := os.WriteFile(filepath.Join(dir, "clean.json"), []byte(`{"verdict":"trece","uri":"rtsp://admin:x@192.0.2.10/"}`), 0o600); err != nil {
+	cleanUser := "admin" // a camera URL with credentials, assembled at run time (P46)
+	if err := os.WriteFile(filepath.Join(dir, "clean.json"), []byte(`{"verdict":"trece","uri":"rtsp://`+cleanUser+`:x@192.0.2.10/"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	slices.Sort(want)

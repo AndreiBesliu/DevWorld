@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -315,4 +316,49 @@ func userVersion(t *testing.T, path string) int {
 		t.Fatal(err)
 	}
 	return v
+}
+
+// TestCatalog_ReplaceSecrets (Task 9A review M7): ReplaceSecrets writes
+// every row it is given and deletes every other row of its prefix, in one
+// transaction: a row that the table refuses leaves every row as it was.
+func TestCatalog_ReplaceSecrets(t *testing.T) {
+	db := openTest(t)
+	ctx := t.Context()
+	for _, id := range []string{"client:a", "client:b", "oauth:dst-1"} {
+		if err := db.PutSecret(ctx, id, "oauth", []byte("old-"+id), "software"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := func() map[string]string {
+		got := map[string]string{}
+		for _, prefix := range []string{"client:", "oauth:"} {
+			ids, err := db.SecretIDs(ctx, prefix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range ids {
+				sealed, _, _, err := db.Secret(ctx, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got[id] = string(sealed)
+			}
+		}
+		return got
+	}
+	before := rows()
+	// client:z sorts last and has no blob, which the table refuses.
+	if err := db.ReplaceSecrets(ctx, "client:", "oauth", map[string][]byte{"client:a": []byte("new-a"), "client:z": nil}, "software"); err == nil {
+		t.Fatal("ReplaceSecrets with a row of no blob succeeded")
+	}
+	if got := rows(); !maps.Equal(got, before) {
+		t.Errorf("after a refused ReplaceSecrets the rows are %v, want them as they were: %v", got, before)
+	}
+	if err := db.ReplaceSecrets(ctx, "client:", "oauth", map[string][]byte{"client:a": []byte("new-a"), "client:c": []byte("new-c")}, "software"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"client:a": "new-a", "client:c": "new-c", "oauth:dst-1": "old-oauth:dst-1"}
+	if got := rows(); !maps.Equal(got, want) {
+		t.Errorf("rows %v, want %v", got, want)
+	}
 }

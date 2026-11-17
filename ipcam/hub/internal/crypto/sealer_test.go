@@ -86,10 +86,8 @@ func TestSealer_LabelBound(t *testing.T) {
 			t.Errorf("Unseal of %x = %q, %v; want an error", blob, got, err)
 		}
 	}
-	for _, label := range []string{""} {
-		if _, err := s.Seal(t.Context(), label, roundTripPlain()); err == nil {
-			t.Errorf("Seal under label %q succeeded, want an error", label)
-		}
+	if _, err := s.Seal(t.Context(), "", roundTripPlain()); err == nil {
+		t.Error("Seal under an empty label succeeded, want an error")
 	}
 	if _, err := s.Seal(t.Context(), "oauth:dst-1", nil); err == nil {
 		t.Error("Seal of no bytes succeeded, want an error")

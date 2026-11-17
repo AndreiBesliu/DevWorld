@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 )
 
 // The secrets table (§4.6 L552, P19) holds every secret of the hub as a
@@ -92,4 +94,48 @@ func (db *DB) SecretIDs(ctx context.Context, prefix string) ([]string, error) {
 		return nil, fmt.Errorf("catalog: list the secrets: %w", err)
 	}
 	return ids, nil
+}
+
+// ReplaceSecrets writes rows, each of kind and sealer, and deletes every
+// other row whose id starts with prefix (taken as it is, never as a LIKE
+// pattern), in one short transaction: either every change is made, or none
+// (Task 9A review M7). The rows are written in the order of their ids.
+func (db *DB) ReplaceSecrets(ctx context.Context, prefix, kind string, rows map[string][]byte, sealer string) error {
+	err := db.WithTx(ctx, func(tx *sql.Tx) error {
+		for _, id := range slices.Sorted(maps.Keys(rows)) {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO secrets (id, kind, sealed_blob, sealer) VALUES (?, ?, ?, ?)
+				ON CONFLICT (id) DO UPDATE SET kind = excluded.kind, sealed_blob = excluded.sealed_blob, sealer = excluded.sealer`,
+				id, kind, rows[id], sealer); err != nil {
+				return fmt.Errorf("put %s: %w", id, err)
+			}
+		}
+		ids, err := tx.QueryContext(ctx, "SELECT id FROM secrets WHERE substr(id, 1, length(?1)) = ?1", prefix)
+		if err != nil {
+			return err
+		}
+		var stale []string
+		for ids.Next() {
+			var id string
+			if err := ids.Scan(&id); err != nil {
+				_ = ids.Close()
+				return err
+			}
+			if _, keep := rows[id]; !keep {
+				stale = append(stale, id)
+			}
+		}
+		if err := errors.Join(ids.Err(), ids.Close()); err != nil {
+			return err
+		}
+		for _, id := range stale {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM secrets WHERE id = ?", id); err != nil {
+				return fmt.Errorf("delete %s: %w", id, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("catalog: replace the secrets %s*: %w", prefix, err)
+	}
+	return nil
 }

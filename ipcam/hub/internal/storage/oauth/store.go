@@ -118,7 +118,9 @@ func clientRow(p storage.Kind, t ClientType) string {
 // client:microsoft, each of kind oauth, replaces every other client row,
 // and keeps c in RAM. The Desktop and TV clients need their secrets; the
 // Android, Web and Entra clients take none (the Web client's secret never
-// reaches the hub).
+// reaches the hub). It seals every client first and then writes the rows
+// in one transaction, so a failure leaves the rows as they were (Task 9A
+// review M7).
 func (s *Store) SetClients(ctx context.Context, c Clients) error {
 	rows := map[string]Client{}
 	for t, cl := range c.Google {
@@ -149,30 +151,20 @@ func (s *Store) SetClients(ctx context.Context, c Clients) error {
 		}
 		rows[clientRow(storage.KindOneDrivePersonal, ClientEntra)] = *m
 	}
+	sealed := make(map[string][]byte, len(rows))
 	for id, cl := range rows {
 		plain, err := json.Marshal(cl) //nolint:gosec // G117: the plaintext that Seal seals, cleared after it
 		if err != nil {
 			return err
 		}
-		sealed, err := s.cfg.Sealer.Seal(ctx, id, plain)
+		sealed[id], err = s.cfg.Sealer.Seal(ctx, id, plain)
 		clear(plain)
 		if err != nil {
 			return fmt.Errorf("oauth: seal %s: %w", id, err)
 		}
-		if err := s.cfg.Secrets.PutSecret(ctx, id, secretKind, sealed, s.cfg.Sealer.Backend()); err != nil {
-			return err
-		}
 	}
-	ids, err := s.cfg.Secrets.SecretIDs(ctx, clientPrefix)
-	if err != nil {
+	if err := s.cfg.Secrets.ReplaceSecrets(ctx, clientPrefix, secretKind, sealed, s.cfg.Sealer.Backend()); err != nil {
 		return err
-	}
-	for _, id := range ids {
-		if _, keep := rows[id]; !keep {
-			if err := s.cfg.Secrets.DeleteSecret(ctx, id); err != nil {
-				return err
-			}
-		}
 	}
 	s.mu.Lock()
 	s.clients = c
@@ -289,13 +281,27 @@ func (s *Store) Begin(ctx context.Context, r BeginRequest) (BeginResult, error) 
 	result.ExpiresAt = p.expires
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for st, old := range s.pending {
-		if now.After(old.expires.Add(pendingKept)) {
+	s.sweep()
+	s.pending[state] = p
+	return result, nil
+}
+
+// sweep wipes the verifier and the device code of every state that
+// expired, or whose login ended, unless a redemption of it is in flight
+// (Task 9A review M6), and forgets the states that ended pendingKept ago.
+// Every call of the store that names a state sweeps first, and so does
+// RunDaily's every step. s.mu is held.
+func (s *Store) sweep() {
+	now := s.cfg.Clock()
+	for st, p := range s.pending {
+		ended := p.completion != nil || p.failed != nil || !now.Before(p.expires)
+		if ended && !p.polling && !p.redeeming {
+			p.verifier, p.device = "", ""
+		}
+		if now.After(p.expires.Add(pendingKept)) {
 			delete(s.pending, st)
 		}
 	}
-	s.pending[state] = p
-	return result, nil
 }
 
 // authURL is plan A's authorization request (P36): Google's with
@@ -331,8 +337,9 @@ func (s *Store) authURL(p storage.Kind, route Route, client Client, state, chall
 // names the login, with no IssuedAt.
 func (s *Store) Complete(ctx context.Context, state, code string) (Completion, error) {
 	s.mu.Lock()
+	s.sweep()
 	p := s.pending[state]
-	if p == nil || p.device != "" {
+	if p == nil || p.route.Plan == PlanB1 {
 		s.mu.Unlock()
 		return Completion{}, ErrStateUnknown
 	}
@@ -391,8 +398,9 @@ func (p *pending) named() Completion {
 func (s *Store) DeviceStatus(ctx context.Context, state string) (Completion, error) {
 	now := s.cfg.Clock()
 	s.mu.Lock()
+	s.sweep()
 	p := s.pending[state]
-	if p == nil || p.device == "" {
+	if p == nil || p.route.Plan != PlanB1 {
 		s.mu.Unlock()
 		return Completion{}, ErrStateUnknown
 	}
@@ -420,11 +428,12 @@ func (s *Store) DeviceStatus(ctx context.Context, state string) (Completion, err
 		return named, ErrAuthorizationPending
 	}
 	p.polling = true
+	device := p.device
 	s.mu.Unlock()
 	// The provider redeems an approved device code once: the poll goes on
 	// when its caller goes away (security review CTL-4).
 	ctx = context.WithoutCancel(ctx)
-	form := url.Values{"grant_type": {grantDeviceCode}, "device_code": {p.device}}
+	form := url.Values{"grant_type": {grantDeviceCode}, "device_code": {device}}
 	tok, err := s.tokenCall(ctx, p.req.Provider, p.client, form)
 	if err == nil {
 		return s.deviceApproved(ctx, p, tok)
@@ -492,12 +501,13 @@ const (
 // login whatever the status.
 func (s *Store) Status(ctx context.Context, state string) (string, Completion, error) {
 	s.mu.Lock()
+	s.sweep()
 	p := s.pending[state]
 	s.mu.Unlock()
 	if p == nil {
 		return "", Completion{}, ErrStateUnknown
 	}
-	if p.device != "" {
+	if p.route.Plan == PlanB1 {
 		c, err := s.DeviceStatus(ctx, state)
 		s.mu.Lock()
 		failed := p.failed != nil

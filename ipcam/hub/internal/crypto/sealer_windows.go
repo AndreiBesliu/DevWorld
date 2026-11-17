@@ -27,6 +27,9 @@ type dpapiSealer struct{}
 
 func newSealer(string) (Sealer, error) { return dpapiSealer{}, nil }
 
+// removeKeyLeftovers has nothing to do: DPAPI keeps no key file.
+func removeKeyLeftovers(string) error { return nil }
+
 func (dpapiSealer) Backend() string { return BackendDPAPIMachine }
 
 func (dpapiSealer) Seal(_ context.Context, label string, plain []byte) ([]byte, error) {

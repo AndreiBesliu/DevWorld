@@ -56,6 +56,9 @@ func (s *Store) RunDaily(ctx context.Context, emit func(DailyResult)) error {
 // dailyStep makes every attempt that is due now, emits the days it
 // decides, and returns when the next attempt is due (zero: none known).
 func (s *Store) dailyStep(ctx context.Context, emit func(DailyResult)) time.Time {
+	s.mu.Lock()
+	s.sweep()
+	s.mu.Unlock()
 	ids, err := s.cfg.Secrets.SecretIDs(ctx, loginPrefix)
 	if err != nil {
 		return time.Time{}

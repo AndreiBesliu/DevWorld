@@ -121,9 +121,10 @@ type SecretStore interface {
 	// (compare-and-swap in one short transaction); swapped is false when
 	// another writer changed the row first.
 	SwapSecret(ctx context.Context, id string, old, next []byte, sealer string) (swapped bool, err error)
-	// DeleteSecret and SecretIDs serve SetClients, which replaces the client
-	// rows, and RunDaily, which lists the logins.
-	DeleteSecret(ctx context.Context, id string) error
+	// ReplaceSecrets writes rows and deletes every other row of prefix, in
+	// one transaction: SetClients replaces the client rows with it (Task 9A
+	// review M7). SecretIDs serves RunDaily, which lists the logins.
+	ReplaceSecrets(ctx context.Context, prefix, kind string, rows map[string][]byte, sealer string) error
 	SecretIDs(ctx context.Context, prefix string) ([]string, error)
 }
 

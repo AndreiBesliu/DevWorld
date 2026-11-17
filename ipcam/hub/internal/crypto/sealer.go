@@ -93,3 +93,8 @@ func checkUnseal(label string, sealed []byte, version byte) error {
 	}
 	return nil
 }
+
+// RemoveKeyLeftovers removes the temporary files that a cut first creation
+// of the software key left in <dataDir>/state/keys (C2-R16 (e)); ipcam-hub
+// run calls it at its start. DPAPI keeps no key file.
+func RemoveKeyLeftovers(dataDir string) error { return removeKeyLeftovers(dataDir) }

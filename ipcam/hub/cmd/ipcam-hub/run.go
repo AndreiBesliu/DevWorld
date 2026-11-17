@@ -316,6 +316,11 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	var store *oauth.Store
 	var conns *connTracker
 	if up != nil || controlToken != "" {
+		// A cut first key creation's temporary file goes at the next start
+		// (C2-R16 (e)); one left changes nothing, so the run goes on.
+		if err := crypto.RemoveKeyLeftovers(cfg.DataDir); err != nil {
+			_, _ = fmt.Fprintln(stderr, "ipcam-hub:", err)
+		}
 		var client, tokens *http.Client
 		client, tokens, conns = newHubClient()
 		if store, err = newOAuthStore(cfg, cat, tokens); err != nil {

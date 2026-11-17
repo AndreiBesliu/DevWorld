@@ -35,11 +35,14 @@ const scanChunk = 1 << 20
 // and the scan exits 1 when either of the last two is not empty (security
 // review DIAG-1).
 type scanSecretsLine struct {
-	Schema     string   `json:"schema"`
-	Values     int      `json:"values"`
-	Removed    []string `json:"removed"`
-	Unreadable []string `json:"unreadable"`
-	Unremoved  []string `json:"unremoved"`
+	Schema string `json:"schema"`
+	Values int    `json:"values"`
+	// ShortValues counts the values of fewer than shortMax bytes, found as
+	// whole tokens only (C2-R16 (e)).
+	ShortValues int      `json:"shortValues"`
+	Removed     []string `json:"removed"`
+	Unreadable  []string `json:"unreadable"`
+	Unremoved   []string `json:"unremoved"`
 }
 
 // diagScanSecretsCommand is "ipcam-hub diag scan-secrets [--config <run.json>]
@@ -50,7 +53,8 @@ type scanSecretsLine struct {
 // it opens read-only, so it never migrates and never takes the write lock,
 // and adds the values of stdin's JSON lines {"value":"…"}. Every file under
 // --dir that holds a value in one of the forms of encodedNeedles is
-// removed. It creates no file of its own: the sealer only unseals, so it
+// removed; a value of fewer than shortMax bytes is found in its text forms
+// only as a whole token, and an empty value is refused (C2-R16 (e)). It creates no file of its own: the sealer only unseals, so it
 // makes no key. SQLite's read-only open of a closed WAL catalog creates
 // catalog.db-wal and -shm, which belong to the catalog file's owner, not to
 // the scan's (robustFchown, C2-R15 (a)). On the Pi it runs as root on files
@@ -92,8 +96,14 @@ func diagScanSecretsCommand(args []string, stdin io.Reader, stdout, stderr io.Wr
 	if err != nil {
 		return failed(err)
 	}
-	code := printJSONLine(stdout, stderr, scanSecretsLine{Schema: scanSecretsSchema, Values: len(values), Removed: res.Removed,
-		Unreadable: res.Unreadable, Unremoved: res.Unremoved})
+	short := 0
+	for _, v := range values {
+		if len(v) < shortMax {
+			short++
+		}
+	}
+	code := printJSONLine(stdout, stderr, scanSecretsLine{Schema: scanSecretsSchema, Values: len(values), ShortValues: short,
+		Removed: res.Removed, Unreadable: res.Unreadable, Unremoved: res.Unremoved})
 	if code == exitOK && len(res.Unreadable)+len(res.Unremoved) > 0 {
 		_, _ = fmt.Fprintln(stderr, "ipcam-hub: diag scan-secrets: some files could not be scanned or removed: see unreadable and unremoved")
 		return exitFatal
@@ -102,9 +112,9 @@ func diagScanSecretsCommand(args []string, stdin io.Reader, stdout, stderr io.Wr
 }
 
 // stdinValues reads the JSON lines {"value":"…"} of r, one object a line;
-// blank lines are skipped, and empty values too. A line that is not one
-// object, or holds anything after it, is an error that does not quote it
-// (security review DIAG-5).
+// blank lines are skipped. A line that is not one object, holds anything
+// after it (security review DIAG-5), or holds an empty value (C2-R16 (e)),
+// is an error that does not quote it.
 func stdinValues(r io.Reader) ([]string, error) {
 	var values []string
 	sc := bufio.NewScanner(r)
@@ -125,9 +135,10 @@ func stdinValues(r io.Reader) ([]string, error) {
 		if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf(`stdin line %d holds more than one {"value":…} object`, n)
 		}
-		if *v.Value != "" {
-			values = append(values, *v.Value)
+		if *v.Value == "" {
+			return nil, fmt.Errorf("stdin line %d holds an empty value, which would match every file", n)
 		}
+		values = append(values, *v.Value)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("stdin: %w", err)
@@ -164,6 +175,21 @@ func sealedValues(ctx context.Context, path string) ([]string, error) {
 // ordinary text.
 const shiftedMin = 8
 
+// shortMax: a value of fewer bytes (a typed camera user such as "admin", a
+// 4-digit password) is found in its text forms (raw, URL-encoded, a JSON
+// string's body) only as a whole token, never inside a longer word or
+// number, since an ordinary substring hit would remove result files that
+// leak nothing; its base64 and hex forms are still found anywhere
+// (C2-R16 (e)).
+const shortMax = 8
+
+// needle is a form of a value that the scan searches for; token: only as a
+// whole token (tokenAt).
+type needle struct {
+	b     []byte
+	token bool
+}
+
 // encodedNeedles are values in each of the forms in which a value leaks,
 // without duplicates: raw; URL-encoded (QueryEscape, PathEscape, and a
 // URL's userinfo as a password or a user, as url.UserPassword writes a
@@ -175,34 +201,46 @@ const shiftedMin = 8
 // 9A review M4); and, for a value of shiftedMin bytes or more, the part of
 // its base64 (Std and URL) that only its own bytes determine at each of
 // the three byte offsets, which finds it inside a longer base64 text: an
-// HTTP Basic credential, a base64'd JSON blob (security review DIAG-2).
-func encodedNeedles(values []string) [][]byte {
-	seen := map[string]bool{}
-	var needles [][]byte
-	add := func(e string) {
-		if e != "" && !seen[e] {
-			seen[e] = true
-			needles = append(needles, []byte(e))
+// HTTP Basic credential, a base64'd JSON blob (security review DIAG-2). A
+// short value's text forms are whole-token needles (shortMax); a form that
+// is both kinds is a whole-token needle.
+func encodedNeedles(values []string) []needle {
+	index := map[string]int{}
+	var needles []needle
+	add := func(e string, token bool) {
+		if e == "" {
+			return
 		}
+		if i, ok := index[e]; ok {
+			needles[i].token = needles[i].token || token
+			return
+		}
+		index[e] = len(needles)
+		needles = append(needles, needle{b: []byte(e), token: token})
 	}
 	for _, v := range values {
 		b := []byte(v)
+		short := len(b) < shortMax
 		query, path := url.QueryEscape(v), url.PathEscape(v)
 		password, user := strings.TrimPrefix(url.UserPassword("", v).String(), ":"), url.User(v).String()
 		for _, e := range []string{
 			v, query, path, password, user,
 			lowerEscapes(query), lowerEscapes(path), lowerEscapes(password), lowerEscapes(user),
+			jsonStringBody(v, true), jsonStringBody(v, false),
+		} {
+			add(e, short)
+		}
+		for _, e := range []string{
 			base64.StdEncoding.EncodeToString(b), base64.URLEncoding.EncodeToString(b),
 			base64.RawStdEncoding.EncodeToString(b), base64.RawURLEncoding.EncodeToString(b),
 			hex.EncodeToString(b), strings.ToUpper(hex.EncodeToString(b)),
-			jsonStringBody(v, true), jsonStringBody(v, false),
 		} {
-			add(e)
+			add(e, false)
 		}
 		if len(b) >= shiftedMin {
 			for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
 				for offset := range 3 {
-					add(base64Inner(enc, b, offset))
+					add(base64Inner(enc, b, offset), false)
 				}
 			}
 		}
@@ -244,7 +282,7 @@ func jsonStringBody(v string, escapeHTML bool) string {
 // is named in the result and the walk goes on, so that the files removed
 // before it are still reported (security review DIAG-1). open opens a file
 // of the scan: scanOpen.
-func scanAndRemove(dir string, needles [][]byte, open func(*os.Root, string) (*os.File, error)) (scanResult, error) {
+func scanAndRemove(dir string, needles []needle, open func(*os.Root, string) (*os.File, error)) (scanResult, error) {
 	res := scanResult{Removed: []string{}, Unreadable: []string{}, Unremoved: []string{}}
 	if len(needles) == 0 {
 		return res, nil
@@ -301,47 +339,81 @@ var scanOpen = (*os.Root).Open
 
 // scanner looks for needles in files, with buffers allocated once a scan.
 type scanner struct {
-	needles    [][]byte
+	needles    []needle
 	longest    int
 	buf, chunk []byte
 	open       func(*os.Root, string) (*os.File, error)
 }
 
-func newScanner(needles [][]byte, open func(*os.Root, string) (*os.File, error)) *scanner {
+func newScanner(needles []needle, open func(*os.Root, string) (*os.File, error)) *scanner {
 	longest := 0
 	for _, n := range needles {
-		longest = max(longest, len(n))
+		longest = max(longest, len(n.b))
 	}
-	return &scanner{needles: needles, longest: longest, buf: make([]byte, 0, scanChunk+longest), chunk: make([]byte, scanChunk), open: open}
+	return &scanner{needles: needles, longest: longest, buf: make([]byte, 0, scanChunk+longest+1), chunk: make([]byte, scanChunk), open: open}
 }
 
 // holds reports whether the file rel of root holds a needle, reading it
-// scanChunk at a time with an overlap of the longest needle.
+// scanChunk at a time. Each read keeps the last longest+1 bytes of the one
+// before, so that a needle across two reads is found with the byte before
+// it, and a whole-token needle at the end of what was read waits for the
+// byte after it (tokenAt).
 func (sc *scanner) holds(root *os.Root, rel string) (bool, error) {
 	f, err := sc.open(root, rel)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = f.Close() }()
-	buf := sc.buf[:0]
+	buf, start := sc.buf[:0], true
 	for {
 		n, err := f.Read(sc.chunk)
 		buf = append(buf, sc.chunk[:n]...)
+		eof := errors.Is(err, io.EOF)
 		for _, needle := range sc.needles {
-			if bytes.Contains(buf, needle) {
+			if needle.token && tokenAt(buf, needle.b, start, eof) || !needle.token && bytes.Contains(buf, needle.b) {
 				return true, nil
 			}
 		}
-		if errors.Is(err, io.EOF) {
+		if eof {
 			return false, nil
 		}
 		if err != nil {
 			return false, err
 		}
-		if keep := sc.longest - 1; len(buf) > keep {
-			buf = append(buf[:0], buf[len(buf)-keep:]...)
+		if keep := sc.longest + 1; len(buf) > keep {
+			buf, start = append(buf[:0], buf[len(buf)-keep:]...), false
 		}
 	}
+}
+
+// tokenAt reports whether buf holds needle as a whole token: where its
+// first byte is a token byte (isTokenByte), the byte before it is not one
+// or the file's start (start: buf begins the file), and where its last
+// byte is one, the byte after it is not one or the file's end (eof: buf
+// ends the file). A match whose byte before or after is not in buf is not
+// one yet: holds keeps it for the next read.
+func tokenAt(buf, needle []byte, start, eof bool) bool {
+	first, last := isTokenByte(needle[0]), isTokenByte(needle[len(needle)-1])
+	for off := 0; ; {
+		i := bytes.Index(buf[off:], needle)
+		if i < 0 {
+			return false
+		}
+		i += off
+		end := i + len(needle)
+		before := !first || (i == 0 && start) || (i > 0 && !isTokenByte(buf[i-1]))
+		after := !last || (end == len(buf) && eof) || (end < len(buf) && !isTokenByte(buf[end]))
+		if before && after {
+			return true
+		}
+		off = i + 1
+	}
+}
+
+// isTokenByte reports a byte of a word or a number: an ASCII letter or
+// digit, '_', or a byte of a multi-byte UTF-8 character.
+func isTokenByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c >= 0x80
 }
 
 // lowerEscapes is s with the hex digits of its percent-escapes in lower

@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -187,7 +189,9 @@ func TestControl_HoldsTheHubLock(t *testing.T) {
 }
 
 // TestControl_BindsLoopbackOnly (P40): the control endpoint listens on
-// 127.0.0.1 alone: its port answers on no other address of the host.
+// 127.0.0.1 alone: its port answers on no other address of the host. A
+// host with no other address proves nothing: the test is skipped, or fails
+// with a *_REQUIRE_* variable set to 1, as CI sets them (Task 9A review M8).
 func TestControl_BindsLoopbackOnly(t *testing.T) {
 	h, c := startControlHub(t, uploadConfig(t, filepath.Join(t.TempDir(), "data"), nil))
 	host, port, err := net.SplitHostPort(c.addr)
@@ -218,6 +222,42 @@ func TestControl_BindsLoopbackOnly(t *testing.T) {
 	t.Logf("tried %d other addresses", tried)
 	h.next(t, 30*time.Second, "ready event", ofType("ready"))
 	stopAndDrain(t, h)
+	if tried == 0 {
+		msg := "this host has no address but loopback and link-local ones: the control port was probed on no other address"
+		if requireSet(os.Environ()) {
+			t.Fatal(msg)
+		}
+		t.Skip(msg)
+	}
+}
+
+// TestRun_RemovesKeyLeftovers (C2-R16 (e)): a run with a token store
+// removes, at its start, the temporary file that a cut first creation of
+// the sealer's key left beside the key; the key stays.
+func TestRun_RemovesKeyLeftovers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("DPAPI keeps no key file")
+	}
+	dataDir := filepath.Join(t.TempDir(), "data")
+	keys := filepath.Join(dataDir, "state", "keys")
+	if err := os.MkdirAll(keys, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	for _, name := range []string{"sealer.key", "sealer.key.123456"} {
+		if err := os.WriteFile(filepath.Join(keys, name), key, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h, _ := startControlHub(t, uploadConfig(t, dataDir, nil))
+	h.next(t, 30*time.Second, "ready event", ofType("ready"))
+	stopAndDrain(t, h)
+	if names := dirNames(t, keys); !slices.Equal(names, []string{"sealer.key"}) {
+		t.Errorf("state/keys holds %v after a start, want the key alone", names)
+	}
 }
 
 // TestControl_ClientsSealed (P46): POST /control/v1/clients answers 204 and

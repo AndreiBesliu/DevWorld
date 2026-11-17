@@ -12,7 +12,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/sys/unix"
@@ -264,4 +266,49 @@ func syncDir(dir string) error {
 		err = cerr
 	}
 	return err
+}
+
+// leftoverAge is how old a key's temporary file is, when no key is in
+// place, before removeKeyLeftovers takes it for a leftover rather than a
+// creation in progress.
+const leftoverAge = time.Minute
+
+// removeKeyLeftovers removes the temporary files of makeKey (sealer.key.*)
+// that a cut first key creation left in state/keys: every one beside a
+// whole key, which no creation can still need, and without a key one older
+// than leftoverAge. Neither a link nor anything but a regular file is
+// removed, and no link is followed into state/keys.
+func removeKeyLeftovers(dataDir string) error {
+	dir, _, err := keyDir(dataDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	keys := os.NewFile(uintptr(dir), keyDirName)
+	defer func() { _ = keys.Close() }()
+	names, err := keys.Readdirnames(-1)
+	if err != nil {
+		return fmt.Errorf("crypto: the sealer key's directory: %w", err)
+	}
+	var st unix.Stat_t
+	haveKey := unix.Fstatat(dir, keyName, &st, unix.AT_SYMLINK_NOFOLLOW) == nil && st.Mode&unix.S_IFMT == unix.S_IFREG
+	var errs []error
+	for _, name := range names {
+		if !strings.HasPrefix(name, keyName+".") {
+			continue
+		}
+		if err := unix.Fstatat(dir, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG {
+			continue
+		}
+		modified := time.Unix(st.Mtim.Unix())
+		if !haveKey && time.Since(modified) < leftoverAge {
+			continue
+		}
+		if err := unix.Unlinkat(dir, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			errs = append(errs, fmt.Errorf("crypto: remove a leftover of the sealer key: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }
