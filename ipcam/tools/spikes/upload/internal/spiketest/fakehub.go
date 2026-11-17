@@ -36,6 +36,10 @@ const (
 	// unset. With "sd", run refuses a run.json without sdCardConfirmed,
 	// as ipcam-hub's SD gate does (exit 4).
 	FakeStorageEnv = "UPLOADSPIKE_FAKE_STORAGE"
+	// FakeFailStartEnv makes run record its start and exit 1 before its
+	// control and ready events, a hub that fails early: always with "1",
+	// else while the file that it names exists.
+	FakeFailStartEnv = "UPLOADSPIKE_FAKE_FAIL_START"
 )
 
 // The stand-in's records.
@@ -95,11 +99,11 @@ func record(r FakeRecord) {
 //   - "diag scan-secrets --dir <dir>" searches the files under dir for the
 //     values on stdin, raw, and reports those that hold one as moved;
 //   - "run --config <run.json> --stop-on-stdin-eof" records its start,
-//     refuses an unconfirmed SD card as ipcam-hub's gate does, serves a
-//     control endpoint on 127.0.0.1 that checks the token and records each
-//     request, prints control and ready, records every SIGINT, SIGTERM and
-//     SIGHUP without stopping, and stops, exit 0, at the end of its stdin,
-//     which it records.
+//     exits 1 with FakeFailStartEnv, refuses an unconfirmed SD card as
+//     ipcam-hub's gate does, serves a control endpoint on 127.0.0.1 that
+//     checks the token and records each request, prints control and
+//     ready, records every SIGINT, SIGTERM and SIGHUP without stopping,
+//     and stops, exit 0, at the end of its stdin, which it records.
 func FakeHub(args []string) int {
 	fail := func(err error) int {
 		_, _ = fmt.Fprintln(os.Stderr, "stand-in ipcam-hub:", err)
@@ -158,6 +162,9 @@ func FakeHub(args []string) int {
 		b, _ := json.Marshal(fields)
 		_, _ = os.Stdout.Write(append(b, '\n'))
 	}
+	if failStart() {
+		return fail(errors.New("failing its start, as asked"))
+	}
 	if os.Getenv(FakeStorageEnv) == "sd" && !cfg.SDCardConfirmed {
 		record(FakeRecord{Event: RecordSdGate})
 		emit(map[string]any{"type": "sd_card_unconfirmed"})
@@ -177,6 +184,16 @@ func FakeHub(args []string) int {
 	_, _ = io.Copy(io.Discard, os.Stdin)
 	record(FakeRecord{Event: RecordEOFStop})
 	return 0
+}
+
+// failStart reports whether FakeFailStartEnv asks run to fail.
+func failStart() bool {
+	v := os.Getenv(FakeFailStartEnv)
+	if v == "" || v == "1" {
+		return v == "1"
+	}
+	_, err := os.Stat(v) //nolint:gosec // the test's own file
+	return err == nil
 }
 
 // fakeControl is the stand-in's control endpoint: every request needs the

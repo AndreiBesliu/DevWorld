@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/hubproc"
@@ -38,6 +39,7 @@ func runResume(ctx context.Context, e *env, args []string) error {
 	ctx, stop := signalContext(ctx)
 	defer stop()
 	told := false
+	starts := retry{e: e}
 	for ctx.Err() == nil {
 		if !hasOpenRun(e) {
 			if !told {
@@ -55,17 +57,19 @@ func runResume(ctx context.Context, e *env, args []string) error {
 		told = false
 		if err := h.startHub(ctx); err != nil {
 			h.giveBack()
-			e.printf("%s %v", msgError, err)
+			floor := time.Duration(0)
 			if errors.Is(err, hubproc.ErrSdCardUnconfirmed) || errors.Is(err, hubproc.ErrNoSpikeUser) {
-				sleep(ctx, 30*time.Second)
+				floor = 30 * time.Second
 			}
+			starts.failed(ctx, err, floor, nil)
 			continue
 		}
 		if err := h.serve(ctx); err != nil {
 			h.giveBack()
-			e.printf("%s %v", msgError, err)
+			starts.failed(ctx, err, 0, nil)
 			continue
 		}
+		starts.ok()
 		switch h.hold(ctx) {
 		case holdHandover:
 			h.handBack(ctx)
@@ -74,6 +78,48 @@ func runResume(ctx context.Context, e *env, args []string) error {
 		}
 	}
 	return nil
+}
+
+// retryMax bounds the wait between a holder's attempts to start a hub
+// that keeps failing.
+const retryMax = time.Minute
+
+// retry paces a holder's attempts to start a hub that fails (a missing or
+// broken ipcam-hub, a full disk, port 7091 taken): the first wait is
+// e.poll(), each next one twice the last, up to retryMax (2 s in the
+// tests), and a success starts again from e.poll(). A failure's line is
+// printed once while the same error repeats, so a hub that fails at once
+// never pins a CPU or floods the autostart's log for the 7 days.
+type retry struct {
+	e    *env
+	wait time.Duration
+	last string
+}
+
+// failed prints err unless it repeats the last failure, and waits the next
+// wait, at least floor, or until ctx ends or wake is closed.
+func (r *retry) failed(ctx context.Context, err error, floor time.Duration, wake <-chan struct{}) {
+	if line := fmt.Sprintf("%s %v", msgError, err); line != r.last {
+		r.e.printf("%s", line)
+		r.last = line
+	}
+	r.wait = min(max(2*r.wait, r.e.poll()), r.e.retryMax())
+	select {
+	case <-ctx.Done():
+	case <-wake:
+	case <-time.After(max(r.wait, floor)):
+	}
+}
+
+// ok records a success: the next failure waits e.poll() and is printed.
+func (r *retry) ok() { r.wait, r.last = 0, "" }
+
+// retryMax is retry's bound: a minute, 2 s in the tests.
+func (e *env) retryMax() time.Duration {
+	if e.fast {
+		return 2 * time.Second
+	}
+	return retryMax
 }
 
 // takeForResume takes hub.lock for resume, unless another process holds
@@ -122,6 +168,15 @@ func (e *env) goneGrace() time.Duration {
 		return 3 * time.Second
 	}
 	return waitGoneGrace
+}
+
+// crashRestart is how long a holder waits before it restarts a hub that
+// ended on its own: 5 s, a second in the tests.
+func (e *env) crashRestart() time.Duration {
+	if e.fast {
+		return time.Second
+	}
+	return crashRestart
 }
 
 // heartbeatEvery is the heartbeat's period: a minute, a second in the tests.

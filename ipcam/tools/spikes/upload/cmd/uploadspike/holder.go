@@ -100,6 +100,7 @@ type holder struct {
 	handover   chan struct{}
 	hubGone    chan struct{}
 	crashAt    int64
+	crashes    retry // the restarts after a crash
 }
 
 // acquire takes the device's hub for command (One hub per device): no MI5
@@ -547,24 +548,39 @@ func (h *holder) heartbeat() {
 	})
 }
 
-// crashed reports a hub that ended on its own: the gap starts, and the hub
-// restarts after crashRestart; the gap ends once it is ready again.
+// restartAfterCrash restarts a hub that ended on its own: the gap starts,
+// and the hub restarts after crashRestart; a restart that fails is tried
+// again after a growing wait (retry), its error printed once; the gap
+// ends once a hub is ready again. A handover cuts the wait.
 func (h *holder) restartAfterCrash(ctx context.Context) {
+	wake := h.handoverRequested()
+	select {
+	case <-wake:
+		return
+	default:
+	}
 	h.mu.Lock()
-	if h.crashAt == 0 {
+	first := h.crashAt == 0
+	if first {
 		h.crashAt = h.e.now().UnixMilli()
 	}
 	h.mu.Unlock()
-	h.e.printf(msgHubCrashed)
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(crashRestart):
+	if first {
+		h.e.printf(msgHubCrashed)
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+			return
+		case <-time.After(h.e.crashRestart()):
+		}
 	}
+	h.crashes.e = h.e
 	if err := h.startHub(ctx); err != nil {
-		h.e.printf("%s %v", msgError, err)
+		h.crashes.failed(ctx, err, h.e.crashRestart(), wake)
 		return
 	}
+	h.crashes.ok()
 	h.mu.Lock()
 	gap := results.Gap{StartMs: h.crashAt, EndMs: h.e.now().UnixMilli(), Reason: results.GapHubCrash}
 	h.crashAt = 0
