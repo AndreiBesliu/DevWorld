@@ -222,17 +222,8 @@ func TestProgress_AnswersTheShells(t *testing.T) {
 // of 2026-11-17 count. testdata/results-v0.1.0 was written by v0.1.0's code.
 func TestProgress_ReadsTheResultsOfV010(t *testing.T) {
 	hub := newTestHub(t, 1)
-	from := filepath.Join("..", "..", "testdata", "results-v0.1.0")
-	entries, err := os.ReadDir(from)
-	if err != nil {
+	if err := os.CopyFS(hub.resultsDir, os.DirFS(filepath.Join("..", "..", "testdata", "results-v0.1.0"))); err != nil {
 		t.Fatal(err)
-	}
-	for _, e := range entries {
-		data, err := os.ReadFile(filepath.Join(from, e.Name()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		writeResultFile(t, hub.resultsDir, e.Name(), string(data))
 	}
 
 	p := hub.getProgress(t)

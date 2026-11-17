@@ -395,17 +395,8 @@ func snapshot(t *testing.T, dir string) string {
 // were written by v0.1.0's code (testdata/README.md).
 func TestLoadResults_ReadsV010ResultsNextToV011Ones(t *testing.T) {
 	in := t.TempDir()
-	from := filepath.Join("..", "..", "testdata", "results-v0.1.0")
-	entries, err := os.ReadDir(from)
-	if err != nil {
+	if err := os.CopyFS(in, os.DirFS(filepath.Join("..", "..", "testdata", "results-v0.1.0"))); err != nil {
 		t.Fatal(err)
-	}
-	for _, e := range entries {
-		data, err := os.ReadFile(filepath.Join(from, e.Name()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		write(t, in, e.Name(), string(data))
 	}
 	write(t, in, "chrome-20261118-090000-s2.json", `{"appVersion":"spike-video-v0.1.1","device":{"os":"Windows","platform":"chrome","ua":"Mozilla/5.0 (Windows NT 10.0)","webview":"Chrome/141.0.0.0"},`+
 		`"durationS":40,"hubJitterMs":[],"interrupted":false,"mdnsUnavailable":false,"notes":[],"samples":{"subLatencyMs":[120],"mainLatencyMs":[130]},"scenario":"S2","startedAt":"2026-11-18T09:00:00.000Z"}`+"\n")
