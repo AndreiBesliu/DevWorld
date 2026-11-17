@@ -22,6 +22,9 @@ const (
 	limitPair   = "plan A, sau B1 după un eșec al planului A; zilele 1–6 ok"
 	limitMatrix = "9 celule judecate, fiecare listată și citită"
 	judgedDays  = 6 // days 1–6; day 7 is the Testing project's expiry (Review Focus 1)
+	// notJudgedSeams is the reason given when envelopes written with
+	// uploadspike's test seams set were left out (C2-R22 (3)).
+	notJudgedSeams = "rezultate scrise cu variabilele de test ale uploadspike: nu se judecă"
 )
 
 // pairState is a judged pair's state.
@@ -44,7 +47,10 @@ const (
 // otherwise a missing or blocked part, or an empty set, has no verdict.
 func Judge(envs []results.Envelope) results.Judgement {
 	j := results.Judgement{Gate: gate, Reasons: []string{}, Rows: []results.Row{}, Decisions: []string{}}
-	pairs, source, oneDrive, cells := latest(envs)
+	pairs, source, oneDrive, cells, seamed := latest(envs)
+	if seamed > 0 {
+		j.Reasons = append(j.Reasons, notJudgedSeams)
+	}
 	var b2, incomplete []string
 	judgedPairs := 0
 	for _, def := range append(slices.Clone(Drive), OneDrive...) {
@@ -105,9 +111,11 @@ func Judge(envs []results.Envelope) results.Judgement {
 }
 
 // latest gathers the MI6 envelopes' pairs, each dest's from the envelope
-// stored last, the latest visibility matrix, whether A5 passed, and the
-// source of the rows (the hosts, joined).
-func latest(envs []results.Envelope) (map[string]results.Mi6Pair, string, bool, []results.VisibilityCell) {
+// stored last, the latest visibility matrix, whether A5 passed, the source
+// of the rows (the hosts, joined), and how many envelopes it left out
+// because they were written with uploadspike's test seams set.
+func latest(envs []results.Envelope) (map[string]results.Mi6Pair, string, bool, []results.VisibilityCell, int) {
+	seamed := 0
 	pairs := map[string]results.Mi6Pair{}
 	at := map[string]int64{}
 	var hosts []string
@@ -116,6 +124,10 @@ func latest(envs []results.Envelope) (map[string]results.Mi6Pair, string, bool, 
 	oneDrive := false
 	for _, e := range envs {
 		if e.Code != "MI6" || e.MI6 == nil {
+			continue
+		}
+		if e.TestSeams {
+			seamed++
 			continue
 		}
 		if e.Host != "" && !slices.Contains(hosts, e.Host) {
@@ -131,7 +143,7 @@ func latest(envs []results.Envelope) (map[string]results.Mi6Pair, string, bool, 
 			cells, cellsAt = e.MI6.Visibility, e.AtMs
 		}
 	}
-	return pairs, strings.Join(hosts, ", "), oneDrive, cells
+	return pairs, strings.Join(hosts, ", "), oneDrive, cells, seamed
 }
 
 // judgePair judges one pair: its state, the row's value, and its §2.2

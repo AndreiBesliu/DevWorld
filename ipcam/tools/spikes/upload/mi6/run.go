@@ -344,6 +344,8 @@ type Meta struct {
 	Storage        string
 	SdConfirmation *results.SdConfirmation
 	Sealer         string
+	// TestSeams is set while one of uploadspike's test seams is set.
+	TestSeams bool
 }
 
 // Envelope is the run's envelope at endMs, with the host's gaps and the
@@ -378,7 +380,7 @@ func (r *Run) Envelope(m Meta, gaps []results.Gap, handoffs map[string]int, endM
 	}
 	return results.Envelope{Schema: results.Schema, Code: "MI6", RunID: r.RunID, Set: m.Set, Host: m.Host, OS: m.OS,
 		PiModel: m.PiModel, Storage: m.Storage, SdConfirmation: m.SdConfirmation, Sealer: m.Sealer, Account: Account,
-		AccountKind: kind, Runs: []results.Run{run}, MI6: data}
+		AccountKind: kind, TestSeams: m.TestSeams, Runs: []results.Run{run}, MI6: data}
 }
 
 // ClientFor is the client that a login of the pair under plan hands its

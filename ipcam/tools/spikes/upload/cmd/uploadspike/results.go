@@ -113,7 +113,8 @@ func rewriteMI6(ctx context.Context, e *env, host string, info *hostinfo.Host) e
 
 // writeMI6 writes the run's envelope into results/, now.
 func writeMI6(ctx context.Context, e *env, run *mi6.Run, st *runstate.State, host string, info *hostinfo.Host) error {
-	meta := mi6.Meta{Host: host, Set: host, OS: runtime.GOOS, SdConfirmation: st.Sd, Sealer: "software", Storage: "unknown"}
+	meta := mi6.Meta{Host: host, Set: host, OS: runtime.GOOS, SdConfirmation: st.Sd, Sealer: "software", Storage: "unknown",
+		TestSeams: e.seams}
 	if runtime.GOOS == "windows" {
 		meta.Sealer = "dpapi-machine"
 	}

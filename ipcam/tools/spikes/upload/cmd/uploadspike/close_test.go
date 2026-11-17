@@ -221,3 +221,33 @@ func TestClose_Day7CloseScansTheRewrittenEnvelope(t *testing.T) {
 		t.Errorf("the planted file is still in results/: %v", err)
 	}
 }
+
+// TestTestSeams_WarnedAndRecorded (C2-R22 (3)): a command run with one of
+// uploadspike's test seams set says so in one Romanian line naming the
+// set seams, and the envelope that it writes records testSeams, which G15
+// does not judge; the seams' values never appear in the line.
+func TestTestSeams_WarnedAndRecorded(t *testing.T) {
+	r := newRig(t)
+	r.openMI6("android")
+	p := r.run("", nil, "results")
+	if p.code != 0 {
+		t.Fatalf("results: exit %d\n%s\n%s", p.code, p.stdout, p.stderr)
+	}
+	var warning string
+	for _, line := range strings.Split(p.stderr.String(), "\n") {
+		if strings.HasPrefix(line, strings.SplitN(msgTestSeams, "%", 2)[0]) {
+			warning = line
+		}
+	}
+	for _, seam := range []string{envBase, envHubBin, envPort, envNoBrowser, envFast, envRunAs, envHost} {
+		if !strings.Contains(warning, seam) {
+			t.Errorf("the warning %q does not name %s", warning, seam)
+		}
+	}
+	if strings.Contains(warning, r.base) || strings.Contains(warning, r.hub) {
+		t.Errorf("the warning %q shows a seam's value", warning)
+	}
+	if e, _ := envelopeBytes(t, r); !e.TestSeams {
+		t.Errorf("the envelope written with seams set: testSeams %v; want true", e.TestSeams)
+	}
+}

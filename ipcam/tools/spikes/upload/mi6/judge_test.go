@@ -251,3 +251,23 @@ func TestMI6_VisibilityMatrixShape(t *testing.T) {
 		}
 	}
 }
+
+// TestG15_TestSeamsNotJudged (C2-R22 (3)): an envelope written while one
+// of uploadspike's test seams was set is not judged: alone it leaves G15
+// without a verdict, saying why, and beside an owner's envelope it
+// changes nothing, even when it is newer and failed.
+func TestG15_TestSeamsNotJudged(t *testing.T) {
+	seamed := passingEnvelope()
+	seamed.TestSeams = true
+	j := Judge([]results.Envelope{seamed})
+	if j.Verdict != results.Incomplete || !slices.Contains(j.Reasons, notJudgedSeams) {
+		t.Errorf("Judge of a seamed envelope alone = %+v; want %q with %q", j, results.Incomplete, notJudgedSeams)
+	}
+	failed := passingEnvelope()
+	failed.TestSeams, failed.AtMs = true, 20
+	p := pair(failed, "g-android")
+	p.Plan, p.HandoffOK, p.B1Failure, p.Refresh = "B1", false, "access_denied", nil
+	if j := Judge([]results.Envelope{passingEnvelope(), failed}); j.Verdict != results.Pass {
+		t.Errorf("Judge with a newer seamed failure = %+v; want trece from the owner's envelope", j)
+	}
+}

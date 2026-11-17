@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/handoff"
@@ -49,11 +50,30 @@ const (
 	handoverTimeout = 60 * time.Second
 )
 
+// testSeams are the variables above: each is inert unless set, and while
+// one is set uploadspike says so and its envelopes record testSeams, which
+// the judges do not judge (C2-R22 (3)).
+var testSeams = []string{envBase, envHubBin, envMediaMTX, envFakes, envRunAs, envPort, envHost, envNoBrowser, envEventLog,
+	envFast, envPauseAfter, envSignalFile, envNotElevated}
+
+// setSeams are the names of the test seams set in this process's
+// environment.
+func setSeams() []string {
+	var set []string
+	for _, name := range testSeams {
+		if _, ok := os.LookupEnv(name); ok {
+			set = append(set, name)
+		}
+	}
+	return set
+}
+
 // env is one uploadspike process's paths and settings.
 type env struct {
 	base, hubBin, mediamtx, fakes, runAs, host, eventLog string
 	port                                                 int
 	noBrowser, fast                                      bool
+	seams                                                bool // a test seam is set
 	in                                                   io.Reader
 	out, errOut                                          io.Writer
 	now                                                  func() time.Time
@@ -102,6 +122,10 @@ func newEnv(in io.Reader, out, errOut io.Writer) (*env, error) {
 		e.runAs = hubproc.SpikeUser
 	}
 	e.host = os.Getenv(envHost)
+	if set := setSeams(); len(set) > 0 {
+		e.seams = true
+		_, _ = fmt.Fprintf(errOut, msgTestSeams+"\n", strings.Join(set, ", "))
+	}
 	return e, nil
 }
 

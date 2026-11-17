@@ -72,6 +72,10 @@ type Envelope struct {
 	// elsewhere.
 	Part  int `json:"part,omitempty"`
 	Parts int `json:"parts,omitempty"`
+	// TestSeams is set when the envelope was written while one of
+	// uploadspike's test seams (its UPLOADSPIKE_* variables) was set: the
+	// judges do not judge it (C2-R22 (3)).
+	TestSeams bool `json:"testSeams,omitempty"`
 	// AtMs is when the envelope was stored, in Unix ms on its writer's
 	// clock, as c1's C1-R22: Write stamps it.
 	AtMs int64 `json:"atMs"`

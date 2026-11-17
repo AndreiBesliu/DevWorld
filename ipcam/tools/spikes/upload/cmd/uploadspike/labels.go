@@ -34,6 +34,7 @@ const (
 	msgNoCommand         = "lipsește comanda"
 	msgStoppedByYou      = "Proba a fost oprită de dvs."
 	msgError             = "uploadspike: eroare:"
+	msgTestSeams         = "Atenție: sunt setate variabilele de test %s; rezultatele scrise acum nu se judecă."
 	msgMI5Running        = "Proba MI5 rulează; rulați comanda după ce se termină."
 	msgHubBusy           = "Alt program al probei ține hub-ul. Închideți-l și încercați din nou."
 	msgLoginInterrupted  = "Autentificarea s-a întrerupt: alt program al probei a preluat hub-ul. Rulați din nou: %s."
