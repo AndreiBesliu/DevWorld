@@ -36,7 +36,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -56,6 +55,10 @@ const (
 	// PathClients registers a client (a Client as JSON) over HTTP, for the
 	// lab's fakeproviders process.
 	PathClients = "/fake/clients"
+	// PathIssued answers GET with Issued as JSON: the values that the fake
+	// minted and the PKCE verifiers that it received, which a test of
+	// another process looks for where they must not be (Review Focus 5).
+	PathIssued = "/fake/issued"
 )
 
 // The providers and the client types.
@@ -151,7 +154,18 @@ type Fake struct {
 	users   map[string]*deviceGrant // by user code
 	fails   map[string][]failure    // by path
 	counts  map[string]int          // by grant type, and "device", "revoke"
-	seq     int
+	// minted and verifiers are every code, access and refresh token minted,
+	// and every code_verifier received, in order (Issued).
+	minted    map[string][]string
+	verifiers []string
+}
+
+// Issued is what the fake minted, by kind ("code", "access", "refresh",
+// "device", "user"), and the PKCE verifiers that its token endpoint
+// received, in order.
+type Issued struct {
+	Minted    map[string][]string `json:"minted"`
+	Verifiers []string            `json:"verifiers"`
 }
 
 type codeGrant struct {
@@ -210,8 +224,19 @@ func New(opts Options) *Fake {
 	return &Fake{
 		opts: opts, clients: map[string]Client{}, codes: map[string]*codeGrant{}, refresh: map[string]*grant{},
 		access: map[string]*accessToken{}, devices: map[string]*deviceGrant{}, users: map[string]*deviceGrant{},
-		fails: map[string][]failure{}, counts: map[string]int{},
+		fails: map[string][]failure{}, counts: map[string]int{}, minted: map[string][]string{},
 	}
+}
+
+// Issued returns what the fake minted and the verifiers it received.
+func (f *Fake) Issued() Issued {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := Issued{Minted: map[string][]string{}, Verifiers: append([]string{}, f.verifiers...)}
+	for k, v := range f.minted {
+		out.Minted[k] = append([]string{}, v...)
+	}
+	return out
 }
 
 // AddClient registers c, replacing a client of the same ID.
@@ -335,6 +360,7 @@ func (f *Fake) Handler() http.Handler {
 	mux.HandleFunc(PathMicrosoftDevice, func(w http.ResponseWriter, r *http.Request) { f.serveDevice(w, r, Microsoft, PathMicrosoftDevice) })
 	mux.HandleFunc(PathGoogleRevoke, f.serveRevoke)
 	mux.HandleFunc(PathClients, f.serveClients)
+	mux.HandleFunc("GET "+PathIssued, func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, f.Issued()) })
 	return mux
 }
 
@@ -462,6 +488,9 @@ func (f *Fake) authenticate(provider string, form url.Values) (Client, int, stri
 
 // redeemCode redeems an authorization code. f.mu is held.
 func (f *Fake) redeemCode(c Client, form url.Values) (map[string]any, error) {
+	if v := form.Get("code_verifier"); v != "" {
+		f.verifiers = append(f.verifiers, v)
+	}
 	g := f.codes[form.Get("code")]
 	switch {
 	case g == nil || g.used || !f.opts.Clock().Before(g.expires) || g.client.ID != c.ID:
@@ -614,16 +643,22 @@ func (f *Fake) nextFailure(path string) (failure, bool) {
 	return queued[0], true
 }
 
-// mint returns a new value of kind. f.mu is held.
+// mint returns a new value of kind, and records it (Issued). f.mu is held.
 func (f *Fake) mint(kind string) string {
+	v := ""
 	if f.opts.Mint != nil {
-		return f.opts.Mint(kind)
+		v = f.opts.Mint(kind)
+	} else {
+		v = RandomValue(kind)
 	}
+	f.minted[kind] = append(f.minted[kind], v)
+	return v
+}
+
+// RandomValue is a new random value of kind, as the fake mints by default.
+func RandomValue(kind string) string {
 	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		f.seq++
-		return fmt.Sprintf("fake-%s-%d", kind, f.seq)
-	}
+	_, _ = rand.Read(b) // never fails (crypto/rand)
 	return "fake-" + kind + "-" + hex.EncodeToString(b)
 }
 

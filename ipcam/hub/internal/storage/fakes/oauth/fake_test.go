@@ -314,3 +314,37 @@ func TestFake_AutoApprove(t *testing.T) {
 		t.Errorf("an auto-approved device code: %v", body)
 	}
 }
+
+// TestFake_IssuedRecordsMintsAndVerifiers: Issued, and GET /fake/issued,
+// list every value minted by kind and every verifier received, so that a
+// test of another process can look for them where they must not be.
+func TestFake_IssuedRecordsMintsAndVerifiers(t *testing.T) {
+	f, srv, _ := newFake(t, Options{})
+	const redirect = "http://127.0.0.1:53123/"
+	r, err := f.Authorize(authURL(desktop(), redirect))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := codeOf(t, r)
+	status, body := redeem(t, srv, desktop(), code, redirect, verifier)
+	if status != http.StatusOK {
+		t.Fatalf("redemption: %d %v", status, body)
+	}
+	got := f.Issued()
+	if len(got.Minted["code"]) != 1 || got.Minted["code"][0] != code || len(got.Minted["access"]) != 1 ||
+		got.Minted["access"][0] != body["access_token"] || len(got.Minted["refresh"]) != 1 || got.Minted["refresh"][0] != body["refresh_token"] {
+		t.Errorf("Issued().Minted = %v; want the code and the tokens", got.Minted)
+	}
+	if len(got.Verifiers) != 1 || got.Verifiers[0] != verifier {
+		t.Errorf("Issued().Verifiers = %v; want the verifier", got.Verifiers)
+	}
+	resp, err := http.Get(srv.URL + PathIssued) //nolint:noctx // a test of the fake
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var over Issued
+	if err := json.NewDecoder(resp.Body).Decode(&over); err != nil || len(over.Verifiers) != 1 || len(over.Minted["code"]) != 1 {
+		t.Errorf("GET %s = %+v, %v", PathIssued, over, err)
+	}
+}

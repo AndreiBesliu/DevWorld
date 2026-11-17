@@ -7,7 +7,7 @@
 // files of fakeoauth's access tokens by drive.file (P21); any other bearer
 // token acts for one anonymous client, as before.
 //
-//	fakeproviders -listen <ip:port> [-throttle <bytes/s>]
+//	fakeproviders -listen <ip:port> [-throttle <bytes/s>] [-known <kind>=<value>]...
 //
 // At start it prints one line, the URLs to give the drivers:
 //
@@ -17,8 +17,12 @@
 // -throttle it reads each request's body at that many bytes a second, the
 // uploads' chunks and fragments included, so that a chunk's upload_progress
 // and the next commit are seconds apart, not milliseconds (the lab uses
-// 1 MiB/s, Task 8's restart). It is test infrastructure that no release
-// ships, so it lives outside hub/cmd/ (§3.5).
+// 1 MiB/s, Task 8's restart). Each -known gives the value of fakeoauth's next
+// mint of its kind ("code", "access", "refresh"), in order, so that a test of
+// another process knows what to look for where it must not be; GET
+// /oauth/fake/issued lists every value minted and every PKCE verifier
+// received (uploadspike's TestMI6_TokenNotInResults). It is test
+// infrastructure that no release ships, so it lives outside hub/cmd/ (§3.5).
 package main
 
 import (
@@ -31,6 +35,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -67,6 +73,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	listen := flags.String("listen", "", "the address to serve on, `ip:port`")
 	throttle := flags.Int64("throttle", 0, "read each request's body at this many `bytes/s`; 0: no limit")
+	known := map[string][]string{}
+	flags.Func("known", "the next minted value of a kind, `kind=value`; repeatable", func(v string) error {
+		kind, value, ok := strings.Cut(v, "=")
+		if !ok || kind == "" || value == "" {
+			return fmt.Errorf("not kind=value")
+		}
+		known[kind] = append(known[kind], value)
+		return nil
+	})
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -92,7 +107,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "fakeproviders: %v\n", err)
 		return 1
 	}
-	srv := &http.Server{Handler: handler(*throttle), ReadHeaderTimeout: readHeaderTimeout}
+	srv := &http.Server{Handler: handler(*throttle, known), ReadHeaderTimeout: readHeaderTimeout}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	select {
@@ -107,9 +122,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 // handler serves a fakegdrive under /gdrive/ and /gdrive-upload/, a
 // fakegraph under /graph/ and a fakeoauth under /oauth/, each request's body
-// read at throttle bytes a second when throttle is positive.
-func handler(throttle int64) http.Handler {
-	login := fakeoauth.New(fakeoauth.Options{AutoApprove: true})
+// read at throttle bytes a second when throttle is positive; fakeoauth mints
+// the known values of each kind first, in order.
+func handler(throttle int64, known map[string][]string) http.Handler {
+	var mu sync.Mutex
+	login := fakeoauth.New(fakeoauth.Options{AutoApprove: true, Mint: func(kind string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		if q := known[kind]; len(q) > 0 {
+			known[kind] = q[1:]
+			return q[0]
+		}
+		return fakeoauth.RandomValue(kind)
+	}})
 	gd := fakegdrive.New(fakegdrive.Options{})
 	gd.IdentifyTokens(func(token string) (fakegdrive.Identity, bool) {
 		tok, ok := login.Lookup(token)

@@ -306,6 +306,39 @@ func TestFakeProviders_Usage(t *testing.T) {
 	}
 }
 
+// TestFakeProviders_KnownValuesAndIssued: each -known value is fakeoauth's
+// next mint of its kind, in order, then random ones follow; GET
+// /oauth/fake/issued lists every minted value, and a -known that is not
+// kind=value is a usage error.
+func TestFakeProviders_KnownValuesAndIssued(t *testing.T) {
+	access := "SENT" + "INEL-known-access"
+	p := start(t, "-listen", "127.0.0.1:0", "-known", "access="+access, "-known", "user="+"SENT"+"INEL-user")
+	if got := deviceLogin(t, p.urls["oauth"]); got != access {
+		t.Errorf("the first access token %q, want the known one", got)
+	}
+	if got := deviceLogin(t, p.urls["oauth"]); got == access || !strings.HasPrefix(got, "fake-access-") {
+		t.Errorf("the second access token %q, want a random one", got)
+	}
+	resp, err := http.Get(p.urls["oauth"] + "/fake/issued") //nolint:noctx // a test of the fake
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var issued struct {
+		Minted map[string][]string `json:"minted"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&issued); err != nil {
+		t.Fatal(err)
+	}
+	if a := issued.Minted["access"]; len(a) != 2 || a[0] != access || issued.Minted["user"][0] != "SENT"+"INEL-user" {
+		t.Errorf("issued %v; want both access tokens, the known one first", issued.Minted)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"-listen", "127.0.0.1:0", "-known", "access"}, &stdout, &stderr); code != 2 {
+		t.Errorf("-known access: exit %d, want 2", code)
+	}
+}
+
 // deviceLogin registers a TV client with the fakeoauth at base, runs its
 // device flow, which fakeproviders approves at once, and returns the access
 // token.
