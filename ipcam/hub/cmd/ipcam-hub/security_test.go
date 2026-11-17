@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -266,8 +265,8 @@ func countEvents(out, typ, dest string) int {
 // reset-connections cuts the drivers' connections, not a call of the
 // token store in flight: a refresh whose rotated answer is on its way
 // back still stores the rotation, which the provider revoked the old
-// token for. The token store's idle connections are closed, so no pooled
-// flow outlives the block.
+// token for. The next token call dials a new connection, so no pooled flow
+// outlives the block.
 func TestControl_ResetKeepsTokenCalls(t *testing.T) {
 	f := newOAuthFixture(t)
 	f.logIn(t, "g-windows", oauth.PlatformWindows, "acct-1")
@@ -327,7 +326,7 @@ func TestControl_ResetKeepsTokenCalls(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(remotes) <= before {
-		t.Errorf("%d connections before the reset and %d after: the token store's idle connection outlived it", before, len(remotes))
+		t.Errorf("%d connections before the reset and %d after: a connection of the token store outlived it", before, len(remotes))
 	}
 }
 
@@ -335,7 +334,7 @@ func TestControl_ResetKeepsTokenCalls(t *testing.T) {
 // a file that vanishes between the directory's read and its open (a
 // results writer's temporary file) cannot leak and is skipped; a file that
 // cannot be read is named in unreadable, and the scan goes on, prints its
-// line with every file it removed, and exits 1.
+// line with every file it moved into the quarantine, and exits 1.
 func TestDiagScanSecrets_VanishedAndUnreadableFiles(t *testing.T) {
 	value := "SENT" + "INEL-leaked-value"
 	dir := t.TempDir()
@@ -353,12 +352,13 @@ func TestDiagScanSecrets_VanishedAndUnreadableFiles(t *testing.T) {
 		}
 		return root.Open(rel)
 	}
-	res, err := scanAndRemove(dir, encodedNeedles([]string{value}), open)
+	res, err := scanAndQuarantine(dir, encodedNeedles([]string{value}), open)
 	if err != nil {
-		t.Fatalf("scanAndRemove = %v; want the scan to go on", err)
+		t.Fatalf("scanAndQuarantine = %v; want the scan to go on", err)
 	}
-	if !slices.Equal(res.Removed, []string{"a-leak.json", "d-leak.json"}) || !slices.Equal(res.Unreadable, []string{"c-unreadable.json"}) {
-		t.Errorf("removed %v, unreadable %v; want both leaks removed and the unreadable file named", res.Removed, res.Unreadable)
+	if !slices.Equal(res.Moved, []string{"a-leak.json", "d-leak.json"}) || !slices.Equal(res.Unreadable, []string{"c-unreadable.json"}) ||
+		len(res.Unmoved) != 0 {
+		t.Errorf("moved %v, unreadable %v, unmoved %v; want both leaks moved and the unreadable file named", res.Moved, res.Unreadable, res.Unmoved)
 	}
 	// Through the command: the line is printed, and the exit is 1.
 	_ = os.WriteFile(filepath.Join(dir, "f-leak.json"), []byte(value), 0o600)
@@ -366,7 +366,7 @@ func TestDiagScanSecrets_VanishedAndUnreadableFiles(t *testing.T) {
 	t.Cleanup(func() { scanOpen = (*os.Root).Open })
 	code, lines, out, _ := runScan(t, stdinLine(value), "--dir", dir)
 	if code != exitFatal || len(lines) != 1 || !strings.Contains(out, "f-leak.json") || !strings.Contains(out, "c-unreadable.json") {
-		t.Errorf("scan-secrets with an unreadable file = %d, %q; want exit 1 after a line naming the removed and the unreadable files", code, out)
+		t.Errorf("scan-secrets with an unreadable file = %d, %q; want exit 1 after a line naming the moved and the unreadable files", code, out)
 	}
 }
 
@@ -408,12 +408,8 @@ func TestDiagScanSecrets_MoreEncodings(t *testing.T) {
 	if code != exitOK || len(lines) != 1 {
 		t.Fatalf("scan-secrets = %d, %q (%s)", code, out, stderr)
 	}
-	var got []string
-	for _, r := range lines[0]["removed"].([]any) {
-		got = append(got, fmt.Sprint(r))
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("removed %v, want %v", got, want)
+	if got := stringsOf(lines[0], "moved"); !slices.Equal(got, want) {
+		t.Errorf("moved %v, want %v", got, want)
 	}
 }
 
@@ -444,7 +440,7 @@ func TestDiagScanSecrets_RefusesCatalogValuesThatAreNoSecrets(t *testing.T) {
 		t.Errorf("scan-secrets = %d, %q, %q; want exit 1, no line, a refusal naming the row only", code, out, stderr)
 	}
 	if _, err := os.Stat(envelope); err != nil {
-		t.Errorf("the envelope was removed (%v)", err)
+		t.Errorf("the envelope left the results (%v)", err)
 	}
 }
 

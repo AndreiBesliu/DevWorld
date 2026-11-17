@@ -493,12 +493,15 @@ const (
 )
 
 // Status is the login of state: pending, completed with its Completion,
-// expired, or failed with its error when the provider ended the login or
-// the hub could not store an approved one; a poll's or a Complete's error
-// that ends nothing (no answer, a proxy's page) is pending. A login whose
-// code or device code is being redeemed is pending, also past its life. A
-// device login is polled as DeviceStatus does. The Completion names the
-// login whatever the status.
+// expired, or failed with its error. A plan A login is failed once its
+// Complete failed, whatever the error, since its code is used up (Task 9A
+// review M2), and pending while that Complete's call is in flight, also
+// past its life. A device login is polled as DeviceStatus does: it is
+// failed only when the provider ended it or the hub could not store an
+// approved one; a poll's error that ends nothing (no answer, a proxy's
+// page) is pending, and so is a login whose device code is being
+// redeemed, also past its life (security review STORE-4, CTL-2). The
+// Completion names the login whatever the status.
 func (s *Store) Status(ctx context.Context, state string) (string, Completion, error) {
 	s.mu.Lock()
 	s.sweep()
@@ -633,10 +636,11 @@ func KnownSecrets(ctx context.Context, secrets SecretReader, sealer crypto.Seale
 				if v == "" {
 					continue
 				}
-				// A value that is no secret would make root's scan remove
-				// files that leak nothing (security review DIAG-4).
+				// A value that is no secret would make root's scan
+				// quarantine files that leak nothing (security review
+				// DIAG-4).
 				if problem := secretValueProblem(v); problem != "" {
-					return nil, fmt.Errorf("oauth: the row %s holds a value that is %s, which no secret of the store is: the scan would remove files that leak nothing", id, problem)
+					return nil, fmt.Errorf("oauth: the row %s holds a value that is %s, which no secret of the store is: the scan would quarantine files that leak nothing", id, problem)
 				}
 				values = append(values, v)
 			}
@@ -653,10 +657,11 @@ const minSecretLen = 16
 // secretValueProblem says why v is no OAuth client ID, client secret or
 // refresh token, "" when it may be one: shorter than minSecretLen bytes, or
 // holding a space, a control character, or one of " \ { } [ ] : , which none
-// of them uses and every JSON file does. Root's known-secrets scan removes
-// every results file that holds a value, and its values come from rows that
-// the hub's identity writes, so a value that is no secret is refused
-// (security review DIAG-4). The text never quotes v.
+// of them uses and every JSON file does. Root's known-secrets scan moves
+// every results file that holds a value out of the results, into its
+// quarantine, and its values come from rows that the hub's identity
+// writes, so a value that is no secret is refused (security review DIAG-4,
+// C2-R20 (a)). The text never quotes v.
 func secretValueProblem(v string) string {
 	if len(v) < minSecretLen {
 		return fmt.Sprintf("shorter than %d bytes", minSecretLen)

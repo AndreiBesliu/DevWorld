@@ -208,10 +208,12 @@ func (c cancelAfterAnswer) RoundTrip(r *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// TestProviderError_Classes (security review STORE-3, Task 9A review M3):
-// one classifier: the refusals that need a new login are ErrAuthExpired;
-// the transient OAuth codes at any status, 408, 429, a 5xx and an answer
-// without an OAuth code (a proxy's HTML 403 or 407) are ErrTransient.
+// TestProviderError_Classes (security review STORE-3, Task 9A review M3,
+// C2-R20 (e)): one classifier: the refusals that need a new login, and an
+// unknown OAuth code ("error") at a 4xx but 408 and 429, are
+// ErrAuthExpired; the transient OAuth codes at any status, 408, 429, a 5xx
+// and an answer without an OAuth code ("": a proxy's HTML 403 or 407) are
+// ErrTransient.
 func TestProviderError_Classes(t *testing.T) {
 	for _, tc := range []struct {
 		status int
@@ -222,7 +224,8 @@ func TestProviderError_Classes(t *testing.T) {
 		{400, "access_denied", true}, {400, "expired_token", true}, {400, "redirect_uri_mismatch", true},
 		{400, "invalid_scope", true}, {400, "unsupported_grant_type", true}, {400, "invalid_request", true},
 		{400, "temporarily_unavailable", false}, {400, "server_error", false}, {400, "rate_limit_exceeded", false},
-		{403, "error", false}, {407, "error", false}, {400, "error", false}, {408, "error", false}, {408, "invalid_grant", false},
+		{403, "", false}, {407, "", false}, {400, "", false}, {408, "", false}, {408, "invalid_grant", false},
+		{403, "error", true}, {400, "error", true}, {401, "error", true}, {408, "error", false}, {429, "error", false},
 		{429, "invalid_grant", false}, {503, "error", false}, {500, "invalid_grant", false},
 	} {
 		err := error(&ProviderError{Code: tc.code, Status: tc.status})

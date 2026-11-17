@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io/fs"
 	"net/url"
 	"os"
@@ -91,9 +90,9 @@ func refreshTokenOf(t *testing.T, f *oauthFixture) string {
 // TestDiagScanSecrets_AllEncodings (P45, ARH-08, §16.2.3): a client secret
 // and a refresh token that the catalog holds sealed, and a value given on
 // stdin, each planted in each of the encodings in its own file under
-// --dir, are found and their files removed; a clean file stays; the output
-// counts the values and names the removed files, and holds no value. The
-// stdin value, a typed camera password, holds characters that JSON
+// --dir, are found and their files quarantined; a clean file stays; the
+// output counts the values and names the moved files, and holds no value.
+// The stdin value, a typed camera password, holds characters that JSON
 // escapes, so only the JSON needles find its JSON forms.
 func TestDiagScanSecrets_AllEncodings(t *testing.T) {
 	f := newOAuthFixture(t)
@@ -128,13 +127,8 @@ func TestDiagScanSecrets_AllEncodings(t *testing.T) {
 		t.Fatalf("scan-secrets = %d, %q (%s); want one line, exit 0", code, out, stderr)
 	}
 	line := lines[0]
-	removed, _ := line["removed"].([]any)
-	var got []string
-	for _, r := range removed {
-		got = append(got, fmt.Sprint(r))
-	}
-	if line["schema"] != "ipcam.diag.scansecrets/1" || !slices.Equal(got, want) {
-		t.Errorf("line %v, want the schema and removed %q", line, want)
+	if got := stringsOf(line, "moved"); line["schema"] != "ipcam.diag.scansecrets/1" || !slices.Equal(got, want) {
+		t.Errorf("line %v, want the schema and moved %q", line, want)
 	}
 	// The hub's clients' IDs and two secrets, the refresh token, the stdin
 	// value.
@@ -147,7 +141,7 @@ func TestDiagScanSecrets_AllEncodings(t *testing.T) {
 		}
 	}
 	if _, err := os.Stat(filepath.Join(dir, "clean.json")); err != nil {
-		t.Errorf("clean.json was removed (%v)", err)
+		t.Errorf("clean.json left the results (%v)", err)
 	}
 	for _, v := range values {
 		for _, encode := range encodings {

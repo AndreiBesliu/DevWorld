@@ -447,14 +447,17 @@ func hubTransport(conns *connTracker) *http.Transport {
 // newHubClient is the drivers' plain HTTP client, the token store's, and
 // the tracker of the drivers' connections, which reset-connections closes.
 // The token store's client has a transport of its own, which the tracker
-// does not track: reset-connections closes only its idle connections, so
-// no pooled flow to a token endpoint outlives MI5's block, and a token
-// call in flight is never cut, since its provider may already have rotated
-// and revoked the refresh token that the answer replaces; tokenTimeout
-// bounds that call (security review CTL-3).
+// does not track, so a token call in flight is never cut, since its
+// provider may already have rotated and revoked the refresh token that the
+// answer replaces; tokenTimeout bounds that call (security review CTL-3).
+// That transport keeps no connection past its call (no keep-alive, over
+// HTTP/1.1 and HTTP/2), so each token call dials anew and no pooled flow
+// to a token endpoint outlives MI5's block (C2-R20 (d)); the store makes a
+// few calls a day.
 func newHubClient() (drivers, tokens *http.Client, conns *connTracker) {
 	tokenTransport := hubTransport(nil)
-	conns = &connTracker{conns: map[*trackedConn]bool{}, idleOnly: tokenTransport}
+	tokenTransport.DisableKeepAlives = true
+	conns = &connTracker{conns: map[*trackedConn]bool{}}
 	return newHTTPClient(hubTransport(conns)), newHTTPClient(tokenTransport), conns
 }
 
@@ -467,9 +470,6 @@ func newHubClient() (drivers, tokens *http.Client, conns *connTracker) {
 type connTracker struct {
 	mu    sync.Mutex
 	conns map[*trackedConn]bool
-	// idleOnly is the token store's transport, whose idle connections a
-	// reset closes, and only those.
-	idleOnly *http.Transport
 }
 
 func (t *connTracker) dial(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -494,9 +494,6 @@ func (t *connTracker) reset() int {
 	t.mu.Unlock()
 	for _, c := range open {
 		_ = c.Close()
-	}
-	if t.idleOnly != nil {
-		t.idleOnly.CloseIdleConnections()
 	}
 	return len(open)
 }

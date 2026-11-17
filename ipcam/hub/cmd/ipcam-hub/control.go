@@ -29,8 +29,10 @@ const controlTokenEnv = "IPCAM_CONTROL_TOKEN" //nolint:gosec // G101: the name o
 // bearer token is checked, so any local process may send one: it holds
 // controlMaxHeader bytes at most and arrives within controlHeaderTimeout,
 // and the endpoint serves controlMaxConns connections at once, so that no
-// local process makes the hub hold much memory (security review CTL-1).
-// uploadspike, the one caller, sends a few small requests at a time.
+// local process makes the hub hold much memory (security review CTL-1);
+// an answer without the token closes its connection, so no such process
+// keeps a connection open past its answer (C2-R20 (b)). uploadspike, the
+// one caller, sends a few small requests at a time.
 const (
 	controlMaxBody       = 64 << 10
 	controlMaxHeader     = 8 << 10
@@ -167,6 +169,10 @@ func (c *control) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if !c.authorized(r) {
+			// The connection ends with the answer: no caller without the
+			// token holds one of the controlMaxConns through keep-alive
+			// (C2-R20 (b)).
+			w.Header().Set("Connection", "close")
 			writeControl(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
@@ -306,7 +312,11 @@ func (c *control) firstReport(state string) bool {
 	return true
 }
 
-// refresh refreshes a login now.
+// refresh refreshes a login now. The refresh goes on when its caller goes
+// away meanwhile, as a completion does (security review CTL-4): a provider
+// that rotates has revoked the old token by the time it answers, so a
+// refresh cut there would leave the row with a revoked one; tokenTimeout
+// still bounds the provider's call (C2-R20 (g)).
 func (c *control) refresh(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DestID string `json:"destId"`
@@ -315,7 +325,7 @@ func (c *control) refresh(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, err)
 		return
 	}
-	res, err := c.store.Refresh(r.Context(), req.DestID)
+	res, err := c.store.Refresh(context.WithoutCancel(r.Context()), req.DestID)
 	if err != nil {
 		c.failed(req.DestID, "refresh", err)
 		writeFailure(w, http.StatusBadGateway, err)
@@ -356,8 +366,8 @@ func (c *control) targets(w http.ResponseWriter, r *http.Request) {
 
 // resetConnections closes the drivers' connections, idle and in flight:
 // each request in flight fails as transient and is retried on a new
-// connection (MI5 calls it right after its block). Of the token store's
-// connections it closes the idle ones only (newHubClient).
+// connection (MI5 calls it right after its block). The token store keeps
+// no connection past a call, and its call in flight goes on (newHubClient).
 func (c *control) resetConnections(w http.ResponseWriter, _ *http.Request) {
 	c.conns.reset()
 	w.WriteHeader(http.StatusNoContent)

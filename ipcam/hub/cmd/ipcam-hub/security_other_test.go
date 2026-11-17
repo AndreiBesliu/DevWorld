@@ -18,7 +18,7 @@ import (
 // on the Pi, root runs diag scan-secrets and diag visibility on a data
 // directory and a run.json that the hub's identity owns, so neither
 // follows a link as run.json, state/, catalog.db or hub_id, nor blocks on a
-// FIFO in their place: each is refused at once, and nothing is removed.
+// FIFO in their place: each is refused at once, and nothing is moved.
 func TestDiagRootCommands_FollowNoLinkAndNeverBlock(t *testing.T) {
 	type plant func(t *testing.T, f *oauthFixture)
 	moveAside := func(t *testing.T, path string) string {
@@ -103,7 +103,7 @@ func TestDiagRootCommands_FollowNoLinkAndNeverBlock(t *testing.T) {
 					t.Fatalf("diag %s blocked for 5 s", command)
 				}
 				if _, err := os.Stat(leak); err != nil {
-					t.Errorf("a file was removed (%v)", err)
+					t.Errorf("a file left the results (%v)", err)
 				}
 			})
 		}

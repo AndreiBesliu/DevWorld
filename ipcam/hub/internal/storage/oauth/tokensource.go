@@ -193,8 +193,10 @@ func (s *Store) deviceAuthorization(ctx context.Context, p storage.Kind, client 
 
 // post sends form to endpoint within tokenTimeout and decodes a 200's JSON
 // into v. A request with no answer, and a 200 that is not JSON (a portal's
-// or a scanner's page), is ErrTransient; a refusal is a ProviderError;
-// neither text quotes the request, its URL or the answer.
+// or a scanner's page), is ErrTransient; any other answer is a
+// ProviderError with the OAuth error code of its JSON body, codeUnknown
+// for a code that the hub does not know, or none; neither text quotes the
+// request, its URL or the answer.
 func (s *Store) post(ctx context.Context, endpoint string, form url.Values, v any) error {
 	ctx, cancel := context.WithTimeout(ctx, s.tokenTimeout)
 	defer cancel()
@@ -221,10 +223,10 @@ func (s *Store) post(ctx context.Context, endpoint string, form url.Values, v an
 		var e struct {
 			Error string `json:"error"`
 		}
-		_ = json.Unmarshal(body, &e)
+		_ = json.Unmarshal(body, &e) // no JSON, or no string error: no code
 		code := e.Error
-		if !providerCodes[code] {
-			code = "error"
+		if code != "" && !providerCodes[code] {
+			code = codeUnknown
 		}
 		return &ProviderError{Code: code, Status: resp.StatusCode}
 	}
@@ -275,9 +277,9 @@ func (s *Store) refresh(ctx context.Context, ref string, daily bool) (RefreshRes
 // Once the provider answered, the row is written even when ctx ended: a
 // provider that rotates revokes the old token, so a rotation that is not
 // stored would leave the row with a revoked one. When the write fails, the
-// refresh is ErrTransient and src keeps the rotation until the next
-// refresh writes it, before it calls the provider (security review
-// STORE-1).
+// refresh is ErrTransient and src keeps the rotation, the token change
+// alone, never a daily refresh's time, until the next refresh writes it,
+// before it calls the provider (security review STORE-1, C2-R20 (c)).
 func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource, daily bool) (RefreshResult, error) {
 	if err := s.storeRotation(ctx, ref, src); err != nil {
 		return RefreshResult{}, err
@@ -310,11 +312,15 @@ func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource,
 		now := s.cfg.Clock()
 		rotated := tok.RefreshToken != "" && tok.RefreshToken != l.RefreshToken
 		if rotated || daily {
-			next := l
+			// kept is the token change alone: a refresh whose store fails
+			// keeps it for the next one, and a failed day records no daily
+			// success (C2-R20 (c), C2-R16 (d′)).
+			kept := l
 			if rotated {
-				next.RefreshToken = tok.RefreshToken
-				next.PreviousRefreshTokens = superseded(l.PreviousRefreshTokens, l.RefreshToken)
+				kept.RefreshToken = tok.RefreshToken
+				kept.PreviousRefreshTokens = superseded(l.PreviousRefreshTokens, l.RefreshToken)
 			}
+			next := kept
 			if daily {
 				next.DailyRefreshedAtMs = now.UnixMilli()
 			}
@@ -322,7 +328,7 @@ func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource,
 			switch {
 			case err != nil:
 				if rotated {
-					src.rotation = &rotation{old: row, next: next}
+					src.rotation = &rotation{old: row, next: kept}
 				}
 				return RefreshResult{}, fmt.Errorf("oauth: store the refreshed login %s: %v: %w", ref, err, storage.ErrTransient)
 			case !swapped && !again:
@@ -343,7 +349,8 @@ func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource,
 }
 
 // rotation is a rotated login that a refresh could not store: the row it
-// read, and the login to write in its place.
+// read, and the login to write in its place, which differs from it in its
+// refresh tokens only.
 type rotation struct {
 	old  []byte
 	next login
@@ -463,7 +470,11 @@ func (s *Store) source(ref string) *tokenSource {
 }
 
 // Token returns the access token, refreshed first when it expires within
-// expiryMargin. Its errors wrap storage.ErrAuthExpired or ErrTransient.
+// expiryMargin. Its errors wrap storage.ErrAuthExpired when only a new
+// login or a new setup of the clients mends them, and storage.ErrTransient
+// when a later call may succeed. A fault of the hub's sealer key wraps
+// crypto.ErrKeyUnavailable instead (unsealError, security review SEAL-2),
+// and a token endpoint that is no URL wraps none of them.
 func (t *tokenSource) Token() (*oauth2.Token, error) {
 	t.s.mu.Lock()
 	ctx := t.ctx

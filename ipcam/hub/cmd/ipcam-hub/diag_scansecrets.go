@@ -14,8 +14,10 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/catalog"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
@@ -29,20 +31,23 @@ const scanSecretsSchema = "ipcam.diag.scansecrets/1" //nolint:gosec // G101: a s
 const scanChunk = 1 << 20
 
 // scanSecretsLine is diag scan-secrets' line: how many values it looked
-// for, the files it removed, the files it could not read through, and the
-// files that hold a value and could not be removed, relative to --dir with
-// "/", never a value. The line is printed whenever the scan walked --dir,
-// and the scan exits 1 when either of the last two is not empty (security
-// review DIAG-1).
+// for, this scan's directory of the quarantine, relative to --dir's parent
+// with "/" ("" when no file moved), the files it moved there, the files it
+// could not read through, and the files that hold a value and could not be
+// moved (they stay in --dir), relative to --dir with "/", never a value. A
+// moved file is at <quarantine>/<its path>. The line is printed whenever
+// the scan walked --dir, and the scan exits 1 when either of the last two
+// is not empty (security review DIAG-1).
 type scanSecretsLine struct {
 	Schema string `json:"schema"`
 	Values int    `json:"values"`
 	// ShortValues counts the values of fewer than shortMax bytes, found as
 	// whole tokens only (C2-R16 (e)).
 	ShortValues int      `json:"shortValues"`
-	Removed     []string `json:"removed"`
+	Quarantine  string   `json:"quarantine"`
+	Moved       []string `json:"moved"`
 	Unreadable  []string `json:"unreadable"`
-	Unremoved   []string `json:"unremoved"`
+	Unmoved     []string `json:"unmoved"`
 }
 
 // diagScanSecretsCommand is "ipcam-hub diag scan-secrets [--config <run.json>]
@@ -52,10 +57,12 @@ type scanSecretsLine struct {
 // TV secrets) and every oauth:* refresh token of --config's catalog, which
 // it opens read-only, so it never migrates and never takes the write lock,
 // and adds the values of stdin's JSON lines {"value":"…"}. Every file under
-// --dir that holds a value in one of the forms of encodedNeedles is
-// removed; a value of fewer than shortMax bytes is found in its text forms
-// only as a whole token, and an empty value is refused (C2-R16 (e)). It creates no file of its own: the sealer only unseals, so it
-// makes no key. SQLite's read-only open of a closed WAL catalog creates
+// --dir that holds a value in one of the forms of encodedNeedles moves into
+// the quarantine beside --dir, and no file is removed (quarantine, C2-R20
+// (a)); a value of fewer than shortMax bytes is found in its text forms
+// only as a whole token, and an empty value is refused (C2-R16 (e)). Past
+// the quarantine, it creates no file of its own: the sealer only unseals,
+// so it makes no key. SQLite's read-only open of a closed WAL catalog creates
 // catalog.db-wal and -shm, which belong to the catalog file's owner, not to
 // the scan's (robustFchown, C2-R15 (a)). On the Pi it runs as root on files
 // that the hub's identity owns, so it follows no link as run.json, state/,
@@ -92,9 +99,12 @@ func diagScanSecretsCommand(args []string, stdin io.Reader, stdout, stderr io.Wr
 	slices.Sort(values)
 	values = slices.Compact(values)
 	needles := encodedNeedles(values)
-	res, err := scanAndRemove(*dir, needles, scanOpen)
+	res, err := scanAndQuarantine(*dir, needles, scanOpen)
 	if err != nil {
 		return failed(err)
+	}
+	if res.QuarantineErr != nil {
+		_, _ = fmt.Fprintln(stderr, "ipcam-hub: diag scan-secrets: the quarantine:", res.QuarantineErr)
 	}
 	short := 0
 	for _, v := range values {
@@ -103,9 +113,9 @@ func diagScanSecretsCommand(args []string, stdin io.Reader, stdout, stderr io.Wr
 		}
 	}
 	code := printJSONLine(stdout, stderr, scanSecretsLine{Schema: scanSecretsSchema, Values: len(values), ShortValues: short,
-		Removed: res.Removed, Unreadable: res.Unreadable, Unremoved: res.Unremoved})
-	if code == exitOK && len(res.Unreadable)+len(res.Unremoved) > 0 {
-		_, _ = fmt.Fprintln(stderr, "ipcam-hub: diag scan-secrets: some files could not be scanned or removed: see unreadable and unremoved")
+		Quarantine: res.Quarantine, Moved: res.Moved, Unreadable: res.Unreadable, Unmoved: res.Unmoved})
+	if code == exitOK && len(res.Unreadable)+len(res.Unmoved) > 0 {
+		_, _ = fmt.Fprintln(stderr, "ipcam-hub: diag scan-secrets: some files could not be scanned or quarantined: see unreadable and unmoved")
 		return exitFatal
 	}
 	return code
@@ -178,9 +188,10 @@ const shiftedMin = 8
 // shortMax: a value of fewer bytes (a typed camera user such as "admin", a
 // 4-digit password) is found in its text forms (raw, URL-encoded, a JSON
 // string's body) only as a whole token, never inside a longer word or
-// number, since an ordinary substring hit would remove result files that
-// leak nothing; its base64 and hex forms are still found anywhere
-// (C2-R16 (e)).
+// number, since an ordinary substring hit would quarantine result files
+// that leak nothing (C2-R16 (e)); its base64 and hex forms are not
+// searched, being short enough to occur in ordinary base64 and hex text
+// (C2-R20 (f)).
 const shortMax = 8
 
 // needle is a form of a value that the scan searches for; token: only as a
@@ -202,8 +213,8 @@ type needle struct {
 // its base64 (Std and URL) that only its own bytes determine at each of
 // the three byte offsets, which finds it inside a longer base64 text: an
 // HTTP Basic credential, a base64'd JSON blob (security review DIAG-2). A
-// short value's text forms are whole-token needles (shortMax); a form that
-// is both kinds is a whole-token needle.
+// short value has its text forms only, as whole-token needles (shortMax);
+// a form that is both kinds is a whole-token needle.
 func encodedNeedles(values []string) []needle {
 	index := map[string]int{}
 	var needles []needle
@@ -229,6 +240,9 @@ func encodedNeedles(values []string) []needle {
 			jsonStringBody(v, true), jsonStringBody(v, false),
 		} {
 			add(e, short)
+		}
+		if short {
+			continue
 		}
 		for _, e := range []string{
 			base64.StdEncoding.EncodeToString(b), base64.URLEncoding.EncodeToString(b),
@@ -273,21 +287,31 @@ func jsonStringBody(v string, escapeHTML bool) string {
 	return quoted[1 : len(quoted)-1]
 }
 
-// scanAndRemove removes every regular file under dir that holds a needle,
-// and returns their paths relative to dir with "/", sorted. It walks dir
-// as an os.Root, so a symbolic link is neither followed nor removed, and
-// no path leaves dir. A file or directory that vanishes during the walk (a
-// results writer's temporary file, renamed) cannot leak and is skipped;
-// one that cannot be read, or that holds a needle and cannot be removed,
-// is named in the result and the walk goes on, so that the files removed
-// before it are still reported (security review DIAG-1). open opens a file
-// of the scan: scanOpen.
-func scanAndRemove(dir string, needles []needle, open func(*os.Root, string) (*os.File, error)) (scanResult, error) {
-	res := scanResult{Removed: []string{}, Unreadable: []string{}, Unremoved: []string{}}
+// scanAndQuarantine moves every regular file under dir that holds a
+// needle into this scan's directory of dir's quarantine (quarantine), and
+// returns their paths relative to dir with "/", sorted; it removes no file
+// (C2-R20 (a)). It walks dir as an os.Root, so a symbolic link is neither
+// followed nor moved, and no path leaves dir. A file or directory that
+// vanishes during the walk (a results writer's temporary file, renamed)
+// cannot leak and is skipped; one that cannot be read, or that holds a
+// needle and cannot be moved, is named in the result and the walk goes on,
+// so that the files moved before it are still reported (security review
+// DIAG-1). open opens a file of the scan: scanOpen.
+func scanAndQuarantine(dir string, needles []needle, open func(*os.Root, string) (*os.File, error)) (scanResult, error) {
+	res := scanResult{Moved: []string{}, Unreadable: []string{}, Unmoved: []string{}}
 	if len(needles) == 0 {
 		return res, nil
 	}
-	root, err := os.OpenRoot(dir)
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return scanResult{}, err
+	}
+	q, err := newQuarantine(abs)
+	if err != nil {
+		return scanResult{}, err
+	}
+	defer q.close()
+	root, err := os.OpenRoot(abs)
 	if err != nil {
 		return scanResult{}, err
 	}
@@ -311,27 +335,145 @@ func scanAndRemove(dir string, needles []needle, open func(*os.Root, string) (*o
 			res.Unreadable = append(res.Unreadable, rel)
 			return nil
 		}
-		switch err := root.Remove(rel); {
+		switch err := q.move(rel); {
 		case err == nil:
-			res.Removed = append(res.Removed, rel)
-		case !errors.Is(err, fs.ErrNotExist):
-			res.Unremoved = append(res.Unremoved, rel)
+			res.Moved = append(res.Moved, rel)
+		case q.err == nil && errors.Is(err, fs.ErrNotExist) && gone(root, rel):
+			// It vanished after its read: it cannot leak.
+		default:
+			res.Unmoved = append(res.Unmoved, rel)
 		}
 		return nil
 	})
 	if err != nil {
 		return scanResult{}, err
 	}
-	for _, list := range [][]string{res.Removed, res.Unreadable, res.Unremoved} {
+	for _, list := range [][]string{res.Moved, res.Unreadable, res.Unmoved} {
 		slices.Sort(list)
 	}
+	if q.scan != "" {
+		res.Quarantine = q.name + "/" + q.scan
+	}
+	res.QuarantineErr = q.err
 	return res, nil
 }
 
-// scanResult is what a scan removed, the files it could not read through,
-// and the files that hold a needle and that it could not remove.
+// gone reports whether rel is no longer in root.
+func gone(root *os.Root, rel string) bool {
+	_, err := root.Lstat(rel)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// scanResult is what a scan moved and into which directory of the
+// quarantine (relative to the results root's parent, with "/"; "" when it
+// made none), the files it could not read through, the files that hold a
+// needle and that it could not move, and why the quarantine could not take
+// any file, if so.
 type scanResult struct {
-	Removed, Unreadable, Unremoved []string
+	Quarantine                 string
+	Moved, Unreadable, Unmoved []string
+	QuarantineErr              error
+}
+
+// quarantineSuffix names a results root's quarantine: <results>-quarantine,
+// beside it.
+const quarantineSuffix = "-quarantine"
+
+// quarantine is the directory beside a results root into which diag
+// scan-secrets moves the files that hold a value, each scan into a
+// directory of its own, <results>-quarantine/<scan>/<the file's path>
+// (C2-R20 (a)). A scan that a value steers (a string that every envelope
+// holds) then destroys nothing, and a real leak leaves the results, which
+// is the folder the owner sends, while its bytes stay on the disk. Only
+// the scan's identity may read the quarantine: on Linux it is that
+// identity's directory, 0700 (root's on the Pi, where uploadspike runs the
+// scan as root); on Windows its DACL grants SYSTEM and the Administrators
+// alone, and so does each moved file's (restrictDir, restrictFile). The
+// quarantine and the scan's directory are made at the first file that
+// moves, so a clean scan makes nothing.
+type quarantine struct {
+	parentDir string // the results root's parent
+	results   string // the results root's name in parentDir
+	name      string // the quarantine's name in parentDir
+	parent    *os.Root
+	scan      string // this scan's directory in the quarantine, once made
+	err       error  // why no file can move, once preparing the quarantine failed
+}
+
+// newQuarantine is the quarantine of the results root at abs.
+func newQuarantine(abs string) (*quarantine, error) {
+	parent, results := filepath.Dir(abs), filepath.Base(abs)
+	if parent == abs {
+		return nil, fmt.Errorf("%s has no parent directory to hold its quarantine", abs)
+	}
+	return &quarantine{parentDir: parent, results: results, name: results + quarantineSuffix}, nil
+}
+
+// move moves the results' file rel into this scan's directory of the
+// quarantine, at the same path, preparing the quarantine first when no
+// file moved yet; once preparing failed, no file moves.
+func (q *quarantine) move(rel string) error {
+	if q.err == nil && q.parent == nil {
+		if q.err = q.prepare(); q.err != nil {
+			return q.err
+		}
+	}
+	if q.err != nil {
+		return q.err
+	}
+	from := filepath.Join(q.results, filepath.FromSlash(rel))
+	to := filepath.Join(q.name, q.scan, filepath.FromSlash(rel))
+	if err := q.parent.MkdirAll(filepath.Dir(to), 0o700); err != nil {
+		return err
+	}
+	if err := restrictFile(filepath.Join(q.parentDir, from)); err != nil {
+		return err
+	}
+	return q.parent.Rename(from, to)
+}
+
+// prepare opens the results root's parent, makes the quarantine beside the
+// results root, or takes the one there, which must be a directory of the
+// scan's identity, restricted to it (restrictDir), and makes this scan's
+// directory in it, named by the scan's UTC time.
+func (q *quarantine) prepare() error {
+	parent, err := os.OpenRoot(q.parentDir)
+	if err != nil {
+		return err
+	}
+	q.parent = parent
+	if info, err := parent.Lstat(q.results); err != nil {
+		return err
+	} else if !info.IsDir() {
+		return fmt.Errorf("%s is a link or no directory", filepath.Join(q.parentDir, q.results))
+	}
+	if err := parent.Mkdir(q.name, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	if err := restrictDir(filepath.Join(q.parentDir, q.name)); err != nil {
+		return err
+	}
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	for i := 1; ; i++ {
+		scan := stamp
+		if i > 1 {
+			scan = fmt.Sprintf("%s-%d", stamp, i)
+		}
+		err := parent.Mkdir(filepath.Join(q.name, scan), 0o700)
+		switch {
+		case err == nil:
+			q.scan = scan
+			return restrictDir(filepath.Join(q.parentDir, q.name, scan))
+		case !errors.Is(err, fs.ErrExist) || i == 100:
+			return err
+		}
+	}
+}
+
+func (q *quarantine) close() {
+	if q.parent != nil {
+		_ = q.parent.Close()
+	}
 }
 
 // scanOpen opens a file of the scan; tests replace it.
