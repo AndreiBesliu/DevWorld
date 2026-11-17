@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -76,7 +77,10 @@ func (c clients) check() error {
 // without echo; on Linux it first asks the SD-card confirmation when rec/
 // is on an SD card and the run state has no answer yet (P02). The clients
 // go to the hub's control endpoint, which seals them; nothing is kept on
-// disk. Then the hub goes back to the autostart.
+// disk. Then the hub goes back to the autostart. Another command's
+// handover, while it waits for the clients or once they are in, gets the
+// interactive holder's answer (Handover): the scan, the hub's stop, the
+// lock's release and exit 0.
 func runSetup(ctx context.Context, e *env, args []string) error {
 	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
 	terminal := flags.Bool("terminal", false, "")
@@ -106,18 +110,50 @@ func runSetup(ctx context.Context, e *env, args []string) error {
 		return err
 	}
 	if inTerminal {
-		c, err := readClients(e)
-		if err != nil {
-			return err
-		}
-		if err := saveClients(ctx, h, c); err != nil {
-			return err
-		}
-	} else if err := h.setupPage(ctx); err != nil {
+		err = h.setupTerminal(ctx)
+	} else {
+		err = h.setupPage(ctx)
+	}
+	switch {
+	case errors.Is(err, errHandedOver):
+		h.handBack(ctx)
+		return nil
+	case err != nil:
 		return err
 	}
 	e.printf(msgSetupSaved)
+	select {
+	case <-h.handoverRequested():
+		h.handBack(ctx)
+	default:
+	}
 	return nil
+}
+
+// setupTerminal asks the clients in the terminal and gives them to the
+// hub; a handover while it asks ends it with errHandedOver, a signal with
+// ctx's error.
+func (h *holder) setupTerminal(ctx context.Context) error {
+	type answer struct {
+		c   clients
+		err error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		c, err := readClients(h.e)
+		got <- answer{c, err}
+	}()
+	select {
+	case a := <-got:
+		if a.err != nil {
+			return a.err
+		}
+		return saveClients(ctx, h, a.c)
+	case <-h.handoverRequested():
+		return errHandedOver
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // saveClients hands the clients to the hub and keeps their IDs that the

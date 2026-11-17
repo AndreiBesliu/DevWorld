@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -362,5 +363,47 @@ func TestClose_NotElevatedTellsTheOwner(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r.base, "results")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("results/ after the refusal: %v; want none", err)
+	}
+}
+
+// TestSetup_HandsOverToAnotherCommand (Handover): setup, an interactive
+// holder, answers another command's handover while it waits for the
+// clients, in the terminal (stdin still open) or on the page (Windows):
+// it scans the results with its control tokens, stops its hub, releases
+// the lock and exits 0 with the Romanian line, and the other command takes
+// the hub at once.
+func TestSetup_HandsOverToAnotherCommand(t *testing.T) {
+	for _, mode := range []string{"terminal", "page"} {
+		t.Run(mode, func(t *testing.T) {
+			args := []string{"setup", "--terminal"}
+			if mode == "page" {
+				if runtime.GOOS != "windows" {
+					t.Skip("setup serves its page on Windows only")
+				}
+				args = []string{"setup"}
+			}
+			r := newRig(t)
+			a := r.start(nil, args...)
+			until(t, time.Minute, "setup's hub", func() bool { return len(r.startsBy(a.cmd.Process.Pid)) == 1 })
+			until(t, 30*time.Second, "setup's server", func() bool { code, _ := r.get("/spike/v1/status"); return code == http.StatusOK })
+			began := time.Now()
+			b := r.run(clientsInput(), nil, "setup", "--terminal")
+			if b.code != 0 || time.Since(began) > 30*time.Second {
+				t.Fatalf("the second setup: exit %d after %v\nstdout:\n%s\nstderr:\n%s", b.code, time.Since(began), b.stdout, b.stderr)
+			}
+			if !a.wait(30*time.Second) || a.code != 0 {
+				t.Fatalf("the first setup after the handover: ended %v, exit %d\nstdout:\n%s\nstderr:\n%s", a.code != -1, a.code, a.stdout, a.stderr)
+			}
+			if !strings.Contains(a.stdout.String(), msgHandedOver) || strings.Contains(a.stderr.String(), "handed over") {
+				t.Errorf("the first setup said\n%s\n%s\nwant %q, in Romanian only", a.stdout, a.stderr, msgHandedOver)
+			}
+			if !slices.ContainsFunc(r.records(spiketest.RecordScan), func(s spiketest.FakeRecord) bool { return s.PPID == a.cmd.Process.Pid }) {
+				t.Errorf("the first setup ran no scan before it gave the hub back: %+v", r.records(spiketest.RecordScan))
+			}
+			hub := r.startsBy(a.cmd.Process.Pid)[0].PID
+			if !slices.ContainsFunc(r.records(spiketest.RecordEOFStop), func(s spiketest.FakeRecord) bool { return s.PID == hub }) {
+				t.Errorf("the first setup's hub %d did not stop cleanly", hub)
+			}
+		})
 	}
 }
