@@ -55,17 +55,22 @@ func (d *fakeDriver) WebCell(c string, l, r bool) error {
 	d.cells = append(d.cells, fmt.Sprintf("%s %v %v", c, l, r))
 	return nil
 }
+func (d *fakeDriver) WebClientID() string   { return "web-client.apps" }
 func (d *fakeDriver) HandoverToken() string { return strings.Repeat("ab", 32) }
 func (d *fakeDriver) Handover() int         { return http.StatusNoContent }
 func (d *fakeDriver) DevicePage(w http.ResponseWriter, res hubproc.BeginResult) {
 	_, _ = io.WriteString(w, "device "+res.UserCode)
 }
-func (d *fakeDriver) ReaderPage(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "reader") }
+func (d *fakeDriver) ReaderPage(w http.ResponseWriter, _ *http.Request) {
+	_, _ = io.WriteString(w, "reader")
+}
 func (d *fakeDriver) CallbackPage(w http.ResponseWriter, ok bool) {
 	_, _ = fmt.Fprint(w, "callback ", ok)
 }
-func (d *fakeDriver) Setup(w http.ResponseWriter, _ *http.Request)  { _, _ = io.WriteString(w, "setup") }
-func (d *fakeDriver) Status(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "status") }
+func (d *fakeDriver) Setup(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "setup") }
+func (d *fakeDriver) Status(w http.ResponseWriter, _ *http.Request) {
+	_, _ = io.WriteString(w, "status")
+}
 
 // fakeControl is a control endpoint that records each request's path and
 // body.
@@ -403,9 +408,14 @@ func TestHandoffServer_LanListenerOnlyDuringRemoteLogin(t *testing.T) {
 	}
 	lanAll := func(want bool) {
 		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
 		for _, ip := range addrs {
-			if got := listening(net.JoinHostPort(ip.String(), port)); got != want {
-				t.Errorf("%s:%s listening %v; want %v", ip, port, got, want)
+			addr := net.JoinHostPort(ip.String(), port)
+			for listening(addr) != want && time.Now().Before(deadline) {
+				time.Sleep(50 * time.Millisecond)
+			}
+			if got := listening(addr); got != want {
+				t.Errorf("%s listening %v; want %v", addr, got, want)
 			}
 		}
 		if wildcardListener(t, HandoffPort) {

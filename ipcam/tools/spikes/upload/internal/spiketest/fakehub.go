@@ -58,7 +58,10 @@ type FakeRecord struct {
 	SdCardConfirmed bool     `json:"sdCardConfirmed,omitempty"`
 	Destinations    []string `json:"destinations,omitempty"`
 	Token           bool     `json:"token,omitempty"`
-	AtMs            int64    `json:"atMs"`
+	// Body is a POST /control/v1/clients request's body: the test's own
+	// clients.
+	Body string `json:"body,omitempty"`
+	AtMs int64  `json:"atMs"`
 }
 
 var fakeLogMu sync.Mutex
@@ -186,11 +189,16 @@ func fakeControl(token string) http.Handler {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		record(FakeRecord{Event: RecordRequest, Detail: r.Method + " " + r.URL.Path})
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/control/v1/clients":
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+			record(FakeRecord{Event: RecordRequest, Detail: r.Method + " " + r.URL.Path, Body: string(body)})
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		record(FakeRecord{Event: RecordRequest, Detail: r.Method + " " + r.URL.Path})
+		switch r.URL.Path {
 		case "/control/v1/oauth/begin":
 			var req struct {
 				Platform string `json:"platform"`

@@ -89,8 +89,10 @@ func Mono() (time.Duration, error) {
 	if err := procQueryUnbiasedInterruptTime.Find(); err != nil {
 		return 0, err
 	}
-	var t uint64 // 100-ns units
-	if r, _, err := procQueryUnbiasedInterruptTime.Call(uintptr(unsafe.Pointer(&t))); r == 0 { //nolint:gosec // the call's out parameter
+	// t is in 100-ns units.
+	var t uint64
+	p := unsafe.Pointer(&t) //nolint:gosec // the call's out parameter
+	if r, _, err := procQueryUnbiasedInterruptTime.Call(uintptr(p)); r == 0 {
 		return 0, err
 	}
 	return time.Duration(t) * 100, nil //nolint:gosec // 100-ns units since boot, far below 2^63 ns

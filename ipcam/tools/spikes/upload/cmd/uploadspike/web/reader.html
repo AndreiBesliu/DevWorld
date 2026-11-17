@@ -1,0 +1,102 @@
+<!-- SPIKE-ONLY: ipcam/docs/superpowers/plans/2026-10-18-phase0c2-upload-spike.md -->
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>{{.Title}}</title>
+<style>
+body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 44rem; padding: 0 1rem; line-height: 1.5; }
+button { font-size: 1.2rem; padding: 0.6rem 1.4rem; }
+#log li { margin: 0.2rem 0; }
+</style>
+<script src="https://accounts.google.com/gsi/client" async></script>
+</head>
+<body>
+<h1>{{.L.ReaderTitle}}</h1>
+<p>{{.L.ReaderHelp}}</p>
+<p><strong>{{.L.VisibleWarning}}</strong></p>
+<p id="noclient" hidden>{{.L.NoClient}}</p>
+<p><button id="start" type="button">{{.L.ReaderStart}}</button> <span id="signin" hidden>{{.L.ReaderSignIn}}</span></p>
+<ul id="log"></ul>
+<p id="done" hidden><strong>{{.L.ReaderDone}}</strong></p>
+<p id="resumed" hidden>{{.L.ReaderResumed}}</p>
+<script>
+// The web reader (P21): the Web application client of the project gets a
+// drive.file token through Google Identity Services and keeps it in page
+// memory only; for each creator's folder it lists the folder and reads
+// the probe file vis-<creator>.txt (16 bytes), and posts only booleans.
+// A run that the page's going to the background interrupts restarts by
+// itself on return (C2-R18 (d)).
+const cfg = {{.Reader}};
+const drive = "https://www.googleapis.com/drive/v3/files";
+let token = "", running = false, interrupted = false, finished = false;
+const log = (text) => { const li = document.createElement("li"); li.textContent = text; document.getElementById("log").append(li); };
+
+async function read(target) {
+  const q = encodeURIComponent("'" + target.folderId + "' in parents and trashed=false");
+  const auth = {Authorization: "Bearer " + token};
+  const list = await fetch(drive + "?q=" + q + "&fields=files(id,name)&pageSize=100", {headers: auth});
+  let listed = false, read = false;
+  if (list.ok) {
+    const files = (await list.json()).files || [];
+    const probe = files.find((f) => f.name === "vis-" + target.creator + ".txt");
+    if (probe) {
+      listed = true;
+      const got = await fetch(drive + "/" + encodeURIComponent(probe.id) + "?alt=media", {headers: {...auth, Range: "bytes=0-15"}});
+      read = got.ok && (await got.arrayBuffer()).byteLength === 16;
+    }
+  }
+  return {creator: target.creator, listed, read};
+}
+
+async function clientID() {
+  if (cfg.webClientId || !cfg.remote) return cfg.webClientId;
+  const r = await fetch(cfg.remote + "/spike/v1/visibility/config", {cache: "no-store"});
+  return r.ok ? (await r.json()).webClientId : "";
+}
+
+async function runRead() {
+  if (running || finished) return;
+  running = true; interrupted = false;
+  try {
+    const targets = await (await fetch(cfg.remote + "/spike/v1/visibility/targets", {cache: "no-store"})).json();
+    for (const t of targets) {
+      if (interrupted) return;
+      const cell = await read(t);
+      if (interrupted) return;
+      await fetch(cfg.remote + "/spike/v1/visibility/web", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(cell)});
+      log(t.creator + ": " + (cell.listed ? "listat" : "nelistat") + ", " + (cell.read ? "citit" : "necitit"));
+    }
+    finished = true;
+    document.getElementById("done").hidden = false;
+  } catch (e) {
+    log(String(e));
+  } finally {
+    running = false;
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && running) { interrupted = true; return; }
+  if (!document.hidden && interrupted && !finished) {
+    document.getElementById("resumed").hidden = false;
+    setTimeout(runRead, 500);
+  }
+});
+
+document.getElementById("start").addEventListener("click", async () => {
+  const id = await clientID().catch(() => "");
+  if (!id) { document.getElementById("noclient").hidden = false; return; }
+  document.getElementById("signin").hidden = false;
+  const client = google.accounts.oauth2.initTokenClient({
+    client_id: id,
+    scope: "https://www.googleapis.com/auth/drive.file",
+    callback: (resp) => { if (resp && resp.access_token) { token = resp.access_token; runRead(); } },
+  });
+  client.requestAccessToken();
+});
+</script>
+</body>
+</html>

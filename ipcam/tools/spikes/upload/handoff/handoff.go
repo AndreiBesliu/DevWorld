@@ -43,6 +43,7 @@ const (
 	maxSmallBody   = 16 << 10
 	readHeaderWait = 10 * time.Second
 	hubCallTimeout = 40 * time.Second
+	lanDrain       = 5 * time.Second
 )
 
 // shellOrigins are the video app's shells (spikehub's withCORS): the
@@ -67,8 +68,10 @@ type Driver interface {
 	AllowBegin(dest, platform, plan string) error
 	// Begun tells the driver that a login began.
 	Begun(dest string, res hubproc.BeginResult)
-	// WebCell records a cell of the web reader.
+	// WebCell records a cell of the web reader; WebClientID is the web
+	// reader's client ID, which a reader page on another device reads.
 	WebCell(creator string, listed, read bool) error
+	WebClientID() string
 	// HandoverToken is the run state's; Handover is the holder's answer to
 	// a request that carries it: 204, or 409 while an MI5 run is open.
 	HandoverToken() string
@@ -148,6 +151,20 @@ func New(hub *hubproc.ControlClient, opts Options) *Server {
 
 // Port is the server's port.
 func (s *Server) Port() int { return s.port }
+
+// SetHub points the server at a restarted hub's control endpoint.
+func (s *Server) SetHub(hub *hubproc.ControlClient) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hub = hub
+}
+
+// control is the current hub's control client, nil without one.
+func (s *Server) control() *hubproc.ControlClient {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hub
+}
 
 // ServeLoopback listens on 127.0.0.1:<port>, and [::1]:<port> when the
 // host has IPv6 loopback, retrying the bind for 10 s while the port is in
@@ -281,7 +298,8 @@ func (s *Server) CloseLAN() {
 	}
 }
 
-// closeSession closes sess, once.
+// closeSession closes sess, once: its listeners at once, its connections
+// once their answers are out, within lanDrain.
 func (s *Server) closeSession(sess *lanSession) {
 	s.mu.Lock()
 	if s.lan != sess {
@@ -291,8 +309,12 @@ func (s *Server) closeSession(sess *lanSession) {
 	s.lan = nil
 	s.mu.Unlock()
 	sess.timer.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), lanDrain)
+	defer cancel()
 	for _, srv := range sess.srvs {
-		_ = srv.Close()
+		if srv.Shutdown(ctx) != nil {
+			_ = srv.Close()
+		}
 	}
 }
 
@@ -331,6 +353,7 @@ func (s *Server) handler(loopback bool) http.Handler {
 	mux.Handle("/spike/v1/results", shell(s.results))
 	mux.Handle("/spike/v1/visibility/targets", reader(s.targets))
 	mux.Handle("/spike/v1/visibility/web", reader(s.webCell))
+	mux.Handle("/spike/v1/visibility/config", reader(s.readerConfig))
 	mux.HandleFunc("GET /oauth/device", s.devicePage)
 	if s.opts.OneDrive {
 		mux.HandleFunc("GET /oauth/callback", s.callback)
@@ -426,7 +449,8 @@ func (s *Server) beginLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
 		return
 	}
-	if s.opts.Driver == nil || s.hub == nil {
+	hub := s.control()
+	if s.opts.Driver == nil || hub == nil {
 		noLogin(w)
 		return
 	}
@@ -452,7 +476,7 @@ func (s *Server) beginLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), hubCallTimeout)
 	defer cancel()
-	res, err := s.hub.Begin(ctx, hubproc.BeginRequest{DestID: dest, Provider: provider, Platform: platform, LoopbackPort: port, Plan: n.Plan})
+	res, err := hub.Begin(ctx, hubproc.BeginRequest{DestID: dest, Provider: provider, Platform: platform, LoopbackPort: port, Plan: n.Plan})
 	if err != nil {
 		writeHubFailure(w, err)
 		return
@@ -483,7 +507,8 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
 		return
 	}
-	if s.hub == nil {
+	hub := s.control()
+	if hub == nil {
 		noLogin(w)
 		return
 	}
@@ -497,13 +522,15 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), hubCallTimeout)
 	defer cancel()
-	done, err := s.hub.Complete(ctx, req.State, req.Code)
+	done, err := hub.Complete(ctx, req.State, req.Code)
 	if err != nil {
 		writeHubFailure(w, err)
 		return
 	}
-	s.CloseLAN()
 	writeJSON(w, http.StatusOK, done)
+	// The session ends once this answer is out: its listener closes at
+	// once, and its connections after their answers (closeSession).
+	go s.CloseLAN()
 }
 
 // decodeExact decodes r's body, at most maxSmallBody bytes, into v,
@@ -533,7 +560,8 @@ func (s *Server) devicePage(w http.ResponseWriter, r *http.Request) {
 // callback is OneDrive's web redirect (only if A5 passed): it forwards the
 // code and state to the hub and shows the result.
 func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
-	if s.hub == nil || s.opts.Driver == nil {
+	hub := s.control()
+	if hub == nil || s.opts.Driver == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -542,7 +570,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	if q.Get("state") != "" && q.Get("code") != "" {
 		ctx, cancel := context.WithTimeout(r.Context(), hubCallTimeout)
 		defer cancel()
-		_, err := s.hub.Complete(ctx, q.Get("state"), q.Get("code"))
+		_, err := hub.Complete(ctx, q.Get("state"), q.Get("code"))
 		ok = err == nil
 	}
 	s.opts.Driver.CallbackPage(w, ok)
@@ -563,13 +591,14 @@ func (s *Server) targets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
 		return
 	}
-	if s.hub == nil {
+	hub := s.control()
+	if hub == nil {
 		noLogin(w)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), hubCallTimeout)
 	defer cancel()
-	t, err := s.hub.Targets(ctx)
+	t, err := hub.Targets(ctx)
 	if err != nil {
 		writeHubFailure(w, err)
 		return
@@ -578,6 +607,16 @@ func (s *Server) targets(w http.ResponseWriter, r *http.Request) {
 		t = []hubproc.Target{}
 	}
 	writeJSON(w, http.StatusOK, t)
+}
+
+// readerConfig answers the web reader's client ID (no secret), for a
+// reader page that `mi6 reader --hub` serves on another device.
+func (s *Server) readerConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || s.opts.Driver == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "none"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"webClientId": s.opts.Driver.WebClientID()})
 }
 
 // webCell records a web reader's cell: exactly creator, listed and read.

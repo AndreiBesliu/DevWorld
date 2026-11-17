@@ -18,9 +18,15 @@ const markerText = "SPIKE" + "-ONLY" + ": ipcam/docs/superpowers/plans/2026-10-1
 
 // markedNonGoFiles are the spike files outside the Go code of this module that
 // must carry the marker, relative to this directory: the windows job's S4U
-// helper (Task 1). Task 9 adds uploadspike's pages, Task 9a the video app's
-// OAuth files.
-var markedNonGoFiles = []string{"ci/s4u-run.ps1"}
+// helper (Task 1) and uploadspike's embedded pages (Task 9). Task 9a adds the
+// video app's OAuth files.
+var markedNonGoFiles = []string{
+	"ci/s4u-run.ps1",
+	"cmd/uploadspike/web/setup.html",
+	"cmd/uploadspike/web/device.html",
+	"cmd/uploadspike/web/reader.html",
+	"cmd/uploadspike/web/status.html",
+}
 
 // markerLine is the first line that a file of the given type must have.
 func markerLine(path string) (string, error) {
