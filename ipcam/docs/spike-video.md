@@ -19,7 +19,7 @@ Textele între «» apar exact așa în programele de test. Textele între „�
 | PC: Chrome | S10, S1, S2, S3-9, S3-16, S4, S7, S9 | 1 oră și 5 min |
 | PC: Edge | S10, S1, S2, S3-9, S9 | 20 min |
 | PC: Firefox | S10, S1, S2, S3-9, S9 | 25 min, cu verificarea pluginului |
-| PC: aplicația ipcam-desktop | S10, S1, S2, S3-16, S4, S7, S9 | 55 min, cu instalarea |
+| PC: ipcam-desktop | S10, S1, S2, S3-16, S4, S7, S9 | 55 min, cu instalarea |
 | Telefon: Galaxy A24 | S10, S1, S2, S3-9, pauză de 10 min, S3-4, S4, S5, S6, S7, S8, S9 | 1 oră și 35 min, cu instalarea și pauza |
 | Trimiterea rezultatelor | | 5 min |
 | **Total, fără pasul opțional** | | **4 ore și 40 min** |

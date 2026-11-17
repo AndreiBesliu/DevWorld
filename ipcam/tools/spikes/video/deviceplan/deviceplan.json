@@ -1,0 +1,41 @@
+{
+  "version": "spike-video-v0.1.1",
+  "pauseMinutes": 10,
+  "devices": [
+    {
+      "id": "chrome",
+      "label": "Chrome",
+      "platform": "chrome",
+      "pc": true,
+      "steps": ["S10", "S1", "S2", "S3-9", "S3-16", "S4", "S7", "S9"]
+    },
+    {
+      "id": "edge",
+      "label": "Edge",
+      "platform": "edge",
+      "pc": true,
+      "steps": ["S10", "S1", "S2", "S3-9", "S9"]
+    },
+    {
+      "id": "firefox",
+      "label": "Firefox",
+      "platform": "firefox",
+      "pc": true,
+      "steps": ["S10", "S1", "S2", "S3-9", "S9"]
+    },
+    {
+      "id": "ipcam-desktop",
+      "label": "ipcam-desktop",
+      "platform": "windows-tauri",
+      "pc": true,
+      "steps": ["S10", "S1", "S2", "S3-16", "S4", "S7", "S9"]
+    },
+    {
+      "id": "phone",
+      "label": "Galaxy A24",
+      "platform": "android",
+      "pc": false,
+      "steps": ["S10", "S1", "S2", "S3-9", "pause", "S3-4", "S4", "S5", "S6", "S7", "S8", "S9"]
+    }
+  ]
+}

@@ -6,6 +6,8 @@ import (
 	"net"
 	"slices"
 	"strings"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/deviceplan"
 )
 
 // lanAddr is a private IPv4 address of this PC, with the name of its network
@@ -69,6 +71,11 @@ type bannerInfo struct {
 	// awakeErr is why it could not; both are empty on the other systems.
 	keepsAwake bool
 	awakeErr   error
+	// browserOpened is set when spikehub opened its page in the default
+	// browser (Windows), and browserErr is why it could not; both are empty
+	// when it did not try.
+	browserOpened bool
+	browserErr    error
 }
 
 // writeBanner prints the start banner, in Romanian: where the phone connects,
@@ -81,7 +88,7 @@ func writeBanner(w io.Writer, b bannerInfo) {
 	p := func(format string, args ...any) { _, _ = fmt.Fprintf(w, format+"\n", args...) }
 
 	p("")
-	p("spikehub: serverul de test video pentru telefon și PC (Faza 0 b)")
+	p("spikehub %s: serverul de test video pentru telefon și PC (Faza 0 b)", deviceplan.Version())
 	p("")
 	switch {
 	case b.lanErr != nil:
@@ -101,6 +108,12 @@ func writeBanner(w io.Writer, b bannerInfo) {
 		p("«Proba ipcam» și scrieți în ea una dintre adresele de mai sus (nu în browserul telefonului).")
 	}
 	p("Pe acest PC: în browsere și în ipcam-desktop folosiți adresa http://127.0.0.1:%d.", b.port)
+	switch {
+	case b.browserOpened:
+		p("Pagina de test s-a deschis în browserul implicit. În celelalte browsere deschideți aceeași adresă.")
+	case b.browserErr != nil:
+		p("Nu am putut deschide browserul (%v). Deschideți singur adresa http://127.0.0.1:%d.", b.browserErr, b.port)
+	}
 	p("")
 	p("Dacă telefonul nu se poate conecta:")
 	p("  - același Wi-Fi, nu rețeaua pentru oaspeți; permiteți spikehub în firewall la «Rețele private»;")

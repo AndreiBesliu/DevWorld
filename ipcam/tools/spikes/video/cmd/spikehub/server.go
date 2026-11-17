@@ -74,6 +74,11 @@ type hub struct {
 	resultsMu sync.Mutex
 	// toldFull is set once the console has said that the folder is full.
 	toldFull bool
+
+	// progressMu guards progressCache, the results files that the progress
+	// has read, by name (progress.go).
+	progressMu    sync.Mutex
+	progressCache map[string]cachedFacts
 }
 
 func newHub(cfg hubConfig) *hub {
@@ -95,6 +100,7 @@ func (h *hub) Handler() http.Handler {
 	mux.HandleFunc("GET /spike/v1/cameras", h.handleCameras)
 	mux.HandleFunc("POST /spike/v1/offer", h.handleOffer)
 	mux.HandleFunc("POST /spike/v1/results", h.handleResults)
+	mux.HandleFunc("GET /spike/v1/progress", h.handleProgress)
 	mux.Handle("GET /media/hls/", http.StripPrefix("/media/hls/", h.hlsHandler()))
 	mux.Handle("GET /", h.appHandler())
 	return h.withCORS(mux)
