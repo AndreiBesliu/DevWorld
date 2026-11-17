@@ -85,7 +85,7 @@ func diagVisibilityCommand(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "ipcam-hub: diag visibility:", err)
 		return exitFatal
 	}
-	cfg, hubID, err := uploadsOf(*config)
+	cfg, hubID, err := uploadsOfStrict(*config)
 	if err != nil {
 		return failed(err)
 	}
@@ -105,8 +105,8 @@ func diagVisibilityCommand(args []string, stdout, stderr io.Writer) int {
 		return failed(err)
 	}
 	defer func() { _ = cat.Close() }()
-	client, _ := newHubClient()
-	store, err := newOAuthStore(cfg, cat, client)
+	client, tokens, _ := newHubClient()
+	store, err := newOAuthStore(cfg, cat, tokens)
 	if err != nil {
 		return failed(err)
 	}

@@ -25,11 +25,20 @@ import (
 // sets it; without it, run serves no control endpoint.
 const controlTokenEnv = "IPCAM_CONTROL_TOKEN" //nolint:gosec // G101: the name of a variable
 
-// The control endpoint's limits.
+// The control endpoint's limits. A request's header is read before its
+// bearer token is checked, so any local process may send one: it holds
+// controlMaxHeader bytes at most and arrives within controlHeaderTimeout,
+// and the endpoint serves controlMaxConns connections at once, so that no
+// local process makes the hub hold much memory (security review CTL-1).
+// uploadspike, the one caller, sends a few small requests at a time.
 const (
-	controlMaxBody     = 64 << 10
-	controlReadTimeout = 10 * time.Second
-	defaultTestingDays = 7 // Phase 0's Google project is in Testing (P53)
+	controlMaxBody       = 64 << 10
+	controlMaxHeader     = 8 << 10
+	controlHeaderTimeout = 2 * time.Second
+	controlReadTimeout   = 10 * time.Second
+	controlIdleTimeout   = 30 * time.Second
+	controlMaxConns      = 128
+	defaultTestingDays   = 7 // Phase 0's Google project is in Testing (P53)
 )
 
 // controlTokenPattern is a valid control token.
@@ -103,13 +112,16 @@ func readControlToken() (string, error) {
 // request needs Authorization: Bearer <token>; no answer, event or error
 // holds a token, a secret, a code or a verifier.
 type control struct {
-	token string
-	store *oauth.Store
-	up    *uploads // nil without an uploads section
-	uc    *uploadsConfig
-	cat   *catalog.DB
-	ev    *events
-	conns *connTracker
+	token   string
+	store   *oauth.Store
+	unblock func(ref string) // the uploads' Unblock of a tokenRef; nil without an uploads section
+	uc      *uploadsConfig
+	cat     *catalog.DB
+	ev      *events
+	conns   *connTracker
+	// maxConns is how many connections the endpoint serves at once;
+	// controlMaxConns when 0.
+	maxConns int
 
 	mu       sync.Mutex
 	reported map[string]bool // device logins whose end went out as an event
@@ -123,11 +135,16 @@ func (c *control) serve(ctx context.Context) (string, func(), error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("the control endpoint: %w", err)
 	}
-	srv := &http.Server{Handler: c.handler(), ReadHeaderTimeout: controlReadTimeout, ReadTimeout: controlReadTimeout}
+	maxConns := c.maxConns
+	if maxConns <= 0 {
+		maxConns = controlMaxConns
+	}
+	srv := &http.Server{Handler: c.handler(), MaxHeaderBytes: controlMaxHeader, ReadHeaderTimeout: controlHeaderTimeout,
+		ReadTimeout: controlReadTimeout, IdleTimeout: controlIdleTimeout}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = srv.Serve(ln)
+		_ = srv.Serve(newLimitListener(ln, maxConns))
 	}()
 	stop := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownWait)
@@ -221,7 +238,11 @@ func (c *control) begin(w http.ResponseWriter, r *http.Request) {
 }
 
 // complete redeems a plan A login's code; the destinations of its tokenRef
-// are unblocked.
+// are unblocked. The login's end goes out as an event here unless a status
+// or an earlier complete reported it (Task 9A review M1); a complete that
+// names no plan A login (an unknown state, or a device login's) reports
+// nothing, and leaves a device login's report to its own end (security
+// review CTL-2).
 func (c *control) complete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		State string `json:"state"`
@@ -232,13 +253,14 @@ func (c *control) complete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	done, err := c.store.Complete(r.Context(), req.State, req.Code)
-	c.firstReport(req.State) // its end goes out here: a later status reports it no more
 	if err != nil {
-		c.failed(done.DestID, "complete", err)
+		if !errors.Is(err, oauth.ErrStateUnknown) && c.firstReport(req.State) {
+			c.failed(done.DestID, "complete", err)
+		}
 		writeFailure(w, http.StatusBadRequest, err)
 		return
 	}
-	c.completed(done)
+	c.completed(done, c.firstReport(req.State))
 	writeControl(w, http.StatusOK, done)
 }
 
@@ -256,8 +278,8 @@ func (c *control) status(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, oauth.ErrStateUnknown):
 		writeFailure(w, http.StatusNotFound, err)
 		return
-	case status == oauth.StatusCompleted && c.firstReport(state):
-		c.completed(done)
+	case status == oauth.StatusCompleted:
+		c.completed(done, c.firstReport(state))
 	case status == oauth.StatusFailed && c.firstReport(state):
 		c.failed(done.DestID, stage, err)
 	case status == oauth.StatusExpired && c.firstReport(state):
@@ -332,22 +354,72 @@ func (c *control) targets(w http.ResponseWriter, r *http.Request) {
 	writeControl(w, http.StatusOK, out)
 }
 
-// resetConnections closes the drivers' and the token store's connections,
-// idle and in flight: each request in flight fails as transient and is
-// retried on a new connection (MI5 calls it right after its block).
+// resetConnections closes the drivers' connections, idle and in flight:
+// each request in flight fails as transient and is retried on a new
+// connection (MI5 calls it right after its block). Of the token store's
+// connections it closes the idle ones only (newHubClient).
 func (c *control) resetConnections(w http.ResponseWriter, _ *http.Request) {
 	c.conns.reset()
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// completed reports a completed login and unblocks the destinations of its
-// tokenRef.
-func (c *control) completed(done oauth.Completion) {
-	c.ev.emit("oauth_completed", map[string]any{"destId": done.DestID, "provider": done.Provider, "platform": done.Platform,
-		"plan": done.Plan, "clientType": done.ClientType, "issuedAtMs": done.IssuedAt.UnixMilli()})
-	if c.up != nil {
-		c.up.unblock(done.DestID)
+// completed unblocks the destinations of a completed login's tokenRef, at
+// every answer that reports it completed (Unblock is idempotent), and
+// reports it as an event when report is set, its end's first report
+// (security review CTL-2).
+func (c *control) completed(done oauth.Completion, report bool) {
+	if report {
+		c.ev.emit("oauth_completed", map[string]any{"destId": done.DestID, "provider": done.Provider, "platform": done.Platform,
+			"plan": done.Plan, "clientType": done.ClientType, "issuedAtMs": done.IssuedAt.UnixMilli()})
 	}
+	if c.unblock != nil {
+		c.unblock(done.DestID)
+	}
+}
+
+// limitListener accepts at most a fixed number of connections at once; an
+// Accept beyond them waits until one closes, or the listener does.
+type limitListener struct {
+	net.Listener
+	slots     chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newLimitListener(ln net.Listener, n int) net.Listener {
+	return &limitListener{Listener: ln, slots: make(chan struct{}, n), closed: make(chan struct{})}
+}
+
+func (l *limitListener) Accept() (net.Conn, error) {
+	select {
+	case l.slots <- struct{}{}:
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		<-l.slots
+		return nil, err
+	}
+	return &limitedConn{Conn: conn, release: func() { <-l.slots }}, nil
+}
+
+func (l *limitListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return l.Listener.Close()
+}
+
+// limitedConn frees its slot once closed.
+type limitedConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *limitedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
 }
 
 // failed reports a login's or a refresh's failure, by its reason only.

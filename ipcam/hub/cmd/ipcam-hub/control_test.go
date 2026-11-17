@@ -385,8 +385,10 @@ func TestControl_CompleteUnblocksEveryDestinationOfItsTokenRef(t *testing.T) {
 	if len(completed) != 1 || completed[0]["clientType"] != "desktop" || completed[0]["issuedAtMs"] == nil {
 		t.Errorf("oauth_completed %v", completed)
 	}
-	if failed := ofTypeIn(all, "oauth_failed", "destId", "g-windows"); len(failed) != 1 || failed[0]["stage"] != "complete" || failed[0]["reason"] != "state" {
-		t.Errorf("oauth_failed %v, want the second complete's, reason state", failed)
+	// One end event per login (Task 9A review M1): the second complete
+	// answers reason state and reports nothing.
+	if failed := ofTypeIn(all, "oauth_failed", "destId", "g-windows"); len(failed) != 0 {
+		t.Errorf("oauth_failed %v, want none: the login's end went out as oauth_completed", failed)
 	}
 	srv.mu.Lock()
 	var secrets []string

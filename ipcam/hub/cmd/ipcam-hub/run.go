@@ -72,11 +72,34 @@ type runJobDef struct {
 // reconcile and the verification could read none of the job's files. Its
 // errors quote no key.
 func loadRunConfig(path string) (runConfig, []recorder.Job, *age.X25519Identity, error) {
-	var cfg runConfig
 	b, err := os.ReadFile(path) //nolint:gosec // the configuration that the caller named
 	if err != nil {
-		return cfg, nil, nil, err
+		return runConfig{}, nil, nil, err
 	}
+	return parseRunConfig(path, b, true)
+}
+
+// maxRunConfig bounds a run.json that a root command reads.
+const maxRunConfig = 4 << 20
+
+// loadRunConfigStrict is loadRunConfig for the diag commands that root
+// runs on the Pi on the hub identity's run.json (scan-secrets,
+// visibility): it reads run.json as readRegular does, never through a link
+// or from a FIFO (security review SEAL-1), and neither its jobs nor its
+// identityFile, which those commands do not need.
+func loadRunConfigStrict(path string) (runConfig, error) {
+	b, err := readRegular(path, maxRunConfig)
+	if err != nil {
+		return runConfig{}, err
+	}
+	cfg, _, _, err := parseRunConfig(path, b, false)
+	return cfg, err
+}
+
+// parseRunConfig is the run configuration b, read from path, with its jobs
+// and its identity when withJobs is set.
+func parseRunConfig(path string, b []byte, withJobs bool) (runConfig, []recorder.Job, *age.X25519Identity, error) {
+	var cfg runConfig
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
@@ -95,8 +118,12 @@ func loadRunConfig(path string) (runConfig, []recorder.Job, *age.X25519Identity,
 			return cfg, nil, nil, fmt.Errorf("%s: %w", path, err)
 		}
 	}
+	if !withJobs {
+		return cfg, nil, nil, nil
+	}
 	var id *age.X25519Identity
 	if cfg.IdentityFile != "" {
+		var err error
 		if id, err = loadIdentity(cfg.IdentityFile); err != nil {
 			return cfg, nil, nil, err
 		}
@@ -283,15 +310,15 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	obs := newObserver(ev, stderr, card)
 	defer obs.close()
 	rc.Observer = obs
-	// The token store, on the drivers' client, whose connections the control
-	// endpoint resets (Task 9); c1's run, with neither uploads nor control,
-	// has none.
+	// The token store, on a client of its own beside the drivers', whose
+	// connections the control endpoint resets (Task 9; newHubClient); c1's
+	// run, with neither uploads nor control, has none.
 	var store *oauth.Store
 	var conns *connTracker
 	if up != nil || controlToken != "" {
-		var client *http.Client
-		client, conns = newHubClient()
-		if store, err = newOAuthStore(cfg, cat, client); err != nil {
+		var client, tokens *http.Client
+		client, tokens, conns = newHubClient()
+		if store, err = newOAuthStore(cfg, cat, tokens); err != nil {
 			return fail(err)
 		}
 		if up != nil {
@@ -301,7 +328,10 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 	if controlToken != "" {
-		c := &control{token: controlToken, store: store, up: up, uc: cfg.Uploads, cat: cat, ev: ev, conns: conns, reported: map[string]bool{}}
+		c := &control{token: controlToken, store: store, uc: cfg.Uploads, cat: cat, ev: ev, conns: conns, reported: map[string]bool{}}
+		if up != nil {
+			c.unblock = up.unblock
+		}
 		addr, stopControl, err := c.serve(ctx)
 		if err != nil {
 			return fail(err)

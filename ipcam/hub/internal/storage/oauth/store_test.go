@@ -48,10 +48,12 @@ func (c *testClock) Add(d time.Duration) {
 // The tests' OAuth clients. Their IDs and secrets are assembled at run time
 // and never take a provider's shape (P46).
 var (
-	idAndroid, idDesktop, idTV, idWeb, idEntra = "android-client", "desktop-client", "tv-client", "web-client", "entra-client"
-	secretDesktop                              = "SENT" + "INEL-desktop-secret"
-	secretTV                                   = "SENT" + "INEL-tv-secret"
-	secretWeb                                  = "SENT" + "INEL-web-secret"
+	// At least 16 bytes each, as the hub takes (security review DIAG-4).
+	idAndroid, idDesktop, idTV, idWeb, idEntra = "android-client-id-0001", "desktop-client-id-0001", "tv-client-id-0001",
+		"web-client-id-0001", "entra-client-id-0001"
+	secretDesktop = "SENT" + "INEL-desktop-secret"
+	secretTV      = "SENT" + "INEL-tv-secret"
+	secretWeb     = "SENT" + "INEL-web-secret"
 )
 
 // hubClients are the clients as the hub holds them: the Web client's secret

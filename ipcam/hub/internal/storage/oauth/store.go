@@ -74,8 +74,9 @@ type pending struct {
 	polling  bool
 
 	used       bool
+	redeeming  bool // plan A: Complete's call to the token endpoint is in flight
 	completion *Completion
-	failed     error // a device login that the provider ended
+	failed     error // a login that the provider ended, or whose store failed
 }
 
 // New returns a store on cfg. It touches no file and makes no call.
@@ -131,6 +132,9 @@ func (s *Store) SetClients(ctx context.Context, c Clients) error {
 		case (t == ClientAndroid || t == ClientWeb) && cl.Secret != "":
 			return fmt.Errorf("oauth: the Google %s client takes no secret", t)
 		}
+		if err := checkClient("the Google "+string(t)+" client", cl); err != nil {
+			return err
+		}
 		rows[clientRow(storage.KindGoogleDrive, t)] = cl
 	}
 	if m := c.Microsoft; m != nil {
@@ -139,6 +143,9 @@ func (s *Store) SetClients(ctx context.Context, c Clients) error {
 			return errors.New("oauth: the Microsoft client has no ID")
 		case m.Secret != "":
 			return errors.New("oauth: the Microsoft client is public and takes no secret")
+		}
+		if err := checkClient("the Microsoft client", *m); err != nil {
+			return err
 		}
 		rows[clientRow(storage.KindOneDrivePersonal, ClientEntra)] = *m
 	}
@@ -221,9 +228,25 @@ func (s *Store) unsealRow(ctx context.Context, id string) ([]byte, bool, error) 
 	}
 	plain, err := s.cfg.Sealer.Unseal(ctx, id, sealed)
 	if err != nil {
-		return nil, false, fmt.Errorf("oauth: unseal %s: %w: %w", id, err, storage.ErrAuthExpired)
+		return nil, false, unsealError(id, err)
 	}
 	return plain, true, nil
+}
+
+// unsealError is the error of the failed Unseal of what (a row): a blob
+// that does not open under its label is ErrAuthExpired, which the setup or
+// a new login mends; a fault of the sealer's key (crypto.ErrKeyUnavailable)
+// is neither ErrAuthExpired nor ErrTransient, since no login mends it and
+// the outbox must not ask for one; a ctx that ended is ErrTransient
+// (security review SEAL-2).
+func unsealError(what string, err error) error {
+	switch {
+	case errors.Is(err, crypto.ErrSealedLabel):
+		return fmt.Errorf("oauth: unseal %s: %w: %w", what, err, storage.ErrAuthExpired)
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("oauth: unseal %s: %w: %w", what, err, storage.ErrTransient)
+	}
+	return fmt.Errorf("oauth: unseal %s, a fault of the hub's sealer: %w", what, err)
 }
 
 // Begin starts a login of r.DestID: plan A returns the authorization URL
@@ -323,23 +346,34 @@ func (s *Store) Complete(ctx context.Context, state, code string) (Completion, e
 		s.mu.Unlock()
 		return named, ErrStateExpired
 	}
-	p.used = true
+	p.used, p.redeeming = true, true
 	verifier := p.verifier
 	p.verifier = ""
 	s.mu.Unlock()
+	c, err := s.redeem(ctx, p, verifier, code)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p.redeeming = false
+	if err != nil {
+		p.failed = err // Status reports it failed (Task 9A review M2)
+		return named, err
+	}
+	return c, nil
+}
+
+// redeem redeems plan A's code with p's verifier and stores the login. The
+// code is used up once the provider sees it, so the call and the store go
+// on when the caller goes away meanwhile, or the user's consent would be
+// lost (security review CTL-4); tokenTimeout still bounds the call.
+func (s *Store) redeem(ctx context.Context, p *pending, verifier, code string) (Completion, error) {
+	ctx = context.WithoutCancel(ctx)
 	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {p.route.RedirectURI},
 		"code_verifier": {verifier}}
 	tok, err := s.tokenCall(ctx, p.req.Provider, p.client, form)
 	if err != nil {
-		return named, err
+		return Completion{}, err
 	}
-	// The code is used up: the login is stored even when the caller goes
-	// away meanwhile, or the user's consent would be lost.
-	c, err := s.completed(context.WithoutCancel(ctx), p, tok)
-	if err != nil {
-		return named, err
-	}
-	return c, nil
+	return s.completed(ctx, p, tok)
 }
 
 // named is the Completion that names p's login, with no IssuedAt.
@@ -372,15 +406,24 @@ func (s *Store) DeviceStatus(ctx context.Context, state string) (Completion, err
 		err := p.failed
 		s.mu.Unlock()
 		return named, err
+	case p.polling:
+		// A poll is in flight, which may be redeeming the approved device
+		// code: never expired meanwhile, or the completion that follows
+		// would lose the login's one end report (security review CTL-2).
+		s.mu.Unlock()
+		return named, ErrAuthorizationPending
 	case !now.Before(p.expires):
 		s.mu.Unlock()
 		return named, ErrStateExpired
-	case p.polling || now.Before(p.nextPoll):
+	case now.Before(p.nextPoll):
 		s.mu.Unlock()
 		return named, ErrAuthorizationPending
 	}
 	p.polling = true
 	s.mu.Unlock()
+	// The provider redeems an approved device code once: the poll goes on
+	// when its caller goes away (security review CTL-4).
+	ctx = context.WithoutCancel(ctx)
 	form := url.Values{"grant_type": {grantDeviceCode}, "device_code": {p.device}}
 	tok, err := s.tokenCall(ctx, p.req.Provider, p.client, form)
 	if err == nil {
@@ -399,7 +442,9 @@ func (s *Store) DeviceStatus(ctx context.Context, state string) (Completion, err
 		p.nextPoll = now.Add(p.interval)
 		s.mu.Unlock()
 		return named, ErrAuthorizationPending
-	case errors.As(err, &pe) && pe.Status < 500 && pe.Status != 429:
+	case endsLogin(err):
+		// access_denied, expired_token, invalid_grant…: by its OAuth code,
+		// never by its status alone (security review STORE-3).
 		p.failed = err
 		s.mu.Unlock()
 		return named, err
@@ -439,9 +484,12 @@ const (
 )
 
 // Status is the login of state: pending, completed with its Completion,
-// expired, or failed when the provider ended a device login or the hub
-// could not store an approved one, with its error. A device login is polled as DeviceStatus does. The Completion
-// names the login whatever the status.
+// expired, or failed with its error when the provider ended the login or
+// the hub could not store an approved one; a poll's or a Complete's error
+// that ends nothing (no answer, a proxy's page) is pending. A login whose
+// code or device code is being redeemed is pending, also past its life. A
+// device login is polled as DeviceStatus does. The Completion names the
+// login whatever the status.
 func (s *Store) Status(ctx context.Context, state string) (string, Completion, error) {
 	s.mu.Lock()
 	p := s.pending[state]
@@ -451,21 +499,29 @@ func (s *Store) Status(ctx context.Context, state string) (string, Completion, e
 	}
 	if p.device != "" {
 		c, err := s.DeviceStatus(ctx, state)
+		s.mu.Lock()
+		failed := p.failed != nil
+		s.mu.Unlock()
 		switch {
 		case err == nil:
 			return StatusCompleted, c, nil
-		case errors.Is(err, ErrAuthorizationPending), errors.Is(err, storage.ErrTransient):
-			return StatusPending, c, nil
 		case errors.Is(err, ErrStateExpired):
 			return StatusExpired, c, nil
+		case failed:
+			return StatusFailed, c, err
 		}
-		return StatusFailed, c, err
+		// Only an ended login is failed (security review STORE-4).
+		return StatusPending, c, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
 	case p.completion != nil:
 		return StatusCompleted, *p.completion, nil
+	case p.failed != nil:
+		return StatusFailed, p.named(), p.failed
+	case p.redeeming:
+		return StatusPending, p.named(), nil
 	case !s.cfg.Clock().Before(p.expires):
 		return StatusExpired, p.named(), nil
 	}
@@ -481,11 +537,18 @@ func (s *Store) completed(ctx context.Context, p *pending, tok tokenAnswer) (Com
 	now := s.cfg.Clock()
 	l := login{RefreshToken: tok.RefreshToken, Provider: p.req.Provider, Platform: p.req.Platform,
 		ClientType: p.route.ClientType, Plan: p.route.Plan, IssuedAtMs: now.UnixMilli()}
+	// The new login keeps the tokens of the one it replaces for the
+	// known-secrets scan (security review DIAG-3): a new consent revokes
+	// none of them. A row that does not open has none to keep.
+	if _, old, ok, err := s.readLogin(ctx, p.req.DestID); err == nil && ok && old.RefreshToken != l.RefreshToken {
+		l.PreviousRefreshTokens = superseded(old.PreviousRefreshTokens, old.RefreshToken)
+	}
 	if err := s.putLogin(ctx, p.req.DestID, l); err != nil {
 		return Completion{}, err
 	}
 	src := s.source(p.req.DestID)
 	src.mu.Lock()
+	src.rotation = nil // the new login replaces a rotation still to store
 	src.set(tok, now)
 	src.mu.Unlock()
 	c := Completion{DestID: p.req.DestID, Provider: p.req.Provider, Platform: p.req.Platform, Plan: p.route.Plan,
@@ -519,9 +582,11 @@ type SecretReader interface {
 
 // KnownSecrets unseals, in RAM, every client row and every login row of
 // secrets and returns their secret values: the clients' IDs and secrets,
-// and the logins' refresh tokens, for the known-secrets scan (P45). A row
-// that does not open fails it, naming the row only: a scan without it
-// would miss its secret.
+// and the logins' refresh tokens, current and superseded, for the
+// known-secrets scan (P45). A row that does not open fails it, naming the
+// row only: a scan without it would miss its secret. So does a row that
+// holds a value no OAuth secret takes (secretValueProblem), which root's
+// scan would otherwise search for in every results file.
 func KnownSecrets(ctx context.Context, secrets SecretReader, sealer crypto.Sealer) ([]string, error) {
 	var values []string
 	for _, prefix := range []string{clientPrefix, loginPrefix} {
@@ -544,21 +609,65 @@ func KnownSecrets(ctx context.Context, secrets SecretReader, sealer crypto.Seale
 				return nil, fmt.Errorf("oauth: unseal %s: %w", id, err)
 			}
 			var row struct {
-				ID           string `json:"id"`
-				Secret       string `json:"secret"`
-				RefreshToken string `json:"refreshToken"`
+				ID                    string   `json:"id"`
+				Secret                string   `json:"secret"`
+				RefreshToken          string   `json:"refreshToken"`
+				PreviousRefreshTokens []string `json:"previousRefreshTokens"`
 			}
 			err = json.Unmarshal(plain, &row)
 			clear(plain)
 			if err != nil {
 				return nil, fmt.Errorf("oauth: the row %s is not one of the store's", id)
 			}
-			for _, v := range []string{row.ID, row.Secret, row.RefreshToken} {
-				if v != "" {
-					values = append(values, v)
+			for _, v := range append([]string{row.ID, row.Secret, row.RefreshToken}, row.PreviousRefreshTokens...) {
+				if v == "" {
+					continue
 				}
+				// A value that is no secret would make root's scan remove
+				// files that leak nothing (security review DIAG-4).
+				if problem := secretValueProblem(v); problem != "" {
+					return nil, fmt.Errorf("oauth: the row %s holds a value that is %s, which no secret of the store is: the scan would remove files that leak nothing", id, problem)
+				}
+				values = append(values, v)
 			}
 		}
 	}
 	return values, nil
+}
+
+// minSecretLen is the length that the hub's OAuth values take at least:
+// Google's and Microsoft's client IDs, secrets and refresh tokens are all
+// longer.
+const minSecretLen = 16
+
+// secretValueProblem says why v is no OAuth client ID, client secret or
+// refresh token, "" when it may be one: shorter than minSecretLen bytes, or
+// holding a space, a control character, or one of " \ { } [ ] : , which none
+// of them uses and every JSON file does. Root's known-secrets scan removes
+// every results file that holds a value, and its values come from rows that
+// the hub's identity writes, so a value that is no secret is refused
+// (security review DIAG-4). The text never quotes v.
+func secretValueProblem(v string) string {
+	if len(v) < minSecretLen {
+		return fmt.Sprintf("shorter than %d bytes", minSecretLen)
+	}
+	for _, r := range v {
+		if r <= ' ' || r == 0x7f || strings.ContainsRune(`"\{}[]:,`, r) {
+			return `holds a space, a control character or one of " \ { } [ ] : ,`
+		}
+	}
+	return ""
+}
+
+// checkClient refuses a client whose ID or secret is no secret value.
+func checkClient(name string, c Client) error {
+	if problem := secretValueProblem(c.ID); problem != "" {
+		return fmt.Errorf("oauth: %s's ID %s", name, problem)
+	}
+	if c.Secret != "" {
+		if problem := secretValueProblem(c.Secret); problem != "" {
+			return fmt.Errorf("oauth: %s's secret %s", name, problem)
+		}
+	}
+	return nil
 }

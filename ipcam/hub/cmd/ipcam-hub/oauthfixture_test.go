@@ -21,7 +21,8 @@ import (
 // The OAuth clients of ipcam-hub's tests, their IDs and secrets assembled
 // at run time, in no provider's shape (P46).
 var (
-	clientAndroid, clientDesktop, clientTV, clientWeb = "android-client", "desktop-client", "tv-client", "web-client"
+	// At least 16 bytes each, as the hub takes (security review DIAG-4).
+	clientAndroid, clientDesktop, clientTV, clientWeb = "android-client-id-0001", "desktop-client-id-0001", "tv-client-id-0001", "web-client-id-0001"
 	secretDesktop                                     = "SENT" + "INEL-desktop-secret"
 	secretTV                                          = "SENT" + "INEL-tv-secret"
 )

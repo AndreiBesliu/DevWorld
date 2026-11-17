@@ -432,20 +432,30 @@ const (
 
 // hubTransport is http.DefaultTransport's, proxy from the environment
 // included, with the dial, TLS and response-header timeouts, its
-// connections dialled through conns.
+// connections dialled through conns, or untracked when conns is nil.
 func hubTransport(conns *connTracker) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // the standard library's own
-	t.DialContext = conns.dial
+	t.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	if conns != nil {
+		t.DialContext = conns.dial
+	}
 	t.TLSHandshakeTimeout = tlsHandshakeTimeout
 	t.ResponseHeaderTimeout = responseHeaderTimeout
 	return t
 }
 
-// newHubClient is the drivers' and the token store's plain HTTP client, and
-// the tracker of its connections, which reset-connections closes.
-func newHubClient() (*http.Client, *connTracker) {
-	conns := &connTracker{conns: map[*trackedConn]bool{}}
-	return newHTTPClient(hubTransport(conns)), conns
+// newHubClient is the drivers' plain HTTP client, the token store's, and
+// the tracker of the drivers' connections, which reset-connections closes.
+// The token store's client has a transport of its own, which the tracker
+// does not track: reset-connections closes only its idle connections, so
+// no pooled flow to a token endpoint outlives MI5's block, and a token
+// call in flight is never cut, since its provider may already have rotated
+// and revoked the refresh token that the answer replaces; tokenTimeout
+// bounds that call (security review CTL-3).
+func newHubClient() (drivers, tokens *http.Client, conns *connTracker) {
+	tokenTransport := hubTransport(nil)
+	conns = &connTracker{conns: map[*trackedConn]bool{}, idleOnly: tokenTransport}
+	return newHTTPClient(hubTransport(conns)), newHTTPClient(tokenTransport), conns
 }
 
 // connTracker dials the hub client's connections and keeps every open one,
@@ -457,6 +467,9 @@ func newHubClient() (*http.Client, *connTracker) {
 type connTracker struct {
 	mu    sync.Mutex
 	conns map[*trackedConn]bool
+	// idleOnly is the token store's transport, whose idle connections a
+	// reset closes, and only those.
+	idleOnly *http.Transport
 }
 
 func (t *connTracker) dial(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -481,6 +494,9 @@ func (t *connTracker) reset() int {
 	t.mu.Unlock()
 	for _, c := range open {
 		_ = c.Close()
+	}
+	if t.idleOnly != nil {
+		t.idleOnly.CloseIdleConnections()
 	}
 	return len(open)
 }

@@ -3,6 +3,7 @@ package crypto
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // Sealer seals the hub's secrets at rest (§4.4 L525, P19): the OAuth clients'
@@ -16,12 +17,18 @@ import (
 //     content; a label is a row id, which is no secret.
 //   - Keys and blobs are never readable by the group or others: the
 //     software key is 0600 in a 0700 directory, and the blobs live in the
-//     catalog under the data directory's 0700 state/.
+//     catalog under the data directory's 0700 state/. The software key is
+//     opened without following a link and without blocking (root's diag
+//     commands read the key of the hub's identity, security review SEAL-1).
 //   - Zeroing: the software sealer clears the key bytes it read once the
 //     AEAD holds them, and the DPAPI sealer clears the buffer that Windows
 //     returned once it copied the plaintext. Go gives no further promise:
 //     the AEAD keeps the key for the process's life, the runtime may copy
 //     any value it moves, and Unseal's result is the caller's to clear.
+//
+// Both calls are local and finish what they start: a done ctx fails
+// neither, so a refresh token that a provider rotated is sealed even when
+// the caller of the refresh went away (security review SEAL-2).
 //
 // TPM and service-account DPAPI (§11.8) come in Faza 1, as «Limitări» says.
 type Sealer interface {
@@ -44,6 +51,12 @@ const (
 // sealed under another label, or it was altered since.
 var ErrSealedLabel = errors.New("crypto: the sealed blob does not open under this label")
 
+// ErrKeyUnavailable means the sealer cannot use its key: the software key
+// is missing, unreadable or refused (its mode, owner, size or path), or
+// DPAPI failed otherwise than on the blob. It is a fault of the sealer,
+// which a new login does not mend (security review SEAL-2).
+var ErrKeyUnavailable = errors.New("crypto: the sealer's key is unavailable")
+
 // The first byte of each backend's blobs, so that a blob of the other
 // backend, or of no sealer, is refused before any decryption.
 const (
@@ -58,25 +71,25 @@ const (
 // so a diag command that only unseals leaves nothing behind.
 func NewSealer(dataDir string) (Sealer, error) { return newSealer(dataDir) }
 
-// checkSeal refuses an empty label or plaintext, and a done ctx.
-func checkSeal(ctx context.Context, label string, plain []byte) error {
+// checkSeal refuses an empty label or plaintext.
+func checkSeal(label string, plain []byte) error {
 	switch {
 	case label == "":
 		return errors.New("crypto: seal: no label")
 	case len(plain) == 0:
 		return errors.New("crypto: seal: no plaintext")
 	}
-	return ctx.Err()
+	return nil
 }
 
-// checkUnseal refuses an empty label, a done ctx, and a blob that the
-// backend whose first byte is version did not seal.
-func checkUnseal(ctx context.Context, label string, sealed []byte, version byte) error {
+// checkUnseal refuses an empty label, and a blob that the backend whose
+// first byte is version did not seal, which does not open: ErrSealedLabel.
+func checkUnseal(label string, sealed []byte, version byte) error {
 	switch {
 	case label == "":
 		return errors.New("crypto: unseal: no label")
 	case len(sealed) == 0 || sealed[0] != version:
-		return errors.New("crypto: unseal: not a blob of this sealer")
+		return fmt.Errorf("crypto: unseal: not a blob of this sealer: %w", ErrSealedLabel)
 	}
-	return ctx.Err()
+	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -47,7 +48,17 @@ type login struct {
 	// RunDaily's refreshes write it: a day is decided where its outcome went
 	// out as an event.
 	DailyRefreshedAtMs int64 `json:"dailyRefreshedAtMs,omitempty"`
+	// PreviousRefreshTokens are the refresh tokens that this row held
+	// before its current one, oldest first, at most maxPreviousTokens: a
+	// rotation and a new login of the ref keep the token they replace, which
+	// the provider may not have revoked, so that the known-secrets scan
+	// still finds it (security review DIAG-3).
+	PreviousRefreshTokens []string `json:"previousRefreshTokens,omitempty"`
 }
+
+// maxPreviousTokens bounds a login row's superseded refresh tokens; the
+// oldest go first.
+const maxPreviousTokens = 64
 
 // sealLogin seals l under ref's label.
 func (s *Store) sealLogin(ctx context.Context, ref string, l login) ([]byte, error) {
@@ -74,7 +85,8 @@ func (s *Store) putLogin(ctx context.Context, ref string, l login) error {
 
 // readLogin returns ref's sealed row and its login, and whether there is
 // one. A catalog that fails to read is ErrTransient; a row that this hub
-// cannot open, ErrAuthExpired: only a new login mends it.
+// cannot open, ErrAuthExpired: only a new login mends it; a fault of the
+// sealer's key is neither (unsealError).
 func (s *Store) readLogin(ctx context.Context, ref string) ([]byte, login, bool, error) {
 	id := loginPrefix + ref
 	sealed, backend, ok, err := s.cfg.Secrets.Secret(ctx, id)
@@ -89,7 +101,7 @@ func (s *Store) readLogin(ctx context.Context, ref string) ([]byte, login, bool,
 	}
 	plain, err := s.cfg.Sealer.Unseal(ctx, id, sealed)
 	if err != nil {
-		return nil, login{}, false, fmt.Errorf("oauth: unseal the login %s: %w: %w", ref, err, storage.ErrAuthExpired)
+		return nil, login{}, false, unsealError("the login "+ref, err)
 	}
 	defer clear(plain)
 	var l login
@@ -155,7 +167,9 @@ func (s *Store) tokenCall(ctx context.Context, p storage.Kind, client Client, fo
 		return tokenAnswer{}, err
 	}
 	if tok.AccessToken == "" {
-		return tokenAnswer{}, errors.New("oauth: the token endpoint gave no access token")
+		// Not the provider's own answer (a portal's or a scanner's page):
+		// it ends no login (security review STORE-4).
+		return tokenAnswer{}, fmt.Errorf("oauth: the token endpoint gave no access token: %w", storage.ErrTransient)
 	}
 	return tok, nil
 }
@@ -172,14 +186,15 @@ func (s *Store) deviceAuthorization(ctx context.Context, p storage.Kind, client 
 		return deviceAnswer{}, err
 	}
 	if dev.DeviceCode == "" || dev.UserCode == "" {
-		return deviceAnswer{}, errors.New("oauth: the device endpoint gave no device code")
+		return deviceAnswer{}, fmt.Errorf("oauth: the device endpoint gave no device code: %w", storage.ErrTransient)
 	}
 	return dev, nil
 }
 
 // post sends form to endpoint within tokenTimeout and decodes a 200's JSON
-// into v. A request with no answer is ErrTransient, and a refusal is a
-// ProviderError; neither text quotes the request, its URL or the answer.
+// into v. A request with no answer, and a 200 that is not JSON (a portal's
+// or a scanner's page), is ErrTransient; a refusal is a ProviderError;
+// neither text quotes the request, its URL or the answer.
 func (s *Store) post(ctx context.Context, endpoint string, form url.Values, v any) error {
 	ctx, cancel := context.WithTimeout(ctx, s.tokenTimeout)
 	defer cancel()
@@ -214,7 +229,7 @@ func (s *Store) post(ctx context.Context, endpoint string, form url.Values, v an
 		return &ProviderError{Code: code, Status: resp.StatusCode}
 	}
 	if err := json.Unmarshal(body, v); err != nil {
-		return errors.New("oauth: the provider's answer is not its JSON")
+		return fmt.Errorf("oauth: the provider's answer is not its JSON: %w", storage.ErrTransient)
 	}
 	return nil
 }
@@ -241,19 +256,32 @@ func (s *Store) refresh(ctx context.Context, ref string, daily bool) (RefreshRes
 }
 
 // refreshLocked is the refresh of ref (P27), with src.mu held:
+//  0. write the rotation that src keeps from a refresh whose store failed;
 //  1. read the sealed row and unseal its refresh token;
-//  2. call the token endpoint, in no transaction, within tokenTimeout;
+//  2. call the token endpoint, in no transaction, within tokenTimeout, with
+//     the client of the login that the row holds;
 //  3. when the provider rotated the token, or the refresh is daily (its
 //     time is recorded), seal the row anew and write it with SwapSecret
 //     before the access token is used.
 //
 // An invalid_grant, or a swap that another writer won, re-reads the row
 // once: a token that another process rotated meanwhile is refreshed again,
-// so no process keeps a revoked one. An invalid_grant on a row that stays
-// as it was, also rotationGrace later, is ErrAuthExpired. A row written
-// anew keeps every field it does not change, so a rotation keeps the last
-// daily refresh's time, and a daily refresh keeps the token.
+// with the client of the login that the row now holds (security review
+// STORE-5), so no process keeps a revoked one. An invalid_grant on a row
+// that stays as it was, also rotationGrace later, is ErrAuthExpired. A row
+// written anew keeps every field it does not change, so a rotation keeps
+// the last daily refresh's time, and a daily refresh keeps the token.
+//
+// Once the provider answered, the row is written even when ctx ended: a
+// provider that rotates revokes the old token, so a rotation that is not
+// stored would leave the row with a revoked one. When the write fails, the
+// refresh is ErrTransient and src keeps the rotation until the next
+// refresh writes it, before it calls the provider (security review
+// STORE-1).
 func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource, daily bool) (RefreshResult, error) {
+	if err := s.storeRotation(ctx, ref, src); err != nil {
+		return RefreshResult{}, err
+	}
 	row, l, ok, err := s.readLogin(ctx, ref)
 	switch {
 	case err != nil:
@@ -261,11 +289,11 @@ func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource,
 	case !ok:
 		return RefreshResult{}, fmt.Errorf("oauth: no login for %s: %w", ref, storage.ErrAuthExpired)
 	}
-	client, err := s.client(ctx, l.Provider, l.ClientType)
-	if err != nil {
-		return RefreshResult{}, err
-	}
 	for again := false; ; again = true {
+		client, err := s.client(ctx, l.Provider, l.ClientType)
+		if err != nil {
+			return RefreshResult{}, err
+		}
 		if s.beforeCall != nil {
 			s.beforeCall()
 		}
@@ -285,18 +313,18 @@ func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource,
 			next := l
 			if rotated {
 				next.RefreshToken = tok.RefreshToken
+				next.PreviousRefreshTokens = superseded(l.PreviousRefreshTokens, l.RefreshToken)
 			}
 			if daily {
 				next.DailyRefreshedAtMs = now.UnixMilli()
 			}
-			sealed, err := s.sealLogin(ctx, ref, next)
-			if err != nil {
-				return RefreshResult{}, err
-			}
-			swapped, err := s.cfg.Secrets.SwapSecret(ctx, loginPrefix+ref, row, sealed, s.cfg.Sealer.Backend())
+			swapped, err := s.swapLogin(context.WithoutCancel(ctx), ref, row, next)
 			switch {
 			case err != nil:
-				return RefreshResult{}, fmt.Errorf("oauth: store the refreshed login %s: %w", ref, storage.ErrTransient)
+				if rotated {
+					src.rotation = &rotation{old: row, next: next}
+				}
+				return RefreshResult{}, fmt.Errorf("oauth: store the refreshed login %s: %v: %w", ref, err, storage.ErrTransient)
 			case !swapped && !again:
 				// Another writer changed the row: refresh with its token.
 				if row, l, ok, err = s.readLogin(ctx, ref); err != nil {
@@ -312,6 +340,50 @@ func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource,
 		src.set(tok, now)
 		return RefreshResult{At: now, Rotated: rotated}, nil
 	}
+}
+
+// rotation is a rotated login that a refresh could not store: the row it
+// read, and the login to write in its place.
+type rotation struct {
+	old  []byte
+	next login
+}
+
+// swapLogin seals next and writes it as ref's row while the row still
+// holds old.
+func (s *Store) swapLogin(ctx context.Context, ref string, old []byte, next login) (bool, error) {
+	sealed, err := s.sealLogin(ctx, ref, next)
+	if err != nil {
+		return false, err
+	}
+	return s.cfg.Secrets.SwapSecret(ctx, loginPrefix+ref, old, sealed, s.cfg.Sealer.Backend())
+}
+
+// storeRotation writes the rotation that src keeps, if any, while the row
+// still holds the token it replaced; a row that another writer changed
+// meanwhile (a new login) wins, and the rotation is dropped. A write that
+// fails again is ErrTransient, and src keeps the rotation.
+func (s *Store) storeRotation(ctx context.Context, ref string, src *tokenSource) error {
+	r := src.rotation
+	if r == nil {
+		return nil
+	}
+	if _, err := s.swapLogin(context.WithoutCancel(ctx), ref, r.old, r.next); err != nil {
+		return fmt.Errorf("oauth: store the rotated login %s: %v: %w", ref, err, storage.ErrTransient)
+	}
+	src.rotation = nil
+	return nil
+}
+
+// superseded is prev with token, the refresh token that a rotation or a
+// new login replaces, at its end, and the oldest dropped past
+// maxPreviousTokens. prev is not changed.
+func superseded(prev []string, token string) []string {
+	out := append(slices.Clone(prev), token)
+	if n := len(out) - maxPreviousTokens; n > 0 {
+		out = out[n:]
+	}
+	return out
 }
 
 // rereadChanged re-reads ref's row after an invalid_grant: a row that
@@ -360,6 +432,9 @@ type tokenSource struct {
 	mu     sync.Mutex // one refresh at a time; held across the call
 	access string
 	expiry time.Time
+	// rotation is a rotated login that a refresh could not store, written
+	// before the next call to the provider (security review STORE-1).
+	rotation *rotation
 }
 
 // TokenSource returns ref's token source, the same for every call: its

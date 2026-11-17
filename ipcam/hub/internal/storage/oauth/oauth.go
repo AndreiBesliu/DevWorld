@@ -15,9 +15,12 @@
 //     SwapSecret before it returns the access token, so two processes never
 //     keep a revoked token and the catalog's other writers never wait on a
 //     token endpoint that a WAN block has silenced.
-//   - invalid_grant on an unchanged row, and invalid_client, wrap
-//     storage.ErrAuthExpired; a network error, a timeout, a 429 or a 5xx
-//     wrap storage.ErrTransient.
+//   - invalid_grant on an unchanged row, invalid_client and the other
+//     refusals that need a new login wrap storage.ErrAuthExpired; a network
+//     error, a timeout, a 408, a 429, a 5xx, a transient OAuth code at any
+//     status and an answer without an OAuth code (a proxy's page) wrap
+//     storage.ErrTransient. A fault of the sealer's key is neither: a new
+//     login would not mend it (crypto.ErrKeyUnavailable).
 //   - RunDaily refreshes each login once a day, counted from its issuance
 //     (P53), and records each daily success in the login's sealed row, so
 //     a restart neither attempts nor reports again a day that was ok.
@@ -223,9 +226,17 @@ var providerCodes = map[string]bool{
 	"temporarily_unavailable": true, "server_error": true, "rate_limit_exceeded": true,
 }
 
+// terminalCodes are the OAuth refusals that end a login: only a new login,
+// or a new setup of the clients, mends them.
+var terminalCodes = map[string]bool{
+	"invalid_grant": true, "invalid_client": true, "unauthorized_client": true, "access_denied": true,
+	"expired_token": true, "redirect_uri_mismatch": true, "invalid_scope": true, "unsupported_grant_type": true,
+	"invalid_request": true,
+}
+
 // ProviderError is a provider's refusal: its OAuth error code and HTTP
-// status, never its own words. A refusal that needs a new login wraps
-// storage.ErrAuthExpired; a 429 or a 5xx wraps storage.ErrTransient.
+// status, never its own words. Unwrap classifies it, the one classifier of
+// the token, device and refresh calls (security review STORE-3).
 type ProviderError struct {
 	Code   string
 	Status int
@@ -235,12 +246,27 @@ func (e *ProviderError) Error() string {
 	return fmt.Sprintf("oauth: the provider refused: %s (HTTP %d)", e.Code, e.Status)
 }
 
-// Unwrap is the storage error that the refusal is.
+// Unwrap is the storage error that the refusal is: storage.ErrTransient
+// for a 408, a 429 or a 5xx whatever its code; storage.ErrAuthExpired for a
+// refusal that ends the login (terminalCodes); and ErrTransient for any
+// other answer: a transient code (temporarily_unavailable, server_error,
+// rate_limit_exceeded) at any status, a device flow's authorization_pending
+// or slow_down, and an answer without an OAuth code, such as a proxy's HTML
+// 403 or 407, which must not force a new login (Task 9A review M3).
 func (e *ProviderError) Unwrap() error {
-	if e.Status == http.StatusTooManyRequests || e.Status >= http.StatusInternalServerError {
+	switch {
+	case e.Status == http.StatusRequestTimeout || e.Status == http.StatusTooManyRequests || e.Status >= http.StatusInternalServerError:
 		return storage.ErrTransient
+	case terminalCodes[e.Code]:
+		return storage.ErrAuthExpired
 	}
-	return storage.ErrAuthExpired
+	return storage.ErrTransient
+}
+
+// endsLogin reports whether err is a provider's refusal that ends a login.
+func endsLogin(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe) && errors.Is(pe, storage.ErrAuthExpired)
 }
 
 // Reason is err's reason for the oauth_failed event: invalid_grant,

@@ -111,13 +111,30 @@ func openExistingCatalog(ctx context.Context, dataDir string) (*catalog.DB, erro
 // and never creates (g2-11), after it checked that a run left a catalog.
 func uploadsOf(path string) (cfg runConfig, hubID string, err error) {
 	cfg, _, _, err = loadRunConfig(path)
-	switch {
-	case err != nil:
+	if err != nil {
 		return cfg, "", err
-	case cfg.Uploads == nil:
+	}
+	return uploadsHubOf(path, cfg, haveCatalog)
+}
+
+// uploadsOfStrict is uploadsOf for a diag command that root runs on the Pi
+// on the hub identity's files (visibility): run.json and the catalog's
+// files as loadRunConfigStrict and checkCatalogFiles take them (security
+// review SEAL-1).
+func uploadsOfStrict(path string) (cfg runConfig, hubID string, err error) {
+	if cfg, err = loadRunConfigStrict(path); err != nil {
+		return cfg, "", err
+	}
+	return uploadsHubOf(path, cfg, checkCatalogFiles)
+}
+
+// uploadsHubOf checks that cfg, read from path, has an uploads section and
+// that a run left a catalog (check), and reads the hub's ID.
+func uploadsHubOf(path string, cfg runConfig, check func(dataDir string) error) (_ runConfig, hubID string, err error) {
+	if cfg.Uploads == nil {
 		return cfg, "", fmt.Errorf("%s has no uploads section", path)
 	}
-	if err := haveCatalog(cfg.DataDir); err != nil {
+	if err := check(cfg.DataDir); err != nil {
 		return cfg, "", err
 	}
 	if hubID, err = readHubID(filepath.Join(cfg.DataDir, "state")); err != nil {
@@ -130,8 +147,8 @@ func uploadsOf(path string) (cfg runConfig, hubID string, err error) {
 // catalog cat, its tokens from the sealed token store of cfg's data
 // directory on cat.
 func diagDestination(ctx context.Context, cfg runConfig, cat *catalog.DB, def destDef, hubID string) (storage.Destination, error) {
-	client, _ := newHubClient()
-	store, err := newOAuthStore(cfg, cat, client)
+	client, tokens, _ := newHubClient()
+	store, err := newOAuthStore(cfg, cat, tokens)
 	if err != nil {
 		return nil, err
 	}

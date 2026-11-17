@@ -29,22 +29,22 @@ func newSealer(string) (Sealer, error) { return dpapiSealer{}, nil }
 
 func (dpapiSealer) Backend() string { return BackendDPAPIMachine }
 
-func (dpapiSealer) Seal(ctx context.Context, label string, plain []byte) ([]byte, error) {
-	if err := checkSeal(ctx, label, plain); err != nil {
+func (dpapiSealer) Seal(_ context.Context, label string, plain []byte) ([]byte, error) {
+	if err := checkSeal(label, plain); err != nil {
 		return nil, err
 	}
 	in, entropy := blobOf(plain), blobOf([]byte(label))
 	var out windows.DataBlob
 	err := cryptProtectData(&in, nil, &entropy, 0, nil, windows.CRYPTPROTECT_LOCAL_MACHINE|windows.CRYPTPROTECT_UI_FORBIDDEN, &out)
 	if err != nil {
-		return nil, fmt.Errorf("crypto: seal with DPAPI: %w", err)
+		return nil, fmt.Errorf("crypto: seal with DPAPI: %w: %w", err, ErrKeyUnavailable)
 	}
 	defer freeBlob(&out, false)
 	return append([]byte{blobDPAPI}, bytesOf(&out)...), nil
 }
 
-func (dpapiSealer) Unseal(ctx context.Context, label string, sealed []byte) ([]byte, error) {
-	if err := checkUnseal(ctx, label, sealed, blobDPAPI); err != nil {
+func (dpapiSealer) Unseal(_ context.Context, label string, sealed []byte) ([]byte, error) {
+	if err := checkUnseal(label, sealed, blobDPAPI); err != nil {
 		return nil, err
 	}
 	if len(sealed) < 2 {
@@ -58,7 +58,8 @@ func (dpapiSealer) Unseal(ctx context.Context, label string, sealed []byte) ([]b
 		// Another entropy, or an altered blob.
 		return nil, ErrSealedLabel
 	case err != nil:
-		return nil, fmt.Errorf("crypto: unseal with DPAPI: %w", err)
+		// DPAPI's own fault, not the blob's (security review SEAL-2).
+		return nil, fmt.Errorf("crypto: unseal with DPAPI: %w: %w", err, ErrKeyUnavailable)
 	}
 	defer freeBlob(&out, true)
 	return append([]byte(nil), bytesOf(&out)...), nil

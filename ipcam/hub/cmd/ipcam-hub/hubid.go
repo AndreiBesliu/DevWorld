@@ -105,7 +105,9 @@ func syncDir(dir string) error {
 // readHubID returns the hub's ID in stateDir, or errNoHubID when there is
 // none; it creates nothing.
 func readHubID(stateDir string) (string, error) {
-	b, err := os.ReadFile(filepath.Join(stateDir, hubIDName)) //nolint:gosec // G304: under the data directory
+	// Never through a link or from a FIFO: root's diag visibility reads it
+	// on the Pi (security review SEAL-1).
+	b, err := readRegular(filepath.Join(stateDir, hubIDName), 4<<10)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", errNoHubID
 	}
