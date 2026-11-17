@@ -27,9 +27,11 @@ import (
 
 // runResults closes the open MI6 run's results now (its envelope is
 // rewritten at day 7), runs ipcam-hub's known-secrets scan over results/
-// (P45; elevated on Windows, C2-R20), and zips results/ into
-// results-<host>.zip in the current folder; under sudo the zip goes to
-// SUDO_USER. A scan that moved or could not move a file fails the run.
+// (P45; elevated on Windows, C2-R20) right before it zips results/ into
+// results-<host>.zip in the current folder, also when no run is open any
+// more; under sudo the zip goes to SUDO_USER. A scan that moved or could
+// not move a file fails the run; one that leaves a file it found in
+// results/, or could not scan it, stops the zip.
 func runResults(ctx context.Context, e *env, args []string) error {
 	if err := cli.ParseFlags(flag.NewFlagSet("results", flag.ContinueOnError), args, e.out, usage); err != nil {
 		return err
@@ -42,7 +44,7 @@ func runResults(ctx context.Context, e *env, args []string) error {
 	if err != nil {
 		return err
 	}
-	failed := false
+	var rewrite func() error
 	if raw, ok := st.Open["MI6"]; ok {
 		run, err := mi6.Decode(raw)
 		if err != nil {
@@ -52,16 +54,12 @@ func runResults(ctx context.Context, e *env, args []string) error {
 			return err
 		}
 		e.printf(msgResultsWritten)
-		if err := scanResults(ctx, e, nil); err != nil {
-			failed = true
-			e.printf("%s", err)
-			failMI6(e, err)
-			if st, err = runstate.Load(e.statePath()); err == nil {
-				if run, err = mi6.Decode(st.Open["MI6"]); err == nil {
-					_ = writeMI6(ctx, e, run, st, host, info)
-				}
-			}
-		}
+		rewrite = func() error { return rewriteMI6(ctx, e, host, info) }
+	}
+	failed, last := closingScan(ctx, e, nil, rewrite)
+	if last != nil && !last.clean {
+		e.printf(msgResultsNotZipped)
+		return exitError(1)
 	}
 	zipPath, err := zipResults(e, host)
 	if err != nil {
@@ -72,6 +70,45 @@ func runResults(ctx context.Context, e *env, args []string) error {
 		return exitError(1)
 	}
 	return nil
+}
+
+// closingScan runs the known-secrets scan over results/ with tokens. When
+// it fails, the open MI6 run fails with the scan's fixed reason, rewrite
+// (nil: none) writes the run's envelope again, and the scan runs once
+// more, so the last write of results/ is always scanned (PH0-22). It
+// reports whether a scan failed, and the last scan's failure, nil when
+// results/ came out clean.
+func closingScan(ctx context.Context, e *env, tokens []string, rewrite func() error) (bool, *scanFailure) {
+	f := scanResults(ctx, e, tokens)
+	if f == nil {
+		return false, nil
+	}
+	e.printf("%s", f.line)
+	failMI6(e, f.reason)
+	if rewrite == nil {
+		return true, f
+	}
+	if err := rewrite(); err != nil {
+		return true, &scanFailure{line: fmt.Sprintf("%s %v", msgError, err)}
+	}
+	if last := scanResults(ctx, e, tokens); last != nil {
+		e.printf("%s", last.line)
+		return true, last
+	}
+	return true, nil
+}
+
+// rewriteMI6 writes the open MI6 run's envelope again, from the run state.
+func rewriteMI6(ctx context.Context, e *env, host string, info *hostinfo.Host) error {
+	st, err := runstate.Load(e.statePath())
+	if err != nil {
+		return err
+	}
+	run, err := mi6.Decode(st.Open["MI6"])
+	if err != nil {
+		return err
+	}
+	return writeMI6(ctx, e, run, st, host, info)
 }
 
 // writeMI6 writes the run's envelope into results/, now.
@@ -100,21 +137,37 @@ type scanLine struct {
 	Quarantine string   `json:"quarantine"`
 }
 
+// scanFailure is a failed known-secrets scan (C2-R20): line is the
+// owner's terminal line, which may name the quarantine's folder on this
+// device; reason is the run's and its envelope's, fixed and path-free
+// (PH0-22: on Windows the base is under the owner's profile folder).
+type scanFailure struct {
+	line, reason string
+	// clean is set when results/ holds no file that the scan found or
+	// could not read: each one moved to the quarantine, so the folder may
+	// be zipped.
+	clean bool
+}
+
 // scanResults runs `ipcam-hub diag scan-secrets --config <run.json> --dir
 // <results>` as uploadspike's own identity, with values and the handover
 // token on its stdin; the hub adds every client ID, client secret and
 // refresh token that it holds sealed. --dir is always the results root.
-// A non-empty moved or unmoved, or a failed scan, is the error.
-func scanResults(ctx context.Context, e *env, values []string) error {
+// A non-empty moved or unmoved, or a failed scan, is its failure; nil when
+// results/ is clean.
+func scanResults(ctx context.Context, e *env, values []string) *scanFailure {
+	unrun := func(err error) *scanFailure {
+		return &scanFailure{line: fmt.Sprintf(msgScanError, err), reason: "scan-secrets: did not run"}
+	}
 	st, err := runstate.Load(e.statePath())
 	if err != nil {
-		return err
+		return unrun(err)
 	}
 	if st.HandoverToken != "" {
 		values = append(values, st.HandoverToken)
 	}
 	if err := os.MkdirAll(e.resultsDir(), 0o700); err != nil {
-		return err
+		return unrun(err)
 	}
 	var stdin bytes.Buffer
 	for _, v := range values {
@@ -136,15 +189,32 @@ func scanResults(ctx context.Context, e *env, values []string) error {
 			line = s
 		}
 	}
+	clean := runErr == nil && line.Schema != "" && len(line.Unmoved)+len(line.Unreadable) == 0
 	switch {
 	case len(line.Moved)+len(line.Unmoved) > 0:
-		return ownerError(fmt.Sprintf(msgScanFailed, filepath.Join(filepath.Dir(e.resultsDir()), filepath.FromSlash(line.Quarantine))))
+		f := &scanFailure{reason: fmt.Sprintf("scan-secrets: moved %d, unmoved %d", len(line.Moved), len(line.Unmoved)), clean: clean}
+		if len(line.Unmoved) > 0 {
+			f.line = msgScanUnmoved
+		} else {
+			f.line = fmt.Sprintf(msgScanFailed, filepath.Join(filepath.Dir(e.resultsDir()), filepath.FromSlash(line.Quarantine)))
+		}
+		return f
 	case runErr != nil:
-		return ownerError(fmt.Sprintf(msgScanError, scanErrorText(runErr)))
+		return &scanFailure{line: fmt.Sprintf(msgScanError, scanErrorText(runErr)), reason: "scan-secrets: " + scanExit(runErr)}
 	case line.Schema == "":
-		return ownerError(fmt.Sprintf(msgScanError, "no line"))
+		return &scanFailure{line: fmt.Sprintf(msgScanError, "no line"), reason: "scan-secrets: no line"}
 	}
 	return nil
+}
+
+// scanExit is a failed scan's end without a path: its exit code, or that
+// it did not run.
+func scanExit(err error) string {
+	var de *hubproc.DiagError
+	if errors.As(err, &de) {
+		return "exit " + strconv.Itoa(de.Code)
+	}
+	return "did not run"
 }
 
 // scanErrorText is a failed scan's error without its stderr, which names

@@ -69,7 +69,9 @@ type Run struct {
 	Visibility []results.VisibilityCell `json:"visibility,omitempty"`
 	// LoginsDone is set once day 0's logins and the matrix are over.
 	LoginsDone bool `json:"loginsDone,omitempty"`
-	// ScanFailed is why a scan of the results failed the run (C2-R20).
+	// ScanFailed is why a scan of the results failed the run (C2-R20): a
+	// fixed reason that names no path, since the envelope carries it
+	// (PH0-22).
 	ScanFailed string `json:"scanFailed,omitempty"`
 }
 

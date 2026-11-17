@@ -36,6 +36,10 @@ const (
 	// unset. With "sd", run refuses a run.json without sdCardConfirmed,
 	// as ipcam-hub's SD gate does (exit 4).
 	FakeStorageEnv = "UPLOADSPIKE_FAKE_STORAGE"
+	// FakeScanUnmovedEnv set to "1" makes diag scan-secrets leave each
+	// file that holds a value where it is, report it as unmoved and exit
+	// 1, as ipcam-hub's scan does when the quarantine cannot take a file.
+	FakeScanUnmovedEnv = "UPLOADSPIKE_FAKE_SCAN_UNMOVED"
 	// FakeFailStartEnv makes run record its start and exit 1 before its
 	// control and ready events, a hub that fails early: always with "1",
 	// else while the file that it names exists.
@@ -49,6 +53,7 @@ const (
 	RecordEOFStop = "eof-stop"
 	RecordRequest = "request"
 	RecordSdGate  = "sd-gate"
+	RecordScan    = "scan"
 )
 
 // FakeRecord is one record of the stand-in hub: its process and parent,
@@ -96,8 +101,10 @@ func record(r FakeRecord) {
 //     storage;
 //   - "diag visibility --creator <dest> --reader <dest>" prints a cell
 //     that was listed and read;
-//   - "diag scan-secrets --dir <dir>" searches the files under dir for the
-//     values on stdin, raw, and reports those that hold one as moved;
+//   - "diag scan-secrets --dir <dir>" records the scan, searches the
+//     files under dir for the values on stdin, raw, and moves each file
+//     that holds one into <dir>-quarantine/<scan>/, as ipcam-hub's scan
+//     does, or, with FakeScanUnmovedEnv, leaves it and reports it unmoved;
 //   - "run --config <run.json> --stop-on-stdin-eof" records its start,
 //     exits 1 with FakeFailStartEnv, refuses an unconfirmed SD card as
 //     ipcam-hub's gate does, serves a control endpoint on 127.0.0.1 that
@@ -269,7 +276,8 @@ func fakeVisibility(args []string) int {
 	return 0
 }
 
-// fakeScan reports the files under --dir that hold a value of stdin, raw.
+// fakeScan moves the files under --dir that hold a value of stdin, raw,
+// into the quarantine beside --dir, and prints ipcam-hub's line.
 func fakeScan(args []string) int {
 	flags := flag.NewFlagSet("scan-secrets", flag.ContinueOnError)
 	_ = flags.String("config", "", "")
@@ -277,6 +285,7 @@ func fakeScan(args []string) int {
 	if err := flags.Parse(args); err != nil || *dir == "" {
 		return 2
 	}
+	record(FakeRecord{Event: RecordScan})
 	var values [][]byte
 	dec := json.NewDecoder(os.Stdin)
 	for {
@@ -288,7 +297,7 @@ func fakeScan(args []string) int {
 		}
 		values = append(values, []byte(v.Value))
 	}
-	moved := []string{}
+	var found []string
 	_ = filepath.WalkDir(*dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
@@ -300,15 +309,34 @@ func fakeScan(args []string) int {
 		for _, v := range values {
 			if len(v) > 0 && bytes.Contains(b, v) {
 				rel, _ := filepath.Rel(*dir, path)
-				moved = append(moved, filepath.ToSlash(rel))
+				found = append(found, rel)
 				break
 			}
 		}
 		return nil
 	})
+	moved, unmoved, quarantine := []string{}, []string{}, ""
+	if os.Getenv(FakeScanUnmovedEnv) == "1" {
+		for _, rel := range found {
+			unmoved = append(unmoved, filepath.ToSlash(rel))
+		}
+	} else if len(found) > 0 {
+		quarantine = filepath.Base(*dir) + "-quarantine/" + time.Now().UTC().Format("20060102T150405.000000000Z")
+		for _, rel := range found {
+			to := filepath.Join(filepath.Dir(*dir), filepath.FromSlash(quarantine), rel)
+			if os.MkdirAll(filepath.Dir(to), 0o700) == nil && os.Rename(filepath.Join(*dir, rel), to) == nil {
+				moved = append(moved, filepath.ToSlash(rel))
+			} else {
+				unmoved = append(unmoved, filepath.ToSlash(rel))
+			}
+		}
+	}
 	b, _ := json.Marshal(map[string]any{"schema": "ipcam.diag.scansecrets/1", "values": len(values), "shortValues": 0,
-		"moved": moved, "unreadable": []string{}, "unmoved": []string{}, "quarantine": ""})
+		"moved": moved, "unreadable": []string{}, "unmoved": unmoved, "quarantine": quarantine})
 	fmt.Println(string(b))
+	if len(unmoved) > 0 {
+		return 1
+	}
 	return 0
 }
 

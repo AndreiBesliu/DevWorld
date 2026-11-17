@@ -417,16 +417,18 @@ func (h *holder) handBack(ctx context.Context) {
 
 // scanOrFail runs the results' known-secrets scan with this process's
 // control tokens and the handover token; a non-empty moved or unmoved, or
-// a failed scan, fails the open MI6 run (C2-R20).
+// a failed scan, fails the open MI6 run (C2-R20), with the scan's fixed
+// reason (PH0-22).
 func (h *holder) scanOrFail(ctx context.Context) {
-	if err := scanResults(ctx, h.e, h.tokens); err != nil {
-		h.e.printf("%s", err)
-		failMI6(h.e, err)
+	if f := scanResults(ctx, h.e, h.tokens); f != nil {
+		h.e.printf("%s", f.line)
+		failMI6(h.e, f.reason)
 	}
 }
 
-// failMI6 records why the open MI6 run failed.
-func failMI6(e *env, err error) {
+// failMI6 records why the open MI6 run failed: a fixed reason, which names
+// no path, since it goes into the envelope (PH0-22).
+func failMI6(e *env, reason string) {
 	_ = runstate.Update(e.statePath(), func(s *runstate.State) error {
 		raw, ok := s.Open["MI6"]
 		if !ok {
@@ -436,7 +438,7 @@ func failMI6(e *env, err error) {
 		if derr != nil {
 			return derr
 		}
-		run.ScanFailed = "scan-secrets: " + err.Error()
+		run.ScanFailed = reason
 		s.Open["MI6"] = run.Encode()
 		return nil
 	})

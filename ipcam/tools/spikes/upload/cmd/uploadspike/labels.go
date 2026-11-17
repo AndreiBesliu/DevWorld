@@ -46,6 +46,8 @@ const (
 	msgHubStarted        = "Hub-ul a pornit."
 	msgScanFailed        = "Scanarea rezultatelor a găsit un secret și a mutat fișierele în %s; proba se repetă. Spuneți-ne."
 	msgScanError         = "Scanarea rezultatelor nu s-a putut face (%v); proba se repetă. Spuneți-ne."
+	msgScanUnmoved       = "Scanarea rezultatelor a găsit un secret pe care nu l-a putut muta din folderul rezultatelor; proba se repetă. Spuneți-ne."
+	msgResultsNotZipped  = "Rezultatele nu au fost puse în arhivă: scanarea nu a confirmat că nu conțin secrete. Spuneți-ne."
 	msgNeedsElevation    = "Rulați comanda dintr-o fereastră de administrator (clic dreapta pe Windows Terminal, «Executare ca administrator»): scanarea rezultatelor are nevoie de drepturi de administrator."
 	msgResultsZip        = "Rezultatele sunt în %s. Trimiteți-ne acest fișier."
 	msgResultsWritten    = "Rezultatele probei MI6 au fost scrise."

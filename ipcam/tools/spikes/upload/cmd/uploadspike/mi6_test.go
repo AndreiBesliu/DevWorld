@@ -95,7 +95,7 @@ func TestMI6_SdCardNeedsConfirmation(t *testing.T) {
 // uploadspike process, with no secret in RAM, closes MI6: a client secret
 // planted in results/ is found through diag scan-secrets, which unseals
 // the clients that setup gave the hub, the file leaves results/ for the
-// quarantine, and the run fails.
+// quarantine, and the run fails with a reason that names no local path.
 func TestClose_ScanAfterRestartUsesSealedClients(t *testing.T) {
 	r, _ := realRig(t)
 	if p := r.run(clientsInput(), nil, "setup", "--terminal"); p.code != 0 {
@@ -121,11 +121,18 @@ func TestClose_ScanAfterRestartUsesSealedClients(t *testing.T) {
 		t.Errorf("the quarantine holds %v; want the planted file", moved)
 	}
 	run, err := mi6.Decode(r.state().Open["MI6"])
-	if err != nil || !strings.HasPrefix(run.ScanFailed, "scan-secrets") {
-		t.Errorf("the run: %+v, %v; want it failed by the scan", run, err)
+	if err != nil || run.ScanFailed != "scan-secrets: moved 1, unmoved 0" {
+		t.Errorf("the run: %+v, %v; want it failed by the scan, with the fixed reason", run, err)
 	}
-	if e := readEnvelope(t, r); e.Runs[0].Valid {
-		t.Errorf("the envelope's run is valid: %+v", e.Runs[0])
+	e, raw := envelopeBytes(t, r)
+	if e.Runs[0].Valid || e.Runs[0].InvalidReason != run.ScanFailed {
+		t.Errorf("the envelope's run: %+v; want it invalid with the run's reason", e.Runs[0])
+	}
+	// PH0-22: the quarantine's folder, under the owner's profile on
+	// Windows, never reaches the envelope or the zip.
+	assertNoLocalPath(t, "the envelope", raw, r.base)
+	for name, body := range zipEntries(t, r) {
+		assertNoLocalPath(t, "the zip's "+name, []byte(body), r.base)
 	}
 }
 

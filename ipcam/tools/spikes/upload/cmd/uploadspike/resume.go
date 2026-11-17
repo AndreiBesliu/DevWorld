@@ -217,8 +217,9 @@ func (h *holder) hold(ctx context.Context) holdEnd {
 }
 
 // closeDueMI6 closes the open MI6 run at day 7 (Close): its envelope, then
-// the known-secrets scan with this process's control tokens; the run
-// leaves the run state.
+// the known-secrets scan with this process's control tokens, and, when the
+// scan fails the run, the envelope again and one more scan; the run leaves
+// the run state.
 func (h *holder) closeDueMI6(ctx context.Context) {
 	st, err := runstate.Load(h.e.statePath())
 	if err != nil {
@@ -237,15 +238,7 @@ func (h *holder) closeDueMI6(ctx context.Context) {
 		h.e.printf("%s %v", msgError, err)
 		return
 	}
-	if err := scanResults(ctx, h.e, h.tokens); err != nil {
-		h.e.printf("%s", err)
-		failMI6(h.e, err)
-		if st, err := runstate.Load(h.e.statePath()); err == nil {
-			if run, err := mi6.Decode(st.Open["MI6"]); err == nil {
-				_ = writeMI6(ctx, h.e, run, st, host, info)
-			}
-		}
-	}
+	closingScan(ctx, h.e, h.tokens, func() error { return rewriteMI6(ctx, h.e, host, info) })
 	_ = runstate.Update(h.e.statePath(), func(s *runstate.State) error {
 		delete(s.Open, "MI6")
 		return nil
