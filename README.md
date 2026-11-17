@@ -5,6 +5,7 @@ Monorepo cu mai multe proiecte independente. Fiecare proiect are propriul folder
 | Folder | Proiect | Stare |
 |---|---|---|
 | [`ipcam/`](ipcam/) | Aplicație pentru camere IP: live, înregistrare, control PTZ, stocare în Google Drive / OneDrive / local. Web, Android, iOS, Windows. | Design |
+| [`atelier-ai/`](atelier-ai/) | Aplicație pentru ateliere de mobilier la comandă: extrage corpurile din schițe și PDF-uri cu AI, calculează lista de piese, optimizează debitarea, preview 3D. Web. | Design |
 
 ## Reguli de lucru
 
