@@ -18,6 +18,8 @@
 // `resume: n/a (no requestVideoFrameCallback)` and records nothing, rather
 // than a false "no frame".
 //
+// The automatic run waits for the person without a timeout (env.waitForPersonMs).
+//
 // Samples: `resumeMs` (visible to that frame), `backgroundS` (time hidden).
 // Notes: `session: kept` or `session: reopened`; `connection at return: <state>`
 // (the session's connectionState when the page turned visible, `closed` once
@@ -170,7 +172,8 @@ export const S5: ScenarioDefinition = {
     };
     guide();
     const stopGuide = run.every(GUIDE_EVERY_MS, guide);
-    const hidden = await untilVisibility(run, doc, 'hidden', WAIT_FOR_PERSON_MS);
+    const waitForPersonMs = run.env.waitForPersonMs ?? WAIT_FOR_PERSON_MS;
+    const hidden = await untilVisibility(run, doc, 'hidden', waitForPersonMs);
     stopGuide();
     if (hidden === 'timeout') {
       run.note('the app did not go to the background within 10 min');
@@ -193,7 +196,7 @@ export const S5: ScenarioDefinition = {
     const cancelClose = run.env.clock.setTimer(() => {
       close(`after ${SUSPENDED_CLOSE_MS / 1000} s in the background`);
     }, SUSPENDED_CLOSE_MS);
-    const shown = await untilVisibility(run, doc, 'visible', WAIT_FOR_PERSON_MS).finally(cancelClose);
+    const shown = await untilVisibility(run, doc, 'visible', waitForPersonMs).finally(cancelClose);
     if (shown === 'timeout') {
       disconnected.stop();
       run.note('the app did not come back within 10 min');

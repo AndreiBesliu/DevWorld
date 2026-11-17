@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PENDING_KEY, ResultsQueue, publish, scrubText, type KeyValueStore, type ScenarioResult } from './results';
 import { finish, setup, TEST_HUB } from './scenarios/fakes';
@@ -139,6 +141,25 @@ describe('ResultsQueue', () => {
 
     expect(queue.pending()).toBe(1);
     expect(await queue.flush()).toBe(1);
+  });
+
+  it('upgrade_v010ResultsWaitingInTheApp_areSentUnchanged', async () => {
+    // Post-release task A, requirement 9: v0.1.1 installed over v0.1.0 sends what v0.1.0 could
+    // not, as v0.1.0 wrote it. The result is one that v0.1.0's code wrote (tools/spikes/video/testdata),
+    // without the field the hub adds.
+    const stored = JSON.parse(
+      readFileSync(join(import.meta.dirname, '../../testdata/results-v0.1.0/chrome-20261117-221328-s1.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    delete stored.mdnsUnavailable;
+    const storage = new MemoryStore();
+    storage.setItem(PENDING_KEY, JSON.stringify([stored]));
+    const fetchMock = vi.fn<typeof fetch>(created);
+    const queue = new ResultsQueue({ storage, fetch: fetchMock, hubUrl: () => TEST_HUB });
+
+    expect(queue.pending()).toBe(1);
+    expect(await queue.flush()).toBe(0);
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual(stored);
   });
 
   it('publish_exposesTheResultAndUploadsIt', async () => {

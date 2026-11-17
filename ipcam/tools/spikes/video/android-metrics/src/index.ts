@@ -29,6 +29,8 @@ export interface SpikeMetricsPlugin {
   read(): Promise<AndroidMetrics>;
   /** Keeps the screen on (FLAG_KEEP_SCREEN_ON) while `on` is true. */
   keepAwake(options: { on: boolean }): Promise<void>;
+  /** Vibrates the phone briefly, to call the person (the automatic run's S5 and S6). Needs VIBRATE. */
+  vibrate(): Promise<void>;
 }
 
 export const SpikeMetrics = registerPlugin<SpikeMetricsPlugin>('SpikeMetrics');

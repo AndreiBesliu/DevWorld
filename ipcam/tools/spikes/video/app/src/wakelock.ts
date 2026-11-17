@@ -61,13 +61,31 @@ export async function holdWakeLock({ wakeLock, native, doc }: WakeLockDeps): Pro
     }
   }
   const keepAwake = native?.keepAwake?.bind(native);
-  if (keepAwake) {
+  if (native && keepAwake) {
     try {
-      await keepAwake(true);
-      return { kind: 'native', release: () => keepAwake(false).catch(() => undefined) };
+      // The shell's flag is one for the whole app: the automatic run holds it
+      // for its whole length while each scenario holds and releases it too, so
+      // the flag goes off only with the last holder.
+      const holders = nativeHolders.get(native) ?? 0;
+      if (holders === 0) await keepAwake(true);
+      nativeHolders.set(native, holders + 1);
+      let held = true;
+      return {
+        kind: 'native',
+        release: async () => {
+          if (!held) return;
+          held = false;
+          const left = (nativeHolders.get(native) ?? 1) - 1;
+          nativeHolders.set(native, left);
+          if (left === 0) await keepAwake(false).catch(() => undefined);
+        },
+      };
     } catch {
       // Neither works: the run goes on without.
     }
   }
   return { kind: 'n/a', release: () => Promise.resolve() };
 }
+
+/** How many wake locks hold each shell's keepAwake. */
+const nativeHolders = new WeakMap<SpikeNative, number>();

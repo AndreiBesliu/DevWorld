@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { captureForDecoderInfo } from './decoderinfo';
+import { captureForDecoderInfo, grantCamera } from './decoderinfo';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -52,5 +52,34 @@ describe('captureForDecoderInfo', () => {
     grant?.({ getTracks: () => [track] } as unknown as MediaStream);
     await Promise.resolve();
     expect(track.stop).toHaveBeenCalledTimes(1); // nobody holds it: the camera light goes off
+  });
+});
+
+describe('grantCamera', () => {
+  it('camera_oneGetUserMediaPromptAtTheStart_releasedAtOnce', async () => {
+    // Post-release task A: the automatic run asks for the camera once, at its start, so that S3's
+    // capture windows later hold it without a prompt and the run can be left alone.
+    vi.useFakeTimers();
+    const { track } = camera();
+    let grant: ((stream: MediaStream) => void) | undefined;
+    const getUserMedia = vi.fn(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          grant = resolve;
+        }),
+    );
+
+    const granted = grantCamera({ getUserMedia });
+    await vi.advanceTimersByTimeAsync(90_000); // the person reads the explanation first
+    grant?.({ getTracks: () => [track] } as unknown as MediaStream);
+
+    expect(await granted).toBe(true);
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(track.stop).toHaveBeenCalledTimes(1); // the light goes off at once
+  });
+
+  it('camera_refusedOrNone_runGoesOn', async () => {
+    expect(await grantCamera({ getUserMedia: () => Promise.reject(new DOMException('denied', 'NotAllowedError')) })).toBe(false);
+    expect(await grantCamera(undefined)).toBe(false);
   });
 });

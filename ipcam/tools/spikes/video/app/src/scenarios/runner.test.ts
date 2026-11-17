@@ -12,6 +12,15 @@ afterEach(() => {
 });
 
 describe('runner', () => {
+  it('runner_resultCarriesTheAppVersion', async () => {
+    // Post-release task A, requirement 9: new results say which release made them.
+    const t = setup();
+
+    const result = await finish(runScenario('S10', t.env));
+
+    expect(result.appVersion).toBe('spike-video-v0.1.1');
+  });
+
   it('runner_stageIsShownOverThePageDuringTheRunAndTakenAwayAfter', async () => {
     // The stage covers the page while a scenario runs, so its video, text and question are on screen.
     const t = setup();

@@ -66,5 +66,6 @@ export function installAndroidNative(
     enterPip: () => pip.enter(),
     onPip: pipFanOut(pip),
     keepAwake: (on) => metrics.keepAwake({ on }),
+    vibrate: () => metrics.vibrate(),
   };
 }

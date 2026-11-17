@@ -216,3 +216,31 @@ func TestProgress_AnswersTheShells(t *testing.T) {
 		t.Errorf("status %d, Access-Control-Allow-Origin %q", resp.StatusCode, resp.Header.Get("Access-Control-Allow-Origin"))
 	}
 }
+
+// The v0.1.1 zip is extracted over v0.1.0's folder, and its results stay
+// (requirement 9): the hub reads v0.1.0's files as they are, so Chrome's runs
+// of 2026-11-17 count. testdata/results-v0.1.0 was written by v0.1.0's code.
+func TestProgress_ReadsTheResultsOfV010(t *testing.T) {
+	hub := newTestHub(t, 1)
+	from := filepath.Join("..", "..", "testdata", "results-v0.1.0")
+	entries, err := os.ReadDir(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(from, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeResultFile(t, hub.resultsDir, e.Name(), string(data))
+	}
+
+	p := hub.getProgress(t)
+
+	if want := `[{"key":"chrome","platform":"chrome","scenarios":["S1","S7","S9","S10"]}]`; mustJSON(t, p.Complete) != want {
+		t.Errorf("complete = %s, want %s", mustJSON(t, p.Complete), want)
+	}
+	if got := deviceOf(t, p, "chrome").Remaining; !slices.Equal(got, []string{"S2", "S3-9", "S3-16", "S4"}) {
+		t.Errorf("chrome: remaining %v", got)
+	}
+}

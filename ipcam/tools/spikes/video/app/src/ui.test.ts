@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { createI18n } from './i18n';
 import type { ScenarioResult } from './results';
 import { ConnectError } from './session';
-import { connectErrorLines, defaultHubUrl, offersRepeat, statusText, type Status } from './ui';
+import { connectErrorLines, defaultHubUrl, offersRepeat, queueEventLines, queueOutcomeLines, statusText, type Status } from './ui';
 
 const HUB = 'http://192.168.1.20:7080';
 
@@ -64,6 +64,13 @@ describe('the status of a scenario', () => {
     samples: {},
     notes: [],
     ...over,
+  });
+
+  it('statusText_notRunHereButCompleteInSpikehub_isDone', () => {
+    // Chrome's runs of 2026-11-17 (v0.1.0) show as done, and the automatic run skips them.
+    expect(statusText({ kind: 'idle' }, t, true)).toBe('gata (rezultatul e în spikehub)');
+    expect(statusText({ kind: 'idle' }, t, false)).toBe('neînceput');
+    expect(statusText({ kind: 'running' }, t, true)).toBe(t('statusRunning'));
   });
 
   it('statusText_finishedRun_isDone', () => {
@@ -164,5 +171,62 @@ describe('the stage on the page', () => {
     const video = styles.get('.stage video');
     expect(video?.get('height')).toBe('100%');
     expect(video?.get('object-fit')).toBe('contain');
+  });
+});
+
+describe('the automatic run on the page', () => {
+  const { t } = createI18n({ lang: 'ro' });
+
+  it('autoRun_bannerSaysWhatHappenedAndThatTheRunContinued', () => {
+    expect(queueEventLines({ kind: 'resumed', id: 'S3-9', count: 1 }, t)).toEqual([
+      'S3-9 s-a întrerupt (1 din 3): fereastra nu mai era vizibilă. A pornit din nou de la început, iar rularea continuă.',
+    ]);
+    expect(queueEventLines({ kind: 'retry', id: 'S2' }, t)).toEqual(['S2 a eșuat și pornește încă o dată; rularea continuă.']);
+  });
+
+  it('autoRun_pauseIsCountedDown', () => {
+    expect(queueEventLines({ kind: 'pause', leftMs: 581_000 }, t)).toEqual([
+      'Pauză de răcire: mai sunt 9 min 41 s. Lăsați telefonul pe masă, scos din încărcător; rularea continuă singură.',
+    ]);
+  });
+
+  it('autoRun_scenarioLine', () => {
+    expect(queueEventLines({ kind: 'scenario', id: 'S7', index: 1, total: 2, attempt: 1 }, t)).toEqual(['Rulează S7 (1 din 2).']);
+  });
+
+  it('autoRun_threeInterruptionsStopWithAClearLine', () => {
+    expect(queueOutcomeLines({ kind: 'interrupted-too-often', id: 'S4' }, t)).toEqual([
+      'Rularea s-a oprit: S4 s-a întrerupt de 3 ori. Lăsați fereastra vizibilă și apăsați din nou «Rulează tot pentru acest dispozitiv»; ce e gata nu se mai rulează.',
+    ]);
+  });
+
+  it('autoRun_doneAndNothingLeft', () => {
+    expect(queueOutcomeLines({ kind: 'done', ran: ['S7', 'S9'], skipped: ['S10'], failed: [] }, t)).toEqual([
+      'Gata: toate scenariile acestui dispozitiv au rezultate.',
+    ]);
+    expect(queueOutcomeLines({ kind: 'done', ran: ['S7', 'S9'], skipped: [], failed: ['S9'] }, t)).toEqual([
+      'Gata: toate scenariile acestui dispozitiv au rezultate.',
+      'Au eșuat de două ori: S9. Faceți o captură de ecran și trimiteți-ne-o în chat.',
+    ]);
+    expect(queueOutcomeLines({ kind: 'done', ran: [], skipped: ['S10'], failed: [] }, t)).toEqual([
+      'Totul e gata pe acest dispozitiv. «Rulează din nou tot» reia toate scenariile.',
+    ]);
+  });
+
+  it('preflight_noH264_showsTheGuidesOpenH264Steps', () => {
+    const lines = queueOutcomeLines({ kind: 'no-h264' }, t);
+
+    expect(lines[0]).toBe('Firefox nu afișează încă H.264, pentru că îi lipsește pluginul OpenH264. Rularea nu a pornit.');
+    expect(lines.join('\n')).toContain('„Extensii și teme” → „Pluginuri”');
+    expect(lines.join('\n')).toContain('furnizat de Cisco Systems');
+    expect(lines.join('\n')).toContain('lăsați Firefox deschis 5 minute, reporniți-l');
+  });
+
+  it('autoRun_adviceBeforeTheRun', () => {
+    expect(t('advicePc')).toBe(
+      'Cât rulează, lăsați fereastra vizibilă (jumătate de ecran e de ajuns: Windows + ←) și nu blocați PC-ul.',
+    );
+    expect(t('runAll')).toBe('Rulează tot pentru acest dispozitiv');
+    expect(t('rerunAll')).toBe('Rulează din nou tot');
   });
 });

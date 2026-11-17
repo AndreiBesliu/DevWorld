@@ -44,6 +44,8 @@ export type InterruptReason =
  */
 export interface ScenarioResult {
   scenario: ScenarioId;
+  /** The release of the app that ran it, such as `spike-video-v0.1.1`; absent in v0.1.0's results. */
+  appVersion?: string;
   /**
    * The device as the page and its shell tell it: `ramMb` is the physical
    * memory in MiB and `gpu` the display adapters, both from the shell when it
