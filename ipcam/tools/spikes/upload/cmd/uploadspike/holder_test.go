@@ -210,6 +210,9 @@ func TestHandover_RefusedWhileMI5Open(t *testing.T) {
 	if code, _ := r.do(http.MethodPost, "/spike/v1/run/handover", "", "Authorization", "Bearer "+st.HandoverToken); code != http.StatusConflict {
 		t.Errorf("a direct handover with MI5 open: %d; want 409", code)
 	}
+	// The late caller's request and the direct one: the holder's lines
+	// reach this process's buffer after its answers.
+	until(t, 10*time.Second, "the holder's two refusals", func() bool { return strings.Count(a.stdout.String(), msgHandoverMI5) == 2 })
 	refusals := strings.Count(a.stdout.String(), msgHandoverMI5)
 	// The command that finds the run sends no request.
 	b := r.run("", nil, "mi6", "--b1", "android")

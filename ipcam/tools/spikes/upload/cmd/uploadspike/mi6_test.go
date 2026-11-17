@@ -233,9 +233,9 @@ func TestMI6_PlanAFails_RunsB1SameDay(t *testing.T) {
 	a := &app{r: r}
 	a.loginA(t, "android", 0, true)
 	until(t, time.Minute, "B1 on Android", func() bool { _, _, plan := a.next(t, "android"); return plan == mi6.PlanB1 })
-	if !strings.Contains(m.stdout.String(), "Planul A pentru Android × Google Drive a fost refuzat (invalid_grant)") {
-		t.Errorf("mi6 said:\n%s\nwant the plan A refusal and B1", m.stdout)
-	}
+	until(t, 10*time.Second, "the plan A refusal's line", func() bool {
+		return strings.Contains(m.stdout.String(), "Planul A pentru Android × Google Drive a fost refuzat (invalid_grant)")
+	})
 	a.loginB1(t, "android")
 	a.loginB1(t, "web")
 	a.webCells(t, "tv")
