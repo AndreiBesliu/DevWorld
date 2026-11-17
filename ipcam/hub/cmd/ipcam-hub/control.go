@@ -141,8 +141,10 @@ func (c *control) serve(ctx context.Context) (string, func(), error) {
 	if maxConns <= 0 {
 		maxConns = controlMaxConns
 	}
+	// DisableGeneralOptionsHandler: net/http would answer OPTIONS * itself,
+	// 200 with keep-alive, before the handler checks the token (C2-R21).
 	srv := &http.Server{Handler: c.handler(), MaxHeaderBytes: controlMaxHeader, ReadHeaderTimeout: controlHeaderTimeout,
-		ReadTimeout: controlReadTimeout, IdleTimeout: controlIdleTimeout}
+		ReadTimeout: controlReadTimeout, IdleTimeout: controlIdleTimeout, DisableGeneralOptionsHandler: true}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

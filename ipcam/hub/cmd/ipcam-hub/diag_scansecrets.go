@@ -426,16 +426,24 @@ func (q *quarantine) move(rel string) error {
 	if err := q.parent.MkdirAll(filepath.Dir(to), 0o700); err != nil {
 		return err
 	}
-	if err := restrictFile(filepath.Join(q.parentDir, from)); err != nil {
+	if beforeQuarantineMove != nil {
+		beforeQuarantineMove(rel)
+	}
+	if err := restrictFile(q.parent, from); err != nil {
 		return err
 	}
 	return q.parent.Rename(from, to)
 }
 
+// beforeQuarantineMove, when set, runs before a file's move into the
+// quarantine: a test seam that swaps a path meanwhile.
+var beforeQuarantineMove func(rel string)
+
 // prepare opens the results root's parent, makes the quarantine beside the
 // results root, or takes the one there, which must be a directory of the
 // scan's identity, restricted to it (restrictDir), and makes this scan's
-// directory in it, named by the scan's UTC time.
+// directory in it, named by the scan's UTC time. restrictDir is told which
+// directories this scan made, and checks the owner of any other.
 func (q *quarantine) prepare() error {
 	parent, err := os.OpenRoot(q.parentDir)
 	if err != nil {
@@ -447,10 +455,14 @@ func (q *quarantine) prepare() error {
 	} else if !info.IsDir() {
 		return fmt.Errorf("%s is a link or no directory", filepath.Join(q.parentDir, q.results))
 	}
-	if err := parent.Mkdir(q.name, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-		return err
+	created := true
+	if err := parent.Mkdir(q.name, 0o700); err != nil {
+		if !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		created = false
 	}
-	if err := restrictDir(filepath.Join(q.parentDir, q.name)); err != nil {
+	if err := restrictDir(parent, q.parentDir, q.name, created); err != nil {
 		return err
 	}
 	stamp := time.Now().UTC().Format("20060102T150405Z")
@@ -463,7 +475,7 @@ func (q *quarantine) prepare() error {
 		switch {
 		case err == nil:
 			q.scan = scan
-			return restrictDir(filepath.Join(q.parentDir, q.name, scan))
+			return restrictDir(parent, q.parentDir, filepath.Join(q.name, scan), true)
 		case !errors.Is(err, fs.ErrExist) || i == 100:
 			return err
 		}

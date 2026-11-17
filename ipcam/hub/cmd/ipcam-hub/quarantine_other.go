@@ -7,15 +7,18 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
 
-// restrictDir makes the quarantine's directory at path the scan's
-// identity's alone (C2-R20 (a)): it must be a directory, not a link, that
-// this identity owns, and it is narrowed to 0700 through its own
-// descriptor, so the check and the change cover the same directory.
-func restrictDir(path string) error {
+// restrictDir makes the quarantine's directory rel of root, at rootDir,
+// the scan's identity's alone (C2-R20 (a)): it must be a directory, not a
+// link, that this identity owns, made by this scan or not, and it is
+// narrowed to 0700 through its own descriptor, so the check and the change
+// cover the same directory.
+func restrictDir(_ *os.Root, rootDir, rel string, _ bool) error {
+	path := filepath.Join(rootDir, rel)
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	switch {
 	case isLink(err), errors.Is(err, unix.ENOTDIR):
@@ -41,4 +44,4 @@ func restrictDir(path string) error {
 
 // restrictFile leaves a file to be quarantined as it is: on Linux the
 // quarantine's directories, 0700, keep every other identity from it.
-func restrictFile(string) error { return nil }
+func restrictFile(*os.Root, string) error { return nil }

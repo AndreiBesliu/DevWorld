@@ -126,10 +126,12 @@ func TestDiagScanSecrets_QuarantinesAndRemovesNothing(t *testing.T) {
 }
 
 // TestControl_UnauthorizedAnswerClosesTheConnection (C2-R20 (b), security
-// review CTL-1): an answer sent before the bearer token is checked closes
-// its connection, so no local process keeps the endpoint's connections
-// open through keep-alive and locks uploadspike out of the cap; an
-// authorized answer keeps its connection.
+// review CTL-1, C2-R21): an answer sent before the bearer token is checked
+// closes its connection, so no local process keeps the endpoint's
+// connections open through keep-alive and locks uploadspike out of the
+// cap; an authorized answer keeps its connection. That holds for OPTIONS *
+// too, which net/http would otherwise answer itself, 200 with keep-alive,
+// before the handler and its token check.
 func TestControl_UnauthorizedAnswerClosesTheConnection(t *testing.T) {
 	c := &control{token: testControlToken(), conns: &connTracker{conns: map[*trackedConn]bool{}}, reported: map[string]bool{}}
 	addr, stop, err := c.serve(t.Context())
@@ -137,14 +139,16 @@ func TestControl_UnauthorizedAnswerClosesTheConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(stop)
+	const targets = "GET /control/v1/visibility/targets"
 	for _, tc := range []struct {
-		name, auth string
-		status     int
-		closes     bool
+		name, line, auth string
+		status           int
+		closes           bool
 	}{
-		{"no token", "", http.StatusUnauthorized, true},
-		{"another token", "Bearer " + strings.Repeat("f", 40), http.StatusUnauthorized, true},
-		{"the token", "Bearer " + testControlToken(), http.StatusOK, false},
+		{"no token", targets, "", http.StatusUnauthorized, true},
+		{"another token", targets, "Bearer " + strings.Repeat("f", 40), http.StatusUnauthorized, true},
+		{"the token", targets, "Bearer " + testControlToken(), http.StatusOK, false},
+		{"OPTIONS * with no token", "OPTIONS *", "", http.StatusUnauthorized, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conn, err := net.Dial("tcp", addr)
@@ -152,7 +156,7 @@ func TestControl_UnauthorizedAnswerClosesTheConnection(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = conn.Close() }()
-			req := "GET /control/v1/visibility/targets HTTP/1.1\r\nHost: h\r\nConnection: keep-alive\r\n"
+			req := tc.line + " HTTP/1.1\r\nHost: h\r\nConnection: keep-alive\r\n"
 			if tc.auth != "" {
 				req += "Authorization: " + tc.auth + "\r\n"
 			}
