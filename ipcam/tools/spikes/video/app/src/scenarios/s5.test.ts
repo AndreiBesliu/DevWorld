@@ -184,6 +184,30 @@ describe('S5', () => {
     expect(result.interrupted).toBe(false);
   });
 
+  it('S5_automaticRun_waitsForThePersonWithoutATimeout', async () => {
+    // Post-release task A: the run calls the person and waits for them, however long they take.
+    const t = setup({ fakePlayer: true, hub: { fps: () => 12 }, overrides: { waitForPersonMs: Infinity } });
+
+    const running = runScenario('S5', t.env);
+    await vi.advanceTimersByTimeAsync(45 * 60_000); // nobody at the phone yet
+    t.doc.hide(); // Home, at last
+    await vi.advanceTimersByTimeAsync(40 * 60_000); // back much later
+    t.doc.show();
+    const result = await finish(running);
+
+    expect(result.interrupted).toBe(false);
+    expect(result.samples.backgroundS).toEqual([2400]);
+    expect(result.notes.filter((note) => note.includes('within 10 min'))).toEqual([]);
+  });
+
+  it('S5_fromTheStartPage_stillGivesUpAfter10Minutes', async () => {
+    const t = setup({ fakePlayer: true });
+
+    const result = await finish(runScenario('S5', t.env));
+
+    expect(result.notes).toContain('the app did not go to the background within 10 min');
+  });
+
   it('S5_backInLessThan2Minutes_isInterruptedWithTheTimeAway', async () => {
     // integration-4: an early return is repeated at once, not discovered in the report.
     const t = setup({ fakePlayer: true, hub: { fps: () => 12 } });

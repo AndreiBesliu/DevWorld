@@ -2,8 +2,11 @@
 // spike app, simulated cameras over WebRTC, the HLS recording, and stores the
 // results that the app uploads.
 //
-//	spikehub [-media DIR] [-sims 16] [-port 7080] [-results DIR] [-mdns=true]
+//	spikehub [-media DIR] [-sims 16] [-port 7080] [-results DIR] [-mdns=true] [-browser=true]
 //	spikehub -real
+//
+// On Windows it opens its page, http://127.0.0.1:<port>, in the default
+// browser at start, unless -browser=false (browser.go).
 //
 // With -real it serves nothing: it probes up to four of the owner's real
 // cameras, prints what each sends and exits (R43, real.go).
@@ -16,6 +19,7 @@
 //	POST /spike/v1/offer        SDP offer in, SDP answer out (application/sdp)
 //	GET  /media/hls/*           the 10 min VOD, with byte ranges
 //	POST /spike/v1/results      a scenario result, stored in the results folder
+//	GET  /spike/v1/progress     what each device has completed and still lacks (progress.go)
 //
 // The camera numbers that the list and the "sent" messages carry are 1 to 16
 // for sim-01 to sim-16, 17 for mx-h265 and 18 for mx-high51 (R1, R3).
@@ -61,6 +65,7 @@ type config struct {
 	results string
 	mdns    bool
 	real    bool
+	browser bool
 }
 
 // parseFlags reads the command line. The usage and the flag errors go to out.
@@ -74,6 +79,7 @@ func parseFlags(args []string, out io.Writer) (config, error) {
 	flags.StringVar(&cfg.results, "results", "./results", "folder for the results files")
 	flags.BoolVar(&cfg.mdns, "mdns", true, "resolve the .local candidates of browsers with mDNS")
 	flags.BoolVar(&cfg.real, "real", false, "only probe up to 4 real cameras, whose RTSP URLs are typed hidden, and exit; serves nothing")
+	flags.BoolVar(&cfg.browser, "browser", true, "on Windows, open the hub's page (http://127.0.0.1:<port>) in the default browser at start")
 	if err := flags.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -114,6 +120,9 @@ type env struct {
 	// keepAwake keeps the PC from sleeping while the hub serves. The default is
 	// defaultKeepAwake, which is nil, and nothing is asked, outside Windows.
 	keepAwake keepAwakeFunc
+	// openBrowser opens the hub's page in the default browser at start. The
+	// default is defaultOpenBrowser, which is nil, and opens nothing, outside Windows.
+	openBrowser openBrowserFunc
 	// realFrameTimeout is how long -real waits for a camera's first frame.
 	realFrameTimeout time.Duration
 }
@@ -139,6 +148,9 @@ func (e env) withDefaults() env {
 	}
 	if e.keepAwake == nil {
 		e.keepAwake = defaultKeepAwake
+	}
+	if e.openBrowser == nil {
+		e.openBrowser = defaultOpenBrowser
 	}
 	if e.realFrameTimeout == 0 {
 		e.realFrameTimeout = realFrameTimeout
@@ -246,12 +258,24 @@ func run(ctx context.Context, args []string, e env) error {
 			defer release()
 		}
 	}
+	// The page opens on the loopback address that the PC's browsers use (R38).
+	// The listener queues the browser's connection until the server below takes it.
+	var browserOpened bool
+	var browserErr error
+	if cfg.browser && e.openBrowser != nil {
+		browserErr = e.openBrowser(fmt.Sprintf("http://127.0.0.1:%d", port))
+		browserOpened = browserErr == nil
+		if browserErr != nil {
+			log.Warn("cannot open the browser", "err", browserErr)
+		}
+	}
 	lan, lanErr := e.lan()
 	writeBanner(e.stdout, bannerInfo{
 		port: port, lan: lan, lanErr: lanErr, sims: cfg.sims, resultsDir: cfg.results, mdnsUnavailable: mdnsUnavailable,
-		keepsAwake: keepsAwake, awakeErr: awakeErr,
+		keepsAwake: keepsAwake, awakeErr: awakeErr, browserOpened: browserOpened, browserErr: browserErr,
 	})
-	log.Info("spikehub listens", "port", port, "sims", cfg.sims, "mdnsUnavailable", mdnsUnavailable, "keepsAwake", keepsAwake)
+	log.Info("spikehub listens", "port", port, "sims", cfg.sims, "mdnsUnavailable", mdnsUnavailable, "keepsAwake", keepsAwake,
+		"browserOpened", browserOpened)
 
 	srv := &http.Server{
 		Handler:           h.Handler(),

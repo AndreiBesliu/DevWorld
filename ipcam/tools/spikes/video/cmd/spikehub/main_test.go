@@ -24,18 +24,18 @@ func TestParseFlags_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := config{media: "./media", sims: 16, port: 7080, results: "./results", mdns: true, real: false}
+	want := config{media: "./media", sims: 16, port: 7080, results: "./results", mdns: true, real: false, browser: true}
 	if cfg != want {
 		t.Errorf("defaults = %+v, want %+v", cfg, want)
 	}
 }
 
 func TestParseFlags_Values(t *testing.T) {
-	cfg, err := parseFlags([]string{"-media", "m", "-sims", "4", "-port", "0", "-results", "r", "-mdns=false", "-real"}, io.Discard)
+	cfg, err := parseFlags([]string{"-media", "m", "-sims", "4", "-port", "0", "-results", "r", "-mdns=false", "-real", "-browser=false"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := config{media: "m", sims: 4, port: 0, results: "r", mdns: false, real: true}
+	want := config{media: "m", sims: 4, port: 0, results: "r", mdns: false, real: true, browser: false}
 	if cfg != want {
 		t.Errorf("config = %+v, want %+v", cfg, want)
 	}
@@ -82,6 +82,9 @@ type harnessOptions struct {
 	// keepAwake replaces the request that keeps the PC awake; nil takes the
 	// default, which does nothing outside Windows.
 	keepAwake func() (func(), error)
+	// openBrowser replaces the opening of the default browser; nil opens
+	// nothing, also on Windows, where a test must not start a browser.
+	openBrowser func(url string) error
 }
 
 // startHub runs the hub until the test ends or stop is called. It returns once
@@ -107,18 +110,23 @@ func startHub(t *testing.T, opts harnessOptions) *harness {
 		}
 	})
 	listening := make(chan string, 1)
+	openBrowser := opts.openBrowser
+	if openBrowser == nil {
+		openBrowser = func(string) error { return nil }
+	}
 	lan := opts.lan
 	if lan == nil {
 		lan = func() ([]lanAddr, error) { return []lanAddr{{Name: "Wi-Fi", IP: net.IPv4(192, 168, 1, 12)}}, nil }
 	}
 	e := env{
-		stdout:    h.stdout,
-		stderr:    h.stderr,
-		askSecret: opts.askSecret,
-		newAPI:    opts.newAPI,
-		keepAwake: opts.keepAwake,
-		clock:     newFakeClock(), // the simulators do not run on their own
-		lan:       lan,
+		stdout:      h.stdout,
+		stderr:      h.stderr,
+		askSecret:   opts.askSecret,
+		newAPI:      opts.newAPI,
+		keepAwake:   opts.keepAwake,
+		openBrowser: openBrowser,
+		clock:       newFakeClock(), // the simulators do not run on their own
+		lan:         lan,
 		listen: func(int) (net.Listener, error) {
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
 			if err == nil {
@@ -370,6 +378,64 @@ func TestRun_SaysSoWhenItCannotKeepThePCAwake(t *testing.T) {
 	}
 	if err := h.stop(t); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// On Windows spikehub opens the hub's page in the default browser at start,
+// at the loopback address that the browsers use (R38), and says so.
+func TestRun_OpensTheBrowserAtTheLoopbackAddress(t *testing.T) {
+	opened := make(chan string, 2)
+	h := startHub(t, harnessOptions{openBrowser: func(url string) error {
+		opened <- url
+		return nil
+	}})
+
+	url := waitFor(t, opened)
+	if want := "http://127.0.0.1:" + strings.TrimPrefix(h.url, "http://127.0.0.1:"); url != want {
+		t.Errorf("opened %q, want %q", url, want)
+	}
+	if resp, _ := h.get(t, "/spike/v1/cameras"); resp.StatusCode != http.StatusOK {
+		t.Errorf("the page's hub does not answer: status %d", resp.StatusCode)
+	}
+	if banner := h.stdout.String(); !strings.Contains(banner, "Pagina de test s-a deschis în browserul implicit.") {
+		t.Errorf("banner does not say that the browser opened:\n%s", banner)
+	}
+	if err := h.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	if len(opened) != 0 {
+		t.Error("the browser was opened more than once")
+	}
+}
+
+func TestRun_OpensNoBrowserWithTheFlagOff(t *testing.T) {
+	var calls atomic.Int32
+	h := startHub(t, harnessOptions{args: []string{"-browser=false"}, openBrowser: func(string) error {
+		calls.Add(1)
+		return nil
+	}})
+
+	if err := h.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 0 {
+		t.Errorf("-browser=false opened the browser %d times", calls.Load())
+	}
+	if banner := h.stdout.String(); strings.Contains(banner, "Pagina de test s-a deschis") || strings.Contains(banner, "Nu am putut deschide browserul") {
+		t.Errorf("banner talks about opening the browser:\n%s", banner)
+	}
+}
+
+// A browser that cannot be opened stops nothing: the banner gives the address.
+func TestRun_SaysSoWhenTheBrowserCannotBeOpened(t *testing.T) {
+	h := startHub(t, harnessOptions{openBrowser: func(string) error { return errors.New("rundll32: file not found") }})
+
+	banner := h.stdout.String()
+	if !strings.Contains(banner, "Nu am putut deschide browserul") || !strings.Contains(banner, "http://127.0.0.1:") {
+		t.Errorf("banner does not explain the failure:\n%s", banner)
+	}
+	if resp, _ := h.get(t, "/spike/v1/cameras"); resp.StatusCode != http.StatusOK {
+		t.Errorf("the hub does not serve: status %d", resp.StatusCode)
 	}
 }
 

@@ -391,6 +391,14 @@ jobs:
           sums="$(cd "${out}" && sha256sum --check --strict --quiet SHA256SUMS 2>&1)" || problems+=("SHA256SUMS: ${sums}")
 
           app='Proba video ipcam (Faza 0 b)'
+          # The release's version, which the app writes into every result and spikehub shows
+          # (post-release task A): one string in deviceplan.json, the tag's name on a tag.
+          version="$(jq -r .version tools/spikes/video/deviceplan/deviceplan.json)"
+          [[ "${version}" =~ ^spike-video-v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+            problems+=("deviceplan.json: the version ${version} is not spike-video-vX.Y.Z")
+          if [[ "${GITHUB_REF_TYPE}" == tag && "${GITHUB_REF_NAME}" != "${version}" ]]; then
+            problems+=("the tag ${GITHUB_REF_NAME} is not the release's version ${version} (deviceplan.json)")
+          fi
           unzip -p "${out}/spikehub-windows.zip" spikehub.exe > "${RUNNER_TEMP}/spikehub.exe" ||
             problems+=("spikehub-windows.zip: spikehub.exe cannot be read")
           check_hub() { # <file> <what file(1) says about the target>
@@ -398,6 +406,7 @@ jobs:
             kind="$(file -b "$1")"
             [[ "${kind}" == *"$2"* ]] || problems+=("$(basename "$1") is not $2: ${kind}")
             grep -aqF -- "${app}" "$1" || problems+=("$(basename "$1") does not embed the spike app")
+            grep -aqF -- "${version}" "$1" || problems+=("$(basename "$1") does not carry the version ${version}")
           }
           check_hub "${RUNNER_TEMP}/spikehub.exe" 'PE32+ executable (console) x86-64'
           check_hub "${out}/spikehub-linux-arm64" 'ELF 64-bit LSB executable, ARM aarch64'
@@ -440,6 +449,8 @@ jobs:
             problems+=("ipcam-spike.apk: the app's files cannot be unpacked")
           mapfile -t apk_scripts < <(find "${RUNNER_TEMP}/apk-app/assets/public" -name '*.js' 2>/dev/null)
           [[ ${#apk_scripts[@]} -gt 0 ]] || problems+=("ipcam-spike.apk holds no script of the app")
+          [[ ${#apk_scripts[@]} -gt 0 ]] && grep -qF -- "${version}" "${apk_scripts[@]}" ||
+            problems+=("ipcam-spike.apk: its app does not carry the version ${version}")
           labels="$(tools/scripts/check-guide-labels.sh docs/spike-video.md \
             --program hub "${hub_sources[@]}" --program hub "${RUNNER_TEMP}/spikehub.exe" \
             --program app tools/spikes/video/app/src/i18n.ts --program app "${apk_scripts[@]}" \
@@ -453,6 +464,7 @@ jobs:
             exit 1
           fi
           {
+            echo "version: ${version}"
             echo "${labels}"
             cd "${out}"
             for name in "${want[@]}"; do

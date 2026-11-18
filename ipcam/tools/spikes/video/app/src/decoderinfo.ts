@@ -17,12 +17,20 @@ const stopAll = (stream: MediaStream): void => {
 };
 
 /**
+ * How long the automatic run's one camera prompt may stay unanswered: it comes
+ * at the start, with the person there, who may read the explanation first.
+ */
+export const START_PROMPT_TIMEOUT_MS = 120_000;
+
+/**
  * Holds a 1-pixel video capture and returns the function that releases it, or
  * `n/a` when there is no camera, the permission is refused or the prompt stays
- * unanswered for 20 s (a capture granted after that is stopped at once).
+ * unanswered for `timeoutMs`, 20 s by default (a capture granted after that is
+ * stopped at once).
  */
 export async function captureForDecoderInfo(
   devices: CaptureDevices | undefined = globalThis.navigator?.mediaDevices,
+  timeoutMs = PROMPT_TIMEOUT_MS,
 ): Promise<(() => void) | 'n/a'> {
   if (!devices) return 'n/a';
   const capture = devices.getUserMedia({
@@ -33,7 +41,7 @@ export async function captureForDecoderInfo(
   const timeout = new Promise<'n/a'>((resolve) => {
     timer = setTimeout(() => {
       resolve('n/a');
-    }, PROMPT_TIMEOUT_MS);
+    }, timeoutMs);
   });
   try {
     const outcome = await Promise.race([capture, timeout]);
@@ -49,4 +57,18 @@ export async function captureForDecoderInfo(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * The automatic run's one camera prompt (post-release task A): a 1-pixel
+ * capture asked for at the start of the run and released at once, so that
+ * S3's capture windows later hold the camera without a prompt and the run can
+ * be left alone. Whether the camera was granted; a refusal only leaves MV4's
+ * decoder out, as it does from the start page.
+ */
+export async function grantCamera(devices: CaptureDevices | undefined = globalThis.navigator?.mediaDevices): Promise<boolean> {
+  const release = await captureForDecoderInfo(devices, START_PROMPT_TIMEOUT_MS);
+  if (release === 'n/a') return false;
+  release();
+  return true;
 }

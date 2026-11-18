@@ -37,6 +37,8 @@ export interface SpikeNative {
   onPip?(cb: (on: boolean) => void): void;
   /** Android: keeps the screen on (FLAG_KEEP_SCREEN_ON) while on is true. */
   keepAwake?(on: boolean): Promise<void>;
+  /** Android: vibrates the phone briefly, to call the person (the automatic run's S5 and S6). */
+  vibrate?(): Promise<void>;
 }
 
 /** The facade the shell installed, if any. */

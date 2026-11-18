@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/resultrules"
 )
 
 // Report is the report of a set of results: what ComputeMV judged, the gates it triggers,
@@ -19,7 +21,7 @@ type Report struct {
 	skipped []Skipped
 	ev      evaluation
 	gates   []Gate
-	// devices are the devices (deviceKey) that have results, in the order of the report.
+	// devices are the devices (resultrules.Key) that have results, in the order of the report.
 	devices []string
 }
 
@@ -393,14 +395,14 @@ func title(device string) string {
 		return t
 	}
 	if unexpectedOS(device) {
-		return fmt.Sprintf("%s (sistem neașteptat: nu intră în verdicte)", deviceTitle[basePlatform(device)]+" pe "+osName(device))
+		return fmt.Sprintf("%s (sistem neașteptat: nu intră în verdicte)", deviceTitle[resultrules.BasePlatform(device)]+" pe "+osName(device))
 	}
 	return "Alt dispozitiv: " + device
 }
 
 // osName is the OS family of a browser device key, as people write it: "chrome-macos" gives "macOS".
 func osName(device string) string {
-	family := strings.TrimPrefix(device, basePlatform(device)+"-")
+	family := strings.TrimPrefix(device, resultrules.BasePlatform(device)+"-")
 	switch family {
 	case "macos":
 		return "macOS"

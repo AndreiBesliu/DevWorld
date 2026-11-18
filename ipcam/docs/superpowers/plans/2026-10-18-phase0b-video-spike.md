@@ -20,7 +20,7 @@ Ce aveți de făcut: porniți un program pe PC, instalați o aplicație de test 
 - **The report.** A Go generator turns the results into the report and the verdicts.
 
 **Tech Stack:**
-- Go 1.27, Pion WebRTC v4 (`github.com/pion/webrtc/v4`), `github.com/bluenviron/gortsplib/v5` and `github.com/bluenviron/mediacommon/v2`
+- Go 1.27 (toolchain 1.27.4 in `ipcam/go.work` since 2026-11-17, B-R2), Pion WebRTC v4 (`github.com/pion/webrtc/v4`), `github.com/bluenviron/gortsplib/v5` and `github.com/bluenviron/mediacommon/v2`
 - Node 24 LTS, pnpm 10, TypeScript (strict), Vite, Vitest, ESLint, Playwright, hls.js, hash-wasm
 - Capacitor 8.5.3 (Android) with Kotlin plugins; Tauri 2.12.4 (Rust) with the `sysinfo` crate
 - ffmpeg (CI only, for media generation)
@@ -37,6 +37,7 @@ Ce aveți de făcut: porniți un program pe PC, instalați o aplicație de test 
 - **Zero cost (O13, PH0-32).** No paid service and no payment details. Builds stay unsigned or debug-signed. The APK is sideloaded. Only GitHub-hosted runners are used; the repo is public, so they are free. Excluded and deferred to Faza 0-bis (§16.9): remote over mobile data, TURN (MV1 remote, MV2 remote, MV11), Chrome from a public origin (the Chrome part of MV12), iOS (iOS-1, iOS-2), the device farm (AND-2).
 - **Toolchains.**
   - Go: newest `go1.27.x` whose `golang.org/toolchain` version is at least 14 days old (check `Time` with `go list -m -json`).
+    - Go 1.27.3 since 2026-10-21, a security exception (GO-2026-6809); Go 1.27.4 since 2026-11-17, for GO-2026-6859 (net/http MaxBytesReader header race, B-R2). `ipcam/go.work` sets it, and CI's setup-go reads it; the module `go` lines stay 1.27.2.
   - Node: 24 LTS. pnpm 10 with `minimumReleaseAge: 10080` in `pnpm-workspace.yaml` (7 days, §11.10).
   - Every other dependency: the newest version at least 14 days old. Lockfiles committed; `--frozen-lockfile` and `-mod=readonly` in CI.
 - **TypeScript.** `strict`, `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`; `any` is forbidden (ESLint `@typescript-eslint/no-explicit-any: error`). `@ipcam/player` must not import React, Capacitor or Tauri (APP-22, enforced by ESLint `no-restricted-imports`).
@@ -516,7 +517,7 @@ The guide covers, in order:
 2. Unpack and run `spikehub.exe`. Allow it on **Rețele private** in the Windows firewall prompt. Read the phone URL from the window.
 3. On the PC: open Chrome at `http://localhost:7080`, run S1, S2, S3-9, S3-16, S4, S7, S9 and S10; repeat in Edge and Firefox (S1, S2, S3-9, S9, S10).
 4. Install `ipcam-desktop` and run S3-16, S4 and S10.
-5. On the Galaxy A24: allow installing from the browser, install `ipcam-spike.apk`, connect to the same Wi-Fi (not guest), enter the URL, then run S1, S2, S3-4, S3-9 (with the camera-light explanation for MV4), S4, S5, S6, S7, S8, S9 and S10. Keep the phone plugged in only for S4; S3 runs on battery.
+5. On the Galaxy A24: allow installing from the browser, install `ipcam-spike.apk`, connect to the same Wi-Fi (not guest), enter the URL, then run S1, S2, S3-4, S3-9 (with the camera-light explanation for MV4), S4, S5, S6, S7, S8, S9 and S10. v0.1.0's guide kept the phone plugged in only for S4, with S3 on battery. Since spike-video-v0.1.1 (post-release task A, B-R4) the automatic run keeps the phone on battery for the whole run, S4 included, from at least 90 % charge: S3 refuses the charger (R48), and the report judges MV7 on a phone S4 recorded on battery (`TestMV7_ThePhonesS4OnBattery_IsJudged`).
 6. Optional: start `spikehub -real` and type the RTSP URLs of your own cameras.
 7. Zip the `results` folder and attach it in the chat or put it in `ipcam-teste/` on Google Drive.
 

@@ -21,6 +21,8 @@ on:
       # PH0-22 (R51): the published Phase 0 reports and their raw data, which the redaction job scans.
       - 'ipcam/docs/research/*phase0*-results.md'
       - 'ipcam/docs/research/phase0-data/**'
+      # The owner's guide, which the device table's test (deviceplan) reads.
+      - 'ipcam/docs/spike-video.md'
       - '.github/workflows/ipcam-spikes.yml'
       # The recorder spike has its own workflow (ipcam-spike-recording.yml).
       - '!ipcam/tools/spikes/recording/**'
@@ -40,6 +42,8 @@ on:
       # PH0-22 (R51): the published Phase 0 reports and their raw data, which the redaction job scans.
       - 'ipcam/docs/research/*phase0*-results.md'
       - 'ipcam/docs/research/phase0-data/**'
+      # The owner's guide, which the device table's test (deviceplan) reads.
+      - 'ipcam/docs/spike-video.md'
       - '.github/workflows/ipcam-spikes.yml'
       # The recorder spike has its own workflow (ipcam-spike-recording.yml).
       - '!ipcam/tools/spikes/recording/**'

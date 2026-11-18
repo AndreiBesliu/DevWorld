@@ -3,16 +3,22 @@
 // button and a status each, the results not yet uploaded, and the stage on
 // which the scenarios show their video. Romanian by default, English one tap away.
 import { createPlayer } from '@ipcam/player';
+import { createAttention, type AudioOut } from './attention';
 import { autorun, type AutorunRequest, type ErrorsTarget } from './autorun';
 import { exposeBandReader, readBand, type BandReaderTarget } from './band';
 import { fetchCameras, simCameras } from './cameras';
-import { captureForDecoderInfo } from './decoderinfo';
+import { watchCharger } from './charger';
+import { captureForDecoderInfo, grantCamera } from './decoderinfo';
 import { detectDevice, type DeviceInfo, type Platform } from './device';
+import { APP_VERSION, planFor, scenariosOf, type DevicePlan } from './deviceplan';
+import { askOnce, reasonOf, runQueue, type QueueEvent, type QueueOutcome } from './devicerun';
+import { decodesH264 } from './h264check';
 import { ConnectError } from './hubhttp';
 import { createI18n, minutesAndSeconds, type MessageKey, type Translate } from './i18n';
 import { sampleLoss, sampleStats } from './metrics';
-import { readNativeMetrics, spikeNative } from './native';
-import { publish, ResultsQueue, SCENARIO_IDS, type KeyValueStore, type ScenarioId, type ScenarioResult } from './results';
+import { readNativeMetrics, spikeNative, type NativeMetrics } from './native';
+import { completeFor, fetchProgress, remainingLines, type Progress } from './progress';
+import { publish, ResultsQueue, SCENARIO_IDS, type InterruptReason, type KeyValueStore, type ScenarioId, type ScenarioResult } from './results';
 import type { Clock, IntersectionWatch, ScenarioEnv, Stage } from './scenarios/context';
 import { runScenario } from './scenarios/index';
 import { NotStarted } from './scenarios/runner';
@@ -75,6 +81,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text 
  */
 class DomStage implements Stage {
   readonly root = el('section', 'stage');
+  private readonly banner = el('p', 'notice');
   private readonly status = el('p', 'status');
   private readonly gridEl = el('div', 'grid');
   private readonly fullEl = el('div', 'full');
@@ -84,8 +91,18 @@ class DomStage implements Stage {
   private big: HTMLVideoElement | undefined;
 
   constructor() {
-    this.root.append(this.status, this.message, this.question, this.gridEl, this.fullEl);
+    this.root.append(this.banner, this.status, this.message, this.question, this.gridEl, this.fullEl);
+    this.notice('');
     this.reset();
+  }
+
+  /**
+   * The automatic run's banner over the stage (an interrupted scenario that
+   * started again). It stays from run to run, until the automatic run clears it.
+   */
+  notice(text: string): void {
+    this.banner.textContent = text;
+    this.banner.hidden = text === '';
   }
 
   open(status: string): void {
@@ -177,12 +194,13 @@ function watchIntersection(element: HTMLElement): IntersectionWatch | 'n/a' {
 /**
  * A scenario's state on the start page. `refused`: it did not start, `key`
  * says why (S3 on the charger, R48); `failed`: it threw (the hub could not be
- * reached, for example).
+ * reached, for example). `queued`: the automatic run ran it, and starts it
+ * again by itself when it was interrupted.
  */
 export type Status =
   | { kind: 'idle' }
   | { kind: 'running' }
-  | { kind: 'done'; result: ScenarioResult }
+  | { kind: 'done'; result: ScenarioResult; queued?: true }
   | { kind: 'failed'; detail: string }
   | { kind: 'refused'; key: MessageKey };
 
@@ -211,6 +229,20 @@ export function startApp(root: HTMLElement): App {
   let busy = false;
   let unattended = false;
   let deviceLine = describeDevice(device);
+  // The automatic run (post-release task A): the device's list, what spikehub
+  // holds, and what the run says on the page.
+  const plan = planFor(device);
+  let progress: Progress | undefined;
+  let runLines: string[] = [];
+  let onContinue: (() => void) | undefined;
+  const attention = createAttention({
+    audio: () => {
+      const Context = (globalThis as { AudioContext?: new () => AudioOut }).AudioContext;
+      return Context ? new Context() : undefined;
+    },
+    ...('vibrate' in navigator ? { vibrate: (pattern: number[]) => navigator.vibrate(pattern) } : {}),
+    ...(native ? { native } : {}),
+  });
   (globalThis as { __spikeResults?: ScenarioResult[] }).__spikeResults ??= [];
   (globalThis as ErrorsTarget).__spikeErrors ??= [];
   exposeBandReader(globalThis as BandReaderTarget, el('canvas'));
@@ -223,11 +255,27 @@ export function startApp(root: HTMLElement): App {
       };
     },
   };
+  // What the shell tells of itself: its model, which the run and the page's
+  // marks count by (a results folder may hold another phone's or the
+  // emulator's runs), and the charger, which an S3 of the phone waits on
+  // (charger.ts). Read at the start, at the connection check and at the button.
+  let shellModel: string | undefined;
+  const chargerWatch = watchCharger(() => clock.now());
+  const seeShell = (metrics: NativeMetrics | 'n/a'): void => {
+    if (metrics === 'n/a') return;
+    shellModel = metrics.model ?? shellModel;
+    chargerWatch.see(metrics.charging);
+  };
+  const shellRead: Promise<void> = native ? readNativeMetrics(native, clock.setTimer).then(seeShell) : Promise.resolve();
 
   // Older browsers and some WebViews have no navigator.wakeLock, whatever lib.dom says.
   const wakeLock = (): ScreenWakeLock | undefined => ('wakeLock' in navigator ? navigator.wakeLock : undefined);
 
-  const environment = async (hubUrl: string): Promise<ScenarioEnv> => {
+  /** The environment of a run against `hubUrl`; `queued` gives the automatic run's question and patience. */
+  const environment = async (
+    hubUrl: string,
+    queued?: { ask: (question: string) => Promise<boolean> },
+  ): Promise<ScenarioEnv> => {
     const cameras = await fetchCameras(hubUrl);
     safeSet(storage, HUB_KEY, hubUrl);
     return {
@@ -236,7 +284,8 @@ export function startApp(root: HTMLElement): App {
       device,
       t,
       stage,
-      ...(unattended ? {} : { ask: (question: string) => stage.ask(question, t('yes'), t('no')) }),
+      ...(unattended ? {} : { ask: queued?.ask ?? ((question: string) => stage.ask(question, t('yes'), t('no'))) }),
+      ...(queued ? { waitForPersonMs: Infinity } : {}),
       ...(native ? { native } : {}),
       doc: document,
       clock,
@@ -265,7 +314,9 @@ export function startApp(root: HTMLElement): App {
       i18n.setLang(i18n.lang() === 'ro' ? 'en' : 'ro');
       render();
     });
-    header.append(el('h1', '', t('appTitle')), language);
+    const title = el('h1', '', t('appTitle'));
+    title.append(' ', el('small', 'version', t('version', { version: APP_VERSION })));
+    header.append(title, language);
 
     const hubSection = el('section', 'hub');
     const label = el('label', '', t('hubLabel'));
@@ -279,8 +330,9 @@ export function startApp(root: HTMLElement): App {
     connectionBox.append(...connection.map((line) => el('p', '', line)));
     hubSection.append(label, check, connectionBox, el('p', 'device', t('device', { device: deviceLine })));
 
+    const completeInHub = progress ? completeFor(progress, device, shellModel) : new Set<ScenarioId>();
     const list = el('section', 'scenarios');
-    list.append(el('h2', '', t('scenarios')));
+    list.append(el('h2', '', t('scenarios')), renderAutorun(completeInHub));
     for (const id of SCENARIO_IDS) {
       const status = statuses.get(id) ?? { kind: 'idle' };
       // A run that failed or was interrupted is marked like a failure: it needs another try.
@@ -291,7 +343,8 @@ export function startApp(root: HTMLElement): App {
       button.addEventListener('click', () => {
         void runFromPage(id);
       });
-      row.append(el('strong', '', id), el('span', 'what', t(`desc${id}` as MessageKey)), el('span', 'status', statusText(status, t)), button);
+      const text = statusText(status, t, completeInHub.has(id));
+      row.append(el('strong', '', id), el('span', 'what', t(`desc${id}` as MessageKey)), el('span', 'status', text), button);
       list.append(row);
     }
 
@@ -309,6 +362,174 @@ export function startApp(root: HTMLElement): App {
     controls.replaceChildren(header, hubSection, list, pendingSection);
   };
 
+  /** The automatic run's block, at the top of the scenario list; `completeInHub` is this device's, as its run counts it. */
+  const renderAutorun = (completeInHub: ReadonlySet<ScenarioId>): HTMLElement => {
+    const block = el('div', 'autorun');
+    block.append(el('h3', '', t('autoTitle')));
+    if (plan === undefined) {
+      block.append(el('p', 'unknown', t('autoUnknown')));
+    } else {
+      const runAll = el('button', 'run-all', t('runAll'));
+      const rerunAll = el('button', 'rerun-all', t('rerunAll'));
+      runAll.disabled = busy;
+      rerunAll.disabled = busy;
+      runAll.addEventListener('click', () => {
+        void runDevice(plan, false);
+      });
+      rerunAll.addEventListener('click', () => {
+        void runDevice(plan, true);
+      });
+      block.append(
+        el('p', 'plan', t('autoDevice', { label: plan.label, scenarios: scenariosOf(plan).join(', ') })),
+        runAll,
+        rerunAll,
+        el('p', 'advice', t(plan.pc ? 'advicePc' : 'advicePhone')),
+      );
+    }
+    if (progress) {
+      const own = plan === undefined ? undefined : { plan, complete: completeInHub };
+      block.append(...remainingLines(progress, t, own).map((line) => el('p', 'remaining', line)));
+    }
+    const lines = el('div', 'run-status');
+    lines.append(...runLines.map((line) => el('p', '', line)));
+    block.append(lines);
+    if (onContinue) {
+      const proceed = onContinue;
+      const go = el('button', 'continue', t('continue'));
+      go.addEventListener('click', () => {
+        proceed();
+      });
+      block.append(el('p', 'guide', t('s6Guide')), go);
+    }
+    return block;
+  };
+
+  /** Reads what spikehub holds, for «Rămase pe acest PC:»; nothing when it cannot be reached. */
+  const refreshProgress = async (): Promise<void> => {
+    if (hub() === '') return;
+    try {
+      await shellRead; // the shell's model first: the marks count by it
+      progress = await fetchProgress(hub());
+    } catch {
+      return; // the connection check and the runs say why
+    }
+    render();
+  };
+
+  /** What the automatic run says on the page, and the banner over the stage. */
+  const onQueueEvent = (event: QueueEvent): void => {
+    const lines = queueEventLines(event, t);
+    if (event.kind === 'resumed' || event.kind === 'retry') stage.notice(lines?.[0] ?? '');
+    if (event.kind === 'result' && !event.result.interrupted) stage.notice('');
+    if (lines !== undefined) {
+      runLines = event.kind === 'resumed' || event.kind === 'retry' ? [...runLines.slice(-1), ...lines] : lines;
+      render();
+    }
+  };
+
+  // Picture-in-picture (S6, Android): the run waits until the person brings the app back.
+  let inPip = false;
+  const pipWaiters: (() => void)[] = [];
+  native?.onPip?.((on) => {
+    inPip = on;
+    if (!on) for (const resolve of pipWaiters.splice(0)) resolve();
+  });
+
+  /** Runs one scenario of the automatic run as the start page does, and shows its status. */
+  const runQueued = async (id: ScenarioId, hubUrl: string, ask: (question: string) => Promise<boolean>): Promise<ScenarioResult> => {
+    statuses.set(id, { kind: 'running' });
+    render();
+    try {
+      const result = await runScenario(id, await environment(hubUrl, { ask }));
+      statuses.set(id, { kind: 'done', result, queued: true });
+      await publish(result, queue);
+      return result;
+    } catch (error) {
+      if (error instanceof NotStarted) statuses.set(id, { kind: 'refused', key: error.key });
+      else statuses.set(id, { kind: 'failed', detail: error instanceof ConnectError ? error.kind : String(error) });
+      throw error;
+    } finally {
+      render();
+    }
+  };
+
+  /** «Rulează tot pentru acest dispozitiv», or with `rerunAll` «Rulează din nou tot» (devicerun.ts). */
+  const runDevice = async (devicePlan: DevicePlan, rerunAll: boolean): Promise<void> => {
+    attention.prime(); // in the tap: the sound of S5 and S6 comes later, without one
+    busy = true;
+    connection = [];
+    connectionFailed = false;
+    runLines = [t('autoStarting')];
+    render();
+    const hubUrl = hub();
+    try {
+      progress = await fetchProgress(hubUrl);
+      safeSet(storage, HUB_KEY, hubUrl);
+      if (native) seeShell(await readNativeMetrics(native, clock.setTimer));
+      const complete = completeFor(progress, device, shellModel);
+      const ask = askOnce((question) => stage.ask(question, t('yes'), t('no')));
+      const outcome = await runQueue({
+        plan: devicePlan,
+        complete,
+        rerunAll,
+        doc: document,
+        clock,
+        runScenario: (id) => runQueued(id, hubUrl, ask),
+        requestCamera: async () => {
+          runLines = [t('autoCamera'), t(device.platform === 'android' ? 'mv4ExplainAndroid' : 'mv4Explain')];
+          render();
+          await grantCamera();
+        },
+        ...(devicePlan.platform === 'firefox' ? { preflight: async () => decodesH264(await environment(hubUrl)) } : {}),
+        holdWakeLock: () => holdWakeLock({ ...withWakeLock(wakeLock()), ...(native ? { native } : {}), doc: document }),
+        alert: () => {
+          attention.alert();
+        },
+        confirm: () =>
+          new Promise<void>((resolve) => {
+            onContinue = () => {
+              onContinue = undefined;
+              render();
+              resolve();
+            };
+            render();
+          }),
+        ...(native?.onPip
+          ? {
+              pip: {
+                active: () => inPip,
+                ended: () => (inPip ? new Promise<void>((resolve) => pipWaiters.push(resolve)) : Promise.resolve()),
+              },
+            }
+          : {}),
+        ...(native && devicePlan.platform === 'android'
+          ? {
+              charger: async () => {
+                seeShell(await readNativeMetrics(native, clock.setTimer));
+                return chargerWatch.state();
+              },
+            }
+          : {}),
+        show: onQueueEvent,
+      });
+      runLines = queueOutcomeLines(outcome, t);
+    } catch (error) {
+      if (error instanceof NotStarted) {
+        runLines = [t(error.key), t('autoStopped')];
+      } else {
+        connection = connectErrorLines(error, t);
+        connectionFailed = true;
+        runLines = [t('autoStopped')];
+      }
+    } finally {
+      stage.notice('');
+      onContinue = undefined;
+      busy = false;
+      render();
+      void refreshProgress();
+    }
+  };
+
   const checkConnection = async (): Promise<void> => {
     busy = true;
     connection = [t('checking')];
@@ -321,11 +542,13 @@ export function startApp(root: HTMLElement): App {
       session.close();
       safeSet(storage, HUB_KEY, hub());
       const metrics = native ? await readNativeMetrics(native, clock.setTimer) : undefined;
+      if (metrics !== undefined) seeShell(metrics);
       deviceLine = metrics === 'n/a' ? `${describeDevice(device)}, ${t('nativeNa')}` : describeDevice(device, metrics);
       connection = [
         t('connected', { cameras: simCameras(cameras).length, pair: pair === 'n/a' ? 'n/a' : `${pair.local}/${pair.remote}` }),
       ];
       void queue.flush().then(render);
+      void refreshProgress();
     } catch (error) {
       connection = connectErrorLines(error, t);
       connectionFailed = true;
@@ -368,6 +591,7 @@ export function startApp(root: HTMLElement): App {
   root.replaceChildren(controls, stage.root);
   render();
   if (hub() !== '' && queue.pending() > 0) void queue.flush().then(render); // what the last launch could not send
+  void refreshProgress();
 
   return {
     autorun(request) {
@@ -435,11 +659,16 @@ function interruptionText(result: ScenarioResult, t: Translate): string {
   }
 }
 
-/** The status line of a scenario on the start page. A run that failed or was interrupted never reads «gata». */
-export function statusText(status: Status, t: Translate): string {
+/**
+ * The status line of a scenario on the start page. A run that failed or was
+ * interrupted never reads «gata». `completeInHub`: spikehub holds a complete
+ * result of this device for it (from an earlier session or release), which an
+ * idle row says.
+ */
+export function statusText(status: Status, t: Translate, completeInHub = false): string {
   switch (status.kind) {
     case 'idle':
-      return t('statusIdle');
+      return t(completeInHub ? 'statusDoneInHub' : 'statusIdle');
     case 'running':
       return t('statusRunning');
     case 'failed':
@@ -447,7 +676,11 @@ export function statusText(status: Status, t: Translate): string {
     case 'refused':
       return t(status.key);
     case 'done': {
-      if (status.result.interrupted) return interruptionText(status.result, t);
+      if (status.result.interrupted) {
+        // The automatic run starts it again by itself, or its stop line says what to do: no «Repetă» here.
+        if (status.queued) return t('statusInterruptedAuto', { reason: queueReason(reasonOf(status.result), t) });
+        return interruptionText(status.result, t);
+      }
       const failed = failedDetail(status.result);
       return failed === undefined ? t('statusDone', { seconds: Math.round(status.result.durationS) }) : t('statusFailed', { detail: failed });
     }
@@ -457,4 +690,85 @@ export function statusText(status: Status, t: Translate): string {
 /** Whether the scenario's button reads «Repetă»: its run was interrupted or failed. */
 export function offersRepeat(status: Status): boolean {
   return status.kind === 'done' && (status.result.interrupted || failedDetail(status.result) !== undefined);
+}
+
+/**
+ * Why a scenario of the automatic run was interrupted, for its banner and the
+ * line that stops the run. Without the start page's «Repetă» advice
+ * (interruptionText): the run starts the scenario again by itself.
+ */
+function queueReason(reason: InterruptReason, t: Translate): string {
+  switch (reason.kind) {
+    case 'hidden':
+      return t('autoReasonHidden');
+    case 'session-lost':
+      return t('autoReasonSessionLost');
+    case 'charging':
+      return t('autoReasonCharging');
+    case 'early-return':
+      return t('autoReasonEarlyReturn', { time: minutesAndSeconds(reason.backgroundS) });
+    case 'pip-left':
+      return t('autoReasonPipLeft', { time: minutesAndSeconds(reason.pipS) });
+  }
+}
+
+/** What to do before pressing the button again, after a run stopped by the third interruption of `reason`. */
+function againAfter(reason: InterruptReason): MessageKey {
+  switch (reason.kind) {
+    case 'hidden':
+      return 'autoAgainHidden';
+    case 'session-lost':
+      return 'autoAgainSessionLost';
+    case 'charging':
+      return 'autoAgainCharging';
+    case 'early-return':
+    case 'pip-left':
+      return 'autoAgainPerson';
+  }
+}
+
+/**
+ * What the page says for an event of the automatic run; undefined for an event
+ * that changes no line (a result: the scenario's row shows it).
+ */
+export function queueEventLines(event: QueueEvent, t: Translate): string[] | undefined {
+  switch (event.kind) {
+    case 'preflight':
+      return [t('autoPreflight')];
+    case 'camera':
+      return [t('autoCamera')];
+    case 'scenario':
+      return [t('autoScenario', { id: event.id, index: event.index, total: event.total })];
+    case 'result':
+      return undefined;
+    case 'interrupted':
+      return [t('autoInterrupted', { id: event.id, reason: queueReason(event.reason, t) })];
+    case 'resumed':
+      return [t('autoResumed', { id: event.id, count: event.count, reason: queueReason(event.reason, t) })];
+    case 'retry':
+      return [t('autoRetry', { id: event.id })];
+    case 'pause':
+      return [t('autoPause', { time: minutesAndSeconds(event.leftMs / 1000) })];
+    case 'cold':
+      return [t('autoCold', { id: event.id, time: minutesAndSeconds(event.leftMs / 1000) })];
+    case 'attention':
+      return [t('autoAttention', { id: event.id })];
+    case 'confirm':
+      return [t('autoAttention', { id: event.id })];
+    case 'pip':
+      return [t('autoPip')];
+  }
+}
+
+/** What the page says when the automatic run ends. */
+export function queueOutcomeLines(outcome: QueueOutcome, t: Translate): string[] {
+  switch (outcome.kind) {
+    case 'done':
+      if (outcome.ran.length === 0) return [t('autoNothingLeft')];
+      return outcome.failed.length === 0 ? [t('autoDone')] : [t('autoDone'), t('autoDoneFailed', { ids: outcome.failed.join(', ') })];
+    case 'interrupted-too-often':
+      return [t('autoTooManyInterruptions', { id: outcome.id, reason: queueReason(outcome.reason, t) }), t(againAfter(outcome.reason))];
+    case 'no-h264':
+      return [t('openh264'), `1. ${t('openh264Step1')}`, `2. ${t('openh264Step2')}`, `3. ${t('openh264Step3')}`];
+  }
 }

@@ -32,6 +32,7 @@ function fakePlugins(read: Awaited<ReturnType<AndroidPlugins['metrics']['read']>
     metrics: {
       read: vi.fn(() => Promise.resolve(read)),
       keepAwake: vi.fn<AndroidPlugins['metrics']['keepAwake']>(() => Promise.resolve()),
+      vibrate: vi.fn<AndroidPlugins['metrics']['vibrate']>(() => Promise.resolve()),
     },
   } satisfies AndroidPlugins;
   const emitPip = (on: boolean): void => {
@@ -79,6 +80,10 @@ describe('installAndroidNative', () => {
     await native.keepAwake?.(true);
     await native.keepAwake?.(false);
     expect(plugins.metrics.keepAwake.mock.calls).toEqual([[{ on: true }], [{ on: false }]]);
+
+    // The automatic run calls the person for S5 and S6 (post-release task A).
+    await native.vibrate?.();
+    expect(plugins.metrics.vibrate).toHaveBeenCalledTimes(1);
   });
 
   it('nativeAndroid_twoPipCallbacks_shareOneNativeListener', () => {
