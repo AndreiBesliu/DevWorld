@@ -270,8 +270,24 @@ func (c *mi5Cmd) run(ctx context.Context) error {
 	h.mi5 = comp
 	c.events = make(chan hubproc.Event, 4096)
 	h.mu.Lock()
-	h.sink = func(ev hubproc.Event) { c.events <- ev }
+	h.sink = func(ev hubproc.Event) {
+		if !mi5Event(ev.Type) {
+			return // the status ticks and the rest: the tally reads none
+		}
+		select {
+		case c.events <- ev:
+		case <-time.After(time.Minute):
+			// Never stall the hub's stdout behind a run that stopped
+			// reading; a lost event shows in the audit, never in a hang.
+		}
+	}
 	h.mu.Unlock()
+	stopSink := func() {
+		h.mu.Lock()
+		h.sink = nil
+		h.mu.Unlock()
+	}
+	defer stopSink()
 	if err := c.logins(ctx, comp); err != nil {
 		return c.fail(ctx, err)
 	}
@@ -295,10 +311,16 @@ func (c *mi5Cmd) run(ctx context.Context) error {
 		}
 	}
 	data, err := mi5.Run(ctx, cfg, opts)
+	stopSink() // nothing reads the events once Run returned
 	if err != nil {
 		return c.fail(ctx, err)
 	}
 	return c.close(ctx, data)
+}
+
+// mi5Event reports whether the run's tally reads events of typ.
+func mi5Event(typ string) bool {
+	return strings.HasPrefix(typ, "upload_") || typ == "dest_state" || typ == "segment_closed" || typ == "gap"
 }
 
 // config is the run's settings from the flags and the host (P17, P38).
