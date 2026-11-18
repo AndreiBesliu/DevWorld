@@ -42,6 +42,14 @@ type Host interface {
 	ResetConnections(ctx context.Context) error
 	// Diag runs `ipcam-hub diag <args>` as the catalog's owner.
 	Diag(ctx context.Context, args []string) ([]json.RawMessage, error)
+	// HubGone closes when the running hub ends, on purpose or on its own.
+	HubGone() <-chan struct{}
+	// RestartCrashed restarts a hub that ended on its own, with the
+	// composition of its phase: the holder's restart after a crash, its
+	// owner's line and its hub-crash gap (Task 9). It reports false, and
+	// starts nothing, when the hub ended on purpose (StopHub, KillHub),
+	// and an error when no hub would start again.
+	RestartCrashed(ctx context.Context) (bool, error)
 	// HubConfig is the hub's process configuration, as the blocked
 	// identity runs it (diag reach); RunJSON its run.json.
 	HubConfig() hubproc.Config
@@ -203,8 +211,77 @@ func (r *run) withTally(fn func(t *tally)) {
 	fn(r.tally)
 }
 
-// sleep waits d.
-func (r *run) sleep(ctx context.Context, d time.Duration) error { return r.opts.Sleep(ctx, d) }
+// sleep waits d. A hub that ends on its own meanwhile, neither stopped
+// nor killed by the run, is restarted at once through the holder (Task
+// 9's restart after a crash: the owner's line, the hub-crash gap) and
+// counted in HubCrashes, and the wait goes on to its end. Every wait of
+// the run sleeps here with its hub running, so a crash is never left to
+// the restart's bound (DrainMax: 12 h for the owner).
+func (r *run) sleep(ctx context.Context, d time.Duration) error {
+	end := r.now().Add(d)
+	for {
+		gone := r.host.HubGone()
+		err := r.sleepOrGone(ctx, d, gone)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !ended(gone) {
+			return err
+		}
+		restarted, err := r.hubEnded(ctx)
+		if err != nil {
+			return err
+		}
+		if d = end.Sub(r.now()); d <= 0 {
+			return nil
+		}
+		if !restarted {
+			return r.opts.Sleep(ctx, d) // an end on purpose: nothing to watch
+		}
+	}
+}
+
+// sleepOrGone waits d, or until gone closes or ctx ends.
+func (r *run) sleepOrGone(ctx context.Context, d time.Duration, gone <-chan struct{}) error {
+	if gone == nil {
+		return r.opts.Sleep(ctx, d)
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-gone:
+			cancel()
+		case <-sctx.Done():
+		}
+	}()
+	return r.opts.Sleep(sctx, d)
+}
+
+// ended reports whether gone is closed.
+func ended(gone <-chan struct{}) bool {
+	if gone == nil {
+		return false
+	}
+	select {
+	case <-gone:
+		return true
+	default:
+		return false
+	}
+}
+
+// hubEnded handles the end of the hub that a wait saw: the holder
+// restarts one that ended on its own, which HubCrashes counts; one that
+// the run stopped or killed restarts nothing.
+func (r *run) hubEnded(ctx context.Context) (bool, error) {
+	restarted, err := r.host.RestartCrashed(ctx)
+	if err != nil || !restarted {
+		return false, err
+	}
+	r.data.HubCrashes++
+	return true, nil
+}
 
 // run is Run's body.
 func (r *run) run(ctx context.Context) (*results.Mi5Data, error) {
@@ -362,10 +439,11 @@ type readOpenLine struct {
 const settle = 5 * time.Second
 
 // readOpen reads cam's open segment once (diag readopen --profile sub), at
-// least settle after its last rotation, and once more settle later when
-// it found no open segment (a rotation whose event had not reached the
-// run yet): whether it read, how long it took, and why not (the diag's
-// error, or its exit).
+// least settle after its last rotation, once more after the hub's restart
+// when the hub ended on its own during the read, and once more settle
+// later when it found no open segment (a rotation whose event had not
+// reached the run yet): whether it read, how long it took, and why not
+// (the diag's error, or its exit).
 func (r *run) readOpen(ctx context.Context, cam string) (bool, float64, string) {
 	var rotated int64
 	r.withTally(func(t *tally) { rotated = t.rotated[cam] })
@@ -374,7 +452,17 @@ func (r *run) readOpen(ctx context.Context, cam string) (bool, float64, string) 
 			return false, 0, "stopped"
 		}
 	}
+	gone := r.host.HubGone()
 	ok, ms, why := r.readOpenOnce(ctx, cam)
+	if !ok && ended(gone) {
+		// The hub ended on its own during the read, which measured the
+		// crash, not the open segment: the hub restarts (sleep's watch),
+		// and the read is made again.
+		if err := r.sleep(ctx, 0); err != nil {
+			return false, 0, "stopped"
+		}
+		ok, ms, why = r.readOpenOnce(ctx, cam)
+	}
 	if !ok && why == "no-open-segment" {
 		if err := r.sleep(ctx, settle); err != nil {
 			return false, 0, "stopped"
@@ -485,6 +573,8 @@ func (r *run) restartMidUpload(ctx context.Context) error {
 	if err := r.host.StartHub(ctx, PhaseMain); err != nil {
 		return err
 	}
+	restartedAt := r.now()
+	r.withTally(func(tl *tally) { tl.restartedAt = restartedAt.UnixMilli() })
 	r.host.Printf("%s", MsgRestarted)
 	return nil
 }

@@ -736,6 +736,65 @@ func TestMI5_OwnLoginWithoutMI6Run(t *testing.T) {
 	stopHolder(t, m, signalFile)
 }
 
+// TestMI5_HubCrashDuringBlock_RestartedAndRecorded (Task 9's hub
+// lifetime under mi5): an ipcam-hub that ends on its own during mi5's
+// block (SIGKILL, as hub.pid names it) is noticed at once: the owner's
+// «Hub-ul s-a oprit singur; îl repornesc.», the hub restarted with MI5's
+// composition, and the run goes on to its normal end. Its envelope is
+// valid and records the crash: hubCrashes 1 and a hub-crash gap in the
+// run's gaps (G14 then gives no verdict on it). Unnoticed, the run waited
+// out the restart's bound (8 min here, 12 h for the owner) for an upload
+// after the unblock, and ended invalid with no data.
+func TestMI5_HubCrashDuringBlock_RestartedAndRecorded(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the lab's run is Linux's")
+	}
+	media := spiketest.Required(t, "MEDIAGEN_DIR", "SPIKE_REQUIRE_MEDIA")
+	r, f := realRigWith(t, []string{"-throttle", "262144"})
+	recc := binary(t, "reccontroller", "github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cmd/reccontroller")
+	log, seam := r.firewallLog()
+	p := r.start([]string{seam, envReccontroller + "=" + recc, envMediaDir + "=" + media, envLabLAN + "=127.0.0.1", envMI5Timing + "=" + mi5ShortTiming},
+		"mi5", "--lab", "--block", "40s", "--segment-secs", "30", "--part-size", "512KiB", "--cameras", "2", "--fakes", f.base)
+	d := &mi6Device{r: r, fwLog: log}
+	d.waitBlock(t, p, 0)
+	crashed := r.hubPID()
+	if err := killPID(crashed); err != nil {
+		t.Fatal(err)
+	}
+	until(t, time.Minute, "the crash's line and a new hub", func() bool {
+		return strings.Contains(p.stdout.String(), msgHubCrashed) && r.hubPID() != crashed && alive(r.hubPID())
+	})
+	if !p.wait(15 * time.Minute) {
+		t.Fatalf("mi5 did not end\nstdout:\n%s\nstderr:\n%s", p.stdout, tail(p.stderr.String(), 40))
+	}
+	if p.code != 0 {
+		t.Fatalf("mi5: exit %d (%s)\nstdout:\n%s\nstderr:\n%s", p.code, p.errorLine(), p.stdout, tail(p.stderr.String(), 40))
+	}
+	files, _ := filepath.Glob(filepath.Join(r.base, "results", "MI5", "lab-linux", "*.json"))
+	if len(files) != 1 {
+		t.Fatalf("envelopes %v", files)
+	}
+	var e results.Envelope
+	if err := json.Unmarshal([]byte(mustRead(t, files[0])), &e); err != nil || e.MI5 == nil || len(e.Runs) != 1 {
+		t.Fatalf("the envelope: %v", err)
+	}
+	if !e.Runs[0].Valid || e.MI5.HubCrashes != 1 {
+		t.Errorf("the run %+v, hubCrashes %d; want valid with the crash counted", e.Runs[0], e.MI5.HubCrashes)
+	}
+	crashGaps := 0
+	for _, g := range e.Runs[0].Gaps {
+		if g.Reason == results.GapHubCrash {
+			crashGaps++
+		}
+	}
+	if crashGaps != 1 {
+		t.Errorf("the run's gaps %+v; want one hub-crash gap", e.Runs[0].Gaps)
+	}
+	if dst := e.MI5.Dests[0]; dst.Dest != "dst-1" || dst.Segments == 0 || dst.Verified != dst.Segments || dst.Missing != 0 || dst.Duplicates != 0 {
+		t.Errorf("dst-1 %+v", dst)
+	}
+}
+
 // mustRead is a file's text.
 func mustRead(t *testing.T, path string) string {
 	t.Helper()

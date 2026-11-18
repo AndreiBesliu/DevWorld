@@ -43,6 +43,15 @@ type fakeRun struct {
 	readAt func(now time.Time) string
 	// oneDrive runs with A5 passed: dst-od takes cam01.
 	oneDrive bool
+	// gone is the running hub's end; crash, when it returns true on a
+	// step, ends the hub on its own there: down, it sends no event until
+	// a start or RestartCrashed. stopping is set by StopHub and KillHub;
+	// restarts are the times of RestartCrashed's restarts.
+	gone     chan struct{}
+	crash    func(step string, at time.Time) bool
+	down     bool
+	stopping bool
+	restarts []time.Time
 }
 
 func newFakeRun(t *testing.T, start time.Time) *fakeRun {
@@ -72,10 +81,52 @@ func (f *fakeRun) step(name string) {
 	f.mu.Lock()
 	f.calls = append(f.calls, fmt.Sprintf("%s@%d", name, f.now.UnixMilli()))
 	at := f.now
+	if f.crash != nil && !f.down && f.gone != nil && f.crash(name, at) {
+		close(f.gone)
+		f.down = true
+	}
+	down := f.down
 	f.mu.Unlock()
-	if f.script != nil {
+	if f.script != nil && !down {
 		f.send(f.script(name, at))
 	}
+}
+
+// hubUp starts a fake hub: a new end, up.
+func (f *fakeRun) hubUp() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gone, f.down, f.stopping = make(chan struct{}), false, false
+}
+
+// hubDown ends the fake hub on purpose.
+func (f *fakeRun) hubDown() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopping = true
+	if f.gone != nil && !f.down {
+		close(f.gone)
+	}
+	f.down = true
+}
+
+func (f *fakeRun) HubGone() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gone
+}
+
+func (f *fakeRun) RestartCrashed(context.Context) (bool, error) {
+	f.mu.Lock()
+	if f.stopping {
+		f.mu.Unlock()
+		return false, nil
+	}
+	f.restarts = append(f.restarts, f.now)
+	f.mu.Unlock()
+	f.hubUp()
+	f.step("restart-crashed")
+	return true, nil
 }
 
 func (f *fakeRun) sleep(ctx context.Context, d time.Duration) error {
@@ -90,11 +141,17 @@ func (f *fakeRun) sleep(ctx context.Context, d time.Duration) error {
 }
 
 func (f *fakeRun) StartHub(_ context.Context, p Phase) error {
+	f.hubUp()
 	f.step("start-" + string(p))
 	return nil
 }
-func (f *fakeRun) StopHub(context.Context) error          { f.step("stop"); return nil }
-func (f *fakeRun) KillHub() error                         { f.killed = f.clock(); f.step("kill"); return nil }
+func (f *fakeRun) StopHub(context.Context) error { f.hubDown(); f.step("stop"); return nil }
+func (f *fakeRun) KillHub() error {
+	f.killed = f.clock()
+	f.hubDown()
+	f.step("kill")
+	return nil
+}
 func (f *fakeRun) ResetConnections(context.Context) error { f.step("reset-connections"); return nil }
 func (f *fakeRun) HubConfig() hubproc.Config              { return hubproc.Config{} }
 func (f *fakeRun) RunJSON() string                        { return "run.json" }
@@ -107,6 +164,12 @@ func (f *fakeRun) Diag(_ context.Context, args []string) ([]json.RawMessage, err
 	f.step("diag-" + args[0] + "-" + strings.Join(args[len(args)-1:], ""))
 	switch args[0] {
 	case "readopen":
+		f.mu.Lock()
+		down := f.down
+		f.mu.Unlock()
+		if down {
+			return nil, &hubproc.DiagError{Code: 1, Stderr: "ipcam-hub: diag readopen: no hub"}
+		}
 		if f.readAt != nil {
 			if why := f.readAt(f.clock()); why != "" {
 				return []json.RawMessage{json.RawMessage(`{"schema":"ipcam.diag.readopen/1","ok":false,"error":"` + why + `"}`)}, nil
@@ -660,5 +723,116 @@ func TestMI5_OneDriveHashMismatchFromEvents(t *testing.T) {
 	got := tl.dest(od, null, nil)
 	if got.HashMismatches != 1 || got.Missing != 0 || got.Duplicates != 0 || got.AuditFrom != AuditEvents {
 		t.Errorf("dst-od %+v; want 1 mismatch (od-3), 0 missing, 0 duplicates", got)
+	}
+}
+
+// TestMI5_HubCrashDuringBlock_RestartedAndCounted (Task 9's hub
+// lifetime under mi5): a hub that ends on its own during the block,
+// neither stopped nor killed by the run, sends nothing more, so a run
+// that never watched it waited out the restart's bound (DrainMax: 12 h
+// for the owner) for an upload after the unblock, then ended invalid
+// with no data. The run notices the end at once, has the holder restart
+// the hub (its line and hub-crash gap are the holder's), counts it in
+// HubCrashes and goes on to its end; the run's own stops and its P16
+// kill are no crash.
+func TestMI5_HubCrashDuringBlock_RestartedAndCounted(t *testing.T) {
+	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	f := newFakeRun(t, start)
+	f.uploads = `{"schema":"ipcam.diag.uploads/1","dest":"dst-1","segments":3,"verified":3,"missing":0,"duplicates":0,"hashMismatches":0}`
+	f.script = labScript(f, start, 1<<20)
+	var blockAt, crashedAt time.Time
+	f.crash = func(step string, at time.Time) bool {
+		if step == "block" {
+			blockAt = at
+		}
+		if crashedAt.IsZero() && !blockAt.IsZero() && step == "sleep" && at.After(blockAt.Add(5*time.Minute)) {
+			crashedAt = at
+			return true
+		}
+		return false
+	}
+	data, err := labRun(t, f, start)
+	if err != nil {
+		t.Fatalf("a run whose hub crashed in the block: %v", err)
+	}
+	if crashedAt.IsZero() || len(f.restarts) != 1 || f.restarts[0].After(crashedAt.Add(time.Second)) || !f.restarts[0].Before(f.unblocked) {
+		t.Fatalf("crashed at %v, restarts %v, unblocked %v; want one restart at once, in the block", crashedAt, f.restarts, f.unblocked)
+	}
+	if data.HubCrashes != 1 {
+		t.Errorf("hubCrashes %d; want 1", data.HubCrashes)
+	}
+	if f.killed.IsZero() || data.Restart == nil || data.Restart.ResumedOffset != 1<<20 || data.Dests[0].Verified != 3 {
+		t.Errorf("the run after the crash: killed %v, restart %+v, dst-1 %+v", f.killed, data.Restart, data.Dests[0])
+	}
+}
+
+// TestMI5_RunStopsAreNoCrash: the run's own stops and its P16 kill end
+// hubs on purpose, which no restart follows and HubCrashes never counts.
+func TestMI5_RunStopsAreNoCrash(t *testing.T) {
+	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	f := newFakeRun(t, start)
+	f.uploads = `{"schema":"ipcam.diag.uploads/1","dest":"dst-1","segments":3,"verified":3,"missing":0,"duplicates":0,"hashMismatches":0}`
+	f.script = labScript(f, start, 1<<20)
+	data, err := labRun(t, f, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.restarts) != 0 || data.HubCrashes != 0 {
+		t.Errorf("restarts %v, hubCrashes %d; want none", f.restarts, data.HubCrashes)
+	}
+}
+
+// TestMI5_InjectedGapsAreTheKills: InjectedGaps counts the recording gaps
+// that the P16 kill caused, open across the kill; a gap that a later
+// crash of the restarted hub caused begins after that hub ran, and is the
+// crash's (HubCrashes), not an injected one.
+func TestMI5_InjectedGapsAreTheKills(t *testing.T) {
+	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	kill := start.Add(time.Hour)
+	tl := newTally(start.UnixMilli(), Destinations(Mi5Config{Cameras: 4, Drive: DriveTest}))
+	tl.killedAt = kill.UnixMilli()
+	observeAt(tl, "gap", kill.Add(3*time.Second), map[string]any{"cam": "cam01", "profile": "sub",
+		"startMs": kill.Add(-time.Second).UnixMilli(), "endMs": kill.Add(3 * time.Second).UnixMilli()})
+	tl.restartedAt = kill.Add(4 * time.Second).UnixMilli()
+	observeAt(tl, "gap", kill.Add(6*time.Second), map[string]any{"cam": "cam02", "profile": "sub",
+		"startMs": kill.Add(-time.Second).UnixMilli(), "endMs": kill.Add(5 * time.Second).UnixMilli()})
+	crash := kill.Add(10 * time.Minute)
+	observeAt(tl, "gap", crash.Add(5*time.Second), map[string]any{"cam": "cam01", "profile": "sub",
+		"startMs": crash.UnixMilli(), "endMs": crash.Add(5 * time.Second).UnixMilli()})
+	if tl.gapsAfterKill != 2 {
+		t.Errorf("injected gaps %d; want the kill's 2, not the later crash's", tl.gapsAfterKill)
+	}
+}
+
+// TestMI5_ReadDuringACrashIsReadAgain: an open-segment read that fails
+// because the hub ended on its own during it measured the crash, not the
+// open segment (G14 would take it for plan B's 2-min segments): the hub
+// is restarted at once and the read made again.
+func TestMI5_ReadDuringACrashIsReadAgain(t *testing.T) {
+	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	f := newFakeRun(t, start)
+	f.uploads = `{"schema":"ipcam.diag.uploads/1","dest":"dst-1","segments":3,"verified":3,"missing":0,"duplicates":0,"hashMismatches":0}`
+	f.script = labScript(f, start, 1<<20)
+	var blockAt time.Time
+	crashed := false
+	f.crash = func(step string, at time.Time) bool {
+		if step == "block" {
+			blockAt = at
+		}
+		if !crashed && !blockAt.IsZero() && step == "diag-readopen-sub" && at.After(blockAt.Add(5*time.Minute)) {
+			crashed = true
+			return true
+		}
+		return false
+	}
+	data, err := labRun(t, f, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !crashed || data.HubCrashes != 1 || len(f.restarts) != 1 {
+		t.Fatalf("crashed %v, hubCrashes %d, restarts %v; want the crash restarted once", crashed, data.HubCrashes, f.restarts)
+	}
+	if r := data.ReadOpen[1]; r.OK != r.Calls || len(r.Failures) != 0 {
+		t.Errorf("the block's reads %+v; want the crash's read made again, none failed", r)
 	}
 }

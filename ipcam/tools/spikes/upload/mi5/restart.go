@@ -94,8 +94,11 @@ type tally struct {
 	verified                                           map[string]int
 	// segmentStarts are the run's closed segments' starts, by camera.
 	segmentStarts map[string][]int64
-	// gapsAfterKill counts the recording gaps that the kill caused.
+	// gapsAfterKill counts the recording gaps that the kill caused: those
+	// open across the kill, which began before the restarted hub ran
+	// (restartedAt), so a later crash's gaps are not the kill's.
 	gapsAfterKill int
+	restartedAt   int64
 	// rotated is when each camera's last segment closed (a new one began);
 	// closedAt when each segment (camera and start) closed.
 	rotated, closedAt map[string]int64
@@ -212,7 +215,7 @@ func (t *tally) observe(ev hubproc.Event) {
 			t.segmentStarts[f.Cam] = append(t.segmentStarts[f.Cam], f.StartMs)
 		}
 	case "gap":
-		if t.killedAt != 0 && f.EndMs >= t.killedAt {
+		if t.killedAt != 0 && f.EndMs >= t.killedAt && (t.restartedAt == 0 || f.StartMs <= t.restartedAt) {
 			t.gapsAfterKill++
 		}
 	}

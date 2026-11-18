@@ -109,6 +109,7 @@ const (
 	msgMI5EndedInvalid   = "Proba MI5 deschisă s-a încheiat fără rezultat (%s); rulați-o din nou în altă zi."
 	msgMI5Running2       = "Proba MI5 rulează (pornită la %s); hub-ul nu se predă până la final."
 	msgMI5Dead           = "Proba MI5 s-a oprit înainte de final; pornirea automată o închide și o marchează nevalidă."
+	msgMI5HubDown        = "Hub-ul s-a oprit singur în timpul probei MI5 și nu a mai pornit; proba s-a oprit. Rulați-o din nou în altă zi."
 	msgAnnotateTooMany   = "setul are %d rezultate; o adnotare primește cel mult %d"
 	msgAnnotateTooLong   = "%s are %d octeți după escapare; o adnotare primește cel mult %d"
 )

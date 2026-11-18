@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -282,5 +284,44 @@ func TestApply_MI5OwnLoginNotCountedAsMI6(t *testing.T) {
 	h.apply(completed("g-web", "tv"))
 	if st, _ = runstate.Load(e.statePath()); st.Handoffs[mi6.HandoffKey("google:tv")] != 1 {
 		t.Errorf("handoffs after g-web's login %v; want one", st.Handoffs)
+	}
+}
+
+// TestMI5_CrashedHubThatWillNotStart: under mi5, a hub that ended on its
+// own is said and started again; one that will not start (here a missing
+// ipcam-hub) is tried mi5CrashTries times, then the run ends with the
+// owner's Romanian line, its envelope invalid with why; a hub that the
+// run stopped or killed on purpose restarts nothing.
+func TestMI5_CrashedHubThatWillNotStart(t *testing.T) {
+	e, out := unitEnv(t)
+	e.hubBin = filepath.Join(t.TempDir(), "missing-hub")
+	e.firewallFor = func(dir string) mi5.WanBlock { // records nothing, runs nothing
+		return mi5.FirewallFor(runtime.GOOS, dir, func(context.Context, string, []string, string) (string, error) { return "", nil })
+	}
+	gone := make(chan struct{})
+	close(gone)
+	h := &holder{e: e, handover: make(chan struct{}), hubGone: gone, mi5: &mi5Comp{phase: mi5.PhaseMain}}
+	m := &mi5Host{h: h}
+	restarted, err := m.RestartCrashed(t.Context())
+	if restarted || !errors.Is(err, errMI5HubDown) {
+		t.Fatalf("restarted %v, %v; want %v", restarted, err, errMI5HubDown)
+	}
+	if !strings.Contains(out.String(), msgHubCrashed) {
+		t.Errorf("the owner's lines %q; want %q", out.String(), msgHubCrashed)
+	}
+	h.stopping = true
+	if restarted, err := m.RestartCrashed(t.Context()); restarted || err != nil {
+		t.Errorf("a hub stopped on purpose: restarted %v, %v; want nothing", restarted, err)
+	}
+	c := &mi5Cmd{e: e, h: &holder{e: e}, host: "pc", open: mi5Open{RunID: "mi5-1", StartMs: time.Now().UnixMilli()}}
+	_ = c.fail(t.Context(), err)
+	files, _ := filepath.Glob(filepath.Join(e.resultsDir(), "MI5", "pc", "*.json"))
+	if len(files) != 1 {
+		t.Fatalf("envelopes %v", files)
+	}
+	var env results.Envelope
+	if b, rerr := os.ReadFile(files[0]); rerr != nil || json.Unmarshal(b, &env) != nil || len(env.Runs) != 1 || env.Runs[0].Valid ||
+		env.Runs[0].InvalidReason != invalidHubDown {
+		t.Errorf("the envelope's run %+v (%v); want invalid with %q", env.Runs, rerr, invalidHubDown)
 	}
 }

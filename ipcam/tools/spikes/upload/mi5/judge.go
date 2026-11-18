@@ -23,6 +23,7 @@ const (
 	reasonNotVerified  = "%s: %d din %d segmente verificate"
 	reasonMissing      = "%s: %d lipsă, %d duplicate, %d hash-uri greșite"
 	reasonReadOpenFail = "citirea segmentului deschis: %d din %d reușite"
+	reasonHubCrashed   = "hub-ul s-a oprit singur de %d ori în timpul probei; proba măsoară o singură repornire, cea plănuită"
 	limitG14           = "0 lipsă, 0 duplicate, fiecare hash verificat; citirea segmentului deschis reușită"
 )
 
@@ -33,7 +34,8 @@ const (
 // the block, a restart that resumed above 0, and the hub's own evidence
 // that the block held: between Block + 2 min and Unblock no upload
 // verified at a provider, and a transient failure or an UNREACHABLE
-// destination. It passes when one judged envelope holds every floor with
+// destination; and no hub that ended on its own (HubCrashes: the run
+// measures one restart, the planned one). It passes when one judged envelope holds every floor with
 // every segment verified, none missing, duplicated or mismatched, and
 // every open-segment read ok. A missing, duplicate or mismatched segment
 // fails it (the outbox is fixed before Faza 3), and a failed open-segment
@@ -82,6 +84,9 @@ func Judge(envs []results.Envelope) results.Judgement {
 		}
 		if CheckResume(d.Restart) != nil {
 			floors = append(floors, reasonNoResume)
+		}
+		if d.HubCrashes > 0 {
+			floors = append(floors, fmt.Sprintf(reasonHubCrashed, d.HubCrashes))
 		}
 		calls, ok := 0, 0
 		for _, r := range d.ReadOpen {

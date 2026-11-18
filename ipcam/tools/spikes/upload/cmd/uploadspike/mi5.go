@@ -821,7 +821,11 @@ func (c *mi5Cmd) fail(ctx context.Context, err error) error {
 		_ = c.saveOpen()
 		return err
 	}
-	c.writeEnvelope(nil, false, invalidStopped)
+	reason := invalidStopped
+	if errors.Is(err, errMI5HubDown) {
+		reason = invalidHubDown
+	}
+	c.writeEnvelope(nil, false, reason)
 	c.closeRun()
 	return err
 }
@@ -830,6 +834,7 @@ func (c *mi5Cmd) fail(ctx context.Context, err error) error {
 const (
 	invalidReboot  = "repornire în timpul probei MI5"
 	invalidStopped = "proba MI5 s-a oprit înainte de final"
+	invalidHubDown = "hub-ul s-a oprit singur și nu a mai pornit"
 )
 
 // writeEnvelope writes the run's envelope: valid with data, or invalid
@@ -998,6 +1003,41 @@ func (m *mi5Host) ResetConnections(ctx context.Context) error {
 
 func (m *mi5Host) Diag(ctx context.Context, args []string) ([]json.RawMessage, error) {
 	return hubproc.Diag(ctx, m.h.e.hubConfig(), args, nil)
+}
+
+func (m *mi5Host) HubGone() <-chan struct{} { return m.h.gone() }
+
+// mi5CrashTries bounds the starts that one crash's restart tries: a hub
+// that no longer starts ends the run (errMI5HubDown) instead of holding
+// the owner's window open for hours.
+const mi5CrashTries = 5
+
+// errMI5HubDown is a run whose hub ended on its own and would not start
+// again.
+var errMI5HubDown = ownerError(msgMI5HubDown)
+
+// RestartCrashed is the holder's restart after a crash (Task 9) under
+// mi5: a hub that ended on its own, neither stopped nor killed by the run,
+// is said («Hub-ul s-a oprit singur; îl repornesc.») and started again
+// with the composition of the run's phase, its hub-crash gap recorded in
+// the run state, whence the envelope's gaps; a start that fails is tried
+// again after the holder's growing wait, mi5CrashTries starts at most.
+func (m *mi5Host) RestartCrashed(ctx context.Context) (bool, error) {
+	h := m.h
+	if h.isStopping() {
+		return false, nil
+	}
+	gone := h.gone()
+	for range mi5CrashTries {
+		h.restartAfterCrash(ctx)
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		if h.gone() != gone {
+			return true, nil
+		}
+	}
+	return false, errMI5HubDown
 }
 
 func (m *mi5Host) HubConfig() hubproc.Config { return m.h.e.hubConfig() }

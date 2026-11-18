@@ -15,7 +15,10 @@ package results
 //   - Reach are the block's checks, before the clock and every 10 min;
 //   - Restart is the restart's evidence (P16), ReadOpen the open-segment
 //     reads, InjectedGaps the recording gaps that the restart caused,
-//     which are never missing segments.
+//     which are never missing segments;
+//   - HubCrashes counts the times the hub ended on its own during the
+//     run (neither stopped nor killed by it), each restarted at once with
+//     a hub-crash gap in the run's gaps (Task 9).
 type Mi5Data struct {
 	BlockSecs              float64       `json:"blockSecs"`
 	RecoverySecs           float64       `json:"recoverySecs"`
@@ -27,6 +30,7 @@ type Mi5Data struct {
 	Restart                *Mi5Restart   `json:"restart"`
 	ReadOpen               []ReadOpenRun `json:"readOpen"`
 	InjectedGaps           int           `json:"injectedGaps"`
+	HubCrashes             int           `json:"hubCrashes,omitempty"`
 }
 
 // ReachCheck is one check of the block, as diag reach saw it from the

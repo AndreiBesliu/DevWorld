@@ -123,3 +123,18 @@ func TestG14_UploadsDuringBlock_FaraVerdict(t *testing.T) {
 		}
 	}
 }
+
+// TestG14_HubCrash_FaraVerdict: a run whose hub ended on its own (Task
+// 9's hub-crash gap, HubCrashes) is not the measured run, which has one
+// restart, the planned one: it gives no verdict and names the crash; a
+// measured failure still decides.
+func TestG14_HubCrash_FaraVerdict(t *testing.T) {
+	j := judgeOne(func(e *results.Envelope) { e.MI5.HubCrashes = 1 })
+	if j.Verdict != results.Incomplete || !strings.Contains(strings.Join(j.Reasons, "\n"), "s-a oprit singur") {
+		t.Errorf("a hub crash: %+v", j)
+	}
+	j = judgeOne(func(e *results.Envelope) { e.MI5.HubCrashes, e.MI5.Dests[0].Missing = 1, 1 })
+	if j.Verdict != results.FailWith(PlanBOutbox) {
+		t.Errorf("a hub crash with a missing segment: %+v", j)
+	}
+}
