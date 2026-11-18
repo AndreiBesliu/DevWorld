@@ -266,12 +266,7 @@ func (c *mi5Cmd) run(ctx context.Context) error {
 	if err := fw.RemoveStale(ctx); err != nil {
 		return c.fail(ctx, err)
 	}
-	session, err := c.startCameras(ctx)
-	if err != nil {
-		return c.fail(ctx, err)
-	}
-	defer c.stopCameras()
-	comp, err := c.composition(cfg, session)
+	comp, err := c.composition(cfg)
 	if err != nil {
 		return c.fail(ctx, err)
 	}
@@ -300,15 +295,20 @@ func (c *mi5Cmd) run(ctx context.Context) error {
 		return c.fail(ctx, err)
 	}
 	if err := c.preChecks(ctx, cfg, comp); err != nil {
+		if errors.As(err, new(refusal)) {
+			return c.refuse(err)
+		}
 		return c.fail(ctx, err)
 	}
-	timing := mi5.OwnerTiming(cfg.BlockFor)
-	if cfg.Lab {
-		timing = mi5.LabTiming(cfg.BlockFor)
+	// The cameras start once the run passed its pre-checks: a refused run
+	// started nothing.
+	session, err := c.startCameras(ctx)
+	if err != nil {
+		return c.fail(ctx, err)
 	}
-	if t, ok := testTiming(); ok {
-		timing = t
-	}
+	defer c.stopCameras()
+	comp.session = session
+	timing := runTiming(cfg)
 	e.printf(msgMI5Started, mi5.Span(cfg.BlockFor), time.Now().Add(timing.PreRun+timing.WarmUp).Format("15:04"))
 	opts := mi5.RunOptions{Host: &mi5Host{h: h}, Firewall: fw, StartMs: comp.startMs, Dests: comp.dests, Timing: timing, Events: c.events}
 	if os.Getenv(envFirewallLog) != "" {
@@ -368,7 +368,7 @@ func (c *mi5Cmd) config(ctx context.Context) (mi5.Mi5Config, error) {
 		}
 	}
 	if f.camera > 0 {
-		cameras = min(f.camera, mi5.MaxCameras)
+		cameras = min(f.camera, cameras) // never above the host's count (P17, P38)
 	}
 	cfg.Cameras = cameras
 	cfg.ProviderHosts = mi5.ProviderHostsFor(cfg)
@@ -398,6 +398,18 @@ func exeName(name string) string {
 		return name + ".exe"
 	}
 	return name
+}
+
+// runTiming is the run's timing: the owner's, the lab's, or the tests'
+// (envMI5Timing).
+func runTiming(cfg mi5.Mi5Config) mi5.Timing {
+	if t, ok := testTiming(); ok {
+		return t
+	}
+	if cfg.Lab {
+		return mi5.LabTiming(cfg.BlockFor)
+	}
+	return mi5.OwnerTiming(cfg.BlockFor)
 }
 
 // testTiming is the tests' timing (envMI5Timing), in ms.
@@ -483,9 +495,10 @@ func (c *mi5Cmd) saveOpen() error {
 
 // composition is MI5's composition: its destinations, each on an MI6 row
 // of its account when this hub has one (dst-1: g-windows on the PC,
-// g-web on the Pi, any MI6 row of the D1 account), else its own; the
-// cameras' session; an ephemeral age pair for the encrypted pre-run.
-func (c *mi5Cmd) composition(cfg mi5.Mi5Config, session linkclient.Session) (*mi5Comp, error) {
+// g-web on the Pi, any MI6 row of the D1 account), else its own; an
+// ephemeral age pair for the encrypted pre-run. The cameras' session joins
+// it once they started, after the pre-checks.
+func (c *mi5Cmd) composition(cfg mi5.Mi5Config) (*mi5Comp, error) {
 	riG, err := age.GenerateX25519Identity()
 	if err != nil {
 		return nil, err
@@ -512,7 +525,7 @@ func (c *mi5Cmd) composition(cfg mi5.Mi5Config, session linkclient.Session) (*mi
 	if err := c.saveOpen(); err != nil {
 		return nil, err
 	}
-	return &mi5Comp{cfg: cfg, dests: dests, startMs: c.open.StartMs, phase: mi5.PhasePreRun, session: session, identity: riG.String(),
+	return &mi5Comp{cfg: cfg, dests: dests, startMs: c.open.StartMs, phase: mi5.PhasePreRun, identity: riG.String(),
 		recipients: []string{riG.Recipient().String(), rk.Recipient().String()}}, nil
 }
 
@@ -645,8 +658,14 @@ func mi6ClientKey(kind, clientType string) string {
 	return "google:" + clientType
 }
 
+// deviceLoginWait bounds a device login's wait, as the holder's
+// pollDevice does: a status that never comes (the hub restarted, the
+// login's state gone) ends the login.
+const deviceLoginWait = 31 * time.Minute
+
 // deviceLogin is a destination's device flow on the hub (B1): the owner
-// opens the address from any browser and types the code.
+// opens the address from any browser and types the code, within
+// deviceLoginWait.
 func (c *mi5Cmd) deviceLogin(ctx context.Context, d mi5.DestConfig) (hubproc.Completion, error) {
 	st, err := runstate.Load(c.e.statePath())
 	if err != nil {
@@ -665,11 +684,15 @@ func (c *mi5Cmd) deviceLogin(ctx context.Context, d mi5.DestConfig) (hubproc.Com
 		return hubproc.Completion{}, err
 	}
 	c.e.printf(msgMI5DeviceLogin, d.ID, res.VerificationURL, res.UserCode)
+	deadline := c.e.now().Add(deviceLoginWait)
 	for {
 		select {
 		case <-ctx.Done():
 			return hubproc.Completion{}, ctx.Err()
 		case <-time.After(c.e.devicePoll()):
+		}
+		if !c.e.now().Before(deadline) {
+			return hubproc.Completion{}, ownerError(fmt.Sprintf(msgMI5LoginFailed, d.ID, msgMI5LoginNoAnswer))
 		}
 		s, err := c.h.ctl.Status(ctx, res.State)
 		if err != nil {
@@ -770,7 +793,7 @@ func (c *mi5Cmd) preChecks(ctx context.Context, cfg mi5.Mi5Config, comp *mi5Comp
 	for _, d := range comp.dests {
 		lines, err := hubproc.Diag(ctx, c.e.hubConfig(), []string{"dest-probe", "--config", c.e.runJSON(), "--dest", d.ID}, nil)
 		if err != nil {
-			return fmt.Errorf("mi5: dest-probe %s: %w", d.ID, err)
+			return &mi5.Failure{Line: fmt.Sprintf(mi5.MsgDestProbeFailed, d.ID), Cause: err}
 		}
 		for _, raw := range lines {
 			var l struct {
@@ -791,7 +814,7 @@ func (c *mi5Cmd) preChecks(ctx context.Context, cfg mi5.Mi5Config, comp *mi5Comp
 		return err
 	}
 	if err := mi5.PreCheck(cfg, comp.dests, free, spool); err != nil {
-		return err
+		return refusal{err}
 	}
 	var tokens []mi5.Token
 	if raw, ok := st.Open["MI6"]; ok {
@@ -806,13 +829,42 @@ func (c *mi5Cmd) preChecks(ctx context.Context, cfg mi5.Mi5Config, comp *mi5Comp
 	for _, l := range c.open.Logins {
 		tokens = append(tokens, mi5.Token{Name: l.TokenRef, IssuedAt: time.UnixMilli(l.IssuedAtMs)})
 	}
-	timing := mi5.OwnerTiming(cfg.BlockFor)
-	return mi5.CheckRefreshes(c.e.now().Add(timing.PreRun+timing.WarmUp), cfg.BlockFor, tokens)
+	timing := runTiming(cfg) // the block's start as this run's own timing puts it
+	if err := mi5.CheckRefreshes(c.e.now().Add(timing.PreRun+timing.WarmUp), cfg.BlockFor, tokens); err != nil {
+		return refusal{err}
+	}
+	return nil
+}
+
+// refusal is a pre-check's refusal (P38, P53): the run never started.
+type refusal struct{ error }
+
+func (r refusal) Unwrap() error { return r.error }
+
+// refuse ends a run that its pre-checks refused before it started: no
+// camera recorded, nothing was blocked, so it writes no envelope; the run
+// leaves the run state, and the owner reads the refusal's own line.
+func (c *mi5Cmd) refuse(err error) error {
+	c.detail(err)
+	c.h.stopHub()
+	c.closeRun()
+	return err
+}
+
+// detail prints the cause of one of MI5's own failures (mi5.Failure) on a
+// detail line, for the lab's and the tests' runs only, which test seams
+// mark and nobody judges: the owner reads the Romanian line alone.
+func (c *mi5Cmd) detail(err error) {
+	var f *mi5.Failure
+	if c.e.seams && errors.As(err, &f) && f.Cause != nil {
+		_, _ = fmt.Fprintf(c.e.errOut, msgFailureDetail+"\n", f.Cause)
+	}
 }
 
 // fail ends a run that could not go on: the block removed, the run's
 // failure in its envelope, the run closed; its line is the owner's.
 func (c *mi5Cmd) fail(ctx context.Context, err error) error {
+	c.detail(err)
 	_ = c.e.firewall().RemoveStale(context.WithoutCancel(ctx))
 	c.h.stopHub()
 	if ctx.Err() != nil {

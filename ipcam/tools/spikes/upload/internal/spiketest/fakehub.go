@@ -47,6 +47,9 @@ const (
 	// FakePiModelEnv is the Pi model, JSON, that diag host reports; a PC
 	// (null) when unset.
 	FakePiModelEnv = "UPLOADSPIKE_FAKE_PIMODEL"
+	// FakeQuotaFreeEnv is the free quota, in bytes, that diag dest-probe
+	// reports for every destination; unset, dest-probe exits 1.
+	FakeQuotaFreeEnv = "UPLOADSPIKE_FAKE_QUOTA_FREE"
 )
 
 // The stand-in's records.
@@ -104,6 +107,9 @@ func record(r FakeRecord) {
 //     storage;
 //   - "diag visibility --creator <dest> --reader <dest>" prints a cell
 //     that was listed and read;
+//   - "diag dest-probe --config <run.json> --dest <dest>" prints the
+//     destination's probe with FakeQuotaFreeEnv's free quota, or exits 1
+//     without it;
 //   - "diag scan-secrets --dir <dir>" records the scan, searches the
 //     files under dir for the values on stdin, raw, and moves each file
 //     that holds one into <dir>-quarantine/<scan>/, as ipcam-hub's scan
@@ -136,6 +142,8 @@ func FakeHub(args []string) int {
 		return fakeVisibility(args[2:])
 	case len(args) >= 2 && args[0] == "diag" && args[1] == "scan-secrets":
 		return fakeScan(args[2:])
+	case len(args) >= 2 && args[0] == "diag" && args[1] == "dest-probe":
+		return fakeDestProbe(args[2:])
 	case len(args) == 4 && args[0] == "run" && args[1] == "--config" && args[3] == "--stop-on-stdin-eof":
 	default:
 		return fail(errors.New("usage: run --config <run.json> --stop-on-stdin-eof"))
@@ -344,6 +352,26 @@ func fakeScan(args []string) int {
 	if len(unmoved) > 0 {
 		return 1
 	}
+	return 0
+}
+
+// fakeDestProbe is diag dest-probe: the destination's probe with
+// FakeQuotaFreeEnv's free quota, or exit 1 without it.
+func fakeDestProbe(args []string) int {
+	fs := flag.NewFlagSet("dest-probe", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dest := fs.String("dest", "", "")
+	_ = fs.String("config", "", "")
+	_ = fs.Bool("delete-segment", false, "")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	free := os.Getenv(FakeQuotaFreeEnv)
+	if free == "" {
+		_, _ = fmt.Fprintln(os.Stderr, "stand-in ipcam-hub: diag dest-probe: no quota")
+		return 1
+	}
+	fmt.Printf(`{"schema":"ipcam.diag.destprobe/1","dest":%q,"probe":{"quota":{"free":%s}}}`+"\n", *dest, free)
 	return 0
 }
 

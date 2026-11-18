@@ -105,6 +105,8 @@ const (
 	msgMI5DeviceLogin    = "Conectați contul pentru %s: deschideți %s pe orice dispozitiv, scrieți codul %s și acceptați."
 	msgMI5LoginDone      = "%s: autentificare reușită."
 	msgMI5LoginFailed    = "Autentificarea pentru %s nu a reușit (%s); rulați din nou uploadspike mi5."
+	msgMI5LoginNoAnswer  = "nu a venit niciun răspuns în 31 de minute"
+	msgFailureDetail     = "Detaliu pentru laborator (variabile de test setate): %v"
 	msgMI5Done           = "Proba MI5 s-a încheiat; rezultatele au fost scrise. Hub-ul trece la pornirea automată."
 	msgMI5EndedInvalid   = "Proba MI5 deschisă s-a încheiat fără rezultat (%s); rulați-o din nou în altă zi."
 	msgMI5Running2       = "Proba MI5 rulează (pornită la %s); hub-ul nu se predă până la final."

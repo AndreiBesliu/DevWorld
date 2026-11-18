@@ -257,17 +257,31 @@ func (p *proc) exitCode() int {
 	return -1
 }
 
-// errorLine is the last «uploadspike: eroare:» line that the process
-// printed, on either stream, or "": the failure's annotation keeps only a
-// test's file:line lines, so a process's reason goes on one of them.
+// errorLine is the process's failure: its last «uploadspike: eroare:»
+// line on either stream, else its stderr's last line (one of MI5's own
+// failures is a whole Romanian line, without the prefix), with the
+// failure's detail line that the test seams add: the failure's annotation
+// keeps only a test's file:line lines, so a process's reason goes on one
+// of them.
 func (p *proc) errorLine() string {
-	var last string
+	var last, detail string
+	detailPrefix := strings.SplitN(msgFailureDetail, "%", 2)[0]
 	for _, out := range []string{p.stdout.String(), p.stderr.String()} {
 		for l := range strings.SplitSeq(out, "\n") {
-			if strings.Contains(l, msgError) {
+			switch {
+			case strings.Contains(l, msgError):
 				last = strings.TrimSpace(l)
+			case strings.HasPrefix(l, detailPrefix):
+				detail = strings.TrimSpace(l)
 			}
 		}
+	}
+	if last == "" {
+		lines := strings.Split(strings.TrimSpace(p.stderr.String()), "\n")
+		last = strings.TrimSpace(lines[len(lines)-1])
+	}
+	if detail != "" {
+		last += " (" + detail + ")"
 	}
 	return last
 }

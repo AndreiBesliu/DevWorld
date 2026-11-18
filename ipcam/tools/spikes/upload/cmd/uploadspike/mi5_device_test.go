@@ -507,6 +507,9 @@ func TestMI5_HolderEndsAnyWay_OneHubUnderResume(t *testing.T) {
 			t.Fatalf("%v: mi5 did not end", sig)
 		}
 		d.waitResumeHub(t)
+		// From here on only resume's hub runs: its events, from its first,
+		// must never touch the cut run's dst-1 placements (C2-R29 (5)).
+		quiet := d.eventsLen()
 		if left := liveExes(d.reccontroller); len(left) != 0 {
 			t.Errorf("%v: reccontroller outlived mi5: %v", sig, left)
 		}
@@ -525,7 +528,7 @@ func TestMI5_HolderEndsAnyWay_OneHubUnderResume(t *testing.T) {
 		if left := pending(d.loggedEvents(t, from), "dst-1"); len(left) == 0 {
 			t.Fatal("the cut run left no pending dst-1 placement")
 		}
-		hub, quiet := r.hubPID(), d.eventsLen()
+		hub := r.hubPID()
 		if code, body, ok := d.refresh(t, hub, "g-web"); !ok {
 			t.Log("the hub's control token is not readable here: no refresh")
 		} else if code != http.StatusOK {
@@ -742,9 +745,12 @@ func TestMI5_OwnLoginWithoutMI6Run(t *testing.T) {
 // «Hub-ul s-a oprit singur; îl repornesc.», the hub restarted with MI5's
 // composition, and the run goes on to its normal end. Its envelope is
 // valid and records the crash: hubCrashes 1 and a hub-crash gap in the
-// run's gaps (G14 then gives no verdict on it). Unnoticed, the run waited
-// out the restart's bound (8 min here, 12 h for the owner) for an upload
-// after the unblock, and ended invalid with no data.
+// run's gaps. G14 judges such a run on its own measured criteria and adds
+// the note «hub-ul s-a oprit singur de N ori în timpul probei», which
+// Task 11's report lists as a defect to investigate (C2-R28 Q2).
+// Unnoticed, the run waited out the recovery's bound (10 min here, 12 h
+// for the owner) for an upload after the unblock, and ended invalid with
+// no data.
 func TestMI5_HubCrashDuringBlock_RestartedAndRecorded(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the lab's run is Linux's")
