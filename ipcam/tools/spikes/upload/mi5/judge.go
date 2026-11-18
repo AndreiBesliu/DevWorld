@@ -23,9 +23,13 @@ const (
 	reasonNotVerified  = "%s: %d din %d segmente verificate"
 	reasonMissing      = "%s: %d lipsă, %d duplicate, %d hash-uri greșite"
 	reasonReadOpenFail = "citirea segmentului deschis: %d din %d reușite"
-	reasonHubCrashed   = "hub-ul s-a oprit singur de %d ori în timpul probei; proba măsoară o singură repornire, cea plănuită"
 	limitG14           = "0 lipsă, 0 duplicate, fiecare hash verificat; citirea segmentului deschis reușită"
 )
+
+// NoteHubCrashed is the verdict note of a judged run whose hub ended on
+// its own N times (C2-R28 Q2). It never decides G14; Task 11's report
+// lists it as a defect to investigate.
+const NoteHubCrashed = "hub-ul s-a oprit singur de %d ori în timpul probei"
 
 // Judge is G14 (P22): over the owner's MI5 envelopes with a block of at
 // least 6 h (a lab envelope is TST-07's row and never decides G14, nor
@@ -34,17 +38,19 @@ const (
 // the block, a restart that resumed above 0, and the hub's own evidence
 // that the block held: between Block + 2 min and Unblock no upload
 // verified at a provider, and a transient failure or an UNREACHABLE
-// destination; and no hub that ended on its own (HubCrashes: the run
-// measures one restart, the planned one). It passes when one judged envelope holds every floor with
+// destination. It passes when one judged envelope holds every floor with
 // every segment verified, none missing, duplicated or mismatched, and
 // every open-segment read ok. A missing, duplicate or mismatched segment
 // fails it (the outbox is fixed before Faza 3), and a failed open-segment
 // read too (2-min segments): a measured failure decides even when a floor
-// is missed. Anything else is fără verdict.
+// is missed. Anything else is fără verdict. A hub that ended on its own
+// during a judged run (HubCrashes) is judged by the same criteria, as the
+// plan states, and adds NoteHubCrashed to the reasons whatever the verdict
+// (C2-R28 Q2).
 func Judge(envs []results.Envelope) results.Judgement {
 	j := results.Judgement{Gate: gate, Reasons: []string{}, Rows: []results.Row{}, Decisions: []string{}}
 	var outbox, twoMin, passed bool
-	var incomplete []string
+	var incomplete, notes []string
 	judged := 0
 	for _, e := range envs {
 		if e.Code != "MI5" || e.MI5 == nil || e.MI5.Lab || e.TestSeams || e.MI5.BlockSecs < OwnerBlock.Seconds() || !valid(e) {
@@ -86,7 +92,7 @@ func Judge(envs []results.Envelope) results.Judgement {
 			floors = append(floors, reasonNoResume)
 		}
 		if d.HubCrashes > 0 {
-			floors = append(floors, fmt.Sprintf(reasonHubCrashed, d.HubCrashes))
+			notes = append(notes, fmt.Sprintf(NoteHubCrashed, d.HubCrashes))
 		}
 		calls, ok := 0, 0
 		for _, r := range d.ReadOpen {
@@ -118,6 +124,7 @@ func Judge(envs []results.Envelope) results.Judgement {
 		j.Verdict = results.Incomplete
 		j.Reasons = append(j.Reasons, incomplete...)
 	}
+	j.Reasons = append(j.Reasons, notes...)
 	return j
 }
 

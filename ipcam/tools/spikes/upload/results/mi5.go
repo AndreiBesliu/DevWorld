@@ -18,7 +18,8 @@ package results
 //     which are never missing segments;
 //   - HubCrashes counts the times the hub ended on its own during the
 //     run (neither stopped nor killed by it), each restarted at once with
-//     a hub-crash gap in the run's gaps (Task 9).
+//     a hub-crash gap in the run's gaps (Task 9). G14 judges such a run by
+//     its own criteria and adds a note naming the crashes (C2-R28).
 type Mi5Data struct {
 	BlockSecs              float64       `json:"blockSecs"`
 	RecoverySecs           float64       `json:"recoverySecs"`

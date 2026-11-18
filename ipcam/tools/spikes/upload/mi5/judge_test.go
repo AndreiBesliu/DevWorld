@@ -1,6 +1,8 @@
 package mi5
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -124,17 +126,25 @@ func TestG14_UploadsDuringBlock_FaraVerdict(t *testing.T) {
 	}
 }
 
-// TestG14_HubCrash_FaraVerdict: a run whose hub ended on its own (Task
-// 9's hub-crash gap, HubCrashes) is not the measured run, which has one
-// restart, the planned one: it gives no verdict and names the crash; a
-// measured failure still decides.
-func TestG14_HubCrash_FaraVerdict(t *testing.T) {
+// TestG14_HubCrash_JudgedWithNote (C2-R28 Q2): a run whose hub ended on
+// its own (Task 9's hub-crash gap, HubCrashes) is judged on G14's own
+// criteria, and each crash adds the verdict note that Task 11's report
+// lists as a defect to investigate.
+func TestG14_HubCrash_JudgedWithNote(t *testing.T) {
+	note := func(n int) string { return fmt.Sprintf("hub-ul s-a oprit singur de %d ori în timpul probei", n) }
 	j := judgeOne(func(e *results.Envelope) { e.MI5.HubCrashes = 1 })
-	if j.Verdict != results.Incomplete || !strings.Contains(strings.Join(j.Reasons, "\n"), "s-a oprit singur") {
-		t.Errorf("a hub crash: %+v", j)
+	if j.Verdict != results.Pass || !slices.Contains(j.Reasons, note(1)) {
+		t.Errorf("a hub crash that the data survived: %+v", j)
 	}
-	j = judgeOne(func(e *results.Envelope) { e.MI5.HubCrashes, e.MI5.Dests[0].Missing = 1, 1 })
-	if j.Verdict != results.FailWith(PlanBOutbox) {
+	j = judgeOne(func(e *results.Envelope) { e.MI5.HubCrashes, e.MI5.Dests[0].Missing = 2, 1 })
+	if j.Verdict != results.FailWith(PlanBOutbox) || !slices.Contains(j.Reasons, note(2)) {
 		t.Errorf("a hub crash with a missing segment: %+v", j)
+	}
+	j = judgeOne(func(e *results.Envelope) { e.MI5.HubCrashes, e.MI5.Restart = 1, nil })
+	if j.Verdict != results.Incomplete || !slices.Contains(j.Reasons, note(1)) || !slices.Contains(j.Reasons, reasonNoResume) {
+		t.Errorf("a hub crash and no resumed restart: %+v", j)
+	}
+	if j = judgeOne(func(*results.Envelope) {}); slices.ContainsFunc(j.Reasons, func(r string) bool { return strings.Contains(r, "s-a oprit singur") }) {
+		t.Errorf("no crash, yet a crash note: %+v", j)
 	}
 }
