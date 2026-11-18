@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -22,6 +25,7 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/internal/spiketest"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/mi5"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/mi6"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/runstate"
 )
 
 // isOwnerLine reports whether err's text is a whole line for the owner,
@@ -365,5 +369,63 @@ func TestMI5_LoginFailureReasonsInRomanian(t *testing.T) {
 				t.Errorf("the owner's line %q shows the hub's code", err)
 			}
 		})
+	}
+}
+
+// treeOf is every file under dir, with its size and modification time.
+func treeOf(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		files[path] = fmt.Sprintf("%v %d %d", info.IsDir(), info.Size(), info.ModTime().UnixNano())
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+// TestMI5_SecondMI5WhileOneRunsGetsMI5Running (C2-R31 (1)): a second
+// uploadspike mi5 while an MI5 run is live, whose cameras hold their
+// ports, refuses with «Proba MI5 rulează; …», never with the taken port's
+// line, which would have the owner close the running probe's cameras and
+// cut its day. It reads the run state only: it writes nothing, starts no
+// hub, asks no login and leaves the live run open.
+func TestMI5_SecondMI5WhileOneRunsGetsMI5Running(t *testing.T) {
+	holdCameraPort(t) // the live run's cameras
+	r := newRig(t)
+	start, err := runstate.ProcStartMs(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.openMI5Of(os.Getpid(), start) // this test plays the live mi5
+	before := treeOf(t, r.base)
+	_, seam := r.firewallLog()
+	p := r.start([]string{seam, envLabLAN + "=127.0.0.1"}, "mi5", "--block", "15m")
+	if !p.wait(30 * time.Second) {
+		t.Fatalf("the second mi5 went on while an MI5 run is live\nstdout:\n%s\nstderr:\n%s", p.stdout, p.stderr)
+	}
+	if line := p.errorLine(); p.code != 1 || line != msgMI5Running || cameraPortLine(line) {
+		t.Errorf("the second mi5: exit %d, line %q; want 1 and %q", p.code, line, msgMI5Running)
+	}
+	if login := strings.SplitN(msgMI5DeviceLogin, "%", 2)[0]; strings.Contains(p.stdout.String(), login) {
+		t.Errorf("the second mi5 asked a login:\n%s", p.stdout)
+	}
+	if starts, reqs := r.records(spiketest.RecordStart), r.records(spiketest.RecordRequest); len(starts) != 0 || len(reqs) != 0 {
+		t.Errorf("hub starts %v, requests %v; want none", starts, reqs)
+	}
+	if after := treeOf(t, r.base); !maps.Equal(before, after) {
+		t.Errorf("the refused mi5 wrote under its base:\nbefore %v\nafter  %v", before, after)
+	}
+	if open, live := mi5State(r.state()); !open || !live {
+		t.Errorf("the live run: open %v, live %v; want both", open, live)
 	}
 }

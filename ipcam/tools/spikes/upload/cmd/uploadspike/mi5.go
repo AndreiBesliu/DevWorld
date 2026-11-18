@@ -171,8 +171,8 @@ func fakesBase(s string) (string, error) {
 	return strings.TrimSuffix(line.OAuth, "/oauth"), nil
 }
 
-// runMI5 is `uploadspike mi5` (G14): it refuses while another program
-// holds a camera port, takes the device's one hub (the MI6 hub through the
+// runMI5 is `uploadspike mi5` (G14): it refuses while an MI5 run is live
+// or another program holds a camera port, takes the device's one hub (the MI6 hub through the
 // handover, Task 9), opens the MI5 run, logs in the destinations that need
 // it, checks the quotas, the spool and the daily refreshes, records the
 // simulated cameras of reccontroller --local, runs MI5's order (mi5.Run),
@@ -240,6 +240,12 @@ type mi5Cmd struct {
 // run is runMI5's body.
 func (c *mi5Cmd) run(ctx context.Context) error {
 	e := c.e
+	// A live MI5 run's cameras hold their ports: its own line comes before
+	// the ports' (C2-R31 (1)), which would have the owner close the running
+	// probe's cameras. The run state is only read here.
+	if err := refuseLiveMI5(e); err != nil {
+		return err
+	}
 	cfg, err := c.config(ctx)
 	if err != nil {
 		return err
@@ -567,6 +573,19 @@ func mi6Row(run *mi6.Run, d mi5.DestConfig, goos string) string {
 		}
 	}
 	return other
+}
+
+// refuseLiveMI5 is errMI5Running while the run state holds an MI5 run
+// whose mi5 still runs; it only reads the run state.
+func refuseLiveMI5(e *env) error {
+	st, err := runstate.Load(e.statePath())
+	if err != nil {
+		return err
+	}
+	if _, live := mi5State(st); live {
+		return errMI5Running
+	}
+	return nil
 }
 
 // cameraPorts are reccontroller --local's fixed listeners on 127.0.0.1

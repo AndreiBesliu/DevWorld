@@ -116,12 +116,8 @@ type holder struct {
 // takes the lock within 60 s; then the previous holder's hub is waited for
 // (WaitGone), and the claim is dropped.
 func acquire(ctx context.Context, e *env, command string) (*holder, error) {
-	st, err := runstate.Load(e.statePath())
-	if err != nil {
+	if err := refuseLiveMI5(e); err != nil {
 		return nil, err
-	}
-	if _, live := mi5State(st); live {
-		return nil, errMI5Running
 	}
 	claim, err := runstate.NewClaim(e.now())
 	if err != nil {
