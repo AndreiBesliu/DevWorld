@@ -8,7 +8,10 @@
     // TypeScript 6 loads no @types package unless it is listed, and none is:
     // these sources run in a browser, so `process` or `Buffer` must not
     // typecheck in them. The tests get Node's types from tsconfig.test.json.
-    "types": []
+    "types": [],
+    // The automatic run's table, tools/spikes/video/deviceplan/deviceplan.json,
+    // which spikehub reads too (deviceplan.ts).
+    "resolveJsonModule": true
   },
   "include": ["src"],
   // The tests and their doubles import vitest, which pulls in Node's types.

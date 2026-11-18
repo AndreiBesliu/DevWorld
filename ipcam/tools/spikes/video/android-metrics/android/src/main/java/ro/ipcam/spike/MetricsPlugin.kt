@@ -12,6 +12,8 @@ import android.os.Bundle
 import android.os.Debug
 import android.os.PowerManager
 import android.os.Process
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.util.Log
 import android.view.WindowManager
 import android.webkit.RenderProcessGoneDetail
@@ -66,6 +68,9 @@ internal fun pageForLog(url: String?): String {
     return url.substringBefore('?').substringBefore('#') + (scenario?.let { " (autorun $it)" } ?: "")
 }
 
+/** The automatic run's call: off, on, off, on (ms), once. */
+private val VIBRATION_PATTERN_MS = longArrayOf(0, 400, 200, 400)
+
 private fun id(any: Any?): String = Integer.toHexString(System.identityHashCode(any))
 
 /** The start of Configuration.toString(): the part a configuration change alters (mcc, mnc, locale, size, density). */
@@ -82,17 +87,20 @@ internal fun autorunQuery(autorun: String?, hub: String?): String? {
 }
 
 /**
- * `read()` answers the metrics of the spike app's NativeMetrics that Android
- * knows; `keepAwake({ on })` keeps the screen on while a scenario runs. An
+ * `read({ run })` answers the metrics of the spike app's NativeMetrics that
+ * Android knows; `keepAwake({ on })` keeps the screen on while a scenario runs;
+ * `vibrate()` calls the person to S5 and S6 of the automatic run. An
  * autorun launch (`adb shell am start ... --es autorun S1 --es hub <url>`)
  * reloads the page with the extras as its query string.
  *
  * Only a cold start honours the extras. `load()` reads them once and removes
  * them from the Activity's Intent, and the Activity's saved state (which the
  * system keeps across a process death) holds the scenario until the page has
- * taken it: until the page that `load()` gave the query reads the metrics,
- * which its run does first (AutorunHandoff). An Activity that is created again
- * before that runs the scenario; one restored after its page took it (it was
+ * taken it: until the run of the page that `load()` gave the query reads the
+ * metrics, which a run does first, with `read({ run: true })`. The page's other
+ * reads, such as the start page's as soon as it loads, do not take it
+ * (AutorunHandoff). An Activity that is created again before that runs the
+ * scenario; one restored after its page took it (it was
  * created again, or its process died and the system started it from the
  * launch Intent it kept, extras included) ignores the extras: its scenario
  * ended with the old page, and the next `am start` is the way to run it again. A warm start
@@ -199,9 +207,11 @@ class MetricsPlugin : Plugin() {
 
     @PluginMethod
     fun read(call: PluginCall) {
-        // A scenario's run reads the metrics first: the page that was loaded with
-        // the launch extras' query has taken its scenario now (AutorunHandoff).
-        handoff.handed()
+        // A scenario's run reads the metrics first, with run: true: on the page that
+        // was loaded with the launch extras' query, that read takes its scenario.
+        // The page's other reads (run false or absent), such as the start page's as
+        // soon as it loads, do not (AutorunHandoff).
+        handoff.read(run = call.getBoolean("run") == true)
         val metrics = JSObject()
         val power = context.getSystemService(PowerManager::class.java)
         power?.let { thermalName(it.currentThermalStatus) }?.let { metrics.put("thermal", it) }
@@ -232,5 +242,14 @@ class MetricsPlugin : Plugin() {
             if (on) activity.window.addFlags(flag) else activity.window.clearFlags(flag)
             call.resolve()
         }
+    }
+
+    /** Vibrates twice, to call the person to S5 and S6 of the automatic run: a WebView ignores navigator.vibrate. */
+    @PluginMethod
+    fun vibrate(call: PluginCall) {
+        val vibrator = context.getSystemService(Vibrator::class.java)
+        if (vibrator == null || !vibrator.hasVibrator()) return call.reject("this phone has no vibrator")
+        vibrator.vibrate(VibrationEffect.createWaveform(VIBRATION_PATTERN_MS, -1))
+        call.resolve()
     }
 }

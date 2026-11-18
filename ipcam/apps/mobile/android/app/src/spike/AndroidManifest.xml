@@ -4,4 +4,7 @@
     <!-- SPIKE-ONLY (plan 2026-10-18-phase0b-video-spike, Task 10): MV4 holds a
          1-pixel camera capture so that the WebView reports which decoder it uses. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- SPIKE-ONLY (post-release task A): the automatic run vibrates the phone to call
+         the person to S5 and S6. A normal permission: Android grants it at install. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 </manifest>

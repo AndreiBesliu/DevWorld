@@ -59,6 +59,22 @@ describe('holdWakeLock', () => {
     expect(keepAwake).toHaveBeenLastCalledWith(false);
   });
 
+  it('wakeLock_automaticRunHoldsTheShellsLockAcrossItsScenarios', async () => {
+    // The run holds the screen for its whole length, pauses included, while each scenario
+    // holds and releases its own (runner.ts): a scenario's release must not let the screen go.
+    const keepAwake = vi.fn(() => Promise.resolve());
+    const native = { metrics: () => Promise.resolve({}), keepAwake };
+
+    const run = await holdWakeLock({ native, doc: new FakeDoc() });
+    const scenario = await holdWakeLock({ native, doc: new FakeDoc() });
+    await scenario.release();
+    expect(keepAwake.mock.calls).toEqual([[true]]);
+
+    await run.release();
+    await run.release(); // twice: nothing more
+    expect(keepAwake.mock.calls).toEqual([[true], [false]]);
+  });
+
   it('wakeLock_neither_isNa', async () => {
     const lock = await holdWakeLock({ doc: new FakeDoc() });
 

@@ -5,6 +5,7 @@
 // and keeping addresses out of the notes (PH0-22).
 import type { MediaLink, Player } from '@ipcam/player';
 import { simCameras, type HubCamera } from '../cameras';
+import { APP_VERSION } from '../deviceplan';
 import { ConnectError } from '../hubhttp';
 import type { MessageKey } from '../i18n';
 import { readNativeMetrics, type NativeMetrics } from '../native';
@@ -57,7 +58,7 @@ export interface Run {
   /** Seconds since the run started, rounded. */
   elapsedS(): number;
   sleep(ms: number): Promise<void>;
-  /** The value of `promise`, or `timeout` when it has not settled within `ms`. */
+  /** The value of `promise`, or `timeout` when it has not settled within `ms` (never with Infinity). */
   within<T>(promise: Promise<T>, ms: number): Promise<T | 'timeout'>;
   /** Calls `fn` every `ms` until the returned function or the end of the run stops it. */
   every(ms: number, fn: () => void): () => void;
@@ -200,7 +201,9 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
   };
 
   const guard = <T>(promise: Promise<T>): Promise<T> => Promise.race([promise, interrupted]);
+  // A wait of Infinity never times out (no timer: setTimeout would fire it at once).
   const delay = (ms: number): { promise: Promise<void>; cancel: () => void } => {
+    if (!Number.isFinite(ms)) return { promise: new Promise<void>(() => undefined), cancel: () => undefined };
     let cancel: () => void = () => undefined;
     const promise = new Promise<void>((resolve) => {
       cancel = env.clock.setTimer(resolve, ms);
@@ -302,7 +305,9 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
   try {
     let metrics: NativeMetrics | 'n/a' = 'n/a';
     if (env.native) {
-      metrics = await guard(readNativeMetrics(env.native, env.clock.setTimer));
+      // The run's own read: in the Android shell it takes the scenario of the
+      // launch extras (R5), which no other read of the page does (native.ts).
+      metrics = await guard(readNativeMetrics(env.native, env.clock.setTimer, { run: true }));
       if (metrics === 'n/a') {
         run.note('native metrics: n/a');
       } else {
@@ -347,6 +352,7 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
   const lost = interruption?.kind === 'session-lost';
   return {
     scenario: id,
+    appVersion: APP_VERSION,
     ...(lost ? {} : figures),
     device,
     startedAt,

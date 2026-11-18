@@ -47,6 +47,16 @@ describe('readNativeMetrics', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('readNativeMetrics_passesOnWhetherTheReadIsARuns', async () => {
+    // C1-R30: on Android only the read that starts a run takes the launch extras' scenario.
+    const metrics = vi.fn<SpikeNative['metrics']>(() => Promise.resolve({}));
+
+    await readNativeMetrics(facade(metrics), setTimer, { run: true });
+    await readNativeMetrics(facade(metrics), setTimer);
+
+    expect(metrics.mock.calls.map(([read]) => read?.run === true)).toEqual([true, false]);
+  });
+
   it('readNativeMetrics_noShell_na', async () => {
     await expect(readNativeMetrics(undefined, setTimer)).resolves.toBe('n/a');
   });

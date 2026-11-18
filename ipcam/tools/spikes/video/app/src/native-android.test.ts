@@ -30,8 +30,9 @@ function fakePlugins(read: Awaited<ReturnType<AndroidPlugins['metrics']['read']>
       },
     },
     metrics: {
-      read: vi.fn(() => Promise.resolve(read)),
+      read: vi.fn<AndroidPlugins['metrics']['read']>(() => Promise.resolve(read)),
       keepAwake: vi.fn<AndroidPlugins['metrics']['keepAwake']>(() => Promise.resolve()),
+      vibrate: vi.fn<AndroidPlugins['metrics']['vibrate']>(() => Promise.resolve()),
     },
   } satisfies AndroidPlugins;
   const emitPip = (on: boolean): void => {
@@ -79,6 +80,24 @@ describe('installAndroidNative', () => {
     await native.keepAwake?.(true);
     await native.keepAwake?.(false);
     expect(plugins.metrics.keepAwake.mock.calls).toEqual([[{ on: true }], [{ on: false }]]);
+
+    // The automatic run calls the person for S5 and S6 (post-release task A).
+    await native.vibrate?.();
+    expect(plugins.metrics.vibrate).toHaveBeenCalledTimes(1);
+  });
+
+  it('nativeAndroid_onlyARunsReadAsksThePluginForTheScenario', async () => {
+    // C1-R30: the start page reads the metrics as soon as it loads, before its run does. The
+    // plugin hands the launch extras' scenario over only at a run's read (AutorunHandoff), so
+    // that an Activity created again between the two reads still runs it.
+    const { plugins } = fakePlugins(A24);
+    const target: { spikeNative?: SpikeNative } = {};
+    installAndroidNative({ platform: 'android', plugins, target });
+
+    await target.spikeNative?.metrics();
+    await target.spikeNative?.metrics({ run: true });
+
+    expect(plugins.metrics.read.mock.calls).toEqual([[{ run: false }], [{ run: true }]]);
   });
 
   it('nativeAndroid_twoPipCallbacks_shareOneNativeListener', () => {

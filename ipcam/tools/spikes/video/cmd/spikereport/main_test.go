@@ -389,3 +389,41 @@ func snapshot(t *testing.T, dir string) string {
 	}
 	return b.String()
 }
+
+// v0.1.1 reads the results of v0.1.0 unchanged, next to its own, which carry
+// the app's version (post-release task A, requirement 9). The v0.1.0 files
+// were written by v0.1.0's code (testdata/README.md).
+func TestLoadResults_ReadsV010ResultsNextToV011Ones(t *testing.T) {
+	in := t.TempDir()
+	if err := os.CopyFS(in, os.DirFS(filepath.Join("..", "..", "testdata", "results-v0.1.0"))); err != nil {
+		t.Fatal(err)
+	}
+	write(t, in, "chrome-20261118-090000-s2.json", `{"appVersion":"spike-video-v0.1.1","device":{"os":"Windows","platform":"chrome","ua":"Mozilla/5.0 (Windows NT 10.0)","webview":"Chrome/141.0.0.0"},`+
+		`"durationS":40,"hubJitterMs":[],"interrupted":false,"mdnsUnavailable":false,"notes":[],"samples":{"subLatencyMs":[120],"mainLatencyMs":[130]},"scenario":"S2","startedAt":"2026-11-18T09:00:00.000Z"}`+"\n")
+
+	results, skipped, err := loadResults(in)
+	if err != nil || len(skipped) != 0 || len(results) != 6 {
+		t.Fatalf("results = %d, skipped = %+v, err = %v", len(results), skipped, err)
+	}
+	statuses := map[string]RunStatus{}
+	for _, run := range classify(results) {
+		statuses[run.File] = run.Status
+	}
+	for file, want := range map[string]RunStatus{
+		"chrome-20261117-221229-s1.json":  RunInterrupted,
+		"chrome-20261117-221328-s1.json":  RunUsed,
+		"chrome-20261117-221216-s10.json": RunUsed,
+		"chrome-20261118-090000-s2.json":  RunUsed,
+	} {
+		if statuses[file] != want {
+			t.Errorf("%s: status %v, want %v", file, statuses[file], want)
+		}
+	}
+	out := t.TempDir()
+	if code, _, stderr := runMain(t, "-in", in, "-out", out, "-date", "2026-11-18"); code != 0 || stderr != "" {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if md := readText(t, filepath.Join(out, "2026-11-18-phase0b-results.md")); !strings.Contains(md, "chrome-20261118-090000-s2.json") {
+		t.Error("the report does not list the v0.1.1 run")
+	}
+}

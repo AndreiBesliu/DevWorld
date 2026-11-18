@@ -276,7 +276,8 @@ function Test-SingleInstance {
   }
 }
 
-$hubProcess = Start-Process -FilePath $Hub -ArgumentList '-sims', '4', '-media', $Media, '-results', $results `
+# -browser=false: spikehub opens its page in the default browser on Windows, which a runner must not do.
+$hubProcess = Start-Process -FilePath $Hub -ArgumentList '-sims', '4', '-media', $Media, '-results', $results, '-browser=false' `
   -RedirectStandardOutput $hubOut -RedirectStandardError $hubLog -PassThru
 $hubDeadline = (Get-Date).AddSeconds(30)
 while ($true) {

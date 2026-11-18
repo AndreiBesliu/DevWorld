@@ -27,12 +27,15 @@ const ro = {
   statusRunning: 'rulează… nu închideți ecranul',
   statusRunningShort: 'rulează…',
   statusDone: 'gata în {seconds} s',
+  statusDoneInHub: 'gata (rezultatul e în spikehub)',
   statusInterrupted:
     'întrerupt: ecranul s-a stins sau aplicația a trecut în fundal, deci rezultatul nu intră în verdict. Repetați scenariul.',
   interruptedSessionLost: 'întrerupt: conexiunea cu hub-ul s-a pierdut. Verificați fereastra spikehub și apăsați «Repetă».',
   interruptedCharging: 'întrerupt: telefonul e la încărcător. Scoateți-l din încărcător și apăsați «Repetă».',
   interruptedEarlyReturn: 'întrerupt: v-ați întors după {time}; e nevoie de cel puțin 2 minute. Apăsați «Repetă».',
   interruptedPipLeft: 'întrerupt: fereastra mică s-a închis după {time}; e nevoie de 5 minute. Apăsați «Repetă».',
+  // An interrupted scenario of the automatic run, which starts it again by itself: {reason} is one of the autoReason… texts.
+  statusInterruptedAuto: 'întrerupt: {reason}.',
   statusFailed: 'eșuat: {detail}',
   s3Charging: 'Scoateți telefonul din încărcător înainte de S3.',
   pendingResults: 'Rezultate netrimise: {n}. Se trimit din nou la fiecare pornire.',
@@ -68,6 +71,64 @@ const ro = {
   descS9: 'Matricea de codecuri: H.265 și H.264 High 5.1 (G9)',
   descS10: 'Perechea ICE și cererea de permisiune (MV12, MV13)',
   descAGE: 'Viteză agerange (MI4)',
+  remainingPc: 'Rămase pe acest PC: {devices}',
+  remainingPhone: 'Rămase pe telefon: {devices}',
+  remainingNone: 'nimic, totul e gata',
+  h264Checking: 'Verificare H.264',
+  version: 'versiunea {version}',
+  autoTitle: 'Rulare automată',
+  runAll: 'Rulează tot pentru acest dispozitiv',
+  rerunAll: 'Rulează din nou tot',
+  autoDevice: 'Acest dispozitiv: {label}. Scenariile, în ordine: {scenarios}.',
+  autoUnknown:
+    'Rularea automată nu e disponibilă aici: aplicația nu recunoaște acest dispozitiv. Ea rulează în Chrome, Edge și Firefox ' +
+    'pe Windows, în ipcam-desktop și în aplicația «Proba ipcam» de pe telefon.',
+  advicePc: 'Cât rulează, lăsați fereastra vizibilă (jumătate de ecran e de ajuns: Windows + ←) și nu blocați PC-ul.',
+  advicePhone:
+    'Cât rulează, lăsați telefonul pe masă, cu aplicația deschisă și scos din încărcător. La S5 și S6 aplicația vă cheamă cu un sunet.',
+  autoStarting: 'Se citesc rezultatele din spikehub…',
+  autoPreflight: 'Se verifică dacă Firefox afișează H.264…',
+  autoCamera: 'Aplicația cere acum, o singură dată, acces la cameră, pentru S3. Permiteți; apoi rularea merge singură.',
+  autoScenario: 'Rulează {id} ({index} din {total}).',
+  // The automatic run's lines for an interrupted scenario: {reason} is one of the autoReason… texts.
+  autoInterrupted: '{id} s-a întrerupt: {reason}. Rularea continuă de îndată ce fereastra e vizibilă.',
+  autoResumed: '{id} s-a întrerupt ({count} din 3): {reason}. A pornit din nou de la început, iar rularea continuă.',
+  autoReasonHidden: 'fereastra nu mai era vizibilă',
+  autoReasonSessionLost: 'conexiunea cu hub-ul s-a pierdut',
+  autoReasonCharging: 'telefonul era la încărcător',
+  autoReasonEarlyReturn: 'v-ați întors după {time}, iar S5 are nevoie de cel puțin 2 minute',
+  autoReasonPipLeft: 'fereastra mică s-a închis după {time}, iar S6 are nevoie de 5 minute',
+  autoRetry: '{id} a eșuat și pornește încă o dată; rularea continuă.',
+  autoPause: 'Pauză de răcire: mai sunt {time}. Lăsați telefonul pe masă, scos din încărcător; rularea continuă singură.',
+  autoCold:
+    'Înainte de {id}, telefonul stă 10 minute fără încărcător, ca să nu fie cald: mai sunt {time}. ' +
+    'Lăsați-l pe masă, scos din încărcător; rularea continuă singură.',
+  autoAttention: '{id} are nevoie de dvs.: urmați instrucțiunea de pe ecran.',
+  s6Guide:
+    'S6 are nevoie de dvs. După «Continuă», aplicația trece singură într-o fereastră mică. Nu o atingeți. Când S6 se termină, ' +
+    'după 5 minute, telefonul sună: atunci atingeți fereastra mică și pictograma de mărire, ca să reveniți în aplicație.',
+  continue: 'Continuă',
+  autoPip: 'S6 s-a terminat. Atingeți fereastra mică și pictograma de mărire, ca să reveniți în aplicație; rularea continuă apoi.',
+  autoDone: 'Gata: toate scenariile acestui dispozitiv au rezultate.',
+  autoDoneFailed: 'Au eșuat de două ori: {ids}. Faceți o captură de ecran și trimiteți-ne-o în chat.',
+  autoNothingLeft: 'Totul e gata pe acest dispozitiv. «Rulează din nou tot» reia toate scenariile.',
+  autoTooManyInterruptions: 'Rularea s-a oprit: {id} s-a întrerupt de 3 ori, ultima dată pentru că {reason}.',
+  autoAgainHidden: 'Lăsați fereastra vizibilă și apăsați din nou «Rulează tot pentru acest dispozitiv»; ce e gata nu se mai rulează.',
+  autoAgainSessionLost:
+    'Verificați că fereastra spikehub e deschisă și că rețeaua merge, apoi apăsați din nou ' +
+    '«Rulează tot pentru acest dispozitiv»; ce e gata nu se mai rulează.',
+  autoAgainCharging:
+    'Scoateți telefonul din încărcător și apăsați din nou «Rulează tot pentru acest dispozitiv»; ce e gata nu se mai rulează.',
+  autoAgainPerson:
+    'Apăsați din nou «Rulează tot pentru acest dispozitiv» și urmați instrucțiunea de pe ecran până la capăt; ' +
+    'ce e gata nu se mai rulează.',
+  autoStopped: 'Rularea automată s-a oprit. Ce e gata nu se mai rulează la următoarea apăsare.',
+  openh264: 'Firefox nu afișează încă H.264, pentru că îi lipsește pluginul OpenH264. Rularea nu a pornit.',
+  openh264Step1:
+    'Meniul ☰ → „Setări” → jos, în stânga, „Extensii și teme” → „Pluginuri”. Trebuie să apară pluginul OpenH264, furnizat de Cisco Systems.',
+  openh264Step2: 'Dacă apare ca dezactivat, deschideți meniul lui („…”) și alegeți să fie activat întotdeauna.',
+  openh264Step3:
+    'Dacă pluginul lipsește, lăsați Firefox deschis 5 minute, reporniți-l și apăsați din nou «Rulează tot pentru acest dispozitiv».',
 } as const;
 
 export type MessageKey = keyof typeof ro;
@@ -95,12 +156,14 @@ const en: Record<MessageKey, string> = {
   statusRunning: 'running… keep the screen on',
   statusRunningShort: 'running…',
   statusDone: 'done in {seconds} s',
+  statusDoneInHub: 'done (the result is in spikehub)',
   statusInterrupted:
     'interrupted: the screen turned off or the app went to the background, so the result is left out of the verdict. Repeat the scenario.',
   interruptedSessionLost: 'interrupted: the connection to the hub was lost. Check the spikehub window and press «Repeat».',
   interruptedCharging: 'interrupted: the phone is on the charger. Unplug it and press «Repeat».',
   interruptedEarlyReturn: 'interrupted: you came back after {time}; at least 2 minutes are needed. Press «Repeat».',
   interruptedPipLeft: 'interrupted: the small window closed after {time}; 5 minutes are needed. Press «Repeat».',
+  statusInterruptedAuto: 'interrupted: {reason}.',
   statusFailed: 'failed: {detail}',
   s3Charging: 'Unplug the phone from the charger before S3.',
   pendingResults: 'Results not sent yet: {n}. They are sent again at every start.',
@@ -134,6 +197,59 @@ const en: Record<MessageKey, string> = {
   descS9: 'Codec matrix: H.265 and H.264 High 5.1 (G9)',
   descS10: 'ICE pair and permission prompt (MV12, MV13)',
   descAGE: 'agerange speed (MI4)',
+  remainingPc: 'Left on this PC: {devices}',
+  remainingPhone: 'Left on the phone: {devices}',
+  remainingNone: 'nothing, all done',
+  h264Checking: 'H.264 check',
+  version: 'version {version}',
+  autoTitle: 'Automatic run',
+  runAll: 'Run everything for this device',
+  rerunAll: 'Run everything again',
+  autoDevice: 'This device: {label}. The scenarios, in order: {scenarios}.',
+  autoUnknown:
+    'The automatic run is not available here: the app does not know this device. It runs in Chrome, Edge and Firefox ' +
+    'on Windows, in ipcam-desktop and in the «Proba ipcam» app on the phone.',
+  advicePc: 'While it runs, keep the window visible (half the screen is enough: Windows + ←) and do not lock the PC.',
+  advicePhone: 'While it runs, leave the phone on the table, with the app open and off the charger. At S5 and S6 the app calls you with a sound.',
+  autoStarting: 'Reading the results from spikehub…',
+  autoPreflight: 'Checking that Firefox shows H.264…',
+  autoCamera: 'The app now asks, once, for the camera, for S3. Allow it; then the run goes on by itself.',
+  autoScenario: 'Running {id} ({index} of {total}).',
+  autoInterrupted: '{id} was interrupted: {reason}. The run goes on as soon as the window is visible.',
+  autoResumed: '{id} was interrupted ({count} of 3): {reason}. It started again from the beginning, and the run goes on.',
+  autoReasonHidden: 'the window was not visible',
+  autoReasonSessionLost: 'the connection to the hub was lost',
+  autoReasonCharging: 'the phone was on the charger',
+  autoReasonEarlyReturn: 'you came back after {time}, and S5 needs at least 2 minutes',
+  autoReasonPipLeft: 'the small window closed after {time}, and S6 needs 5 minutes',
+  autoRetry: '{id} failed and starts once more; the run goes on.',
+  autoPause: 'Cooling pause: {time} left. Leave the phone on the table, off the charger; the run goes on by itself.',
+  autoCold:
+    'Before {id}, the phone stays off the charger for 10 minutes, so that it is not warm: {time} left. ' +
+    'Leave it on the table, off the charger; the run goes on by itself.',
+  autoAttention: '{id} needs you: follow the instruction on the screen.',
+  s6Guide:
+    'S6 needs you. After «Continue», the app goes into a small window by itself. Do not touch it. When S6 ends, ' +
+    'after 5 minutes, the phone rings: then tap the small window and the enlarge icon to return to the app.',
+  continue: 'Continue',
+  autoPip: 'S6 has ended. Tap the small window and the enlarge icon to return to the app; then the run goes on.',
+  autoDone: 'Done: every scenario of this device has results.',
+  autoDoneFailed: 'Failed twice: {ids}. Take a screenshot and send it to us in the chat.',
+  autoNothingLeft: 'Everything is done on this device. «Run everything again» repeats every scenario.',
+  autoTooManyInterruptions: 'The run stopped: {id} was interrupted 3 times, the last time because {reason}.',
+  autoAgainHidden: 'Keep the window visible and press «Run everything for this device» again; what is done does not run again.',
+  autoAgainSessionLost:
+    'Check that the spikehub window is open and that the network works, then press «Run everything for this device» again; ' +
+    'what is done does not run again.',
+  autoAgainCharging: 'Unplug the phone from the charger and press «Run everything for this device» again; what is done does not run again.',
+  autoAgainPerson:
+    'Press «Run everything for this device» again and follow the instruction on the screen to the end; what is done does not run again.',
+  autoStopped: 'The automatic run stopped. What is done does not run again at the next press.',
+  openh264: 'Firefox does not show H.264 yet: the OpenH264 plugin is missing. The run did not start.',
+  openh264Step1:
+    'Menu ☰ → “Settings” → at the bottom left, “Extensions & Themes” → “Plugins”. The OpenH264 plugin, provided by Cisco Systems, must be listed.',
+  openh264Step2: 'If it shows as disabled, open its menu (“…”) and choose to always activate it.',
+  openh264Step3: 'If the plugin is missing, leave Firefox open for 5 minutes, restart it and press «Run everything for this device» again.',
 };
 
 export const MESSAGES: Record<Lang, Record<MessageKey, string>> = { ro, en };

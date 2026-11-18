@@ -54,6 +54,12 @@ export interface ScenarioEnv {
   stage: Stage;
   /** Asks the person a yes/no question; absent when nobody can answer (autorun). */
   ask?: (question: string) => Promise<boolean>;
+  /**
+   * How long S5 waits for the person to leave and to come back: 10 min when
+   * absent, Infinity in the automatic run (devicerun.ts), which calls the
+   * person and waits without a timeout.
+   */
+  waitForPersonMs?: number;
   native?: SpikeNative;
   doc: VisibilitySource;
   clock: Clock;
