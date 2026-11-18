@@ -222,14 +222,16 @@ func runMI5(ctx context.Context, e *env, args []string) error {
 
 // mi5Cmd is one uploadspike mi5.
 type mi5Cmd struct {
-	e      *env
-	f      mi5Flags
-	h      *holder
-	host   string
-	info   *hostinfo.Host
-	recc   *exec.Cmd
-	events chan hubproc.Event
-	open   mi5Open
+	e    *env
+	f    mi5Flags
+	h    *holder
+	host string
+	info *hostinfo.Host
+	recc *exec.Cmd
+	// reccDone is closed once reccontroller ended.
+	reccDone <-chan struct{}
+	events   chan hubproc.Event
+	open     mi5Open
 	// lanListener is the lab's LAN probe listener.
 	lanListener net.Listener
 }
@@ -556,10 +558,11 @@ func (c *mi5Cmd) startCameras(ctx context.Context) (linkclient.Session, error) {
 	media := firstSet(os.Getenv(envMediaDir), filepath.Join(filepath.Dir(bin), "media"))
 	cmd := exec.Command(bin, "-local", "-media", media) //nolint:gosec // the bundle's own reccontroller
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-	if err := startWithUs(cmd); err != nil {
+	done, err := startWithUs(cmd)
+	if err != nil {
 		return linkclient.Session{}, fmt.Errorf("reccontroller: %w", err)
 	}
-	c.recc = cmd
+	c.recc, c.reccDone = cmd, done
 	deadline := time.Now().Add(linkWait)
 	for {
 		s, err := linkclient.Dial(ctx, linkclient.LocalAddr, c.host)
@@ -576,7 +579,7 @@ func (c *mi5Cmd) startCameras(ctx context.Context) (linkclient.Session, error) {
 func (c *mi5Cmd) stopCameras() {
 	if c.recc != nil && c.recc.Process != nil {
 		_ = c.recc.Process.Kill()
-		_ = c.recc.Wait()
+		<-c.reccDone
 	}
 }
 

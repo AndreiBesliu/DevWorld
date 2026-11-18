@@ -6,5 +6,12 @@ package main
 
 import "os/exec"
 
-// startWithUs starts cmd.
-func startWithUs(cmd *exec.Cmd) error { return cmd.Start() }
+// startWithUs starts cmd, and returns a channel closed once it ended.
+func startWithUs(cmd *exec.Cmd) (<-chan struct{}, error) {
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	return done, nil
+}

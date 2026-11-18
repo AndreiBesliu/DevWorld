@@ -19,11 +19,12 @@ import (
 // nothing on the cameras' ports (a closed console window ends both
 // anyway). The child starts suspended and runs only once it is in the job,
 // so nothing it starts escapes the job. A copy of the hub's recorder
-// (startChild, C07): tools import nothing of the hub.
-func startWithUs(cmd *exec.Cmd) error {
+// (startChild, C07): tools import nothing of the hub. It returns a channel
+// closed once the child ended.
+func startWithUs(cmd *exec.Cmd) (<-chan struct{}, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
-		return fmt.Errorf("create a Job Object: %w", err)
+		return nil, fmt.Errorf("create a Job Object: %w", err)
 	}
 	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
 		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE},
@@ -31,12 +32,12 @@ func startWithUs(cmd *exec.Cmd) error {
 	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
 		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil { //nolint:gosec // G103: the limits' address and size, as SetInformationJobObject takes them
 		_ = windows.CloseHandle(job)
-		return fmt.Errorf("set up the Job Object: %w", err)
+		return nil, fmt.Errorf("set up the Job Object: %w", err)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
 	if err := cmd.Start(); err != nil {
 		_ = windows.CloseHandle(job)
-		return err
+		return nil, err
 	}
 	pid := uint32(cmd.Process.Pid) //nolint:gosec // a PID
 	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, pid)
@@ -51,9 +52,12 @@ func startWithUs(cmd *exec.Cmd) error {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		_ = windows.CloseHandle(job)
-		return fmt.Errorf("put the child in the Job Object: %w", err)
+		return nil, fmt.Errorf("put the child in the Job Object: %w", err)
 	}
-	return nil // the job's handle stays open until uploadspike exits
+	// The job's handle stays open until uploadspike exits.
+	done := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(done) }()
+	return done, nil
 }
 
 // resumeProcess resumes the threads of process pid, which started
