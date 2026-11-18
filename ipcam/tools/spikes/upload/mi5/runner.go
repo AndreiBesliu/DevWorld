@@ -73,28 +73,51 @@ type Timing struct {
 	Floor time.Duration
 	// Quiet is how long the final drain waits with nothing pending and
 	// no new event before it ends; DrainMax bounds the recovery from the
-	// unblock on: the restart's wait, the drain and the final drain end
-	// within it together, or the run ends with its own line.
+	// unblock on: the restart's wait, the drain and (without FinalDrain)
+	// the final drain end within it together, or the run ends with its own
+	// line.
 	Quiet, DrainMax time.Duration
+	// FinalDrain is the final drain's own allowance from the first drain's
+	// end (the owner's, C2-R30 (3)): the final drain ends by then when that
+	// is later than the recovery's bound. 0: DrainMax bounds it too (the
+	// lab's single budget, which ends before the mi5-lab step's timeout).
+	FinalDrain time.Duration
 }
+
+// The owner's final drain's allowance (C2-R30 (3)): its stop and start,
+// Quiet, and a margin for the segments that the stop finalised.
+const (
+	// finalStopStart is the stop and the start at most: uploadspike's
+	// holder waits 35 s for a clean stop (hubStopWait) and 2 min for the
+	// ready event (hubStartWait).
+	finalStopStart = 35*time.Second + 2*time.Minute
+	// finalMargin uploads what the stop finalised: one segment per camera,
+	// at most the owner's 5 min of recording each, which an uplink that has
+	// just caught up with the recording uploads within those 5 min; twice
+	// that.
+	finalMargin = 10 * time.Minute
+)
 
 // OwnerTiming is the owner's run: 10 min of encrypted pre-run (a read
 // every 30 s), 10 min of warm-up, checks every 10 min, reads every
-// BlockFor / 24 and at least every 15 min, the floor at Block + 2 min, and
-// 12 h for the recovery.
+// BlockFor / 24 and at least every 15 min, the floor at Block + 2 min, 12 h
+// for the recovery, and the final drain's own allowance.
 func OwnerTiming(blockFor time.Duration) Timing {
+	const quiet = 30 * time.Second
 	return Timing{PreRun: 10 * time.Minute, PreRunEvery: 30 * time.Second, WarmUp: 10 * time.Minute, CheckEvery: 10 * time.Minute,
-		ReadOpenEvery: min(blockFor/24, 15*time.Minute), Floor: 2 * time.Minute, Quiet: 30 * time.Second, DrainMax: 12 * time.Hour}
+		ReadOpenEvery: min(blockFor/24, 15*time.Minute), Floor: 2 * time.Minute, Quiet: quiet, DrainMax: 12 * time.Hour,
+		FinalDrain: finalStopStart + quiet + finalMargin}
 }
 
 // LabTiming is the lab's: the owner's but a 2-min warm-up (30-s segments)
-// and a 25-min recovery bound, so that a lab run that waits it out ends
-// with its own line and envelope before the mi5-lab job's MI5 step times
-// out (60 min: 10 min of pre-run, 2 of warm-up, the 15-min block, 25 and
-// 5 for the rest; C2-R27 (3)). The lab's recoveries took 3–6 min.
+// and a 25-min recovery bound that the final drain shares (no FinalDrain),
+// so that a lab run that waits it out ends with its own line and envelope
+// before the mi5-lab job's MI5 step times out (60 min: 10 min of pre-run,
+// 2 of warm-up, the 15-min block, 25 and 5 for the rest; C2-R27 (3)). The
+// lab's recoveries took 3–6 min.
 func LabTiming(blockFor time.Duration) Timing {
 	t := OwnerTiming(blockFor)
-	t.WarmUp, t.Quiet, t.DrainMax = 2*time.Minute, 15*time.Second, 25*time.Minute
+	t.WarmUp, t.Quiet, t.DrainMax, t.FinalDrain = 2*time.Minute, 15*time.Second, 25*time.Minute, 0
 	return t
 }
 
@@ -148,7 +171,7 @@ type run struct {
 	stopped chan struct{}
 	done    chan struct{}
 	// recoverBy is the unblock + DrainMax: the restart's wait and the
-	// drains end by then.
+	// drains end by then (the final drain may take its FinalDrain).
 	recoverBy time.Time
 }
 
@@ -357,7 +380,7 @@ func (r *run) block(ctx context.Context) error {
 	}
 	if err := r.host.ResetConnections(ctx); err != nil {
 		_ = fw.Unblock(context.WithoutCancel(ctx))
-		return err
+		return failure(MsgResetFailed, err)
 	}
 	if err := fw.ScheduleCleanup(ctx, CleanupAt(start, r.cfg.BlockFor)); err != nil {
 		_ = fw.Unblock(context.WithoutCancel(ctx))
@@ -618,10 +641,14 @@ func (r *run) restartMidUpload(ctx context.Context) error {
 // drain waits until every placement of the run's own segments is
 // verified (the backlog caught up), then stops the recording and drains
 // what the stop finalised with no job; RecoverySecs and UplinkMbps are
-// the first drain's.
+// the first drain's. Both end by the recovery's bound, but the final
+// drain, with the owner's FinalDrain, by the first drain's end +
+// FinalDrain when that is later: a backlog that caught up just before the
+// bound never ends the run invalid in the final drain (C2-R30 (3)).
 func (r *run) drain(ctx context.Context) error {
 	t := r.opts.Timing
-	if err := r.waitDrained(ctx, 0); err != nil {
+	tooLong := fmt.Sprintf(MsgDrainTooLong, span(t.DrainMax))
+	if err := r.waitDrained(ctx, 0, r.recoverBy, tooLong); err != nil {
 		return err
 	}
 	end := r.now()
@@ -632,27 +659,31 @@ func (r *run) drain(ctx context.Context) error {
 		}
 	})
 	r.host.Printf(MsgDrained, elapsed(time.Duration(r.data.RecoverySecs*float64(time.Second))))
+	by := r.recoverBy
+	if own := end.Add(t.FinalDrain); t.FinalDrain > 0 && own.After(by) {
+		by, tooLong = own, fmt.Sprintf(MsgFinalDrainTooLong, elapsed(t.FinalDrain))
+	}
 	if err := r.host.StopHub(ctx); err != nil {
 		return err
 	}
 	if err := r.host.StartHub(ctx, PhaseFinal); err != nil {
 		return err
 	}
-	return r.waitDrained(ctx, t.Quiet)
+	return r.waitDrained(ctx, t.Quiet, by, tooLong)
 }
 
 // waitDrained waits until the restart's placement is verified and no
 // placement of the run is pending, nothing having happened for quiet,
-// until the recovery's bound at most.
-func (r *run) waitDrained(ctx context.Context, quiet time.Duration) error {
+// until by at most; then the run ends with tooLong.
+func (r *run) waitDrained(ctx context.Context, quiet time.Duration, by time.Time, tooLong string) error {
 	for {
 		done := false
 		r.withTally(func(tl *tally) { done = tl.drained(r.now().UnixMilli(), quiet.Milliseconds()) })
 		if done {
 			return nil
 		}
-		if r.now().After(r.recoverBy) {
-			return &Failure{Line: fmt.Sprintf(MsgDrainTooLong, span(r.opts.Timing.DrainMax))}
+		if r.now().After(by) {
+			return &Failure{Line: tooLong}
 		}
 		if err := r.sleep(ctx, 100*time.Millisecond); err != nil {
 			return err

@@ -61,6 +61,8 @@ type fakeRun struct {
 	// The firewall's failures: Block's, ScheduleCleanup's, Unblock's and
 	// RemoveStale's.
 	blockErr, cleanupErr, unblockErr, staleErr error
+	// resetErr is ResetConnections' failure.
+	resetErr error
 }
 
 func newFakeRun(t *testing.T, start time.Time) *fakeRun {
@@ -166,9 +168,12 @@ func (f *fakeRun) KillHub() error {
 	f.step("kill")
 	return nil
 }
-func (f *fakeRun) ResetConnections(context.Context) error { f.step("reset-connections"); return nil }
-func (f *fakeRun) HubConfig() hubproc.Config              { return hubproc.Config{} }
-func (f *fakeRun) RunJSON() string                        { return "run.json" }
+func (f *fakeRun) ResetConnections(context.Context) error {
+	f.step("reset-connections")
+	return f.resetErr
+}
+func (f *fakeRun) HubConfig() hubproc.Config { return hubproc.Config{} }
+func (f *fakeRun) RunJSON() string           { return "run.json" }
 func (f *fakeRun) Printf(format string, args ...any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

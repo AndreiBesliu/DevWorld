@@ -193,3 +193,15 @@ func TestMI5_StaleBlockThatStaysIsAnOwnerLine(t *testing.T) {
 		t.Errorf("mi5's end %v; want %q, the firewall's error its cause", err, mi5.MsgUnblockFailed)
 	}
 }
+
+// TestOwnerTiming_FinalDrainCoversTheHolder (C2-R30 (3)): the owner's
+// final drain's own allowance holds the holder's stop and start at their
+// longest (hubStopWait, hubStartWait) and Quiet, with room left for the
+// segments that the stop finalised.
+func TestOwnerTiming_FinalDrainCoversTheHolder(t *testing.T) {
+	tm := mi5.OwnerTiming(mi5.OwnerBlock)
+	if need := hubStopWait + hubStartWait + tm.Quiet; tm.FinalDrain < need+5*time.Minute {
+		t.Errorf("the final drain's allowance %v; want the stop and start (%v), Quiet (%v) and at least 5 min more", tm.FinalDrain,
+			hubStopWait+hubStartWait, tm.Quiet)
+	}
+}

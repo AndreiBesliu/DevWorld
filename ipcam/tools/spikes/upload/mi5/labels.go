@@ -27,6 +27,7 @@ const (
 	// owner): each is a whole line, its cause kept for the lab's detail.
 	MsgNoUploadAfterUnblock = "După deblocare, hub-ul nu a ajuns la mijlocul niciunui upload, deci repornirea plănuită nu s-a putut face; proba s-a oprit. Spuneți-ne."
 	MsgDrainTooLong         = "Ce s-a adunat în blocare nu a urcat nici în %s de la deblocare; proba s-a oprit. Spuneți-ne."
+	MsgFinalDrainTooLong    = "Ce s-a adunat în blocare a urcat, dar ultimele segmente, închise la oprirea înregistrării, nu au urcat nici în %s; proba s-a oprit. Spuneți-ne."
 	MsgDestProbeFailed      = "Destinația %s nu s-a putut verifica (ipcam-hub diag dest-probe); proba s-a oprit. Spuneți-ne."
 	MsgAuditFailed          = "Verificarea finală la furnizor (ipcam-hub diag uploads) nu s-a putut face; proba s-a oprit. Spuneți-ne."
 	MsgAuditDestFailed      = "Verificarea finală la furnizor (ipcam-hub diag uploads) nu a putut lista destinația %s; proba s-a oprit. Spuneți-ne."
@@ -34,6 +35,7 @@ const (
 	MsgReachNoProvider      = "Verificarea blocării (ipcam-hub diag reach) nu a arătat niciun furnizor; proba s-a oprit. Spuneți-ne."
 	MsgBlockFailed          = "Blocarea internetului hub-ului nu s-a putut pune (firewall-ul sistemului a refuzat-o); proba s-a oprit. Spuneți-ne."
 	MsgCleanupFailed        = "Scoaterea automată a blocării nu s-a putut programa; proba s-a oprit. Spuneți-ne."
+	MsgResetFailed          = "Hub-ul nu și-a putut închide conexiunile de urcare la începutul blocării; proba s-a oprit. Spuneți-ne."
 	MsgUnblockFailed        = "Blocarea internetului hub-ului nu s-a putut scoate: rulați uploadspike unblock (pe Pi: sudo ./uploadspike unblock), apoi spuneți-ne."
 	// The run's settings that the owner typed.
 	MsgBadCameras = "valoare greșită pentru --cameras: %d (de la 1 la %d)"

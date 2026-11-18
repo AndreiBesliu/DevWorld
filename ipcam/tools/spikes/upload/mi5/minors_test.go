@@ -51,13 +51,17 @@ func withoutEvents(script func(string, time.Time) []map[string]any, drop func(ma
 // errFirewall is a firewall command's failure.
 var errFirewall = errors.New("nft: exit status 1: Error: Could not process rule")
 
+// errReset is the hub's control endpoint refusing reset-connections.
+var errReset = errors.New("hubproc: control: reset-connections: 500 Internal Server Error")
+
 // TestMI5_FailuresAreOwnerLines (C2-R29 (1), Task 9B M9): every way in
 // which MI5 itself ends a run says so in Romanian, as a whole line for the
 // owner (uploadspike prints it without «uploadspike: eroare:»), and keeps
 // the diag's or the firewall's error as its cause: no upload in the middle
 // of a placement after the unblock, the recovery's bound, diag dest-probe,
 // diag uploads, diag reach, the block, its cleanup and its removal (an
-// unblock that failed tells the owner how to remove it), and the settings
+// unblock that failed tells the owner how to remove it), the hub's
+// reset-connections at the block's start (C2-R30 (1)), and the settings
 // that the owner typed.
 func TestMI5_FailuresAreOwnerLines(t *testing.T) {
 	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
@@ -102,6 +106,7 @@ func TestMI5_FailuresAreOwnerLines(t *testing.T) {
 		}, MsgAuditFailed, os.ErrNotExist},
 		{"diag-reach-no-provider", func(*testing.T) error { _, err := judgeReach(nil); return err }, MsgReachNoProvider, nil},
 		{"block", func(t *testing.T) error { return run(t, func(f *fakeRun) { f.blockErr = errFirewall }) }, MsgBlockFailed, errFirewall},
+		{"reset-connections", func(t *testing.T) error { return run(t, func(f *fakeRun) { f.resetErr = errReset }) }, MsgResetFailed, errReset},
 		{"cleanup", func(t *testing.T) error { return run(t, func(f *fakeRun) { f.cleanupErr = errFirewall }) }, MsgCleanupFailed, errFirewall},
 		{"unblock", func(t *testing.T) error { return run(t, func(f *fakeRun) { f.unblockErr = errFirewall }) }, MsgUnblockFailed, errFirewall},
 		{"stale-block", func(t *testing.T) error { return run(t, func(f *fakeRun) { f.staleErr = errFirewall }) }, MsgUnblockFailed, errFirewall},
@@ -350,5 +355,88 @@ func TestLabTiming_EndsBeforeTheLabStep(t *testing.T) {
 	tm := LabTiming(block)
 	if worst, step := tm.PreRun+tm.WarmUp+block+tm.DrainMax+margin, labStepTimeout(t); worst > step {
 		t.Errorf("a lab run can last %v (DrainMax %v); the MI5 step times out at %v", worst, tm.DrainMax, step)
+	}
+}
+
+// finalDrainScript is labScript whose first drain ends firstAfter the
+// unblock (every verification held until then), and whose final hub, the
+// drain without recording, queues the segment that the stop finalised
+// (p-4) and verifies it finalAfter the unblock; a negative finalAfter
+// never verifies it.
+func finalDrainScript(f *fakeRun, start time.Time, firstAfter, finalAfter time.Duration) func(string, time.Time) []map[string]any {
+	base := labScript(f, start, 1<<20)
+	var held []map[string]any
+	queued, verified := false, false
+	return func(step string, at time.Time) []map[string]any {
+		evs := slices.DeleteFunc(base(step, at), func(e map[string]any) bool {
+			if e["type"] == "upload_verified" {
+				held = append(held, e)
+				return true
+			}
+			return false
+		})
+		if len(held) > 0 && !f.unblocked.IsZero() && !at.Before(f.unblocked.Add(firstAfter)) {
+			evs, held = append(evs, held...), nil
+		}
+		if step == "start-final" && !queued {
+			queued = true
+			evs = append(evs, map[string]any{"type": "upload_queued", "placementId": "p-4", "dest": "dst-1", "cam": "cam01", "profile": "sub",
+				"startMs": at.Add(-20 * time.Second).UnixMilli(), "bytes": int64(1 << 20)})
+		}
+		if queued && !verified && finalAfter >= 0 && !at.Before(f.unblocked.Add(finalAfter)) {
+			verified = true
+			evs = append(evs, map[string]any{"type": "upload_verified", "placementId": "p-4", "dest": "dst-1", "bytes": int64(1 << 20),
+				"calls": map[string]float64{"put": 2, "get": 1}})
+		}
+		return evs
+	}
+}
+
+// TestMI5_FinalDrainHasItsOwnAllowance (C2-R30 (3)): in the owner's
+// timing, a backlog that finished uploading just before the recovery's
+// bound (unblock + DrainMax) is followed by a final drain (the stop, the
+// start without recording, the segments that the stop finalised, Quiet)
+// that has its own allowance from the first drain's end, so the run
+// finishes instead of ending invalid; past that allowance it ends with its
+// own line. The lab keeps one budget from the unblock (C2-R29 (12)), which
+// ends before the mi5-lab step's timeout. DrainMax is 10 min here, so that
+// the virtual clock reaches it soon.
+func TestMI5_FinalDrainHasItsOwnAllowance(t *testing.T) {
+	const drainMax, firstAfter = 10 * time.Minute, 10*time.Minute - 10*time.Second
+	owner := OwnerTiming(15 * time.Minute)
+	owner.DrainMax = drainMax
+	lab := LabTiming(15 * time.Minute)
+	lab.DrainMax = drainMax
+	for _, tc := range []struct {
+		name       string
+		tm         Timing
+		finalAfter time.Duration
+		want       string        // the run's end; "" for none
+		endsBy     time.Duration // after the unblock
+	}{
+		{"owner", owner, 12 * time.Minute, "", firstAfter + owner.FinalDrain},
+		{"owner-final-never", owner, -1, fmt.Sprintf(MsgFinalDrainTooLong, elapsed(owner.FinalDrain)), firstAfter + owner.FinalDrain},
+		{"lab", lab, 12 * time.Minute, fmt.Sprintf(MsgDrainTooLong, "10 min"), drainMax},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+			f := newFakeRun(t, start)
+			f.uploads = `{"schema":"ipcam.diag.uploads/1","dest":"dst-1","segments":4,"verified":4,"missing":0,"duplicates":0,"hashMismatches":0}`
+			f.script = finalDrainScript(f, start, firstAfter, tc.finalAfter)
+			data, err := runTiming(t.Context(), f, start, tc.tm)
+			got := ""
+			if err != nil {
+				got = err.Error()
+			}
+			if got != tc.want || err != nil && !ownerLine(err) {
+				t.Fatalf("the run's end %q; want %q", got, tc.want)
+			}
+			if took := f.clock().Sub(f.unblocked); took > tc.endsBy+time.Second {
+				t.Errorf("the run ended %v after the unblock; want by %v", took, tc.endsBy)
+			}
+			if err == nil && (data.RecoverySecs < firstAfter.Seconds() || data.RecoverySecs > drainMax.Seconds()) {
+				t.Errorf("recovery %v s; want the first drain's (%v)", data.RecoverySecs, firstAfter)
+			}
+		})
 	}
 }
