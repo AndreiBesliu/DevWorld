@@ -517,7 +517,7 @@ The guide covers, in order:
 2. Unpack and run `spikehub.exe`. Allow it on **Rețele private** in the Windows firewall prompt. Read the phone URL from the window.
 3. On the PC: open Chrome at `http://localhost:7080`, run S1, S2, S3-9, S3-16, S4, S7, S9 and S10; repeat in Edge and Firefox (S1, S2, S3-9, S9, S10).
 4. Install `ipcam-desktop` and run S3-16, S4 and S10.
-5. On the Galaxy A24: allow installing from the browser, install `ipcam-spike.apk`, connect to the same Wi-Fi (not guest), enter the URL, then run S1, S2, S3-4, S3-9 (with the camera-light explanation for MV4), S4, S5, S6, S7, S8, S9 and S10. Keep the phone plugged in only for S4; S3 runs on battery.
+5. On the Galaxy A24: allow installing from the browser, install `ipcam-spike.apk`, connect to the same Wi-Fi (not guest), enter the URL, then run S1, S2, S3-4, S3-9 (with the camera-light explanation for MV4), S4, S5, S6, S7, S8, S9 and S10. v0.1.0's guide kept the phone plugged in only for S4, with S3 on battery. Since spike-video-v0.1.1 (post-release task A, B-R4) the automatic run keeps the phone on battery for the whole run, S4 included, from at least 90 % charge: S3 refuses the charger (R48), and the report judges MV7 on a phone S4 recorded on battery (`TestMV7_ThePhonesS4OnBattery_IsJudged`).
 6. Optional: start `spikehub -real` and type the RTSP URLs of your own cameras.
 7. Zip the `results` folder and attach it in the chat or put it in `ipcam-teste/` on Google Drive.
 

@@ -59,6 +59,10 @@
     "key": "android",
     "class": "usable"
   },
+  "android-s4-battery.json": {
+    "key": "android",
+    "class": "usable"
+  },
   "android-s5-early-return.json": {
     "key": "android",
     "class": "interrupted"

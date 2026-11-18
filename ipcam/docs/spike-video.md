@@ -133,7 +133,7 @@ La S9 pot apărea «profil video nesuportat»<!--app--> sau «calitate redusă: 
 
 ### Pregătire
 
-1. Încărcați telefonul la cel puțin 90 %. Rularea durează circa 1 oră și 30 de minute, toată pe baterie: S3 se măsoară doar fără încărcător.
+1. Încărcați telefonul la cel puțin 90 %. Rularea durează circa 1 oră și 30 de minute, toată pe baterie, inclusiv S4: nu conectați încărcătorul până la sfârșit. S3 se măsoară doar fără încărcător.
 2. Opriți modul „Economisire energie” pe durata probei. Altfel, telefonul încetinește intenționat și rezultatele ies mai slabe.
 3. Conectați telefonul la același Wi-Fi ca PC-ul, nu la rețeaua pentru oaspeți. Dacă aveți VPN pe telefon, opriți-l.
 

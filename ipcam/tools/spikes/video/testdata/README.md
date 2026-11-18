@@ -22,3 +22,8 @@ each through its own reading of the files: `resultrules`, spikehub's
 `TestClassify_TheSharedFixtures`. The automatic run then skips a scenario
 exactly when the report can use its run. The files are synthetic: user agents,
 models and version strings only (PH0-22).
+
+`classes/android-s4-battery.json` is the phone's S4 as the automatic run of
+v0.1.1 writes it, on battery from start to end (ruling B-R4; S4 reads no
+charger state). The report's `TestMV7_ThePhonesS4OnBattery_IsJudged` judges
+MV7 on it.
