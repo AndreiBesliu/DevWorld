@@ -46,9 +46,15 @@ const (
 	lanDrain       = 5 * time.Second
 )
 
-// shellOrigins are the video app's shells (spikehub's withCORS): the
-// Android WebView (androidScheme http) and the Tauri WebView2.
-var shellOrigins = []string{"http://localhost", "http://tauri.localhost", "https://tauri.localhost"}
+// appOrigins are the origins that the video app runs from, which its
+// endpoints answer with CORS (spikehub's withCORS): the Android WebView
+// (androidScheme http), the Tauri WebView2, and the web build on the PC,
+// which spikehub or c1's reccontroller serves on port 7080 (spikehub opens
+// it at 127.0.0.1) and whose OAUTH row calls this server (Task 9a).
+var appOrigins = []string{
+	"http://localhost", "http://tauri.localhost", "https://tauri.localhost",
+	"http://localhost:7080", "http://127.0.0.1:7080",
+}
 
 // Next is the login that uploadspike waits for on a platform.
 type Next struct {
@@ -350,13 +356,13 @@ func RFC1918Addrs() ([]net.IP, error) {
 func (s *Server) handler(sess *lanSession) http.Handler {
 	loopback := sess == nil
 	mux := http.NewServeMux()
-	shell := func(h http.HandlerFunc) http.Handler { return s.cors(shellOrigins, h) }
+	app := func(h http.HandlerFunc) http.Handler { return s.cors(appOrigins, h) }
 	reader := func(h http.HandlerFunc) http.Handler { return s.cors([]string{s.readerOrigin()}, h) }
-	mux.Handle("/spike/v1/oauth/next", shell(s.next))
-	mux.Handle("/spike/v1/oauth/begin", shell(s.beginLogin))
-	mux.Handle("/spike/v1/oauth/complete", shell(func(w http.ResponseWriter, r *http.Request) { s.complete(w, r, sess) }))
-	mux.Handle("/spike/v1/cameras", shell(s.cameras))
-	mux.Handle("/spike/v1/results", shell(s.results))
+	mux.Handle("/spike/v1/oauth/next", app(s.next))
+	mux.Handle("/spike/v1/oauth/begin", app(s.beginLogin))
+	mux.Handle("/spike/v1/oauth/complete", app(func(w http.ResponseWriter, r *http.Request) { s.complete(w, r, sess) }))
+	mux.Handle("/spike/v1/cameras", app(s.cameras))
+	mux.Handle("/spike/v1/results", app(s.results))
 	mux.Handle("/spike/v1/visibility/targets", reader(s.targets))
 	mux.Handle("/spike/v1/visibility/web", reader(s.webCell))
 	mux.Handle("/spike/v1/visibility/interrupted", reader(s.webInterrupted))

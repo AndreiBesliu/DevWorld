@@ -209,6 +209,69 @@ func TestHandoffServer_CORSAllowsShellOriginsOnly(t *testing.T) {
 	}
 }
 
+// TestHandoffServer_CORSOrigins_WebBuildAndShells (Task 9B's cannot-verify
+// (a), checked in Task 9a): the video app's endpoints (/spike/v1/oauth/*,
+// the cameras and the results) answer with CORS exactly the origins that the
+// app runs from: the Android shell (http://localhost), the Windows shell
+// (http://tauri.localhost, https://tauri.localhost) and the web build that
+// spikehub or c1's reccontroller serves on the PC (http://localhost:7080,
+// and http://127.0.0.1:7080, the address that spikehub opens). Their
+// requests and their preflights get Access-Control-Allow-Origin; no other
+// origin gets a CORS header, and each of its requests, a preflight
+// included, is refused with 403. uploadspike's own pages need no CORS: their
+// requests go on without a CORS header, and their preflight is refused.
+func TestHandoffServer_CORSOrigins_WebBuildAndShells(t *testing.T) {
+	s, _, _ := startServer(t, Options{})
+	base := fmt.Sprintf("http://127.0.0.1:%d", s.Port())
+	requests := []struct{ method, path, body string }{
+		{http.MethodGet, "/spike/v1/oauth/next?platform=web", ""},
+		{http.MethodGet, "/spike/v1/oauth/begin?dest=g-web&provider=GOOGLE_DRIVE&platform=web", ""},
+		{http.MethodPost, "/spike/v1/oauth/complete", `{"state":"s","code":"c"}`},
+		{http.MethodGet, "/spike/v1/cameras", ""},
+		{http.MethodPost, "/spike/v1/results", `{"scenario":"OAUTH","device":{"platform":"chrome","ua":"x"}}`},
+	}
+	app := []string{"http://localhost", "http://tauri.localhost", "https://tauri.localhost", "http://localhost:7080", "http://127.0.0.1:7080"}
+	for _, origin := range app {
+		for _, r := range requests {
+			resp := do(t, r.method, base+r.path, r.body, "Origin", origin, "Content-Type", "text/plain")
+			if resp.StatusCode >= 300 || resp.Header.Get("Access-Control-Allow-Origin") != origin || !slices.Contains(resp.Header.Values("Vary"), "Origin") {
+				t.Errorf("%s %s from %s: %d, %v; want its answer with CORS", r.method, r.path, origin, resp.StatusCode, resp.Header)
+			}
+			resp = do(t, http.MethodOptions, base+r.path, "", "Origin", origin,
+				"Access-Control-Request-Method", r.method, "Access-Control-Request-Private-Network", "true")
+			if resp.StatusCode != http.StatusNoContent || resp.Header.Get("Access-Control-Allow-Origin") != origin ||
+				resp.Header.Get("Access-Control-Allow-Private-Network") != "true" {
+				t.Errorf("preflight of %s from %s: %d, %v", r.path, origin, resp.StatusCode, resp.Header)
+			}
+		}
+	}
+	others := []string{
+		"https://evil.example", "null", "http://localhost:7081", "http://127.0.0.1", "https://localhost",
+		"http://192.168.1.20:7080", "http://localhost:7080.evil.example", "http://tauri.localhost:7080", "https://localhost:7080",
+	}
+	for _, origin := range others {
+		for _, r := range requests {
+			for _, method := range []string{r.method, http.MethodOptions} {
+				resp := do(t, method, base+r.path, r.body, "Origin", origin, "Content-Type", "text/plain",
+					"Access-Control-Request-Method", r.method)
+				if resp.StatusCode != http.StatusForbidden || resp.Header.Get("Access-Control-Allow-Origin") != "" {
+					t.Errorf("%s %s from %s: %d, %v; want 403 without CORS", method, r.path, origin, resp.StatusCode, resp.Header)
+				}
+			}
+		}
+	}
+	for _, own := range []string{fmt.Sprintf("http://localhost:%d", s.Port()), base} {
+		resp := do(t, http.MethodGet, base+"/spike/v1/cameras", "", "Origin", own)
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("Access-Control-Allow-Origin") != "" {
+			t.Errorf("cameras from uploadspike's own page %s: %d, %v; want 200 without CORS", own, resp.StatusCode, resp.Header)
+		}
+		resp = do(t, http.MethodOptions, base+"/spike/v1/oauth/complete", "", "Origin", own, "Access-Control-Request-Method", "POST")
+		if resp.StatusCode != http.StatusForbidden || resp.Header.Get("Access-Control-Allow-Origin") != "" {
+			t.Errorf("preflight from uploadspike's own page %s: %d, %v; want 403 without CORS", own, resp.StatusCode, resp.Header)
+		}
+	}
+}
+
 // TestHandoffServer_ForwardsCodeAndStateOnly (Review Focus 5): a complete
 // whose body holds another field, a verifier, is refused with 400 and
 // reaches no hub; the forwarded JSON holds exactly code and state.
