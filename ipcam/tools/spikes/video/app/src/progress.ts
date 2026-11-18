@@ -2,10 +2,12 @@
 // the scenarios each device has completed, which the automatic run skips, and
 // what each device of the guide still lacks, which the page lists under
 // «Rămase pe acest PC:». It reads every release's results, v0.1.0's included.
-import { DEVICE_PLANS, deviceKey, scenariosOf, type DevicePlan } from './deviceplan';
+// Only the device table's scenarios count (TABLE_SCENARIOS): one that the app
+// lists outside the table, the recorder spike's AGE, is left out of the answer.
+import { DEVICE_PLANS, deviceKey, scenariosOf, TABLE_SCENARIOS, type DevicePlan } from './deviceplan';
 import { requestHub } from './hubhttp';
 import type { Translate } from './i18n';
-import { SCENARIO_IDS, type ScenarioId } from './results';
+import type { ScenarioId } from './results';
 
 /** What one device (a key, and a model for the shells) has completed. */
 export interface ProgressGroup {
@@ -32,9 +34,10 @@ export interface Progress {
 
 const PROGRESS_TIMEOUT_MS = 10_000;
 
-const isScenarioId = (value: unknown): value is ScenarioId => (SCENARIO_IDS as readonly unknown[]).includes(value);
+/** A scenario of the device table; an unknown id, or one run only from the list (AGE), is not. */
+const isTableScenario = (value: unknown): value is ScenarioId => (TABLE_SCENARIOS as readonly unknown[]).includes(value);
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');
-const scenarios = (value: unknown): ScenarioId[] => (Array.isArray(value) ? value.filter(isScenarioId) : []);
+const scenarios = (value: unknown): ScenarioId[] => (Array.isArray(value) ? value.filter(isTableScenario) : []);
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
 
 function readProgress(body: unknown): Progress {
@@ -73,16 +76,17 @@ export function fetchProgress(hubUrl: string): Promise<Progress> {
 }
 
 /**
- * The scenarios that this device has completed: the results of its key (its
- * platform, and the OS family for a browser elsewhere than on Windows), and of
- * its model when the shell reports one, as the hub stores it.
+ * The scenarios of the device table that this device has completed: the
+ * results of its key (its platform, and the OS family for a browser elsewhere
+ * than on Windows), and of its model when the shell reports one, as the hub
+ * stores it. A scenario outside the table (AGE) is never complete here.
  */
 export function completeFor(progress: Progress, device: { platform: string; os?: string }, model?: string): Set<ScenarioId> {
   const key = deviceKey(device.platform, device.os);
   const done = new Set<ScenarioId>();
   for (const group of progress.complete) {
     if (group.key !== key || (model !== undefined && group.model !== undefined && group.model !== model)) continue;
-    for (const id of group.scenarios) done.add(id);
+    for (const id of group.scenarios) if (isTableScenario(id)) done.add(id);
   }
   return done;
 }

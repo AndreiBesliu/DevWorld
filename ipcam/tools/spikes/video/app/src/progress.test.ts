@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DEVICE_PLANS } from './deviceplan';
 import { createI18n } from './i18n';
 import { completeFor, fetchProgress, remainingLines, type Progress } from './progress';
-import { SCENARIO_IDS } from './results';
+import { SCENARIO_IDS, type ScenarioId } from './results';
 import { ConnectError } from './session';
 
 const HUB = 'http://192.168.1.20:7080';
@@ -73,6 +73,43 @@ describe('the hub progress', () => {
     // The phone by its model, once the shell has told it; without it, every phone's.
     expect([...completeFor(read, { platform: 'android', os: 'Android' }, 'samsung SM-A245F')]).toEqual(['S10']);
     expect([...completeFor(read, { platform: 'android', os: 'Android' })].sort()).toEqual(['S1', 'S10', 'S2']);
+  });
+
+  it('outsideTheTable_AGE_isNeitherCompleteNorRemaining', async () => {
+    // AGE is in the app's list but in no device's run (the recorder spike's
+    // MI4, run from the list): whatever a hub answers, the skip, the rows'
+    // marks and «Rămase» leave it out.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(() =>
+        Promise.resolve(
+          Response.json({
+            ...ANSWER,
+            complete: ANSWER.complete.map((group) =>
+              group.model === 'samsung SM-A245F' || group.key === 'firefox' ? { ...group, scenarios: [...group.scenarios, 'AGE'] } : group,
+            ),
+            devices: ANSWER.devices.map((device) =>
+              device.id === 'edge' || device.id === 'firefox' ? { ...device, remaining: [...device.remaining, 'AGE'] } : device,
+            ),
+          }),
+        ),
+      ),
+    );
+    const read = await fetchProgress(HUB);
+    const { t } = createI18n({ lang: 'ro' });
+
+    expect(read.complete.flatMap((group) => group.scenarios)).not.toContain('AGE');
+    expect(read.devices.flatMap((device) => device.remaining)).not.toContain('AGE');
+    expect([...completeFor(read, { platform: 'android', os: 'Android' }, 'samsung SM-A245F')]).toEqual(['S10']);
+    expect([...completeFor(read, { platform: 'firefox', os: 'Windows' })]).toEqual(['S10', 'S1']);
+    expect(remainingLines(read, t)).toEqual([
+      'Rămase pe acest PC: Edge, Firefox (S2, S3-9, S9), ipcam-desktop',
+      'Rămase pe telefon: Galaxy A24 (S3-9, S3-4, S4, S5, S6, S7, S8, S9)',
+    ]);
+    // A progress that did not come from a hub's answer: AGE is not complete there either.
+    const withAge: ScenarioId[] = ['S10', 'AGE'];
+    const made = { ...read, complete: [{ key: 'android', platform: 'android', model: 'samsung SM-A245F', scenarios: withAge }] };
+    expect([...completeFor(made, { platform: 'android', os: 'Android' }, 'samsung SM-A245F')]).toEqual(['S10']);
   });
 
   it('remaining_listsThePcDevicesLeftAndThePhone', async () => {

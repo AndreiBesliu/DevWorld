@@ -1,0 +1,23 @@
+{
+  "name": "@ipcam/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Client code shared by the apps: agerange, random-access decryption of age v1 recordings (spec 10.2).",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./agerange": "./agerange/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/ciphers": "2.4.0",
+    "@noble/hashes": "2.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "fast-check": "4.10.2"
+  }
+}

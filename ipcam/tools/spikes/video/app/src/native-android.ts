@@ -5,7 +5,7 @@
 import { Capacitor } from '@capacitor/core';
 import { Pip, type PipPlugin } from '@ipcam/capacitor-pip';
 import { SpikeMetrics, type AndroidMetrics, type SpikeMetricsPlugin } from 'spike-android-metrics';
-import { THERMAL_LEVELS, type NativeMetrics, type SpikeNative, type ThermalStatus } from './native';
+import { THERMAL_LEVELS, type MetricsRead, type NativeMetrics, type SpikeNative, type ThermalStatus } from './native';
 
 export interface AndroidPlugins {
   pip: Pick<PipPlugin, 'enter' | 'addListener'>;
@@ -62,7 +62,8 @@ export function installAndroidNative(
 ): void {
   if (platform !== 'android') return;
   target.spikeNative = {
-    metrics: async () => toNativeMetrics(await metrics.read()),
+    // Only a run's read takes the launch extras' scenario (AutorunHandoff.kt).
+    metrics: async (read?: MetricsRead) => toNativeMetrics(await metrics.read({ run: read?.run === true })),
     enterPip: () => pip.enter(),
     onPip: pipFanOut(pip),
     keepAwake: (on) => metrics.keepAwake({ on }),

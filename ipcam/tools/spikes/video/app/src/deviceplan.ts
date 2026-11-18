@@ -52,6 +52,16 @@ export function scenariosOf(plan: DevicePlan): ScenarioId[] {
   return plan.steps.flatMap((step) => (step.kind === 'scenario' ? [step.id] : []));
 }
 
+/**
+ * The scenarios of the automatic run: those that a device of the table runs,
+ * in the order of SCENARIO_IDS. The app lists more: the recorder spike's AGE
+ * (MI4) is run from the list, by its own button, so the progress, the skip and
+ * «Rămase» leave it out, as spikehub does (cmd/spikehub/progress.go).
+ */
+export const TABLE_SCENARIOS: readonly ScenarioId[] = SCENARIO_IDS.filter((id) =>
+  DEVICE_PLANS.some((plan) => scenariosOf(plan).includes(id)),
+);
+
 const WEB_PLATFORMS: readonly Platform[] = ['chrome', 'edge', 'firefox'];
 
 /** The OS family as spikehub and the report read it: the first word, letters and digits, lower case. */

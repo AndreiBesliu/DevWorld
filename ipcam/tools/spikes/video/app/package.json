@@ -15,8 +15,10 @@
   "dependencies": {
     "@capacitor/core": "8.5.2",
     "@ipcam/capacitor-pip": "workspace:*",
+    "@ipcam/core": "workspace:*",
     "@ipcam/player": "workspace:*",
     "@tauri-apps/api": "2.12.1",
+    "age-encryption": "0.3.1",
     "hash-wasm": "4.12.0",
     "spike-android-metrics": "workspace:*"
   },

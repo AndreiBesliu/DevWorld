@@ -6,15 +6,19 @@
 // tests read the hooks (Task 12).
 //
 // On Android only a cold start honours the extras. The metrics plugin reads
-// them once, when the Bridge is created, and marks the Activity's saved state.
-// An Activity that is restored with the marker (created again, or started again
-// after its process died, from the launch Intent that the system kept with its
-// extras) ignores them, and so does a warm start: the scenario does not run
-// again, and an interrupted run is repeated by starting the app again. The
-// spike's Activity is exported and takes any `hub` URL, so any app on the
-// device can start a run against a hub of its choosing. That is by design for
-// a spike that is never published (SPIKE-ONLY); the results hold no addresses
-// or serial numbers (PH0-22).
+// them once, when the Bridge is created, and the Activity's saved state keeps
+// the scenario until the page's run takes it: at the run's first read of the
+// shell's metrics, the only read marked as a run's (scenarios/runner.ts). The
+// start page's own reads, the first as soon as it loads, do not take it, so an
+// Activity that the system creates again before the run's read still runs the
+// scenario. An Activity restored after the run took it (created again, or
+// started again after its process died, from the launch Intent that the system
+// kept with its extras) ignores them, and so does a warm start: the scenario
+// does not run again, and an interrupted run is repeated by starting the app
+// again. The spike's Activity is exported and takes any `hub` URL, so any app
+// on the device can start a run against a hub of its choosing. That is by
+// design for a spike that is never published (SPIKE-ONLY); the results hold no
+// addresses or serial numbers (PH0-22).
 import { ConnectError } from './hubhttp';
 import {
   publish,

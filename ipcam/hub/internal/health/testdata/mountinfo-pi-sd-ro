@@ -1,0 +1,4 @@
+22 1 179:2 / / rw,noatime shared:1 - ext4 /dev/mmcblk0p2 ro,errors=remount-ro
+23 22 0:5 / /dev rw,relatime shared:2 - devtmpfs udev rw,size=1801440k,nr_inodes=450360,mode=755
+40 22 8:1 / /mnt/ssd ro,relatime shared:25 - ext4 /dev/sda1 rw
+43 22 259:2 / /mnt/nvme rw,relatime shared:26 - ext4 /dev/nvme0n1p2 rw

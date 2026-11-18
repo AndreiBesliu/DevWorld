@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { detectDevice } from './device';
-import { APP_VERSION, DEVICE_PLANS, deviceKey, planFor, scenariosOf, type Step } from './deviceplan';
+import { APP_VERSION, DEVICE_PLANS, deviceKey, planFor, scenariosOf, TABLE_SCENARIOS, type Step } from './deviceplan';
+import { SCENARIO_IDS } from './results';
 
 const CHROME_WINDOWS = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 const EDGE_WINDOWS = `${CHROME_WINDOWS} Edg/141.0.3537.71`;
@@ -36,6 +37,14 @@ describe('the device table (deviceplan.json)', () => {
   it('scenariosOf_leavesOutThePause', () => {
     const phone = DEVICE_PLANS.find((plan) => plan.id === 'phone');
     expect(phone && scenariosOf(phone)).toEqual(['S10', 'S1', 'S2', 'S3-9', 'S3-4', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']);
+  });
+
+  it('tableScenarios_areTheDevicesRuns_withoutTheListsAGE', () => {
+    // The recorder spike's AGE (MI4) is in the app's list, run by its own
+    // button, and in no device's run: the automatic run never counts it.
+    expect(SCENARIO_IDS).toContain('AGE');
+    expect(DEVICE_PLANS.flatMap(scenariosOf)).not.toContain('AGE');
+    expect(TABLE_SCENARIOS).toEqual(['S1', 'S2', 'S3-4', 'S3-9', 'S3-16', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 'S10']);
   });
 });
 
