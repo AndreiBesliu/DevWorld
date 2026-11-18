@@ -40,10 +40,12 @@ describe('the device table (deviceplan.json)', () => {
   });
 
   it('tableScenarios_areTheDevicesRuns_withoutTheListsAGE', () => {
-    // The recorder spike's AGE (MI4) is in the app's list, run by its own
-    // button, and in no device's run: the automatic run never counts it.
-    expect(SCENARIO_IDS).toContain('AGE');
+    // The recorder spike's AGE (MI4) and the upload spike's OAUTH (MI6) are in
+    // the app's list, each run by its own button, and in no device's run: the
+    // automatic run never counts them.
+    expect(SCENARIO_IDS).toEqual(expect.arrayContaining(['AGE', 'OAUTH']));
     expect(DEVICE_PLANS.flatMap(scenariosOf)).not.toContain('AGE');
+    expect(DEVICE_PLANS.flatMap(scenariosOf)).not.toContain('OAUTH');
     expect(TABLE_SCENARIOS).toEqual(['S1', 'S2', 'S3-4', 'S3-9', 'S3-16', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 'S10']);
   });
 });

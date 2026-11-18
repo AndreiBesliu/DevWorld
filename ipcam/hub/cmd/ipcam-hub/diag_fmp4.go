@@ -2,10 +2,11 @@ package main
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/playback"
 )
 
 // The diag benches read a recording as the hub's read path does: its
@@ -22,71 +23,28 @@ import (
 // (maxTrunSamples per trun, entries that fit the box, one trun of the
 // video track per traf); and the first IDR inside the plaintext, checked
 // without an overflow. The spike's TestReader_TrunBoundsAsTheHubs pins
-// the corrupt recordings of this package's TestFMP4_* tests.
+// the corrupt recordings of this package's TestFMP4_* tests. The box
+// header reader, playback.ReadFMP4Box and playback.ReadFullAt, moved to
+// internal/playback, which reads the open segment's boxes with it (Task
+// 7b).
 
 // span is a byte range of the plaintext.
 type span struct{ off, n int64 }
 
 // errNotFMP4 is a recording that is not laid out as MediaMTX writes one.
-var errNotFMP4 = errors.New("the plaintext is not an fMP4 recording")
-
-// fmp4Box is an ISO BMFF box header.
-type fmp4Box struct {
-	off, size, hdr int64
-	typ            string
-}
-
-func (b fmp4Box) end() int64 { return b.off + b.size }
-
-// readFMP4Box reads the header of the box at off, in the size bytes of r.
-func readFMP4Box(r io.ReaderAt, off, size int64) (fmp4Box, error) {
-	var h [16]byte
-	if size-off < 8 {
-		return fmp4Box{}, fmt.Errorf("%w: a box header past the end, at %d", errNotFMP4, off)
-	}
-	if err := readFullAt(r, h[:8], off); err != nil {
-		return fmp4Box{}, err
-	}
-	b := fmp4Box{off: off, size: int64(binary.BigEndian.Uint32(h[:4])), hdr: 8, typ: string(h[4:8])}
-	if b.size == 1 {
-		if size-off < 16 {
-			return fmp4Box{}, fmt.Errorf("%w: a box header past the end, at %d", errNotFMP4, off)
-		}
-		if err := readFullAt(r, h[8:16], off+8); err != nil {
-			return fmp4Box{}, err
-		}
-		b.size, b.hdr = int64(binary.BigEndian.Uint64(h[8:16])), 16 //nolint:gosec // checked below
-	}
-	if b.size < b.hdr || b.end() > size {
-		return fmp4Box{}, fmt.Errorf("%w: a %q box of %d bytes at %d", errNotFMP4, b.typ, b.size, off)
-	}
-	return b, nil
-}
+var errNotFMP4 = playback.ErrNotFMP4
 
 // readFMP4Body reads a whole box, without its header.
-func readFMP4Body(r io.ReaderAt, b fmp4Box) ([]byte, error) {
+func readFMP4Body(r io.ReaderAt, b playback.Box) ([]byte, error) {
 	const maxBody = 16 << 20 // a moov or a moof is a few KB
-	if b.size-b.hdr > maxBody {
-		return nil, fmt.Errorf("%w: a %q box of %d bytes", errNotFMP4, b.typ, b.size)
+	if b.Size-b.Hdr > maxBody {
+		return nil, fmt.Errorf("%w: a %q box of %d bytes", errNotFMP4, b.Type, b.Size)
 	}
-	body := make([]byte, b.size-b.hdr)
-	if err := readFullAt(r, body, b.off+b.hdr); err != nil {
+	body := make([]byte, b.Size-b.Hdr)
+	if err := playback.ReadFullAt(r, body, b.Off+b.Hdr); err != nil {
 		return nil, err
 	}
 	return body, nil
-}
-
-// readFullAt reads len(p) bytes at off: an io.ReaderAt may give io.EOF
-// with all of them when they end its data.
-func readFullAt(r io.ReaderAt, p []byte, off int64) error {
-	n, err := r.ReadAt(p, off)
-	if n == len(p) {
-		return nil
-	}
-	if err == nil || errors.Is(err, io.EOF) {
-		err = io.ErrUnexpectedEOF
-	}
-	return err
 }
 
 // eachChild calls f with the type and body of each box in data.
@@ -134,22 +92,22 @@ type fmp4Recording struct {
 // openFMP4 reads the init of the recording whose plaintext is the size
 // bytes of r.
 func openFMP4(r io.ReaderAt, size int64) (*fmp4Recording, error) {
-	ftyp, err := readFMP4Box(r, 0, size)
+	ftyp, err := playback.ReadFMP4Box(r, 0, size)
 	if err != nil {
 		return nil, err
 	}
-	moov, err := readFMP4Box(r, ftyp.end(), size)
+	moov, err := playback.ReadFMP4Box(r, ftyp.End(), size)
 	if err != nil {
 		return nil, err
 	}
-	if ftyp.typ != "ftyp" || moov.typ != "moov" {
-		return nil, fmt.Errorf("%w: it starts with %q and %q", errNotFMP4, ftyp.typ, moov.typ)
+	if ftyp.Type != "ftyp" || moov.Type != "moov" {
+		return nil, fmt.Errorf("%w: it starts with %q and %q", errNotFMP4, ftyp.Type, moov.Type)
 	}
 	body, err := readFMP4Body(r, moov)
 	if err != nil {
 		return nil, err
 	}
-	m := &fmp4Recording{r: r, size: size, partsStart: moov.end()}
+	m := &fmp4Recording{r: r, size: size, partsStart: moov.End()}
 	trex := map[uint32]sampleDefaults{}
 	err = eachChild(body, func(typ string, b []byte) error {
 		switch typ {
@@ -251,26 +209,26 @@ const maxTrunSamples = 1 << 20
 // it. It stops when visit returns false.
 func (m *fmp4Recording) eachPart(visit func(part span, samples []fmp4Sample) (bool, error)) error {
 	for pos := m.partsStart; pos < m.size; {
-		b, err := readFMP4Box(m.r, pos, m.size)
+		b, err := playback.ReadFMP4Box(m.r, pos, m.size)
 		if err != nil {
 			return err
 		}
-		pos = b.end()
-		switch b.typ {
+		pos = b.End()
+		switch b.Type {
 		case "free", "skip":
 			continue
 		case "moof":
 		default:
-			return fmt.Errorf("%w: a %q box where a part should start, at %d", errNotFMP4, b.typ, b.off)
+			return fmt.Errorf("%w: a %q box where a part should start, at %d", errNotFMP4, b.Type, b.Off)
 		}
-		mdat, err := readFMP4Box(m.r, b.end(), m.size)
+		mdat, err := playback.ReadFMP4Box(m.r, b.End(), m.size)
 		if err != nil {
 			return err
 		}
-		if mdat.typ != "mdat" {
-			return fmt.Errorf("%w: a moof without its mdat, at %d", errNotFMP4, b.off)
+		if mdat.Type != "mdat" {
+			return fmt.Errorf("%w: a moof without its mdat, at %d", errNotFMP4, b.Off)
 		}
-		pos = mdat.end()
+		pos = mdat.End()
 		body, err := readFMP4Body(m.r, b)
 		if err != nil {
 			return err
@@ -280,14 +238,14 @@ func (m *fmp4Recording) eachPart(visit func(part span, samples []fmp4Sample) (bo
 			if typ != "traf" || samples != nil {
 				return nil
 			}
-			s, err := m.readTraf(traf, b.off)
+			s, err := m.readTraf(traf, b.Off)
 			samples = s
 			return err
 		})
 		if err != nil {
 			return err
 		}
-		more, err := visit(span{off: b.off, n: mdat.end() - b.off}, samples)
+		more, err := visit(span{off: b.Off, n: mdat.End() - b.Off}, samples)
 		if err != nil || !more {
 			return err
 		}
@@ -471,7 +429,7 @@ func firstIDR(r io.ReaderAt, size int64, target time.Duration) ([]byte, error) {
 		return nil, fmt.Errorf("%w: a sample outside the plaintext", errNotFMP4)
 	}
 	data := make([]byte, found.size)
-	if err := readFullAt(r, data, found.off); err != nil {
+	if err := playback.ReadFullAt(r, data, found.off); err != nil {
 		return nil, err
 	}
 	return data, nil

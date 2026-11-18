@@ -54,6 +54,7 @@ type fakeOut struct {
 //   - "sleep": it records nothing;
 //   - "eio:<n>": it writes n failed writes of the first path to stderr, as
 //     MediaMTX logs a recorder's error, an I/O error each;
+//   - "eio-on-signal:<n>": the same, once the test sends signalEIO;
 //   - "writeerror": for the first path, it writes a .part of two whole 1 s
 //     parts and a torn third, logs its failed write, then writes the next
 //     segment's .part, as MediaMTX does when a write fails and it starts the
@@ -75,10 +76,16 @@ func fakeMediaMTX(mode, config string) int {
 	}
 	switch {
 	case mode == "sleep":
-	case strings.HasPrefix(mode, "eio:"):
+	case strings.HasPrefix(mode, "eio:"), strings.HasPrefix(mode, "eio-on-signal:"):
 		var n int
-		if _, err := fmt.Sscanf(mode, "eio:%d", &n); err != nil {
+		if _, err := fmt.Sscanf(mode[strings.Index(mode, ":")+1:], "%d", &n); err != nil {
 			return 2
+		}
+		if strings.HasPrefix(mode, "eio-on-signal:") {
+			if err := awaitSignal(signalEIO); err != nil {
+				fmt.Fprintln(os.Stderr, "fake MediaMTX:", err)
+				return 2
+			}
 		}
 		for range n {
 			failedWrite(filepath.Join(recDir, filepath.FromSlash(path), "x.mp4.part"))
@@ -131,6 +138,7 @@ func firstPath(config string) (path, recDir string, err error) {
 const (
 	signalSeen   = "seen"   // a poll saw the first segment's .part: its recording event
 	signalFailed = "failed" // the failed write reached the recorder: the card's degraded event
+	signalEIO    = "eio"    // mode "eio-on-signal": the failed writes may come now
 )
 
 // fakeSignal is the file that sends signal to the fake MediaMTX whose out
@@ -243,6 +251,14 @@ func fakeRecording(n int) (init []byte, parts [][]byte, err error) {
 // hub and its data directory.
 func sdCardHub(t *testing.T, mode string, readOnly bool, jobs ...string) (*hub, string) {
 	t.Helper()
+	return sdCardHubWith(t, mode, readOnly, nil, jobs...)
+}
+
+// sdCardHubWith is sdCardHub with prepare, when set, run before ipcam-hub
+// starts on its data directory (not there yet), the fake MediaMTX's out
+// file and run.json's keys, which it may add to.
+func sdCardHubWith(t *testing.T, mode string, readOnly bool, prepare func(dataDir, fakeOut string, config map[string]any), jobs ...string) (*hub, string) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the card monitor runs where rec/ is on an SD card, from Linux's mount table (T40); Windows has none")
 	}
@@ -271,7 +287,11 @@ func sdCardHub(t *testing.T, mode string, readOnly bool, jobs ...string) (*hub, 
 		defs = append(defs, map[string]any{"cam": cam, "profile": profile, "restreamUrl": "rtsp://127.0.0.1:1/" + job, "recipients": nil})
 	}
 	config := filepath.Join(dir, "run.json")
-	writeJSON(t, config, map[string]any{"dataDir": dataDir, "mediamtx": os.Args[0], "sdCardConfirmed": true, "jobs": defs})
+	cfg := map[string]any{"dataDir": dataDir, "mediamtx": os.Args[0], "sdCardConfirmed": true, "jobs": defs}
+	if prepare != nil {
+		prepare(dataDir, filepath.Join(dir, "fake.json"), cfg)
+	}
+	writeJSON(t, config, cfg)
 	return startHub(t, "run", "--config", config), dataDir
 }
 

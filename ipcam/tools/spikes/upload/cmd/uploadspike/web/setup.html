@@ -1,0 +1,103 @@
+<!-- SPIKE-ONLY: ipcam/docs/superpowers/plans/2026-10-18-phase0c2-upload-spike.md -->
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>{{.Title}}</title>
+<style>
+body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 44rem; padding: 0 1rem; line-height: 1.5; }
+fieldset { margin: 1rem 0; }
+label { display: block; margin: 0.4rem 0; }
+input[type=text], input[type=password] { width: 100%; font-family: ui-monospace, monospace; }
+#drop { border: 2px dashed #888; padding: 1.5rem; text-align: center; }
+button { font-size: 1.2rem; padding: 0.6rem 1.4rem; }
+</style>
+</head>
+<body>
+<h1>{{.L.SetupTitle}}</h1>
+<p>{{.L.SetupHelp}}</p>
+<div id="drop"><label>{{.L.SetupFiles}} <input id="files" type="file" accept=".json,application/json" multiple></label></div>
+<ul id="detected"></ul>
+<form id="form">
+{{range $t := .Lines}}
+<fieldset data-type="{{$t}}">
+<legend data-legend="{{$t}}"></legend>
+<label>{{$.L.SetupID}} <input type="text" name="{{$t}}-id" autocomplete="off"></label>
+{{if or (eq $t "desktop") (eq $t "tv")}}<label>{{$.L.SetupSecret}} <input type="password" name="{{$t}}-secret" autocomplete="off"></label>{{end}}
+</fieldset>
+{{end}}
+<fieldset><legend>{{.L.SetupMicrosoft}}</legend>
+<label>{{.L.SetupID}} <input type="text" name="microsoft-id" autocomplete="off"></label>
+</fieldset>
+<p><button type="submit">{{.L.AutoButton}}</button></p>
+</form>
+<p id="result"></p>
+<script>
+// The setup page (P46): it reads the client JSON files that Google gave at
+// their creation (A4), all at once, recognises each client by itself, and
+// sends the IDs and the Desktop and TV secrets to uploadspike, which hands
+// them to the hub; nothing is kept on disk.
+const names = {android: {{.L.ClientAndroid}}, desktop: {{.L.ClientDesktop}}, tv: {{.L.ClientTV}}, web: {{.L.ClientWeb}}};
+const detected = {{.L.ClientDetected}}, unknown = {{.L.ClientUnknown}};
+const saved = {{.L.SetupSaved}}, failed = {{.L.SetupFailed}};
+document.querySelectorAll("[data-legend]").forEach((el) => { el.textContent = names[el.dataset.legend]; });
+const field = (n) => document.querySelector("[name='" + n + "']");
+
+// kindOf recognises a client JSON: "web" is the Web client; "installed"
+// without a client secret is Android (a public client); with a secret and
+// a localhost redirect it is Desktop, with a secret and no such redirect
+// TV (limited-input devices).
+function kindOf(json) {
+  if (json.web) return ["web", json.web];
+  if (json.installed) {
+    if (!json.installed.client_secret) return ["android", json.installed];
+    const redirects = json.installed.redirect_uris || [];
+    return [redirects.some((u) => u.startsWith("http://localhost")) ? "desktop" : "tv", json.installed];
+  }
+  return ["", null];
+}
+
+// fill puts a value read from a file into a field, never an empty one: a
+// later file never clears what an earlier one filled.
+function fill(name, value) {
+  if (field(name) && value) field(name).value = value;
+}
+
+document.getElementById("files").addEventListener("change", async (ev) => {
+  const list = document.getElementById("detected");
+  for (const file of ev.target.files) {
+    const li = document.createElement("li");
+    try {
+      const [kind, c] = kindOf(JSON.parse(await file.text()));
+      if (!kind) { li.textContent = file.name + ": " + unknown; list.append(li); continue; }
+      fill(kind + "-id", c.client_id);
+      fill(kind + "-secret", c.client_secret);
+      li.textContent = file.name + ": " + detected.replace("%s", names[kind]);
+    } catch (e) {
+      li.textContent = file.name + ": " + unknown;
+    }
+    list.append(li);
+  }
+});
+
+document.getElementById("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const google = {};
+  for (const t of ["android", "desktop", "tv", "web"]) {
+    const id = field(t + "-id").value.trim();
+    if (!id) continue;
+    google[t] = {id};
+    if (field(t + "-secret")) google[t].secret = field(t + "-secret").value.trim();
+  }
+  const body = {google};
+  const ms = field("microsoft-id").value.trim();
+  if (ms) body.microsoft = {id: ms};
+  const r = await fetch("/setup", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const answer = await r.json().catch(() => ({}));
+  document.getElementById("result").textContent = r.ok ? saved : failed.replace("%s", answer.error || r.status);
+});
+</script>
+</body>
+</html>

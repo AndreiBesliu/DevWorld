@@ -2,3 +2,14 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
+# Binaries that a go build from ipcam/ leaves at its root (Task 7b review M6).
+/ipcam-hub
+/ipcam-hub.exe
+/uploadspike
+/uploadspike.exe
+/uploadspike-probe
+/uploadspike-probe.exe
+/fakeproviders
+/fakeproviders.exe
+/uploadreport
+/uploadreport.exe
