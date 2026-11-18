@@ -135,7 +135,7 @@ func newMI6Device(t *testing.T) *mi6Device {
 	a.loginB1(t, "web")
 	a.webCells(t, "android", "tv")
 	if !m.wait(3*time.Minute) || m.code != 0 || !strings.Contains(m.stdout.String(), msgBackToAutostart) {
-		t.Fatalf("mi6's day 0: exit %d\n%s\n%s", m.code, m.stdout, tail(m.stderr.String(), 30))
+		t.Fatalf("mi6's day 0: exit %d\n%s\n%s", m.exitCode(), m.stdout, tail(m.stderr.String(), 30))
 	}
 	d.waitResumeHub(t)
 	return d
@@ -181,7 +181,7 @@ func (d *mi6Device) waitBlock(t *testing.T, m *proc, from int) int {
 	t.Helper()
 	var n int
 	until(t, 3*time.Minute, "the block", func() bool {
-		if m.code != -1 {
+		if m.ended() {
 			t.Fatalf("mi5 ended before its block: exit %d\n%s\n%s", m.code, m.stdout, tail(m.stderr.String(), 30))
 		}
 		b, _ := os.ReadFile(d.fwLog)
@@ -379,8 +379,8 @@ func TestMI5_TakesOverTheMI6Hub(t *testing.T) {
 		t.Errorf("dst-1 %+v", dst)
 	}
 	d.waitResumeHub(t)
-	if _, open := r.state().Open["MI6"]; !open || d.resume.code != -1 {
-		t.Errorf("MI6 open %v, resume ended %v; want the 7-day run going on", open, d.resume.code != -1)
+	if _, open := r.state().Open["MI6"]; !open || d.resume.ended() {
+		t.Errorf("MI6 open %v, resume ended %v; want the 7-day run going on", open, d.resume.ended())
 	}
 }
 
@@ -433,8 +433,8 @@ func TestHandover_RefusedWhileMI5Runs(t *testing.T) {
 	if out := s.stdout.String(); !strings.Contains(out, ask) || !strings.Contains(out, strings.SplitN(msgMI5Running2, "%", 2)[0]) {
 		t.Errorf("status during mi5:\n%s\nwant %q and the MI5 line", out, ask)
 	}
-	if open, live := mi5State(r.state()); !open || !live || m.code != -1 || r.hubPID() != hub || !alive(hub) {
-		t.Errorf("open %v, live %v, mi5 ended %v, hub %d → %d; want mi5 and its hub going on", open, live, m.code != -1, hub, r.hubPID())
+	if open, live := mi5State(r.state()); !open || !live || m.ended() || r.hubPID() != hub || !alive(hub) {
+		t.Errorf("open %v, live %v, mi5 ended %v, hub %d → %d; want mi5 and its hub going on", open, live, m.ended(), hub, r.hubPID())
 	}
 	stopHolder(t, m, signalFile)
 }
@@ -526,12 +526,38 @@ func tornParts(t *testing.T, r *rig) []string {
 	return out
 }
 
+// waitSegmentOpen waits until, in the event log from byte offset from on,
+// a camera's segment closed (segment_closed) less than 20 s ago and that
+// camera's next segment is open (a .part under rec/<cam>/). A kill right
+// then tears that segment, at least 10 s before its 30-s close: a
+// segment's .part exists only from its first part to its close, so a kill
+// at a moment left to chance can fall between two segments.
+func (d *mi6Device) waitSegmentOpen(t *testing.T, from int) {
+	t.Helper()
+	until(t, 2*time.Minute, "a camera's next segment open after its rotation", func() bool {
+		closed := map[string]int64{}
+		for _, e := range d.loggedEvents(t, from) {
+			if e.Type == "segment_closed" {
+				closed[e.Cam] = max(closed[e.Cam], e.AtMs)
+			}
+		}
+		for _, p := range tornParts(t, d.r) {
+			for cam, at := range closed {
+				if time.Since(time.UnixMilli(at)) < 20*time.Second && strings.Contains(filepath.ToSlash(p), "/rec/"+cam+"/") {
+					return true
+				}
+			}
+		}
+		return false
+	})
+}
+
 // TestMI5_RunAfterCutRun_CountsOnlyItsOwnSegments (Holding the hub, each
 // run counts only its own segments): a first mi5 is cut during its block
 // as a reboot cuts it, by SIGKILL to its hub (as hub.pid names it) and at
 // once to mi5 (TerminateProcess of both on Windows, where a holder's death
-// alone would stop the hub cleanly), leaving torn .part files under rec/
-// and pending
+// alone would stop the hub cleanly), while a camera's segment is open
+// (waitSegmentOpen), leaving torn .part files under rec/ and pending
 // dst-1 placements. resume's hub's startup reconcile finalises the torn
 // segments, and none gets a placement. A second mi5 on the same data
 // directory then completes: its routes start at its own start; its audit
@@ -548,6 +574,7 @@ func TestMI5_RunAfterCutRun_CountsOnlyItsOwnSegments(t *testing.T) {
 	until(t, 2*time.Minute, "a dst-1 placement pending in the block", func() bool {
 		return len(pending(d.loggedEvents(t, 0), "dst-1")) > 0
 	})
+	d.waitSegmentOpen(t, d.eventsLen())
 	if err := killPID(r.hubPID()); err != nil {
 		t.Fatal(err)
 	}

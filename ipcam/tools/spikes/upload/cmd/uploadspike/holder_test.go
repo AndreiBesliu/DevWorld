@@ -123,7 +123,7 @@ func TestHubLock_SecondHubOnSameDataDirRefused(t *testing.T) {
 		t.Fatalf("the second command exited %d\nstdout:\n%s\nstderr:\n%s", b.code, b.stdout, b.stderr)
 	}
 	if !a.wait(30*time.Second) || a.code != 0 {
-		t.Fatalf("the holder after the handover: ended %v, exit %d\nstdout:\n%s", a.code != -1, a.code, a.stdout)
+		t.Fatalf("the holder after the handover: ended %v, exit %d\nstdout:\n%s", a.ended(), a.exitCode(), a.stdout)
 	}
 	if !strings.Contains(a.stdout.String(), msgHandedOver) {
 		t.Errorf("the holder said %q; want %q", a.stdout, msgHandedOver)
@@ -157,7 +157,7 @@ func TestHandover_SecondCommandTakesTheHubAndKeepsOpenRuns(t *testing.T) {
 	}
 	b := r.run(clientsInput(), nil, "setup", "--terminal")
 	if b.code != 0 || !a.wait(30*time.Second) {
-		t.Fatalf("setup exited %d, the holder ended %v\n%s\n%s", b.code, a.code != -1, b.stdout, b.stderr)
+		t.Fatalf("setup exited %d, the holder ended %v\n%s\n%s", b.code, a.ended(), b.stdout, b.stderr)
 	}
 	starts := r.startsBy(b.cmd.Process.Pid)
 	if len(starts) != 1 || !slices.Equal(starts[0].Destinations, []string{"g-android", "g-windows", "g-web"}) {
@@ -206,7 +206,7 @@ func TestHandover_RefusedWhileMI5Open(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !late.wait(time.Minute) || late.code != 1 || !strings.Contains(late.stderr.String(), msgMI5Running) {
-		t.Fatalf("the late caller: exit %d, stderr %q; want 1 and %q", late.code, late.stderr, msgMI5Running)
+		t.Fatalf("the late caller: exit %d, stderr %q; want 1 and %q", late.exitCode(), late.stderr, msgMI5Running)
 	}
 	if c := r.state().Claim; c != nil {
 		t.Errorf("the late caller left its claim %+v", c)
@@ -232,8 +232,8 @@ func TestHandover_RefusedWhileMI5Open(t *testing.T) {
 	if c := r.state().Claim; c != nil {
 		t.Errorf("mi6 --b1 recorded a claim %+v", c)
 	}
-	if live := r.liveHubs(); !slices.Equal(live, []int{hubPID}) || a.code != -1 {
-		t.Errorf("live hubs %v, holder ended %v; want the holder's hub %d alone", live, a.code != -1, hubPID)
+	if live := r.liveHubs(); !slices.Equal(live, []int{hubPID}) || a.ended() {
+		t.Errorf("live hubs %v, holder ended %v; want the holder's hub %d alone", live, a.ended(), hubPID)
 	}
 	run, err := mi6.Decode(r.state().Open["MI6"])
 	if err != nil {
@@ -392,7 +392,7 @@ func TestSetup_HandsOverToAnotherCommand(t *testing.T) {
 				t.Fatalf("the second setup: exit %d after %v\nstdout:\n%s\nstderr:\n%s", b.code, time.Since(began), b.stdout, b.stderr)
 			}
 			if !a.wait(30*time.Second) || a.code != 0 {
-				t.Fatalf("the first setup after the handover: ended %v, exit %d\nstdout:\n%s\nstderr:\n%s", a.code != -1, a.code, a.stdout, a.stderr)
+				t.Fatalf("the first setup after the handover: ended %v, exit %d\nstdout:\n%s\nstderr:\n%s", a.ended(), a.exitCode(), a.stdout, a.stderr)
 			}
 			if !strings.Contains(a.stdout.String(), msgHandedOver) || strings.Contains(a.stderr.String(), "handed over") {
 				t.Errorf("the first setup said\n%s\n%s\nwant %q, in Romanian only", a.stdout, a.stderr, msgHandedOver)

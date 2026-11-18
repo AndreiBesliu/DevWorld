@@ -23,9 +23,15 @@ import (
 // fakeproviders process; the test's own clients are registered there.
 func realRig(t *testing.T, known ...string) (*rig, *fakes) {
 	t.Helper()
+	return realRigWith(t, nil, known...)
+}
+
+// realRigWith is realRig whose fakeproviders also takes args.
+func realRigWith(t *testing.T, args []string, known ...string) (*rig, *fakes) {
+	t.Helper()
 	mediamtx := spiketest.Required(t, "MEDIAMTX_BIN", "RECSPIKE_REQUIRE_MEDIAMTX")
 	hub := binary(t, "ipcam-hub", "github.com/AndreiBesliu/DevWorld/ipcam/hub/cmd/ipcam-hub")
-	f := startFakes(t, known...)
+	f := startFakes(t, args, known...)
 	r := newRigWith(t, hub, "")
 	r.env = append(r.env, envMediaMTX+"="+mediamtx, envFakes+"="+f.base)
 	return r, f
@@ -46,12 +52,12 @@ var fakeClients = []map[string]any{
 		"redirectUris": []string{"http://localhost:7091"}},
 }
 
-// startFakes starts fakeproviders on 127.0.0.1 with the known values
-// (-known kind=value) and registers the test's clients.
-func startFakes(t *testing.T, known ...string) *fakes {
+// startFakes starts fakeproviders on 127.0.0.1 with extra args and the
+// known values (-known kind=value) and registers the test's clients.
+func startFakes(t *testing.T, extra []string, known ...string) *fakes {
 	t.Helper()
 	bin := binary(t, "fakeproviders", "github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/fakes/cmd/fakeproviders")
-	args := []string{"-listen", "127.0.0.1:0"}
+	args := append([]string{"-listen", "127.0.0.1:0"}, extra...)
 	for _, k := range known {
 		args = append(args, "-known", k)
 	}

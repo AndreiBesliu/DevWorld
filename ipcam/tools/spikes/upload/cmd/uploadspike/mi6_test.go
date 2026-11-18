@@ -302,14 +302,14 @@ func TestMI6_FailedRefreshDay_StatusAsksB1(t *testing.T) {
 	_, _ = taker.stdin.Write([]byte(clientsInput()))
 	_ = taker.stdin.Close()
 	if !first.wait(2*time.Minute) || first.code != 0 {
-		t.Fatalf("the first mi6 --b1: exit %d\n%s\n%s", first.code, first.stdout, first.stderr)
+		t.Fatalf("the first mi6 --b1: exit %d\n%s\n%s", first.exitCode(), first.stdout, first.stderr)
 	}
 	cut := "Autentificarea s-a întrerupt: alt program al probei a preluat hub-ul. Rulați din nou: uploadspike mi6 --b1 android."
 	if !strings.Contains(first.stdout.String(), cut) {
 		t.Errorf("the first mi6 --b1 said:\n%s\nwant %q", first.stdout, cut)
 	}
 	if !taker.wait(2*time.Minute) || taker.code != 0 {
-		t.Fatalf("setup: exit %d\n%s\n%s", taker.code, taker.stdout, taker.stderr)
+		t.Fatalf("setup: exit %d\n%s\n%s", taker.exitCode(), taker.stdout, taker.stderr)
 	}
 	after := r.state()
 	if string(after.Open["MI6"]) != string(before.Open["MI6"]) || after.Handoffs["acct-1/google:android"] != 1 || after.Handoffs["acct-1/google:tv"] != 0 {
@@ -322,7 +322,7 @@ func TestMI6_FailedRefreshDay_StatusAsksB1(t *testing.T) {
 	second := r.start(nil, "mi6", "--b1", "android")
 	a.loginB1(t, "android")
 	if !second.wait(2*time.Minute) || second.code != 0 || !strings.Contains(second.stdout.String(), msgBackToAutostart) {
-		t.Fatalf("the second mi6 --b1: exit %d\n%s\n%s", second.code, second.stdout, second.stderr)
+		t.Fatalf("the second mi6 --b1: exit %d\n%s\n%s", second.exitCode(), second.stdout, second.stderr)
 	}
 	run, err := mi6.Decode(r.state().Open["MI6"])
 	if err != nil {
@@ -332,7 +332,7 @@ func TestMI6_FailedRefreshDay_StatusAsksB1(t *testing.T) {
 		t.Errorf("g-android after B1: %+v", p)
 	}
 	until(t, time.Minute, "resume's hub after B1", served)
-	if res.code != -1 {
+	if res.ended() {
 		t.Error("resume ended")
 	}
 }

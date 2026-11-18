@@ -21,7 +21,12 @@ const mi5TestTiming = `{"preRun":20000,"preRunEvery":1000,"warmUp":5000,"checkEv
 
 // TestMI5_LabRun_RealHub (P14, P16, g3-16): a short lab run end to end on
 // the real ipcam-hub, the fork's MediaMTX, reccontroller --local's
-// simulated cameras and fakeproviders: the lab's login rig, the quota
+// simulated cameras and fakeproviders, throttled to 1 MiB/s as the lab
+// runs it (-throttle 1048576), so that each 512 KiB part stays about
+// 0.5 s on the wire and the restart lands between two parts of one
+// segment instead of racing a whole upload on loopback (unthrottled, a
+// segment's four parts can all go up between two of the run's 50-ms
+// polls, leaving the restart no moment): the lab's login rig, the quota
 // probe, the encrypted pre-run's reads, the recording, a 75-s block
 // (the tests' firewall seam records its commands and blocks nothing, so
 // its checks pass by the seam and the run is never judged), the restart
@@ -35,7 +40,7 @@ func TestMI5_LabRun_RealHub(t *testing.T) {
 		t.Skip("the lab's run is Linux's")
 	}
 	media := spiketest.Required(t, "MEDIAGEN_DIR", "SPIKE_REQUIRE_MEDIA")
-	r, f := realRig(t)
+	r, f := realRigWith(t, []string{"-throttle", "1048576"})
 	recc := binary(t, "reccontroller", "github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cmd/reccontroller")
 	log, seam := r.firewallLog()
 	p := r.start([]string{seam, envReccontroller + "=" + recc, envMediaDir + "=" + media, envLabLAN + "=127.0.0.1", envMI5Timing + "=" + mi5TestTiming},

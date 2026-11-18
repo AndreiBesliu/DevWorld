@@ -238,6 +238,25 @@ func (r *rig) run(stdin string, extra []string, args ...string) *proc {
 	return p
 }
 
+// ended reports whether the process ended; its code is safe to read
+// only once it did.
+func (p *proc) ended() bool {
+	select {
+	case <-p.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// exitCode is the process's exit code once it ended, else -1.
+func (p *proc) exitCode() int {
+	if p.ended() {
+		return p.code
+	}
+	return -1
+}
+
 // wait waits for the process's end.
 func (p *proc) wait(d time.Duration) bool {
 	select {
