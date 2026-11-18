@@ -309,7 +309,7 @@ func (c *mi5Cmd) run(ctx context.Context) error {
 	if t, ok := testTiming(); ok {
 		timing = t
 	}
-	e.printf(msgMI5Started, cfg.BlockFor, time.Now().Add(timing.PreRun+timing.WarmUp).Format("15:04"))
+	e.printf(msgMI5Started, mi5.Span(cfg.BlockFor), time.Now().Add(timing.PreRun+timing.WarmUp).Format("15:04"))
 	opts := mi5.RunOptions{Host: &mi5Host{h: h}, Firewall: fw, StartMs: comp.startMs, Dests: comp.dests, Timing: timing, Events: c.events}
 	if os.Getenv(envFirewallLog) != "" {
 		// The tests' firewall blocks nothing, so its checks pass by the

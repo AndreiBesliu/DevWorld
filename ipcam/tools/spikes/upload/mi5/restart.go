@@ -83,13 +83,15 @@ type tally struct {
 	segmentStarts map[string][]int64
 	// gapsAfterKill counts the recording gaps that the kill caused.
 	gapsAfterKill int
+	// rotated is when each camera's last segment closed (a new one began).
+	rotated map[string]int64
 }
 
 func newTally(startMs int64, dests []DestConfig) *tally {
 	t := &tally{startMs: startMs, dests: map[string]DestConfig{}, placements: map[string]*placement{},
 		verifiedInBlock: map[string]int{}, failedInBlock: map[string]int{}, rateLimitedInBlock: map[string]int{},
 		unreachable: map[string]bool{}, calls: map[string]map[string]float64{}, verified: map[string]int{},
-		segmentStarts: map[string][]int64{}}
+		segmentStarts: map[string][]int64{}, rotated: map[string]int64{}}
 	for _, d := range dests {
 		t.dests[d.ID] = d
 	}
@@ -181,6 +183,9 @@ func (t *tally) observe(ev hubproc.Event) {
 			t.unreachable[f.Dest] = true
 		}
 	case "segment_closed":
+		if f.Profile == "sub" {
+			t.rotated[f.Cam] = at
+		}
 		if f.Profile == "sub" && f.StartMs >= t.startMs {
 			t.segmentStarts[f.Cam] = append(t.segmentStarts[f.Cam], f.StartMs)
 		}

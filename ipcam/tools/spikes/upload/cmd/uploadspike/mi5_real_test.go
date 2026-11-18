@@ -49,6 +49,9 @@ func TestMI5_LabRun_RealHub(t *testing.T) {
 	if first := strings.SplitN(p.stdout.String(), "\n", 2)[0]; first != msgMI5KeepOpen {
 		t.Errorf("the first line %q; want %q", first, msgMI5KeepOpen)
 	}
+	if started := strings.SplitN(msgMI5Started, "%s", 2)[0] + "75 s "; !strings.Contains(p.stdout.String(), started) {
+		t.Errorf("no %q… line:\n%s", started, p.stdout)
+	}
 	files, _ := filepath.Glob(filepath.Join(r.base, "results", "MI5", "lab-linux", "*.json"))
 	if len(files) != 1 {
 		t.Fatalf("envelopes %v", files)

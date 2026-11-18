@@ -355,10 +355,37 @@ type readOpenLine struct {
 	Error  string  `json:"error"`
 }
 
-// readOpen reads cam's open segment once (diag readopen --profile sub):
-// whether it read, how long it took, and why not (the diag's error, or
-// its exit).
+// settle is how long after a camera's segment rotation a read waits: the
+// camera has no open segment until MediaMTX opens the next .part with its
+// first part, and a series whose period is the segment's (the lab's 30-s
+// pre-run) would land on every rotation.
+const settle = 5 * time.Second
+
+// readOpen reads cam's open segment once (diag readopen --profile sub), at
+// least settle after its last rotation, and once more settle later when
+// it found no open segment (a rotation whose event had not reached the
+// run yet): whether it read, how long it took, and why not (the diag's
+// error, or its exit).
 func (r *run) readOpen(ctx context.Context, cam string) (bool, float64, string) {
+	var rotated int64
+	r.withTally(func(t *tally) { rotated = t.rotated[cam] })
+	if wait := time.UnixMilli(rotated).Add(settle).Sub(r.now()); rotated != 0 && wait > 0 {
+		if err := r.sleep(ctx, wait); err != nil {
+			return false, 0, "stopped"
+		}
+	}
+	ok, ms, why := r.readOpenOnce(ctx, cam)
+	if !ok && why == "no-open-segment" {
+		if err := r.sleep(ctx, settle); err != nil {
+			return false, 0, "stopped"
+		}
+		ok, ms, why = r.readOpenOnce(ctx, cam)
+	}
+	return ok, ms, why
+}
+
+// readOpenOnce is one diag readopen of cam's sub stream.
+func (r *run) readOpenOnce(ctx context.Context, cam string) (bool, float64, string) {
 	lines, err := r.host.Diag(ctx, []string{"readopen", "--config", r.host.RunJSON(), "--cam", cam, "--profile", "sub"})
 	for _, raw := range lines {
 		var l readOpenLine

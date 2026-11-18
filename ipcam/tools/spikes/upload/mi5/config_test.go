@@ -224,3 +224,15 @@ func TestMI5_LanProbeIsDefaultGateway(t *testing.T) {
 		t.Errorf("a silent gateway: %v", err)
 	}
 }
+
+// TestMI5_SpanForTheOwner: a block's length in the owner's lines is whole
+// hours, else whole minutes, else seconds (the tests' short blocks), never
+// Go's "2m0s" nor a "0 min" for a 40-s block.
+func TestMI5_SpanForTheOwner(t *testing.T) {
+	for d, want := range map[time.Duration]string{6 * time.Hour: "6 h", 15 * time.Minute: "15 min", 2 * time.Minute: "2 min",
+		40 * time.Second: "40 s", 75 * time.Second: "75 s", 90 * time.Minute: "90 min"} {
+		if got := Span(d); got != want {
+			t.Errorf("Span(%v) = %q; want %q", d, got, want)
+		}
+	}
+}

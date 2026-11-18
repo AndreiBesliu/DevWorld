@@ -35,6 +35,9 @@ type fakeRun struct {
 	killed    time.Time
 	unblocked time.Time
 	lines     []string // the owner's lines
+	// readAt, when set, answers each readopen at the clock's time: "" for
+	// a read, else its error.
+	readAt func(now time.Time) string
 }
 
 func newFakeRun(t *testing.T, start time.Time) *fakeRun {
@@ -99,6 +102,11 @@ func (f *fakeRun) Diag(_ context.Context, args []string) ([]json.RawMessage, err
 	f.step("diag-" + args[0] + "-" + strings.Join(args[len(args)-1:], ""))
 	switch args[0] {
 	case "readopen":
+		if f.readAt != nil {
+			if why := f.readAt(f.clock()); why != "" {
+				return []json.RawMessage{json.RawMessage(`{"schema":"ipcam.diag.readopen/1","ok":false,"error":"` + why + `"}`)}, nil
+			}
+		}
 		return []json.RawMessage{json.RawMessage(fmt.Sprintf(`{"schema":"ipcam.diag.readopen/1","ok":%v,"readMs":12}`, f.readsOK))}, nil
 	case "uploads":
 		var out []json.RawMessage
@@ -408,5 +416,64 @@ func TestMI5_SaysWhereTheRunIs(t *testing.T) {
 	}
 	if !strings.Contains(f.lines[0], "15 min") {
 		t.Errorf("the block's line %q names no length", f.lines[0])
+	}
+}
+
+// TestMI5_ReadOpenSettlesAfterRotation (MI5's open-segment reads): a
+// camera has no open segment for a moment after each rotation, until
+// MediaMTX opens the next .part; a series whose period is the segment's,
+// as the lab's encrypted pre-run (a read every 30 s, 30-s segments), lands
+// on every rotation and reads nothing open: the lab and a local run of its
+// timing read 0 of 20 there, each «no-open-segment». A read waits until 5 s
+// after the camera's last segment_closed, and a read that still finds no
+// open segment (its rotation's event not yet seen) tries once more 5 s
+// later; a camera with no open segment at all still fails.
+func TestMI5_ReadOpenSettlesAfterRotation(t *testing.T) {
+	const gap = time.Second
+	for _, tc := range []struct {
+		name    string
+		latency time.Duration // from a rotation to its segment_closed
+		never   bool          // no segment is ever open
+		wantOK  int
+	}{{"event-seen", 50 * time.Millisecond, false, 20}, {"event-late", 3 * time.Second, false, 20}, {"never-open", 50 * time.Millisecond, true, 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+			first := start.Add(30*time.Second - 500*time.Millisecond) // the first rotation, just before the first read
+			f := newFakeRun(t, start)
+			f.readAt = func(now time.Time) string {
+				if tc.never {
+					return "no-open-segment"
+				}
+				if since := now.Sub(first); since >= 0 && since%(30*time.Second) < gap {
+					return "no-open-segment"
+				}
+				return ""
+			}
+			sent := 0
+			f.script = func(_ string, at time.Time) []map[string]any {
+				var evs []map[string]any
+				for ; ; sent++ {
+					seen := first.Add(time.Duration(sent) * 30 * time.Second).Add(tc.latency)
+					if seen.After(at) {
+						break
+					}
+					evs = append(evs, map[string]any{"type": "segment_closed", "cam": "cam01", "profile": "sub", "atMs": seen.UnixMilli(),
+						"startMs": seen.Add(-30 * time.Second).UnixMilli()})
+				}
+				return evs
+			}
+			cfg := Mi5Config{Cameras: 4, SegmentSecs: 30, Drive: DriveTest, BlockFor: 15 * time.Minute, ReadOpenCalls: 20, Lab: true}
+			r := newRun(cfg, RunOptions{Host: f, Firewall: f, StartMs: start.UnixMilli(), Dests: Destinations(cfg), Timing: LabTiming(cfg.BlockFor),
+				Events: f.events, Clock: f.clock, Sleep: f.sleep})
+			go r.consume(f.events)
+			defer r.stopConsuming()
+			res, err := r.readOpenSeries(t.Context(), true, "cam01", ReadOpenCalls, 30*time.Second, 10*time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Calls != ReadOpenCalls || res.OK != tc.wantOK || tc.wantOK == 0 && res.Failures["no-open-segment"] != ReadOpenCalls {
+				t.Errorf("reads %+v; want %d calls, %d read", res, ReadOpenCalls, tc.wantOK)
+			}
+		})
 	}
 }

@@ -100,7 +100,7 @@ const (
 	msgBadFakes          = "valoare greșită pentru --fakes: linia pe care o tipărește fakeproviders"
 	msgMI5KeepOpen       = "Lăsați fereastra deschisă până la final."
 	msgMI5HowToKeepOpen  = "Proba MI5 durează aproximativ 8 ore: nu închideți fereastra și nu opriți calculatorul; PC-ul nu intră în repaus cât rulează proba, iar ecranul se poate stinge. Dacă fereastra se închide, proba se reia altă zi (zilele 1–5)."
-	msgMI5Started        = "Proba MI5 a pornit: blocarea de %v începe în jur de %s."
+	msgMI5Started        = "Proba MI5 a pornit: blocarea de %s începe în jur de %s."
 	msgNoCameras         = "Camerele simulate nu au pornit (reccontroller --local): porturile 7080–7083 și 8554 trebuie să fie libere."
 	msgMI5DeviceLogin    = "Conectați contul pentru %s: deschideți %s pe orice dispozitiv, scrieți codul %s și acceptați."
 	msgMI5LoginDone      = "%s: autentificare reușită."

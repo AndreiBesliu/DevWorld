@@ -252,12 +252,19 @@ func PreCheck(cfg Mi5Config, dests []DestConfig, free map[string]int64, spoolFre
 	return nil
 }
 
-// span is a block's length for the owner: "6 h", "15 min".
+// Span is a block's length for the owner: "6 h", "15 min".
+func Span(d time.Duration) string { return span(d) }
+
+// span is a block's length for the owner: "6 h", "15 min", or "40 s" for
+// a test's block that is not whole minutes.
 func span(d time.Duration) string {
-	if d%time.Hour == 0 {
+	switch {
+	case d%time.Hour == 0:
 		return fmt.Sprintf("%d h", d/time.Hour)
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%d min", d/time.Minute)
 	}
-	return fmt.Sprintf("%d min", d/time.Minute)
+	return fmt.Sprintf("%d s", d/time.Second)
 }
 
 // gb is bytes in GB, one decimal, Romanian style.
