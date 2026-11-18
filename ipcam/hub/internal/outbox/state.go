@@ -181,6 +181,17 @@ func (d *destination) failure(now time.Time, r float64, retryAfter time.Duration
 	return wait
 }
 
+// heldBack makes d wait retryAfter from now after a call that the driver's
+// own rate bucket held back (storage.IsLocalRateLimit): the provider said
+// nothing, so it is no failure in a row and leaves the backoff and the
+// state as they are (C2-R28 Q3). It returns that wait.
+func (d *destination) heldBack(now time.Time, retryAfter time.Duration) time.Duration {
+	if until := now.Add(retryAfter); until.After(d.waitUntil) {
+		d.waitUntil = until
+	}
+	return retryAfter
+}
+
 // answered ends the failures in a row: d confirmed a chunk, which proves that
 // it answers, so an UNREACHABLE d is OK again.
 func (d *destination) answered() {

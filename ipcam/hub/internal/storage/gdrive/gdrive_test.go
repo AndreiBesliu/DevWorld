@@ -454,7 +454,7 @@ func TestDrive_ResumeDetectsCompleteSession(t *testing.T) {
 // TestDrive_ZeroListInNormalOperation (Review Focus 3, STO-07): a probe, ten
 // uploads with their verification and a range read make no files.list call;
 // ten BeginUpload calls at one instant send two creates and refuse eight
-// with ErrRateLimited at once; the fake never sees more than two creates in
+// with the bucket's ErrRateLimited (Local, C2-R28 Q3) at once; the fake never sees more than two creates in
 // a second.
 func TestDrive_ZeroListInNormalOperation(t *testing.T) {
 	e := newEnv(t)
@@ -493,10 +493,10 @@ func TestDrive_ZeroListInNormalOperation(t *testing.T) {
 		switch {
 		case err == nil:
 			began++
-		case errors.As(err, &rl) && rl.RetryAfter > 0 && rl.RetryAfter <= time.Second:
+		case errors.As(err, &rl) && rl.RetryAfter > 0 && rl.RetryAfter <= time.Second && rl.Local:
 			limited++
 		default:
-			t.Errorf("BeginUpload %d: %v, want nil or ErrRateLimited with RetryAfter in (0, 1 s]", i, err)
+			t.Errorf("BeginUpload %d: %v (%#v), want nil or the bucket's ErrRateLimited (Local) with RetryAfter in (0, 1 s]", i, err, rl)
 		}
 	}
 	if sent := e.fake.Counts()["files.create.resumable"] - before; began != 2 || limited != 8 || sent != 2 {
@@ -785,8 +785,8 @@ func TestDrive_ErrorMapping(t *testing.T) {
 			case err == nil:
 				t.Fatal("no error")
 			case tc.wantLimit != nil:
-				if !errors.As(err, &rl) || rl.RetryAfter != *tc.wantLimit {
-					t.Errorf("error %v, want ErrRateLimited{RetryAfter: %s}", err, *tc.wantLimit)
+				if !errors.As(err, &rl) || rl.RetryAfter != *tc.wantLimit || rl.Local {
+					t.Errorf("error %v (%#v), want the provider's ErrRateLimited{RetryAfter: %s}, not Local", err, rl, *tc.wantLimit)
 				}
 			case tc.wantCap:
 				if !errors.As(err, &capped) || capped.ResetAfter != 24*time.Hour {

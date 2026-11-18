@@ -33,8 +33,14 @@ var (
 
 // ErrRateLimited means the provider asked to wait RetryAfter before the next
 // call. Drivers return it without sleeping (P26); the outbox waits. Reason
-// finds it as a value and as a pointer.
-type ErrRateLimited struct{ RetryAfter time.Duration }
+// finds it as a value and as a pointer. Local is set when the driver's own
+// rate bucket held the call back before any request (Drive's create bucket,
+// STO-07): the provider said nothing, so the call is no failure of the
+// destination (C2-R28 Q3).
+type ErrRateLimited struct {
+	RetryAfter time.Duration
+	Local      bool
+}
 
 func (e ErrRateLimited) Error() string {
 	return fmt.Sprintf("storage: rate limited, retry after %s", e.RetryAfter)
@@ -47,6 +53,21 @@ type ErrDailyCap struct{ ResetAfter time.Duration }
 
 func (e ErrDailyCap) Error() string {
 	return fmt.Sprintf("storage: daily upload cap reached, resets after %s", e.ResetAfter)
+}
+
+// IsLocalRateLimit reports whether err wraps an ErrRateLimited, as a value
+// or a non-nil pointer, that the driver's own rate bucket returned (Local):
+// no request reached the provider.
+func IsLocalRateLimit(err error) bool {
+	var v ErrRateLimited
+	var p *ErrRateLimited
+	switch {
+	case errors.As(err, &v):
+		return v.Local
+	case errors.As(err, &p) && p != nil:
+		return p.Local
+	}
+	return false
 }
 
 // IsTyped reports whether err wraps one of this package's typed errors: a

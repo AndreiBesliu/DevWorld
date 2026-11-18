@@ -104,6 +104,92 @@ func TestOutbox_RateLimitIsPerDestination(t *testing.T) {
 	}
 }
 
+// TestOutbox_LocalRateLimitWaitsOnlyRetryAfter (C2-R28 Q3, C2-R15 (d)): a
+// call that the driver's own bucket held back (ErrRateLimited, Local) is
+// tried again after its RetryAfter, not after Backoff, and adds nothing to
+// the destination's failures in a row: a failure of the provider after six
+// such denials waits Backoff(1), as the first failure in a row does.
+func TestOutbox_LocalRateLimitWaitsOnlyRetryAfter(t *testing.T) {
+	const denials, retryAfter = 6, 300 * time.Millisecond
+	h := newHarness(t)
+	f := newFakeDest(storage.KindGoogleDrive, h.clk.Now)
+	var begins atomic.Int32
+	f.setFault(func(_ context.Context, c fakeCall) error {
+		if c.Method != "BeginUpload" {
+			return nil
+		}
+		switch n := begins.Add(1); {
+		case n <= denials:
+			return fmt.Errorf("gdrive: files.create.resumable: %w", storage.ErrRateLimited{RetryAfter: retryAfter, Local: true})
+		case n == denials+1:
+			return fmt.Errorf("fake: 503: %w", storage.ErrTransient)
+		}
+		return nil
+	})
+	p := h.enqueue(h.segment("a", 0, randomBytes(100, 1)), "dst-a", catalog.ClassContinuous)
+	q := h.newQueue(map[string]storage.Destination{"dst-a": f}, func(o *Options) { o.Rand = func() float64 { return 0.5 } })
+	h.run(q, 100*time.Millisecond, 10*time.Minute, h.verified(p))
+
+	want := slices.Repeat([]time.Duration{retryAfter}, denials)
+	want = append(want, Backoff(1, 0.5))
+	checkWaits(t, f.callsOf("BeginUpload"), h.obs.of("Failed"), want,
+		"each denial waits its RetryAfter, and the transient failure after them is the first in a row")
+	for i, e := range h.obs.of("Failed")[:denials] {
+		if e.Reason != "rate_limited" {
+			t.Errorf("Failed %d: %+v, want rate_limited", i, e)
+		}
+	}
+	if states := h.destStates("dst-a"); len(states) != 0 {
+		t.Errorf("DestState %v, want none: the destination never failed enough to change state", states)
+	}
+}
+
+// TestOutbox_RemoteRateLimitStillCounts (C2-R28 Q3): the provider's rate
+// limit (ErrRateLimited without Local) keeps counting as a failure in a row:
+// each waits max(Backoff(n), RetryAfter).
+func TestOutbox_RemoteRateLimitStillCounts(t *testing.T) {
+	const limits, retryAfter = 3, 300 * time.Millisecond
+	h := newHarness(t)
+	f := newFakeDest(storage.KindGoogleDrive, h.clk.Now)
+	var begins atomic.Int32
+	f.setFault(func(_ context.Context, c fakeCall) error {
+		if c.Method == "BeginUpload" && begins.Add(1) <= limits {
+			return fmt.Errorf("gdrive: 429: %w", storage.ErrRateLimited{RetryAfter: retryAfter})
+		}
+		return nil
+	})
+	p := h.enqueue(h.segment("a", 0, randomBytes(100, 1)), "dst-a", catalog.ClassContinuous)
+	q := h.newQueue(map[string]storage.Destination{"dst-a": f}, func(o *Options) { o.Rand = func() float64 { return 0.5 } })
+	h.run(q, 100*time.Millisecond, 10*time.Minute, h.verified(p))
+
+	checkWaits(t, f.callsOf("BeginUpload"), h.obs.of("Failed"), []time.Duration{Backoff(1, 0.5), Backoff(2, 0.5), Backoff(3, 0.5)},
+		"the provider's rate limits are failures in a row")
+}
+
+// checkWaits checks that each failure in fails made its placement due again
+// want[i] after it, exactly, and that the calls after them came that much
+// later, within the queue's next poll.
+func checkWaits(t *testing.T, calls []fakeCall, fails []obsEvent, want []time.Duration, why string) {
+	t.Helper()
+	if len(fails) != len(want) || len(calls) != len(want)+1 {
+		t.Fatalf("%d failures and %d calls, want %d and %d", len(fails), len(calls), len(want), len(want)+1)
+	}
+	var waits, gaps []time.Duration
+	for i, e := range fails {
+		waits = append(waits, time.UnixMilli(e.P.NextAttemptAtMs).Sub(e.At))
+		gaps = append(gaps, calls[i+1].At.Sub(calls[i].At))
+	}
+	if !slices.Equal(waits, want) {
+		t.Errorf("the failures made the placement wait %v, want %v: %s", waits, want, why)
+	}
+	for i, gap := range gaps {
+		if gap < want[i] || gap > want[i]+pollEvery {
+			t.Errorf("calls %v apart, want each within a poll (%s) after %v: %s", gaps, pollEvery, want, why)
+			break
+		}
+	}
+}
+
 // TestOutbox_DailyCapPauses24h (§9.9): Drive's daily cap pauses the
 // destination for its ResetAfter, then one probe upload goes first, and its
 // success makes the destination OK again.

@@ -406,8 +406,10 @@ func (u *upload) spoolFailed(ctx context.Context, err *localErr) {
 
 // destFailed takes an error of the destination (P26). An expired sign-in, a
 // full quota and the daily cap pause the destination, and the placement
-// waits as pending. A refusal fails the placement for good. Any other error
-// fails it until the destination's wait ends: max(Backoff, Retry-After).
+// waits as pending. A refusal fails the placement for good. A call that the
+// driver's own rate bucket held back fails it for that bucket's RetryAfter
+// alone, and is no failure in a row (C2-R28 Q3). Any other error fails it
+// until the destination's wait ends: max(Backoff, Retry-After).
 func (u *upload) destFailed(ctx context.Context, err error) {
 	now := u.q.opts.Clock.Now()
 	p := u.p
@@ -428,8 +430,13 @@ func (u *upload) destFailed(ctx context.Context, err error) {
 		p.Attempts++
 	default:
 		info := storage.Reason(err)
-		limited := info.Code == storage.ReasonRateLimited
-		wait := u.d.failure(now, u.q.opts.Rand(), info.RetryAfter, !limited)
+		var wait time.Duration
+		if storage.IsLocalRateLimit(err) {
+			wait = u.d.heldBack(now, info.RetryAfter)
+		} else {
+			limited := info.Code == storage.ReasonRateLimited
+			wait = u.d.failure(now, u.q.opts.Rand(), info.RetryAfter, !limited)
+		}
 		p.State, p.NextAttemptAtMs = catalog.PlacementFailed, now.Add(wait).UnixMilli()
 		p.Attempts++
 	}

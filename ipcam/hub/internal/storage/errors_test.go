@@ -76,6 +76,33 @@ func TestErrors_ProxyRequiredIs(t *testing.T) {
 	}
 }
 
+// TestErrors_LocalRateLimit (C2-R28 Q3): only an ErrRateLimited that a
+// driver's own bucket returned (Local), as a value or a pointer, wrapped or
+// not, is a local rate limit; the provider's rate limit and daily cap, and
+// a nil pointer, are not.
+func TestErrors_LocalRateLimit(t *testing.T) {
+	local := []error{
+		storage.ErrRateLimited{RetryAfter: time.Second, Local: true},
+		&storage.ErrRateLimited{RetryAfter: time.Second, Local: true},
+	}
+	for _, err := range local {
+		for _, e := range []error{err, fmt.Errorf("gdrive: files.create: %w", err)} {
+			if !storage.IsLocalRateLimit(e) {
+				t.Errorf("IsLocalRateLimit(%q) = false, want true", e)
+			}
+		}
+	}
+	for _, err := range []error{
+		nil, storage.ErrRateLimited{RetryAfter: time.Second}, &storage.ErrRateLimited{},
+		fmt.Errorf("gdrive: 429: %w", storage.ErrRateLimited{RetryAfter: 7 * time.Second}),
+		storage.ErrDailyCap{ResetAfter: time.Hour}, (*storage.ErrRateLimited)(nil), storage.ErrTransient,
+	} {
+		if storage.IsLocalRateLimit(err) {
+			t.Errorf("IsLocalRateLimit(%#v) = true, want false", err)
+		}
+	}
+}
+
 // TestErrors_IsTypedKnowsEveryTypedError: IsTyped finds each typed error of
 // package storage, bare and wrapped, the struct errors as values and as
 // non-nil pointers, and no other error. The table must name every Err

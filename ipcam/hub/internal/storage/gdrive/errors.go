@@ -96,9 +96,9 @@ func errorReason(body io.Reader) string {
 }
 
 // rateLimited is the error of a create that the driver's own bucket holds
-// back for wait (STO-07).
+// back for wait (STO-07): Local, since no request reached Drive (C2-R28 Q3).
 func rateLimited(method string, wait time.Duration) error {
-	return fmt.Errorf("gdrive: %s: %w", method, storage.ErrRateLimited{RetryAfter: wait})
+	return fmt.Errorf("gdrive: %s: %w", method, storage.ErrRateLimited{RetryAfter: wait, Local: true})
 }
 
 // sessionGone is the error of a call on a session that is not this
