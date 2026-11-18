@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -121,7 +122,46 @@ func newRigWith(t *testing.T, hub, log string) *rig {
 	}
 	r.env = append(os.Environ(), envBase+"="+r.base, envHubBin+"="+hub, envPort+"="+fmt.Sprint(r.port), envNoBrowser+"=1",
 		envFast+"=1", envRunAs+"=-", envHost+"="+host)
+	// Registered after the rig's folders and before any command's kill,
+	// so it runs between them (cleanups run last first).
+	t.Cleanup(r.waitHubsGone)
 	return r
+}
+
+// hubsGoneWait bounds how long a test's end waits for its hubs.
+const hubsGoneWait = 30 * time.Second
+
+// waitHubsGone waits, at a test's end and for at most hubsGoneWait, until
+// no hub that the rig's commands started runs. A command that the test's
+// cleanup killed leaves its hub to end through its closed stdin a moment
+// later; on Windows a running program's .exe and open files cannot be
+// removed, so without the wait the test's folders failed testing's 2-s
+// removal (TestStatus_IsAClient on the windows job). A hub still running
+// after the bound is a leak, which that removal then reports.
+func (r *rig) waitHubsGone() {
+	deadline := time.Now().Add(hubsGoneWait)
+	for len(r.runningHubs()) > 0 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// runningHubs are the PIDs of the rig's hubs that run now: the stand-ins
+// that its log records (on Windows, which reuses PIDs soon, only a
+// process that started before its record, as its creation time is wall
+// time there), and the real hub that hub.pid names, with its start.
+func (r *rig) runningHubs() []int {
+	var live []int
+	for _, rec := range r.records(spiketest.RecordStart) {
+		start, err := runstate.ProcStartMs(rec.PID)
+		if err != nil || runtime.GOOS == "windows" && start > rec.AtMs+100 || slices.Contains(live, rec.PID) {
+			continue
+		}
+		live = append(live, rec.PID)
+	}
+	if pid, start := r.hubPIDStart(); pid != 0 && runstate.Alive(pid, start) && !slices.Contains(live, pid) {
+		live = append(live, pid)
+	}
+	return live
 }
 
 // proc is an uploadspike process of a test.
@@ -284,15 +324,22 @@ func (r *rig) liveHubs() []int {
 
 // hubPID is hub.pid's PID, 0 without one.
 func (r *rig) hubPID() int {
+	pid, _ := r.hubPIDStart()
+	return pid
+}
+
+// hubPIDStart is hub.pid's PID and its process's start, 0 without one.
+func (r *rig) hubPIDStart() (int, int64) {
 	b, err := os.ReadFile(filepath.Join(r.base, "state", runstate.HubPID)) //nolint:gosec // the test's own file
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	var rec struct {
-		PID int `json:"pid"`
+		PID         int   `json:"pid"`
+		ProcStartMs int64 `json:"procStartMs"`
 	}
 	_ = json.Unmarshal(b, &rec)
-	return rec.PID
+	return rec.PID, rec.ProcStartMs
 }
 
 // get answers a GET of the rig's holder.

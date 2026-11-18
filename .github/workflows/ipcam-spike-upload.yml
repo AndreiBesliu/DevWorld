@@ -224,6 +224,8 @@ jobs:
           set -o pipefail
           tools/scripts/check-licenses.sh ${TREES} 2>&1 | tee "${RUNNER_TEMP}/licenses.log"
       - name: Show failures as annotations
+        # A test's indented file:line lines include the testing package's own, such as a
+        # temporary folder's failed removal, which names no _test.go file.
         if: failure()
         env:
           STEPS: ${{ toJSON(steps) }}
@@ -232,7 +234,7 @@ jobs:
             log="${RUNNER_TEMP}/${id}.log"
             [[ -f "${log}" ]] || continue
             if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
-              grep -E -- '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+              grep -E -- '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE|# |\S+\.go:[0-9]+:|\s+\S+\.go:[0-9]+:)' "${log}" |
                 tools/scripts/annotate.sh "${id}" 60
             else
               # go-licenses warns about every package with assembly; those lines hide its verdict.
@@ -378,6 +380,8 @@ jobs:
             exit 1
           fi
       - name: Show failures as annotations
+        # A test's indented file:line lines include the testing package's own, such as a
+        # temporary folder's failed removal, which names no _test.go file.
         if: failure()
         env:
           STEPS: ${{ toJSON(steps) }}
@@ -386,7 +390,7 @@ jobs:
             log="${RUNNER_TEMP}/${id}.log"
             [[ -f "${log}" ]] || continue
             if grep -qE -- '^(--- FAIL|FAIL)' "${log}"; then
-              grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+_test\.go:[0-9]+:)' "${log}" |
+              grep -E -- '^(--- FAIL|FAIL|panic:|# |\S+\.go:[0-9]+:|\s+\S+\.go:[0-9]+:)' "${log}" |
                 tools/scripts/annotate.sh "${id}" 60
             else
               tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
