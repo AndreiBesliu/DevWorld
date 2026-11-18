@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -17,21 +16,6 @@ const (
 // cutSignals are the ends of an mi5 that TestMI5_HolderEndsAnyWay tries
 // on Windows: TerminateProcess.
 func cutSignals() []os.Signal { return []os.Signal{os.Kill} }
-
-// processes are the running processes' PIDs and parents.
-func processes() map[uint32]uint32 {
-	out := map[uint32]uint32{}
-	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
-	if err != nil {
-		return out
-	}
-	defer func() { _ = windows.CloseHandle(snapshot) }()
-	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
-	for err = windows.Process32First(snapshot, &entry); err == nil; err = windows.Process32Next(snapshot, &entry) {
-		out[entry.ProcessID] = entry.ParentProcessID
-	}
-	return out
-}
 
 // liveExes are the PIDs of the running processes whose image is the file
 // at path (os.SameFile: a runner's temporary folder may be named in its

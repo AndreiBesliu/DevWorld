@@ -12,3 +12,7 @@ import (
 func ownGroupForTest(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
+
+// childrenOf finds nothing here: Linux removes a folder that a process
+// still uses as its current one (see the Windows version).
+func childrenOf(map[int]int64) []int { return nil }

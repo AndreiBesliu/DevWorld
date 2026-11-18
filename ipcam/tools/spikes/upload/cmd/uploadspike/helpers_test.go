@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -92,6 +93,9 @@ type rig struct {
 	log       string // the stand-in's records
 	port      int
 	env       []string
+	// started are the PIDs of the rig's commands and their starts.
+	mu      sync.Mutex
+	started map[int]int64
 }
 
 // freePort is a TCP port that nothing listens on now.
@@ -132,15 +136,23 @@ func newRigWith(t *testing.T, hub, log string) *rig {
 const hubsGoneWait = 30 * time.Second
 
 // waitHubsGone waits, at a test's end and for at most hubsGoneWait, until
-// no hub that the rig's commands started runs. A command that the test's
-// cleanup killed leaves its hub to end through its closed stdin a moment
-// later; on Windows a running program's .exe and open files cannot be
-// removed, so without the wait the test's folders failed testing's 2-s
-// removal (TestStatus_IsAClient on the windows job). A hub still running
-// after the bound is a leak, which that removal then reports.
+// no hub that the rig's commands started runs, nor any other process that
+// they started. A command that the test's cleanup killed leaves its hub
+// to end through its closed stdin a moment later, and may leave a
+// PowerShell of its own (the firewall's check of a LAN login) running in
+// its current folder; on Windows a running program's .exe, its open files
+// and its current folder cannot be removed, so without the wait the
+// test's folders failed testing's 2-s removal (TestStatus_IsAClient on the
+// windows job: «TempDir RemoveAll cleanup: … The process cannot access the
+// file because it is being used by another process», on the commands'
+// current folder). A process still running after the bound is a leak,
+// which that removal then reports.
 func (r *rig) waitHubsGone() {
 	deadline := time.Now().Add(hubsGoneWait)
-	for len(r.runningHubs()) > 0 && time.Now().Before(deadline) {
+	r.mu.Lock()
+	parents := maps.Clone(r.started)
+	r.mu.Unlock()
+	for len(r.runningHubs())+len(childrenOf(parents)) > 0 && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -189,6 +201,14 @@ func (r *rig) start(extra []string, args ...string) *proc {
 	ownGroupForTest(cmd)
 	if err := cmd.Start(); err != nil {
 		r.t.Fatal(err)
+	}
+	if start, err := runstate.ProcStartMs(cmd.Process.Pid); err == nil {
+		r.mu.Lock()
+		if r.started == nil {
+			r.started = map[int]int64{}
+		}
+		r.started[cmd.Process.Pid] = start
+		r.mu.Unlock()
 	}
 	go func() {
 		_ = cmd.Wait()
