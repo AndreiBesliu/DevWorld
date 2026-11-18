@@ -69,7 +69,7 @@ Cazuri pe care le puteți rezolva singur:
 - **«Conexiunea a fost refuzată (refused).»<!--app-->** spikehub nu rulează sau adresa are alt port. Porniți spikehub și verificați că adresa se termină cu `:7080`.
 - **«Hub-ul a refuzat cererea (rejected): …»<!--app-->** spikehub e mai vechi decât aplicația: reluați pasul 1, ca să aveți spikehub v0.1.1.
 - **«întrerupt: conexiunea cu hub-ul s-a pierdut.»<!--app-->** Verificați că fereastra spikehub e deschisă și că PC-ul e pornit, apoi apăsați din nou «Rulează tot pentru acest dispozitiv»<!--app-->.
-- **«Scoateți telefonul din încărcător înainte de S3.»<!--app-->** sau **«întrerupt: telefonul e la încărcător.»<!--app-->** S3 se măsoară doar pe baterie. Scoateți încărcătorul și apăsați din nou «Rulează tot pentru acest dispozitiv»<!--app-->.
+- **«Scoateți telefonul din încărcător înainte de S3.»<!--app-->** sau un rând cu **«telefonul era la încărcător»<!--app-->**. S3 se măsoară doar pe baterie. Scoateți încărcătorul și apăsați din nou «Rulează tot pentru acest dispozitiv»<!--app-->.
 - **«Rezultate netrimise: …»<!--app-->** Rezultatele sunt păstrate în aplicație. Cu spikehub pornit, apăsați «Trimite acum»<!--app-->.
 - **«Atenție: folderul de rezultate a atins limita»<!--hub-->** (în fereastra spikehub). spikehub nu mai salvează rezultate noi. Scrieți-ne în chat.
 
