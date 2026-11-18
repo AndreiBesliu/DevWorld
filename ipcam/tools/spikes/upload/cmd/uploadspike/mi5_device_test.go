@@ -753,9 +753,9 @@ func TestMI5_HubCrashDuringBlock_RestartedAndRecorded(t *testing.T) {
 	r, f := realRigWith(t, []string{"-throttle", "262144"})
 	recc := binary(t, "reccontroller", "github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cmd/reccontroller")
 	log, seam := r.firewallLog()
-	p := r.start([]string{seam, envReccontroller + "=" + recc, envMediaDir + "=" + media, envLabLAN + "=127.0.0.1", envMI5Timing + "=" + mi5ShortTiming},
-		"mi5", "--lab", "--block", "40s", "--segment-secs", "30", "--part-size", "512KiB", "--cameras", "2", "--fakes", f.base)
-	d := &mi6Device{r: r, fwLog: log}
+	d := &mi6Device{r: r, fwLog: log, events: filepath.Join(t.TempDir(), "events.log")}
+	p := r.start([]string{seam, envEventLog + "=" + d.events, envReccontroller + "=" + recc, envMediaDir + "=" + media, envLabLAN + "=127.0.0.1",
+		envMI5Timing + "=" + mi5ShortTiming}, "mi5", "--lab", "--block", "40s", "--segment-secs", "30", "--part-size", "512KiB", "--cameras", "2", "--fakes", f.base)
 	d.waitBlock(t, p, 0)
 	crashed := r.hubPID()
 	if err := killPID(crashed); err != nil {
@@ -768,7 +768,8 @@ func TestMI5_HubCrashDuringBlock_RestartedAndRecorded(t *testing.T) {
 		t.Fatalf("mi5 did not end\nstdout:\n%s\nstderr:\n%s", p.stdout, tail(p.stderr.String(), 40))
 	}
 	if p.code != 0 {
-		t.Fatalf("mi5: exit %d (%s)\nstdout:\n%s\nstderr:\n%s", p.code, p.errorLine(), p.stdout, tail(p.stderr.String(), 40))
+		t.Fatalf("mi5: exit %d (%s; %s)\nstdout:\n%s\nstderr:\n%s", p.code, p.errorLine(), uploadSummary(d.loggedEvents(t, 0), "dst-1"), p.stdout,
+			tail(p.stderr.String(), 40))
 	}
 	files, _ := filepath.Glob(filepath.Join(r.base, "results", "MI5", "lab-linux", "*.json"))
 	if len(files) != 1 {
