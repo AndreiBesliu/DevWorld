@@ -1,0 +1,14 @@
+{
+  "identifier": "spike-oauth",
+  "description": "SPIKE-ONLY (plan 2026-10-18-phase0c2-upload-spike, Task 9a): MI6's sign-in from the main window. tauri-plugin-oauth's loopback listener, and the default browser for the two authorization hosts only: without a scope, opener refuses every URL, and opener:default would open any http(s), mailto or tel URL.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "oauth:allow-start",
+    "oauth:allow-cancel",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://accounts.google.com/*" }, { "url": "https://login.microsoftonline.com/*" }]
+    }
+  ]
+}

@@ -14,6 +14,12 @@ tauri-build = { version = "2.7.1", features = [] }
 tauri = { version = "2.12.1", features = [] }
 # One instance at a time (R52, main.rs).
 tauri-plugin-single-instance = "2.5.2"
+# SPIKE-ONLY (plan 2026-10-18-phase0c2-upload-spike, Task 9a): MI6's sign-in
+# through the system browser, opener scoped to the two authorization hosts
+# (capabilities/spike-oauth.json), and the loopback listener that takes the
+# provider's redirect. TODO (Faza 1): the product's login decides its own.
+tauri-plugin-opener = "2.7.2"
+tauri-plugin-oauth = "2.1.0"
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"], optional = true }
 

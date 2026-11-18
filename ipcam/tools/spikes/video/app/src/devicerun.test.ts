@@ -232,6 +232,17 @@ describe('the automatic run', () => {
     expect(again.events.flatMap((event) => (event.kind === 'scenario' ? [event.total] : []))).toEqual(Array<number>(8).fill(8));
   });
 
+  it('skip_OAUTH_isNeitherRunNorSkipped', async () => {
+    // OAUTH (the upload spike's MI6 login) is started from the list too, never by the device's run.
+    const desktop = harness('ipcam-desktop', { complete: ['OAUTH', 'S10'] });
+
+    const outcome = await finish(runQueue(desktop.env));
+
+    expect(ran(desktop)).toEqual(['S1', 'S2', 'S3-16', 'S4', 'S7', 'S9']);
+    expect(outcome).toEqual({ kind: 'done', ran: ['S1', 'S2', 'S3-16', 'S4', 'S7', 'S9'], skipped: ['S10'], failed: [] });
+    expect(desktop.events.flatMap((event) => (event.kind === 'scenario' ? [event.total] : []))).toEqual(Array<number>(6).fill(6));
+  });
+
   it('skip_nothingLeft_startsNothing', async () => {
     const h = harness('edge', { complete: ['S10', 'S1', 'S2', 'S3-9', 'S9'], preflight: true });
 

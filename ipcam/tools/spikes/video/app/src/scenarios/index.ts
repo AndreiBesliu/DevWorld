@@ -2,6 +2,7 @@
 import type { ScenarioId, ScenarioResult } from '../results';
 import { AGE } from './age';
 import type { ScenarioEnv } from './context';
+import { OAUTH } from './oauth';
 import { runDefinition, type ScenarioDefinition } from './runner';
 import { S1 } from './s1';
 import { S10 } from './s10';
@@ -28,6 +29,7 @@ export const SCENARIOS: Record<ScenarioId, ScenarioDefinition> = {
   S9,
   S10,
   AGE,
+  OAUTH,
 };
 
 /** Runs scenario `id`; see runDefinition. */

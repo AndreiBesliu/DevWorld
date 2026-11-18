@@ -40,13 +40,18 @@ fn main() {
     // window, then exits. Every instance would share the first one's WebView2
     // processes, so a second window would measure none of its own; and the
     // installer's «Finish» page starts the app, so a second launch is likely.
-    let builder =
-        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _, _| {
+    // SPIKE-ONLY (plan 2026-10-18-phase0c2-upload-spike, Task 9a): MI6's
+    // sign-in opens the default browser (opener, scoped in
+    // capabilities/spike-oauth.json) and takes the redirect on a loopback port.
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.set_focus();
             }
-        }));
+        }))
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_oauth::init());
     #[cfg(feature = "spike-metrics")]
     let builder = spike_metrics::install(builder);
     builder
