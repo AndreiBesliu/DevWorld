@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -97,4 +99,95 @@ func TestMI5_LabRun_RealHub(t *testing.T) {
 func tail(s string, n int) string {
 	lines := strings.Split(s, "\n")
 	return strings.Join(lines[max(0, len(lines)-n):], "\n")
+}
+
+// liveExes are the PIDs of the processes that run the program at path
+// (Linux's /proc).
+func liveExes(path string) []int {
+	var out []int
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		if exe, err := os.Readlink(filepath.Join("/proc", e.Name(), "exe")); err == nil && exe == path {
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+// TestMI5_HolderEndsAnyWay_OneHubUnderResume (Holding the hub, Linux): an
+// mi5 that ends during its block by SIGHUP (its window closed), or by
+// SIGKILL, leaves within a minute exactly one hub, resume's, with MI6's
+// destinations only: no block rule left (the firewall seam's log shows
+// the removal after the cut), no orphaned hub, and the MI5 run invalid
+// («proba MI5 s-a oprit înainte de final»). mi5's first line asks to keep
+// the window open.
+func TestMI5_HolderEndsAnyWay_OneHubUnderResume(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("signals of Linux; the windows job's TerminateProcess variant is not written")
+	}
+	media := spiketest.Required(t, "MEDIAGEN_DIR", "SPIKE_REQUIRE_MEDIA")
+	for _, sig := range []syscall.Signal{syscall.SIGHUP, syscall.SIGKILL} {
+		t.Run(sig.String(), func(t *testing.T) {
+			r, f := realRig(t)
+			r.openMI6("android")
+			recc := binary(t, "reccontroller", "github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cmd/reccontroller")
+			log, seam := r.firewallLog()
+			timing := `{"preRun":5000,"preRunEvery":1000,"warmUp":2000,"checkEvery":20000,"readOpenEvery":3000,"floor":2000,"quiet":8000,"drainMax":300000}`
+			extra := []string{seam, envReccontroller + "=" + recc, envMediaDir + "=" + media, envLabLAN + "=127.0.0.1", envMI5Timing + "=" + timing}
+			m := r.start(extra, "mi5", "--lab", "--block", "10m", "--segment-secs", "30", "--part-size", "512KiB", "--cameras", "2", "--fakes", f.base)
+			until(t, 3*time.Minute, "the block", func() bool {
+				b, _ := os.ReadFile(log) //nolint:gosec // the test's own log
+				return strings.Contains(string(b), "nft -f -")
+			})
+			if first := strings.SplitN(m.stdout.String(), "\n", 2)[0]; first != msgMI5KeepOpen {
+				t.Errorf("mi5's first line %q", first)
+			}
+			cutAt := len(mustRead(t, log))
+			if err := m.cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			if !m.wait(time.Minute) {
+				t.Fatal("mi5 did not end")
+			}
+			if left := liveExes(recc); len(left) != 0 {
+				t.Errorf("reccontroller outlived mi5: %v", left)
+			}
+			res := r.start(extra, "resume")
+			until(t, 2*time.Minute, "resume's one hub, the run ended", func() bool {
+				_, open := r.state().Open["MI5"]
+				hubs := liveExes(r.hub)
+				return !open && len(hubs) == 1 && r.hubPID() == hubs[0]
+			})
+			if fw := mustRead(t, log)[cutAt:]; !strings.Contains(fw, "nft delete table inet ipcam_spike") {
+				t.Errorf("no removal of the block after the cut:\n%s", fw)
+			}
+			b, err := os.ReadFile(filepath.Join(r.base, "hub", "spike", "run.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(b), `"g-android"`) || strings.Contains(string(b), `"dst-1"`) || strings.Contains(string(b), "rtsp://") {
+				t.Errorf("resume's run.json holds MI5's parts:\n%s", b)
+			}
+			files, _ := filepath.Glob(filepath.Join(r.base, "results", "MI5", "lab-linux", "*.json"))
+			if len(files) != 1 || !strings.Contains(mustRead(t, files[0]), invalidStopped) {
+				t.Errorf("the cut run's envelope %v", files)
+			}
+			_ = res.cmd.Process.Signal(syscall.SIGTERM)
+			res.wait(time.Minute)
+		})
+	}
+}
+
+// mustRead is a file's text.
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path) //nolint:gosec // the test's own file
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

@@ -527,7 +527,7 @@ func (c *mi5Cmd) startCameras(ctx context.Context) (linkclient.Session, error) {
 	media := firstSet(os.Getenv(envMediaDir), filepath.Join(filepath.Dir(bin), "media"))
 	cmd := exec.Command(bin, "-local", "-media", media) //nolint:gosec // the bundle's own reccontroller
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-	if err := cmd.Start(); err != nil {
+	if err := startWithUs(cmd); err != nil {
 		return linkclient.Session{}, fmt.Errorf("reccontroller: %w", err)
 	}
 	c.recc = cmd
@@ -913,7 +913,7 @@ func endDeadMI5(ctx context.Context, e *env) {
 	var o mi5Open
 	_ = json.Unmarshal(raw, &o)
 	reason := invalidStopped
-	if boot, err := runstate.BootID(); err == nil && o.BootID != "" && boot != o.BootID {
+	if boot, err := runstate.BootID(); err == nil && o.BootID != "" && !runstate.SameBoot(boot, o.BootID) {
 		reason = invalidReboot
 	}
 	if o.RunID != "" {
