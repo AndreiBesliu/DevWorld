@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -427,5 +428,47 @@ func TestMI5_SecondMI5WhileOneRunsGetsMI5Running(t *testing.T) {
 	}
 	if open, live := mi5State(r.state()); !open || !live {
 		t.Errorf("the live run: open %v, live %v; want both", open, live)
+	}
+}
+
+// nopCloser is a bound port that the check lets go.
+type nopCloser struct{}
+
+func (nopCloser) Close() error { return nil }
+
+// TestCheckCameraPorts_OnlyABusyPortIsAnotherProgram (C2-R31 (2)): only a
+// port that another socket holds (EADDRINUSE, WSAEADDRINUSE on Windows)
+// tells the owner to close the program that holds it. Any other bind
+// error, such as WSAEACCES for a port in one of Windows' excluded ranges,
+// says that the port cannot be used on this computer and to write to us,
+// with no program to close. Both name the port, and the bind's error stays
+// their cause.
+func TestCheckCameraPorts_OnlyABusyPortIsAnotherProgram(t *testing.T) {
+	const port = 7083
+	for _, tc := range []struct {
+		name  string
+		cause error
+		want  string
+	}{
+		{"in-use", errAddrInUse, msgCameraPortBusy},
+		{"wsaeacces", syscall.Errno(10013), msgCameraPortDenied}, // WSAEACCES: an excluded port range
+		{"eacces", syscall.EACCES, msgCameraPortDenied},
+		{"other", errors.New("an unexpected bind failure"), msgCameraPortDenied},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkPorts(func(network, addr string) (io.Closer, error) {
+				if addr != net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) {
+					return nopCloser{}, nil
+				}
+				return nil, &net.OpError{Op: "listen", Net: network, Err: os.NewSyscallError("bind", tc.cause)}
+			})
+			want := fmt.Sprintf(tc.want, port)
+			if err == nil || err.Error() != want || !isOwnerLine(err) || !errors.Is(err, tc.cause) {
+				t.Errorf("bind error %v: %v; want the owner's line %q, the bind's error its cause", tc.cause, err, want)
+			}
+			if tc.want == msgCameraPortDenied && err != nil && strings.Contains(err.Error(), "Închideți") {
+				t.Errorf("the line %q has the owner close a program", err)
+			}
+		})
 	}
 }

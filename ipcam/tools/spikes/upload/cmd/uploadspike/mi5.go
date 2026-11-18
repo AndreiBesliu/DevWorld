@@ -596,24 +596,35 @@ var cameraPorts = []struct {
 	port    int
 }{{"tcp4", 7080}, {"tcp4", 7081}, {"udp4", 7082}, {"tcp4", 7083}, {"tcp4", 8554}}
 
-// checkCameraPorts refuses the run while another program holds one of
-// the cameras' ports (C2-R30 (2)): reccontroller could not start them, and
-// the owner would have spent a login and waited through the pre-checks
-// for nothing. It binds each port as reccontroller does and lets it go.
-func checkCameraPorts() error {
+// checkCameraPorts refuses the run while one of the cameras' ports cannot
+// be bound (C2-R30 (2)): reccontroller could not start them, and the owner
+// would have spent a login and waited through the pre-checks for nothing.
+// It binds each port as reccontroller does and lets it go.
+func checkCameraPorts() error { return checkPorts(bindPort) }
+
+// bindPort binds addr on network as reccontroller does.
+func bindPort(network, addr string) (io.Closer, error) {
+	if network == "udp4" {
+		return net.ListenPacket(network, addr)
+	}
+	return net.Listen(network, addr)
+}
+
+// checkPorts is checkCameraPorts with its bind. Only a port that another
+// socket holds is another program's, which the owner can close; any other
+// bind error (WSAEACCES for a port in one of Windows' excluded ranges, for
+// one) is this computer's, which the owner reports (C2-R31 (2)).
+func checkPorts(bind func(network, addr string) (io.Closer, error)) error {
 	for _, p := range cameraPorts {
-		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(p.port))
-		var c io.Closer
-		var err error
-		if p.network == "udp4" {
-			c, err = net.ListenPacket(p.network, addr)
-		} else {
-			c, err = net.Listen(p.network, addr)
+		c, err := bind(p.network, net.JoinHostPort("127.0.0.1", strconv.Itoa(p.port)))
+		switch {
+		case err == nil:
+			_ = c.Close()
+		case errors.Is(err, errAddrInUse):
+			return &mi5.Failure{Line: fmt.Sprintf(msgCameraPortBusy, p.port), Cause: err}
+		default:
+			return &mi5.Failure{Line: fmt.Sprintf(msgCameraPortDenied, p.port), Cause: err}
 		}
-		if err != nil {
-			return ownerError(fmt.Sprintf(msgCameraPortBusy, p.port))
-		}
-		_ = c.Close()
 	}
 	return nil
 }
