@@ -104,6 +104,9 @@ type ReadOpenRun struct {
 	OK        int     `json:"ok"`
 	P50Ms     float64 `json:"p50Ms"`
 	MaxMs     float64 `json:"maxMs"`
+	// Failures counts the failed reads by diag readopen's error
+	// (no-open-segment, unreadable) or the diag's exit ("exit N").
+	Failures map[string]int `json:"failures,omitempty"`
 }
 
 // PiProbeSet is the set of uploadspike-probe's marker for an armv6 Pi

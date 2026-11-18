@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"slices"
 	"sort"
@@ -288,11 +289,13 @@ func (r *run) block(ctx context.Context) error {
 			break
 		}
 		if !now.Before(nextRead) && reads.Calls < max(r.cfg.ReadOpenCalls, ReadOpenCalls)+4 {
-			ok, ms := r.readOpen(ctx, "cam02")
+			ok, ms, why := r.readOpen(ctx, "cam02")
 			reads.Calls++
 			if ok {
 				reads.OK++
 				readMs = append(readMs, ms)
+			} else {
+				failed(&reads, why)
 			}
 			for _, h := range r.cfg.ProviderHosts {
 				dns = dns && r.opts.Resolve(ctx, h) == nil
@@ -347,22 +350,33 @@ type readOpenLine struct {
 	Schema string  `json:"schema"`
 	OK     bool    `json:"ok"`
 	ReadMs float64 `json:"readMs"`
+	Error  string  `json:"error"`
 }
 
 // readOpen reads cam's open segment once (diag readopen --profile sub):
-// whether it read, and how long it took.
-func (r *run) readOpen(ctx context.Context, cam string) (bool, float64) {
+// whether it read, how long it took, and why not (the diag's error, or
+// its exit).
+func (r *run) readOpen(ctx context.Context, cam string) (bool, float64, string) {
 	lines, err := r.host.Diag(ctx, []string{"readopen", "--config", r.host.RunJSON(), "--cam", cam, "--profile", "sub"})
-	if err != nil {
-		return false, 0
-	}
 	for _, raw := range lines {
 		var l readOpenLine
 		if json.Unmarshal(raw, &l) == nil && l.Schema == "ipcam.diag.readopen/1" {
-			return l.OK, l.ReadMs
+			return l.OK, l.ReadMs, l.Error
 		}
 	}
-	return false, 0
+	var de *hubproc.DiagError
+	if errors.As(err, &de) {
+		return false, 0, fmt.Sprintf("exit %d", de.Code)
+	}
+	return false, 0, "no line"
+}
+
+// failed counts a failed read's reason in res.
+func failed(res *results.ReadOpenRun, why string) {
+	if res.Failures == nil {
+		res.Failures = map[string]int{}
+	}
+	res.Failures[why]++
 }
 
 // readOpenSeries reads cam's open segment calls times, one every every,
@@ -376,11 +390,13 @@ func (r *run) readOpenSeries(ctx context.Context, encrypted bool, cam string, ca
 		if err := r.sleep(ctx, every); err != nil {
 			return res, err
 		}
-		ok, took := r.readOpen(ctx, cam)
+		ok, took, why := r.readOpen(ctx, cam)
 		res.Calls++
 		if ok {
 			res.OK++
 			ms = append(ms, took)
+		} else {
+			failed(&res, why)
 		}
 		if r.now().After(end) && res.Calls >= calls {
 			break
