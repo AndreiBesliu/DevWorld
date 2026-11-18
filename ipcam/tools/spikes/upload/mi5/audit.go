@@ -60,7 +60,7 @@ func (r *run) audit(ctx context.Context) error {
 		}
 		lines, err := r.host.Diag(ctx, []string{"dest-probe", "--config", r.host.RunJSON(), "--dest", d.ID, "--delete-segment"})
 		if err != nil {
-			return fmt.Errorf("mi5: dest-probe %s: %w", d.ID, err)
+			return &Failure{Line: fmt.Sprintf(MsgDestProbeFailed, d.ID), Cause: err}
 		}
 		for _, raw := range lines {
 			var l destProbeLine
@@ -107,21 +107,21 @@ func listedChecks(l uploadsLine) bool {
 // catalog (C2-R15 (c)). So a failed exit is accepted when each of the
 // run's destinations has its line, listed unless it is OneDrive; a
 // destination of the run with no line, or of another kind left unlisted,
-// fails the audit with the diag's error. A failure of a destination that
-// is not the run's (an MI6 pair's, which no route reaches) leaves the
-// run's counts whole.
+// fails the audit with the owner's line, the diag's error its cause. A
+// failure of a destination that is not the run's (an MI6 pair's, which no
+// route reaches) leaves the run's counts whole.
 func checkListing(dests []DestConfig, listed map[string]uploadsLine, err error) error {
 	var de *hubproc.DiagError
 	if err != nil && !errors.As(err, &de) {
-		return fmt.Errorf("mi5: diag uploads: %w", err)
+		return &Failure{Line: MsgAuditFailed, Cause: err}
 	}
 	for _, d := range dests {
-		l, ok := listed[d.ID]
-		switch {
-		case !ok:
-			return errors.Join(fmt.Errorf("mi5: diag uploads printed no line for %s", d.ID), err)
-		case !listedChecks(l) && d.Kind != KindOneDrive:
-			return errors.Join(fmt.Errorf("mi5: diag uploads did not list %s", d.ID), err)
+		if l, ok := listed[d.ID]; !ok || !listedChecks(l) && d.Kind != KindOneDrive {
+			cause := err
+			if cause == nil {
+				cause = fmt.Errorf("diag uploads: no listed line for %s", d.ID)
+			}
+			return &Failure{Line: fmt.Sprintf(MsgAuditDestFailed, d.ID), Cause: cause}
 		}
 	}
 	return nil

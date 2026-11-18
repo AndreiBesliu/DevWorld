@@ -112,6 +112,10 @@ type ReadOpenRun struct {
 	// Failures counts the failed reads by diag readopen's error
 	// (no-open-segment, unreadable) or the diag's exit ("exit N").
 	Failures map[string]int `json:"failures,omitempty"`
+	// Retried counts the reads whose first answer found no open segment
+	// and that read once more 5 s later, the second answer being the one
+	// counted (C2-R27 (2)): Task 11's «Limitări» names them.
+	Retried int `json:"retried"`
 }
 
 // PiProbeSet is the set of uploadspike-probe's marker for an armv6 Pi

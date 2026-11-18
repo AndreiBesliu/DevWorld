@@ -460,18 +460,22 @@ func FindLanProbe(ctx context.Context) (string, error) {
 	return "", ErrLanSilent
 }
 
-// errBadConfig is a configuration that no command builds.
-var errBadConfig = errors.New("mi5: bad configuration")
+// errBadConfig is a setting that the run cannot take.
+var errBadConfig = errors.New("bad configuration")
 
-// Validate checks cfg's settings before a run.
+// Validate checks cfg's settings before a run; a wrong one is the owner's
+// line naming the flag.
 func (cfg Mi5Config) Validate() error {
+	bad := func(line string) error { return &Failure{Line: line, Cause: errBadConfig} }
 	switch {
 	case cfg.Cameras < 1 || cfg.Cameras > MaxCameras:
-		return fmt.Errorf("%w: %d cameras", errBadConfig, cfg.Cameras)
-	case cfg.SegmentSecs <= 0 || cfg.BlockFor <= 0:
-		return fmt.Errorf("%w: segment %d s, block %v", errBadConfig, cfg.SegmentSecs, cfg.BlockFor)
+		return bad(fmt.Sprintf(MsgBadCameras, cfg.Cameras, MaxCameras))
+	case cfg.SegmentSecs <= 0:
+		return bad(fmt.Sprintf(MsgBadSegment, cfg.SegmentSecs))
+	case cfg.BlockFor <= 0:
+		return bad(fmt.Sprintf(MsgBadBlock, cfg.BlockFor))
 	case !slices.Contains([]string{DriveTest, DriveTestPersonal, DrivePersonal}, cfg.Drive):
-		return fmt.Errorf("%w: --drive %q", errBadConfig, cfg.Drive)
+		return bad(fmt.Sprintf(MsgBadDrive, cfg.Drive))
 	}
 	return CheckPartSize(cfg.PartSize, cfg.Fakes)
 }

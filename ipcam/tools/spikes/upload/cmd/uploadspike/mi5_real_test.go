@@ -16,9 +16,9 @@ import (
 
 // mi5TestTiming is a short run's timing for the process tests: a 20-s
 // encrypted pre-run (a read a second), a 5-s warm-up, checks every 20 s,
-// a read every 3 s, and drainMax above the outbox's 5-min backoff cap (as
+// a read every 3 s, and 10 min for the recovery from the unblock (as
 // mi5ShortTiming).
-const mi5TestTiming = `{"preRun":20000,"preRunEvery":1000,"warmUp":5000,"checkEvery":20000,"readOpenEvery":3000,"floor":2000,"quiet":8000,"drainMax":480000}`
+const mi5TestTiming = `{"preRun":20000,"preRunEvery":1000,"warmUp":5000,"checkEvery":20000,"readOpenEvery":3000,"floor":2000,"quiet":8000,"drainMax":600000}`
 
 // TestMI5_LabRun_RealHub (P14, P16, g3-16): a short lab run end to end on
 // the real ipcam-hub, the fork's MediaMTX, reccontroller --local's

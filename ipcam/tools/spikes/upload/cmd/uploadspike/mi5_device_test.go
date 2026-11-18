@@ -32,12 +32,12 @@ import (
 
 // mi5ShortTiming is the device tests' short MI5 run: a 5-s encrypted
 // pre-run (a read a second), a 2-s warm-up, checks every 20 s, a read
-// every 3 s, an 8-s quiet final drain, and 8 min for each wait of the
-// restart or a drain (drainMax): above the outbox's 5-min backoff cap, so
-// that a destination still waiting out failed attempts (the Drive
-// driver's create pacing at a hub's start answers rate_limited) delays
-// the restart's moment without failing the run.
-const mi5ShortTiming = `{"preRun":5000,"preRunEvery":1000,"warmUp":2000,"checkEvery":20000,"readOpenEvery":3000,"floor":2000,"quiet":8000,"drainMax":480000}`
+// every 3 s, an 8-s quiet final drain, and 10 min for the recovery from
+// the unblock (drainMax: the restart's wait and both drains together),
+// above the outbox's 5-min backoff cap, so that a destination still
+// waiting out failed attempts delays the restart's moment without failing
+// the run, and below the tests' 15-min waits for mi5's end.
+const mi5ShortTiming = `{"preRun":5000,"preRunEvery":1000,"warmUp":2000,"checkEvery":20000,"readOpenEvery":3000,"floor":2000,"quiet":8000,"drainMax":600000}`
 
 // mi6Device is the owner's device under D2-A or D2-C, as MI5 finds it: the
 // real ipcam-hub on the fakes, setup's clients sealed in it, the

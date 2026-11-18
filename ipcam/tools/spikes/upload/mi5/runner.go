@@ -72,23 +72,29 @@ type Timing struct {
 	// show no upload: Block + 2 min.
 	Floor time.Duration
 	// Quiet is how long the final drain waits with nothing pending and
-	// no new event before it ends; DrainMax bounds each drain.
+	// no new event before it ends; DrainMax bounds the recovery from the
+	// unblock on: the restart's wait, the drain and the final drain end
+	// within it together, or the run ends with its own line.
 	Quiet, DrainMax time.Duration
 }
 
 // OwnerTiming is the owner's run: 10 min of encrypted pre-run (a read
 // every 30 s), 10 min of warm-up, checks every 10 min, reads every
-// BlockFor / 24 and at least every 15 min, the floor at Block + 2 min.
+// BlockFor / 24 and at least every 15 min, the floor at Block + 2 min, and
+// 12 h for the recovery.
 func OwnerTiming(blockFor time.Duration) Timing {
 	return Timing{PreRun: 10 * time.Minute, PreRunEvery: 30 * time.Second, WarmUp: 10 * time.Minute, CheckEvery: 10 * time.Minute,
 		ReadOpenEvery: min(blockFor/24, 15*time.Minute), Floor: 2 * time.Minute, Quiet: 30 * time.Second, DrainMax: 12 * time.Hour}
 }
 
 // LabTiming is the lab's: the owner's but a 2-min warm-up (30-s segments)
-// and a 2-h drain bound.
+// and a 25-min recovery bound, so that a lab run that waits it out ends
+// with its own line and envelope before the mi5-lab job's MI5 step times
+// out (60 min: 10 min of pre-run, 2 of warm-up, the 15-min block, 25 and
+// 5 for the rest; C2-R27 (3)). The lab's recoveries took 3–6 min.
 func LabTiming(blockFor time.Duration) Timing {
 	t := OwnerTiming(blockFor)
-	t.WarmUp, t.Quiet, t.DrainMax = 2*time.Minute, 15*time.Second, 2*time.Hour
+	t.WarmUp, t.Quiet, t.DrainMax = 2*time.Minute, 15*time.Second, 25*time.Minute
 	return t
 }
 
@@ -141,6 +147,9 @@ type run struct {
 	tally   *tally
 	stopped chan struct{}
 	done    chan struct{}
+	// recoverBy is the unblock + DrainMax: the restart's wait and the
+	// drains end by then.
+	recoverBy time.Time
 }
 
 func newRun(cfg Mi5Config, opts RunOptions) *run {
@@ -272,14 +281,18 @@ func ended(gone <-chan struct{}) bool {
 }
 
 // hubEnded handles the end of the hub that a wait saw: the holder
-// restarts one that ended on its own, which HubCrashes counts; one that
+// restarts one that ended on its own, which HubCrashes counts, and the
+// tally's restart target then reads only the restarted hub's progress
+// (every event of the crashed one came before the end was seen); one that
 // the run stopped or killed restarts nothing.
 func (r *run) hubEnded(ctx context.Context) (bool, error) {
+	seen := r.now()
 	restarted, err := r.host.RestartCrashed(ctx)
 	if err != nil || !restarted {
 		return false, err
 	}
 	r.data.HubCrashes++
+	r.withTally(func(t *tally) { t.hubSince = max(t.hubSince, seen.UnixMilli()) })
 	return true, nil
 }
 
@@ -367,14 +380,12 @@ func (r *run) block(ctx context.Context) error {
 			break
 		}
 		if !now.Before(nextRead) && reads.Calls < max(r.cfg.ReadOpenCalls, ReadOpenCalls)+4 {
-			ok, ms, why := r.readOpen(ctx, "cam02")
-			reads.Calls++
-			if ok {
-				reads.OK++
-				readMs = append(readMs, ms)
-			} else {
-				failed(&reads, why)
+			read, err := r.readOpen(ctx, "cam02")
+			if err != nil {
+				_ = fw.Unblock(context.WithoutCancel(ctx))
+				return err
 			}
+			readMs = read.count(&reads, readMs)
 			for _, h := range r.cfg.ProviderHosts {
 				dns = dns && r.opts.Resolve(ctx, h) == nil
 			}
@@ -399,6 +410,7 @@ func (r *run) block(ctx context.Context) error {
 		return err
 	}
 	unblock := r.now()
+	r.recoverBy = unblock.Add(t.DrainMax)
 	r.data.BlockSecs = unblock.Sub(start).Seconds()
 	r.withTally(func(tl *tally) { tl.unblockAt = unblock.UnixMilli() })
 	r.host.Printf("%s", MsgUnblocked)
@@ -438,54 +450,80 @@ type readOpenLine struct {
 // pre-run) would land on every rotation.
 const settle = 5 * time.Second
 
+// readResult is one open-segment read: whether it read, how long it took,
+// why not (the diag's error, or its exit), and whether its first answer
+// found no open segment and it read once more.
+type readResult struct {
+	ok      bool
+	ms      float64
+	why     string
+	retried bool
+}
+
+// count adds the read to its series res, and its time to ms.
+func (rr readResult) count(res *results.ReadOpenRun, ms []float64) []float64 {
+	res.Calls++
+	if rr.retried {
+		res.Retried++
+	}
+	if !rr.ok {
+		failed(res, rr.why)
+		return ms
+	}
+	res.OK++
+	return append(ms, rr.ms)
+}
+
 // readOpen reads cam's open segment once (diag readopen --profile sub), at
 // least settle after its last rotation, once more after the hub's restart
 // when the hub ended on its own during the read, and once more settle
 // later when it found no open segment (a rotation whose event had not
-// reached the run yet): whether it read, how long it took, and why not
-// (the diag's error, or its exit).
-func (r *run) readOpen(ctx context.Context, cam string) (bool, float64, string) {
+// reached the run yet), which the read records (Retried). Its error is a
+// wait's: the run's end, or a hub that ended on its own and would not
+// start again, which ends the run at once.
+func (r *run) readOpen(ctx context.Context, cam string) (readResult, error) {
 	var rotated int64
 	r.withTally(func(t *tally) { rotated = t.rotated[cam] })
 	if wait := time.UnixMilli(rotated).Add(settle).Sub(r.now()); rotated != 0 && wait > 0 {
 		if err := r.sleep(ctx, wait); err != nil {
-			return false, 0, "stopped"
+			return readResult{}, err
 		}
 	}
 	gone := r.host.HubGone()
-	ok, ms, why := r.readOpenOnce(ctx, cam)
-	if !ok && ended(gone) {
+	read := r.readOpenOnce(ctx, cam)
+	if !read.ok && ended(gone) {
 		// The hub ended on its own during the read, which measured the
 		// crash, not the open segment: the hub restarts (sleep's watch),
 		// and the read is made again.
 		if err := r.sleep(ctx, 0); err != nil {
-			return false, 0, "stopped"
+			return readResult{}, err
 		}
-		ok, ms, why = r.readOpenOnce(ctx, cam)
+		read = r.readOpenOnce(ctx, cam)
 	}
-	if !ok && why == "no-open-segment" {
+	if !read.ok && read.why == "no-open-segment" {
 		if err := r.sleep(ctx, settle); err != nil {
-			return false, 0, "stopped"
+			return readResult{}, err
 		}
-		ok, ms, why = r.readOpenOnce(ctx, cam)
+		read = r.readOpenOnce(ctx, cam)
+		read.retried = true
 	}
-	return ok, ms, why
+	return read, nil
 }
 
 // readOpenOnce is one diag readopen of cam's sub stream.
-func (r *run) readOpenOnce(ctx context.Context, cam string) (bool, float64, string) {
+func (r *run) readOpenOnce(ctx context.Context, cam string) readResult {
 	lines, err := r.host.Diag(ctx, []string{"readopen", "--config", r.host.RunJSON(), "--cam", cam, "--profile", "sub"})
 	for _, raw := range lines {
 		var l readOpenLine
 		if json.Unmarshal(raw, &l) == nil && l.Schema == "ipcam.diag.readopen/1" {
-			return l.OK, l.ReadMs, l.Error
+			return readResult{ok: l.OK, ms: l.ReadMs, why: l.Error}
 		}
 	}
 	var de *hubproc.DiagError
 	if errors.As(err, &de) {
-		return false, 0, fmt.Sprintf("exit %d", de.Code)
+		return readResult{why: fmt.Sprintf("exit %d", de.Code)}
 	}
-	return false, 0, "no line"
+	return readResult{why: "no line"}
 }
 
 // failed counts a failed read's reason in res.
@@ -507,14 +545,11 @@ func (r *run) readOpenSeries(ctx context.Context, encrypted bool, cam string, ca
 		if err := r.sleep(ctx, every); err != nil {
 			return res, err
 		}
-		ok, took, why := r.readOpen(ctx, cam)
-		res.Calls++
-		if ok {
-			res.OK++
-			ms = append(ms, took)
-		} else {
-			failed(&res, why)
+		read, err := r.readOpen(ctx, cam)
+		if err != nil {
+			return res, err
 		}
+		ms = read.count(&res, ms)
 		if r.now().After(end) && res.Calls >= calls {
 			break
 		}
@@ -535,18 +570,19 @@ func percentile(v []float64, q float64) float64 {
 }
 
 // ErrNoUploadAfterUnblock is a run whose hub showed no upload in the
-// middle of a placement after the unblock, so no restart could land
-// between two parts.
-var ErrNoUploadAfterUnblock = errors.New("mi5: no upload in the middle of a placement after the unblock")
+// middle of a placement within the recovery's bound after the unblock, so
+// no restart could land between two parts.
+var ErrNoUploadAfterUnblock error = ownerError(MsgNoUploadAfterUnblock)
 
 // restartMidUpload is the restart (P16): after the unblock it waits for
-// an upload_progress with 0 < offset < size, at least tearAfter after the
-// cameras' last rotation (so the kill also tears an open segment), records
-// that placement's last confirmed offset, kills the hub (MediaMTX dies
-// with it) and starts it once more. It never kills during the block.
+// an upload_progress of the running hub with 0 < offset < size, at least
+// tearAfter after the cameras' last rotation (so the kill also tears an
+// open segment), records that placement's last confirmed offset, kills
+// the hub (MediaMTX dies with it) and starts it once more. It never kills
+// during the block, and waits until the recovery's bound at most.
 func (r *run) restartMidUpload(ctx context.Context) error {
 	var target progress
-	deadline := r.now().Add(r.opts.Timing.DrainMax)
+	deadline := r.recoverBy
 	for {
 		found := false
 		r.withTally(func(tl *tally) { target, found = tl.midUpload(r.now().UnixMilli()) })
@@ -606,17 +642,17 @@ func (r *run) drain(ctx context.Context) error {
 }
 
 // waitDrained waits until the restart's placement is verified and no
-// placement of the run is pending, nothing having happened for quiet.
+// placement of the run is pending, nothing having happened for quiet,
+// until the recovery's bound at most.
 func (r *run) waitDrained(ctx context.Context, quiet time.Duration) error {
-	deadline := r.now().Add(r.opts.Timing.DrainMax)
 	for {
 		done := false
 		r.withTally(func(tl *tally) { done = tl.drained(r.now().UnixMilli(), quiet.Milliseconds()) })
 		if done {
 			return nil
 		}
-		if r.now().After(deadline) {
-			return errors.New("mi5: the drain did not end within its bound")
+		if r.now().After(r.recoverBy) {
+			return &Failure{Line: fmt.Sprintf(MsgDrainTooLong, span(r.opts.Timing.DrainMax))}
 		}
 		if err := r.sleep(ctx, 100*time.Millisecond); err != nil {
 			return err

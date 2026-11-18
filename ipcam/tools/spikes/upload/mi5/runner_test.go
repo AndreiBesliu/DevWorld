@@ -52,6 +52,12 @@ type fakeRun struct {
 	down     bool
 	stopping bool
 	restarts []time.Time
+	// restartErr, when set, is RestartCrashed's answer (a hub that would
+	// not start again); restartCalls counts its calls.
+	restartErr   error
+	restartCalls int
+	// destProbeErr is diag dest-probe's exit.
+	destProbeErr error
 }
 
 func newFakeRun(t *testing.T, start time.Time) *fakeRun {
@@ -118,6 +124,11 @@ func (f *fakeRun) HubGone() <-chan struct{} {
 
 func (f *fakeRun) RestartCrashed(context.Context) (bool, error) {
 	f.mu.Lock()
+	f.restartCalls++
+	if f.restartErr != nil {
+		f.mu.Unlock()
+		return false, f.restartErr
+	}
 	if f.stopping {
 		f.mu.Unlock()
 		return false, nil
@@ -184,6 +195,8 @@ func (f *fakeRun) Diag(_ context.Context, args []string) ([]json.RawMessage, err
 			}
 		}
 		return out, f.uploadsErr
+	case "dest-probe":
+		return nil, f.destProbeErr
 	}
 	return nil, nil
 }
@@ -490,15 +503,19 @@ func TestMI5_SaysWhereTheRunIs(t *testing.T) {
 // timing read 0 of 20 there, each «no-open-segment». A read waits until 5 s
 // after the camera's last segment_closed, and a read that still finds no
 // open segment (its rotation's event not yet seen) tries once more 5 s
-// later; a camera with no open segment at all still fails.
+// later; a camera with no open segment at all still fails. Each read that
+// tried once more is counted in Retried (C2-R27 (2), C2-R29 (6)), so that
+// a first miss stays visible: here the late event's first read, and every
+// read of a camera with nothing open.
 func TestMI5_ReadOpenSettlesAfterRotation(t *testing.T) {
 	const gap = time.Second
 	for _, tc := range []struct {
-		name    string
-		latency time.Duration // from a rotation to its segment_closed
-		never   bool          // no segment is ever open
-		wantOK  int
-	}{{"event-seen", 50 * time.Millisecond, false, 20}, {"event-late", 3 * time.Second, false, 20}, {"never-open", 50 * time.Millisecond, true, 0}} {
+		name        string
+		latency     time.Duration // from a rotation to its segment_closed
+		never       bool          // no segment is ever open
+		wantOK      int
+		wantRetried int
+	}{{"event-seen", 50 * time.Millisecond, false, 20, 0}, {"event-late", 3 * time.Second, false, 20, 1}, {"never-open", 50 * time.Millisecond, true, 0, 20}} {
 		t.Run(tc.name, func(t *testing.T) {
 			start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
 			first := start.Add(30*time.Second - 500*time.Millisecond) // the first rotation, just before the first read
@@ -536,6 +553,9 @@ func TestMI5_ReadOpenSettlesAfterRotation(t *testing.T) {
 			}
 			if res.Calls != ReadOpenCalls || res.OK != tc.wantOK || tc.wantOK == 0 && res.Failures["no-open-segment"] != ReadOpenCalls {
 				t.Errorf("reads %+v; want %d calls, %d read", res, ReadOpenCalls, tc.wantOK)
+			}
+			if res.Retried != tc.wantRetried {
+				t.Errorf("reads %+v; want %d retried", res, tc.wantRetried)
 			}
 		})
 	}

@@ -24,6 +24,9 @@ var (
 	ErrProviderReachV6 = ownerError(MsgProviderReachV6)
 )
 
+// errNoProviderLine is a diag reach that printed no provider line.
+var errNoProviderLine = errors.New("diag reach printed no provider line")
+
 // ownerError is an error whose text is a whole line for the owner.
 type ownerError string
 
@@ -31,6 +34,24 @@ func (e ownerError) Error() string { return string(e) }
 
 // OwnerLine marks the error's text as a whole line for the owner.
 func (ownerError) OwnerLine() {}
+
+// Failure is a failure whose text is a whole Romanian line for the owner
+// (OwnerLine), with the cause it stands for: errors.Is and errors.As reach
+// the cause, and the lab's and the tests' runs, which are never judged,
+// print its text on a detail line (uploadspike's mi5); the owner's screen
+// never shows it.
+type Failure struct {
+	Line  string
+	Cause error
+}
+
+func (e *Failure) Error() string { return e.Line }
+
+// Unwrap is the failure's cause.
+func (e *Failure) Unwrap() error { return e.Cause }
+
+// OwnerLine marks the failure's text as a whole line for the owner.
+func (*Failure) OwnerLine() {}
 
 // reachLine is one line of diag reach.
 type reachLine struct {
@@ -57,7 +78,7 @@ func VerifyBlocked(ctx context.Context, hub hubproc.Config, hosts []string, lan 
 	}
 	lines, err := hubproc.Diag(ctx, hub, args, nil)
 	if err != nil {
-		return ReachResult{}, err
+		return ReachResult{}, &Failure{Line: MsgReachFailed, Cause: err}
 	}
 	return judgeReach(lines)
 }
@@ -95,7 +116,7 @@ func judgeReach(lines []json.RawMessage) (ReachResult, error) {
 	res.Loopback = res.Loopback && loopbacks > 0
 	switch {
 	case providers == 0:
-		return res, errors.New("mi5: diag reach printed no provider line")
+		return res, &Failure{Line: MsgReachNoProvider, Cause: errNoProviderLine}
 	case !res.Lan || !res.Loopback:
 		return res, ErrBlockCutLAN
 	case !res.ProviderBlockedV4:

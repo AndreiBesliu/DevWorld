@@ -102,6 +102,10 @@ type tally struct {
 	// rotated is when each camera's last segment closed (a new one began);
 	// closedAt when each segment (camera and start) closed.
 	rotated, closedAt map[string]int64
+	// hubSince is when the run saw the last crashed hub's end: the
+	// restart's target is an upload of the running hub, so progress from
+	// before it is a crashed hub's (C2-R29 (11)).
+	hubSince int64
 }
 
 func newTally(startMs int64, dests []DestConfig) *tally {
@@ -225,11 +229,12 @@ func (t *tally) observe(ev hubproc.Event) {
 func segmentKey(cam string, startMs int64) string { return cam + "/" + strconv.FormatInt(startMs, 10) }
 
 // midUpload is a placement in the middle of its upload after the unblock,
-// of the running hub: its latest upload_progress, after the unblock, has
-// 0 < offset < size with at least a quarter of its bytes still to go
-// (so the kill lands between two parts, not after the last), and it is
-// not verified. It is the restart's moment once no camera rotated within
-// tearAfter of nowMs, so that the kill also tears an open segment.
+// of the running hub: its latest upload_progress, after the unblock and
+// after the last crashed hub's end (hubSince), has 0 < offset < size with
+// at least a quarter of its bytes still to go (so the kill lands between
+// two parts, not after the last), and it is not verified. It is the
+// restart's moment once no camera rotated within tearAfter of nowMs, so
+// that the kill also tears an open segment.
 func (t *tally) midUpload(nowMs int64) (progress, bool) {
 	if t.unblockAt == 0 || t.killedAt != 0 {
 		return progress{}, false
@@ -242,7 +247,7 @@ func (t *tally) midUpload(nowMs int64) (progress, bool) {
 	latest := map[string]progress{}
 	var order []string
 	for _, p := range t.progress {
-		if !p.afterUnblock {
+		if !p.afterUnblock || p.atMs < t.hubSince {
 			continue
 		}
 		if _, seen := latest[p.placement]; !seen {
