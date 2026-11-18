@@ -124,6 +124,28 @@ describe('the status of a scenario', () => {
     expect(offersRepeat(status)).toBe(true);
   });
 
+  // During the automatic run the queue starts an interrupted scenario again by
+  // itself (its row's button is disabled), and after a stop its line says to
+  // press «Rulează tot pentru acest dispozitiv»: the row says why, never «Repetă».
+  it.each([
+    [undefined, 'întrerupt: fereastra nu mai era vizibilă.'],
+    [{ kind: 'hidden', atS: 12 }, 'întrerupt: fereastra nu mai era vizibilă.'],
+    [{ kind: 'session-lost', atS: 300, how: 'connection failed' }, 'întrerupt: conexiunea cu hub-ul s-a pierdut.'],
+    [{ kind: 'charging', atS: 240 }, 'întrerupt: telefonul era la încărcător.'],
+    [{ kind: 'early-return', backgroundS: 45 }, 'întrerupt: v-ați întors după 45 s, iar S5 are nevoie de cel puțin 2 minute.'],
+    [{ kind: 'pip-left', pipS: 290 }, 'întrerupt: fereastra mică s-a închis după 4 min 50 s, iar S6 are nevoie de 5 minute.'],
+  ] as const)('statusText_interruptedInTheAutomaticRun_saysWhyWithoutRepeat (%j)', (interruption, text) => {
+    const status: Status = {
+      kind: 'done',
+      result: result({ interrupted: true, durationS: 12, ...(interruption ? { interruption } : {}) }),
+      queued: true,
+    };
+
+    expect(statusText(status, t)).toBe(text);
+    expect(statusText(status, t)).not.toMatch(/Repet/);
+    expect(statusText(status, createI18n({ lang: 'en' }).t)).not.toMatch(/Repeat/);
+  });
+
   it('statusText_notStarted_saysWhat', () => {
     // R48: S3 on a phone on the charger does not start.
     const status: Status = { kind: 'refused', key: 's3Charging' };
@@ -212,6 +234,13 @@ describe('the automatic run on the page', () => {
   it('autoRun_pauseIsCountedDown', () => {
     expect(queueEventLines({ kind: 'pause', leftMs: 581_000 }, t)).toEqual([
       'Pauză de răcire: mai sunt 9 min 41 s. Lăsați telefonul pe masă, scos din încărcător; rularea continuă singură.',
+    ]);
+  });
+
+  it('autoRun_coldStartIsCountedDown', () => {
+    expect(queueEventLines({ kind: 'cold', id: 'S3-9', leftMs: 300_000 }, t)).toEqual([
+      'Înainte de S3-9, telefonul stă 10 minute fără încărcător, ca să nu fie cald: mai sunt 5 min. ' +
+        'Lăsați-l pe masă, scos din încărcător; rularea continuă singură.',
     ]);
   });
 

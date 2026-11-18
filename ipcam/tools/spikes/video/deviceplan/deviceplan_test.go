@@ -133,3 +133,56 @@ func TestPlan_TheGuideAgrees(t *testing.T) {
 		t.Errorf("the guide's row «%s» is not in the table", label)
 	}
 }
+
+// guideDuration is a duration in the guide's «Cât durează» table: «20 min», «1 oră și 35 min».
+var guideDuration = regexp.MustCompile(`(?:(\d+) (?:oră|ore)(?: și (\d+) min)?|(\d+) min)`)
+
+// guideTotal is the guide's estimate of the whole: «Aproximativ 3 ore și 30 de minute».
+var guideTotal = regexp.MustCompile(`Aproximativ (\d+) (?:oră|ore)(?: și (\d+) de minute)?`)
+
+// The time that the guide asks for in «Ce aveți nevoie» is the sum of its
+// «Cât durează» table, so the owner plans the sessions on one number.
+func TestPlan_TheGuidesTotalIsItsTable(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "docs", "spike-video.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	minutes := func(m []string) int {
+		hours, _ := strconv.Atoi(m[1])
+		rest, _ := strconv.Atoi(m[2])
+		if len(m) > 3 && m[3] != "" {
+			rest, _ = strconv.Atoi(m[3])
+		}
+		return hours*60 + rest
+	}
+	sum, rows, inTable := 0, 0, false
+	total := -1
+	for line := range strings.Lines(string(data)) {
+		line = strings.TrimRight(line, "\n")
+		switch {
+		case strings.HasPrefix(line, "## "):
+			inTable = line == "## Cât durează"
+		case total < 0 && guideTotal.MatchString(line):
+			total = minutes(guideTotal.FindStringSubmatch(line))
+		case inTable && strings.HasPrefix(line, "| ") && !strings.HasPrefix(line, "| Unde |"):
+			cells := strings.Split(line, "|")
+			if len(cells) < 5 {
+				t.Errorf("the table row %q has no duration column", line)
+				continue
+			}
+			m := guideDuration.FindStringSubmatch(cells[3])
+			if m == nil {
+				t.Errorf("the table row %q names no duration", line)
+				continue
+			}
+			sum += minutes(m)
+			rows++
+		}
+	}
+	if rows == 0 || total < 0 {
+		t.Fatalf("the guide has %d rows in «Cât durează» and a total of %d min; want both", rows, total)
+	}
+	if total != sum {
+		t.Errorf("the guide asks for %d h %d min, its table adds up to %d h %d min", total/60, total%60, sum/60, sum%60)
+	}
+}

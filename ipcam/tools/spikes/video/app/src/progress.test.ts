@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DEVICE_PLANS } from './deviceplan';
 import { createI18n } from './i18n';
 import { completeFor, fetchProgress, remainingLines, type Progress } from './progress';
+import { SCENARIO_IDS } from './results';
 import { ConnectError } from './session';
 
 const HUB = 'http://192.168.1.20:7080';
@@ -84,5 +86,28 @@ describe('the hub progress', () => {
 
     const done = { ...read, devices: read.devices.map((device) => ({ ...device, remaining: [] })) };
     expect(remainingLines(done, t)).toEqual(['Rămase pe acest PC: nimic, totul e gata', 'Rămase pe telefon: nimic, totul e gata']);
+  });
+
+  it('remaining_onThePhone_countsOnlyItsModel', async () => {
+    // The phone's run skips by its model (completeFor with the shell's model);
+    // «Rămase pe telefon» on its page counts the same way. The emulator's runs
+    // in the results folder do not make the A24's scenarios done.
+    const read = await progress();
+    const { t } = createI18n({ lang: 'ro' });
+    const phone = DEVICE_PLANS.find((plan) => plan.id === 'phone');
+    if (!phone) throw new Error('no phone plan');
+    const emulatorDidAll = {
+      ...read,
+      complete: [...read.complete, { key: 'android', platform: 'android', model: 'Google sdk_gphone64_x86_64', scenarios: [...SCENARIO_IDS] }],
+      devices: read.devices.map((device) => (device.id === 'phone' ? { ...device, remaining: [] } : device)),
+    };
+    const a24 = completeFor(emulatorDidAll, { platform: 'android', os: 'Android' }, 'samsung SM-A245F');
+
+    expect(remainingLines(emulatorDidAll, t, { plan: phone, complete: a24 })).toEqual([
+      'Rămase pe acest PC: Edge, Firefox (S2, S3-9, S9), ipcam-desktop',
+      'Rămase pe telefon: Galaxy A24 (S1, S2, S3-9, S3-4, S4, S5, S6, S7, S8, S9)',
+    ]);
+    // Without its own device (a browser page knows no phone model), the hub's answer.
+    expect(remainingLines(emulatorDidAll, t)[1]).toBe('Rămase pe telefon: nimic, totul e gata');
   });
 });

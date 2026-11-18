@@ -34,6 +34,8 @@ const ro = {
   interruptedCharging: 'întrerupt: telefonul e la încărcător. Scoateți-l din încărcător și apăsați «Repetă».',
   interruptedEarlyReturn: 'întrerupt: v-ați întors după {time}; e nevoie de cel puțin 2 minute. Apăsați «Repetă».',
   interruptedPipLeft: 'întrerupt: fereastra mică s-a închis după {time}; e nevoie de 5 minute. Apăsați «Repetă».',
+  // An interrupted scenario of the automatic run, which starts it again by itself: {reason} is one of the autoReason… texts.
+  statusInterruptedAuto: 'întrerupt: {reason}.',
   statusFailed: 'eșuat: {detail}',
   s3Charging: 'Scoateți telefonul din încărcător înainte de S3.',
   pendingResults: 'Rezultate netrimise: {n}. Se trimit din nou la fiecare pornire.',
@@ -97,6 +99,9 @@ const ro = {
   autoReasonPipLeft: 'fereastra mică s-a închis după {time}, iar S6 are nevoie de 5 minute',
   autoRetry: '{id} a eșuat și pornește încă o dată; rularea continuă.',
   autoPause: 'Pauză de răcire: mai sunt {time}. Lăsați telefonul pe masă, scos din încărcător; rularea continuă singură.',
+  autoCold:
+    'Înainte de {id}, telefonul stă 10 minute fără încărcător, ca să nu fie cald: mai sunt {time}. ' +
+    'Lăsați-l pe masă, scos din încărcător; rularea continuă singură.',
   autoAttention: '{id} are nevoie de dvs.: urmați instrucțiunea de pe ecran.',
   s6Guide:
     'S6 are nevoie de dvs. După «Continuă», aplicația trece singură într-o fereastră mică. Nu o atingeți. Când S6 se termină, ' +
@@ -157,6 +162,7 @@ const en: Record<MessageKey, string> = {
   interruptedCharging: 'interrupted: the phone is on the charger. Unplug it and press «Repeat».',
   interruptedEarlyReturn: 'interrupted: you came back after {time}; at least 2 minutes are needed. Press «Repeat».',
   interruptedPipLeft: 'interrupted: the small window closed after {time}; 5 minutes are needed. Press «Repeat».',
+  statusInterruptedAuto: 'interrupted: {reason}.',
   statusFailed: 'failed: {detail}',
   s3Charging: 'Unplug the phone from the charger before S3.',
   pendingResults: 'Results not sent yet: {n}. They are sent again at every start.',
@@ -216,6 +222,9 @@ const en: Record<MessageKey, string> = {
   autoReasonPipLeft: 'the small window closed after {time}, and S6 needs 5 minutes',
   autoRetry: '{id} failed and starts once more; the run goes on.',
   autoPause: 'Cooling pause: {time} left. Leave the phone on the table, off the charger; the run goes on by itself.',
+  autoCold:
+    'Before {id}, the phone stays off the charger for 10 minutes, so that it is not warm: {time} left. ' +
+    'Leave it on the table, off the charger; the run goes on by itself.',
   autoAttention: '{id} needs you: follow the instruction on the screen.',
   s6Guide:
     'S6 needs you. After «Continue», the app goes into a small window by itself. Do not touch it. When S6 ends, ' +

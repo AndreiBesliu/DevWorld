@@ -99,6 +99,8 @@ test('«Rulează tot pentru acest dispozitiv» runs Chrome’s list, skips what 
   });
   await page.waitForTimeout(5000);
   expect((await results(page)).map((result) => result.scenario)).toEqual(['S10', 'S7']); // paused while hidden
+  // The run starts S7 again by itself: its row says why, without the start page's «Repetă».
+  await expect(page.locator('.scenario[data-scenario="S7"] .status')).toHaveText('întrerupt: fereastra nu mai era vizibilă.');
   await page.evaluate(() => window.__e2eVisible?.(true));
 
   await expect(page.locator('.autorun .run-status')).toContainText('Gata: toate scenariile acestui dispozitiv au rezultate.', {

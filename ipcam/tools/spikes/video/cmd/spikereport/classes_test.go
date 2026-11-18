@@ -2,11 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"go/constant"
+	"go/importer"
+	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/resultrules"
 )
 
 // TestClassify_TheSharedFixtures reads testdata/classes, results files of every
@@ -53,6 +59,42 @@ func TestClassify_TheSharedFixtures(t *testing.T) {
 		if wantStatus, known := statusOf[want.Class]; !known || got != wantStatus {
 			t.Errorf("%s: status %v, want %s", run.File, run.Status, want.Class)
 		}
+	}
+}
+
+// TestStatusOf_CoversEveryClass walks every constant of type resultrules.Class,
+// read from the package's source, and requires a status for each: classify
+// looks the status up in statusOf, and a class missing there would read as
+// RunUsed, the map's zero value, so the report would judge a run that the hub
+// does not count as complete.
+func TestStatusOf_CoversEveryClass(t *testing.T) {
+	const path = "github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/resultrules"
+	pkg, err := importer.ForCompiler(token.NewFileSet(), "source", nil).Import(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	class := pkg.Scope().Lookup("Class")
+	if class == nil {
+		t.Fatal("resultrules has no type Class")
+	}
+	walked := 0
+	for _, name := range pkg.Scope().Names() {
+		c, ok := pkg.Scope().Lookup(name).(*types.Const)
+		if !ok || !types.Identical(c.Type(), class.Type()) {
+			continue
+		}
+		value, exact := constant.Int64Val(c.Val())
+		if !exact {
+			t.Errorf("resultrules.%s = %v is not an integer", name, c.Val())
+			continue
+		}
+		walked++
+		if _, ok := statusOf[resultrules.Class(value)]; !ok {
+			t.Errorf("statusOf has no status for resultrules.%s (%d)", name, value)
+		}
+	}
+	if walked < 5 {
+		t.Errorf("walked %d constants of resultrules.Class, want at least the 5 that classify knows", walked)
 	}
 }
 

@@ -7,15 +7,16 @@ import { createAttention, type AudioOut } from './attention';
 import { autorun, type AutorunRequest, type ErrorsTarget } from './autorun';
 import { exposeBandReader, readBand, type BandReaderTarget } from './band';
 import { fetchCameras, simCameras } from './cameras';
+import { watchCharger } from './charger';
 import { captureForDecoderInfo, grantCamera } from './decoderinfo';
 import { detectDevice, type DeviceInfo, type Platform } from './device';
 import { APP_VERSION, planFor, scenariosOf, type DevicePlan } from './deviceplan';
-import { askOnce, runQueue, type QueueEvent, type QueueOutcome } from './devicerun';
+import { askOnce, reasonOf, runQueue, type QueueEvent, type QueueOutcome } from './devicerun';
 import { decodesH264 } from './h264check';
 import { ConnectError } from './hubhttp';
 import { createI18n, minutesAndSeconds, type MessageKey, type Translate } from './i18n';
 import { sampleLoss, sampleStats } from './metrics';
-import { readNativeMetrics, spikeNative } from './native';
+import { readNativeMetrics, spikeNative, type NativeMetrics } from './native';
 import { completeFor, fetchProgress, remainingLines, type Progress } from './progress';
 import { publish, ResultsQueue, SCENARIO_IDS, type InterruptReason, type KeyValueStore, type ScenarioId, type ScenarioResult } from './results';
 import type { Clock, IntersectionWatch, ScenarioEnv, Stage } from './scenarios/context';
@@ -193,12 +194,13 @@ function watchIntersection(element: HTMLElement): IntersectionWatch | 'n/a' {
 /**
  * A scenario's state on the start page. `refused`: it did not start, `key`
  * says why (S3 on the charger, R48); `failed`: it threw (the hub could not be
- * reached, for example).
+ * reached, for example). `queued`: the automatic run ran it, and starts it
+ * again by itself when it was interrupted.
  */
 export type Status =
   | { kind: 'idle' }
   | { kind: 'running' }
-  | { kind: 'done'; result: ScenarioResult }
+  | { kind: 'done'; result: ScenarioResult; queued?: true }
   | { kind: 'failed'; detail: string }
   | { kind: 'refused'; key: MessageKey };
 
@@ -253,6 +255,18 @@ export function startApp(root: HTMLElement): App {
       };
     },
   };
+  // What the shell tells of itself: its model, which the run and the page's
+  // marks count by (a results folder may hold another phone's or the
+  // emulator's runs), and the charger, which an S3 of the phone waits on
+  // (charger.ts). Read at the start, at the connection check and at the button.
+  let shellModel: string | undefined;
+  const chargerWatch = watchCharger(() => clock.now());
+  const seeShell = (metrics: NativeMetrics | 'n/a'): void => {
+    if (metrics === 'n/a') return;
+    shellModel = metrics.model ?? shellModel;
+    chargerWatch.see(metrics.charging);
+  };
+  const shellRead: Promise<void> = native ? readNativeMetrics(native, clock.setTimer).then(seeShell) : Promise.resolve();
 
   // Older browsers and some WebViews have no navigator.wakeLock, whatever lib.dom says.
   const wakeLock = (): ScreenWakeLock | undefined => ('wakeLock' in navigator ? navigator.wakeLock : undefined);
@@ -316,9 +330,9 @@ export function startApp(root: HTMLElement): App {
     connectionBox.append(...connection.map((line) => el('p', '', line)));
     hubSection.append(label, check, connectionBox, el('p', 'device', t('device', { device: deviceLine })));
 
-    const completeInHub = progress ? completeFor(progress, device) : new Set<ScenarioId>();
+    const completeInHub = progress ? completeFor(progress, device, shellModel) : new Set<ScenarioId>();
     const list = el('section', 'scenarios');
-    list.append(el('h2', '', t('scenarios')), renderAutorun());
+    list.append(el('h2', '', t('scenarios')), renderAutorun(completeInHub));
     for (const id of SCENARIO_IDS) {
       const status = statuses.get(id) ?? { kind: 'idle' };
       // A run that failed or was interrupted is marked like a failure: it needs another try.
@@ -348,8 +362,8 @@ export function startApp(root: HTMLElement): App {
     controls.replaceChildren(header, hubSection, list, pendingSection);
   };
 
-  /** The automatic run's block, at the top of the scenario list. */
-  const renderAutorun = (): HTMLElement => {
+  /** The automatic run's block, at the top of the scenario list; `completeInHub` is this device's, as its run counts it. */
+  const renderAutorun = (completeInHub: ReadonlySet<ScenarioId>): HTMLElement => {
     const block = el('div', 'autorun');
     block.append(el('h3', '', t('autoTitle')));
     if (plan === undefined) {
@@ -372,7 +386,10 @@ export function startApp(root: HTMLElement): App {
         el('p', 'advice', t(plan.pc ? 'advicePc' : 'advicePhone')),
       );
     }
-    if (progress) block.append(...remainingLines(progress, t).map((line) => el('p', 'remaining', line)));
+    if (progress) {
+      const own = plan === undefined ? undefined : { plan, complete: completeInHub };
+      block.append(...remainingLines(progress, t, own).map((line) => el('p', 'remaining', line)));
+    }
     const lines = el('div', 'run-status');
     lines.append(...runLines.map((line) => el('p', '', line)));
     block.append(lines);
@@ -391,6 +408,7 @@ export function startApp(root: HTMLElement): App {
   const refreshProgress = async (): Promise<void> => {
     if (hub() === '') return;
     try {
+      await shellRead; // the shell's model first: the marks count by it
       progress = await fetchProgress(hub());
     } catch {
       return; // the connection check and the runs say why
@@ -423,7 +441,7 @@ export function startApp(root: HTMLElement): App {
     render();
     try {
       const result = await runScenario(id, await environment(hubUrl, { ask }));
-      statuses.set(id, { kind: 'done', result });
+      statuses.set(id, { kind: 'done', result, queued: true });
       await publish(result, queue);
       return result;
     } catch (error) {
@@ -447,8 +465,8 @@ export function startApp(root: HTMLElement): App {
     try {
       progress = await fetchProgress(hubUrl);
       safeSet(storage, HUB_KEY, hubUrl);
-      const metrics = native ? await readNativeMetrics(native, clock.setTimer) : 'n/a';
-      const complete = completeFor(progress, device, metrics === 'n/a' ? undefined : metrics.model);
+      if (native) seeShell(await readNativeMetrics(native, clock.setTimer));
+      const complete = completeFor(progress, device, shellModel);
       const ask = askOnce((question) => stage.ask(question, t('yes'), t('no')));
       const outcome = await runQueue({
         plan: devicePlan,
@@ -478,7 +496,18 @@ export function startApp(root: HTMLElement): App {
           }),
         ...(native?.onPip
           ? {
-              untilPipEnds: () => (inPip ? new Promise<void>((resolve) => pipWaiters.push(resolve)) : Promise.resolve()),
+              pip: {
+                active: () => inPip,
+                ended: () => (inPip ? new Promise<void>((resolve) => pipWaiters.push(resolve)) : Promise.resolve()),
+              },
+            }
+          : {}),
+        ...(native && devicePlan.platform === 'android'
+          ? {
+              charger: async () => {
+                seeShell(await readNativeMetrics(native, clock.setTimer));
+                return chargerWatch.state();
+              },
             }
           : {}),
         show: onQueueEvent,
@@ -513,6 +542,7 @@ export function startApp(root: HTMLElement): App {
       session.close();
       safeSet(storage, HUB_KEY, hub());
       const metrics = native ? await readNativeMetrics(native, clock.setTimer) : undefined;
+      if (metrics !== undefined) seeShell(metrics);
       deviceLine = metrics === 'n/a' ? `${describeDevice(device)}, ${t('nativeNa')}` : describeDevice(device, metrics);
       connection = [
         t('connected', { cameras: simCameras(cameras).length, pair: pair === 'n/a' ? 'n/a' : `${pair.local}/${pair.remote}` }),
@@ -646,7 +676,11 @@ export function statusText(status: Status, t: Translate, completeInHub = false):
     case 'refused':
       return t(status.key);
     case 'done': {
-      if (status.result.interrupted) return interruptionText(status.result, t);
+      if (status.result.interrupted) {
+        // The automatic run starts it again by itself, or its stop line says what to do: no «Repetă» here.
+        if (status.queued) return t('statusInterruptedAuto', { reason: queueReason(reasonOf(status.result), t) });
+        return interruptionText(status.result, t);
+      }
       const failed = failedDetail(status.result);
       return failed === undefined ? t('statusDone', { seconds: Math.round(status.result.durationS) }) : t('statusFailed', { detail: failed });
     }
@@ -715,6 +749,8 @@ export function queueEventLines(event: QueueEvent, t: Translate): string[] | und
       return [t('autoRetry', { id: event.id })];
     case 'pause':
       return [t('autoPause', { time: minutesAndSeconds(event.leftMs / 1000) })];
+    case 'cold':
+      return [t('autoCold', { id: event.id, time: minutesAndSeconds(event.leftMs / 1000) })];
     case 'attention':
       return [t('autoAttention', { id: event.id })];
     case 'confirm':

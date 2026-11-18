@@ -8,7 +8,7 @@ Din versiunea `spike-video-v0.1.1`, pe fiecare dispozitiv apăsați un singur bu
 
 - PC-ul cu Windows 11, legat la routerul de acasă (prin Wi-Fi sau cablu), cu Chrome, Edge și Firefox.
 - Telefonul Galaxy A24 și încărcătorul lui, pe Wi-Fi-ul aceluiași router.
-- Aproximativ 3 ore și 40 de minute pentru ce a rămas după Chrome, în una sau mai multe sesiuni. Cât rulează, nu trebuie să stați lângă dispozitiv.
+- Aproximativ 3 ore și 30 de minute pentru ce a rămas după Chrome, în una sau mai multe sesiuni. Cât rulează, nu trebuie să stați lângă dispozitiv.
 - Nimic de plătit și niciun cont nou. Nu vă cerem nicio parolă.
 
 Textele între «» apar exact așa în programele de test. Textele între „” sunt ale Windows, Android sau ale browserului și pot diferi puțin, în funcție de versiune.
@@ -133,7 +133,7 @@ La S9 pot apărea «profil video nesuportat»<!--app--> sau «calitate redusă: 
 
 ### Pregătire
 
-1. Încărcați telefonul la cel puțin 90 %. Rularea durează circa 1 oră și 30 de minute, toată pe baterie, inclusiv S4: nu conectați încărcătorul până la sfârșit. S3 se măsoară doar fără încărcător.
+1. Încărcați telefonul la cel puțin 90 %. Apoi scoateți-l din încărcător cu cel puțin 10 minute înainte să apăsați «Rulează tot pentru acest dispozitiv»<!--app-->, de exemplu înainte de instalare, ca S3-9 să înceapă cu telefonul rece. Rularea durează circa 1 oră și 30 de minute, toată pe baterie, inclusiv S4: nu conectați încărcătorul până la sfârșit. S3 se măsoară doar fără încărcător.
 2. Opriți modul „Economisire energie” pe durata probei. Altfel, telefonul încetinește intenționat și rezultatele ies mai slabe.
 3. Conectați telefonul la același Wi-Fi ca PC-ul, nu la rețeaua pentru oaspeți. Dacă aveți VPN pe telefon, opriți-l.
 
@@ -150,9 +150,9 @@ Avertismentele apar pentru că aplicația de test nu vine din Magazin Play și n
 
 1. Deschideți aplicația «Proba ipcam»<!--android-->. Rulați proba doar în ea, nu în browserul telefonului.
 2. În câmpul «Adresa hub-ului (o vedeți în fereastra spikehub)»<!--app--> scrieți adresa notată la pasul 2.6, cea de forma `http://…:7080`, și apăsați «Verifică conexiunea»<!--app-->. Trebuie să apară «Conectat: …»<!--app-->. Nu scrieți `127.0.0.1`: acea adresă merge doar pe PC.
-3. Scoateți telefonul din încărcător și apăsați «Rulează tot pentru acest dispozitiv»<!--app-->.
+3. Verificați că telefonul e scos din încărcător (de cel puțin 10 minute, ca la pregătire) și apăsați «Rulează tot pentru acest dispozitiv»<!--app-->.
 4. Răspundeți la întrebarea lui S10. Când Android cere acces la cameră, alegeți „Cât timp folosiți aplicația”: fără el, verdictul pentru telefon nu se poate da. Indicatorul verde al camerei poate apărea câteva secunde în colțul ecranului.
-5. Așezați telefonul pe masă, nu în buzunar și nu pe o pernă, cu aplicația deschisă. Ecranul rămâne aprins. După S3-9 urmează o pauză de 10 minute, numărată pe ecran, ca telefonul să se răcească; rularea continuă singură.
+5. Așezați telefonul pe masă, nu în buzunar și nu pe o pernă, cu aplicația deschisă. Ecranul rămâne aprins. Aplicația numără cele 10 minute fără încărcător de când l-a văzut scos, cel mai devreme de când ați deschis-o. Dacă nu au trecut încă, înainte de S3-9 așteaptă și numără pe ecran: «Înainte de …, telefonul stă 10 minute fără încărcător, ca să nu fie cald: mai sunt …»<!--app-->. După S3-9 urmează o pauză de 10 minute, numărată pe ecran, ca telefonul să se răcească; rularea continuă singură.
 6. **S5.** Telefonul sună și vibrează. Pe ecran scrie «Apăsați butonul Acasă și reveniți după ora … (cel puțin 2 minute).»<!--app-->, cu o oră a ceasului telefonului. Apăsați Acasă. Când ceasul arată ora afișată sau mai târziu, redeschideți «Proba ipcam»<!--android--> (din aplicațiile recente sau de pe pictograma ei). Aplicația măsoară singură cât durează până revine imaginea.
 7. **S6.** Telefonul sună din nou. Apăsați «Continuă»<!--app-->: aplicația trece singură într-o fereastră mică, peste ecranul de start. Nu o atingeți. După 5 minute telefonul sună: atingeți fereastra mică și pictograma de mărire, ca să reveniți în aplicație.
 8. Rularea continuă singură cu S7, S8 și S9, până la «Gata: toate scenariile acestui dispozitiv au rezultate.»<!--app-->

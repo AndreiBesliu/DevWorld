@@ -17,7 +17,11 @@
 //   which. The third interruption of one scenario stops the run.
 // - A scenario that fails (a `failed:` note) is repeated once, then the run
 //   goes on, as the guide says for «eșuat: …».
+// - An S3 starts from a cold phone (MV5): on the phone, the run waits before it
+//   until the app has seen the phone off the charger for COLD_START_MS,
+//   counted down on the screen (charger.ts; ruling B-R5, item 2).
 // - The screen stays on for the whole run (a wake lock), pauses included.
+import type { ChargerState } from './charger';
 import type { DevicePlan } from './deviceplan';
 import type { InterruptReason, ScenarioId, ScenarioResult } from './results';
 import type { Clock } from './scenarios/context';
@@ -29,6 +33,8 @@ export const MAX_INTERRUPTIONS = 3;
 export const MAX_FAILED_RUNS = 2;
 /** How often the run calls the person again while it waits for them. */
 export const CALL_AGAIN_MS = 60_000;
+/** How long the phone stays off the charger before an S3, so that it starts cold (the guide's 10 minutes). */
+export const COLD_START_MS = 10 * 60_000;
 const PAUSE_TICK_MS = 1000;
 
 /** The scenarios that need the person: S5 (Home, then back after 2 min) and S6 (picture-in-picture). */
@@ -49,6 +55,8 @@ export type QueueEvent =
   | { kind: 'retry'; id: ScenarioId }
   /** The cooling pause, with the time left. */
   | { kind: 'pause'; leftMs: number }
+  /** Before S3 `id`: the phone has been off the charger for less than COLD_START_MS; the time left. */
+  | { kind: 'cold'; id: ScenarioId; leftMs: number }
   /** S5 is next: the person is called, and S5 shows its instruction. */
   | { kind: 'attention'; id: ScenarioId }
   /** S6 is next: the person is called and the run waits for «Continuă». */
@@ -87,8 +95,19 @@ export interface QueueEnv {
   alert(): void;
   /** Resolves when the person presses «Continuă» (S6). */
   confirm(): Promise<void>;
-  /** Resolves once the app is not in picture-in-picture (Android); absent elsewhere. */
-  untilPipEnds?(): Promise<void>;
+  /** Android: picture-in-picture, in which S6 ends; absent elsewhere. */
+  pip?: {
+    /** Whether the app is in picture-in-picture now. */
+    active(): boolean;
+    /** Resolves once the app is not in picture-in-picture. */
+    ended(): Promise<void>;
+  };
+  /**
+   * Android: the charger as the app has seen it (charger.ts), read again for
+   * each call; undefined when the shell cannot tell. Absent where the app
+   * cannot read it (the PC), where an S3 does not wait.
+   */
+  charger?(): Promise<ChargerState | undefined>;
   show(event: QueueEvent): void;
 }
 
@@ -146,18 +165,33 @@ function callPerson(env: QueueEnv, untilHidden: boolean): () => void {
   return stop;
 }
 
-/** The cooling pause, counted down on the page every second. */
-function pause(env: QueueEnv, ms: number): Promise<void> {
+/** A wait of `ms`, counted down on the page every second with the event that `event` makes of the time left. */
+function countDown(env: QueueEnv, ms: number, event: (leftMs: number) => QueueEvent): Promise<void> {
   const start = env.clock.now();
   return new Promise((resolve) => {
     const tick = (): void => {
       const leftMs = Math.max(0, ms - Math.round(env.clock.now() - start));
-      env.show({ kind: 'pause', leftMs });
+      env.show(event(leftMs));
       if (leftMs === 0) resolve();
       else env.clock.setTimer(tick, Math.min(PAUSE_TICK_MS, leftMs));
     };
     tick();
   });
+}
+
+/**
+ * Before S3 `id`: waits until the app has seen the phone off the charger for
+ * COLD_START_MS, and reads the charger again after each wait, since the phone
+ * may have been plugged in meanwhile. On the charger, or without a reading,
+ * nothing to wait for: S3 itself refuses the charger and says so.
+ */
+async function coldStart(env: QueueEnv, id: ScenarioId): Promise<void> {
+  if (!env.charger) return;
+  for (;;) {
+    const state = await env.charger();
+    if (state?.kind !== 'off' || state.forMs >= COLD_START_MS) return;
+    await countDown(env, COLD_START_MS - state.forMs, (leftMs) => ({ kind: 'cold', id, leftMs }));
+  }
 }
 
 const failed = (result: ScenarioResult): boolean => result.notes.some((note) => note.startsWith('failed:'));
@@ -166,7 +200,7 @@ const failed = (result: ScenarioResult): boolean => result.notes.some((note) => 
  * Why an interrupted result was interrupted. A result without the reason (written
  * before the field existed) reads as hidden, as results.ts says, at its end.
  */
-const reasonOf = (result: ScenarioResult): InterruptReason => result.interruption ?? { kind: 'hidden', atS: Math.round(result.durationS) };
+export const reasonOf = (result: ScenarioResult): InterruptReason => result.interruption ?? { kind: 'hidden', atS: Math.round(result.durationS) };
 
 /** What the run does: the scenarios that are not complete, and a pause only between two that run. */
 function stepsToRun(env: QueueEnv): { steps: DevicePlan['steps']; skipped: ScenarioId[] } {
@@ -203,7 +237,7 @@ export async function runQueue(env: QueueEnv): Promise<QueueOutcome> {
     let index = 0;
     for (const step of steps) {
       if (step.kind === 'pause') {
-        await pause(env, step.ms);
+        await countDown(env, step.ms, (leftMs) => ({ kind: 'pause', leftMs }));
         continue;
       }
       if (needsCamera && !cameraAsked && step.id !== 'S10') {
@@ -235,6 +269,7 @@ async function runOne(
   let interruptions = 0;
   let failedRuns = 0;
   for (let attempt = 1; ; attempt += 1) {
+    if (id.startsWith('S3-')) await coldStart(env, id);
     await untilVisible(env.doc);
     let stopCalling: () => void = () => undefined;
     if (id === 'S6') {
@@ -269,10 +304,11 @@ async function runOne(
       env.show({ kind: 'retry', id });
       continue;
     }
-    if (id === 'S6' && env.untilPipEnds) {
+    // S6 ended in picture-in-picture: the person brings the app back. Out of it already, nobody is called.
+    if (id === 'S6' && env.pip?.active()) {
       env.show({ kind: 'pip' });
       const stop = callPerson(env, false);
-      await env.untilPipEnds().finally(stop);
+      await env.pip.ended().finally(stop);
     }
     return 'done';
   }

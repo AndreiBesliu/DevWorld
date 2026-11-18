@@ -2,7 +2,7 @@
 // the scenarios each device has completed, which the automatic run skips, and
 // what each device of the guide still lacks, which the page lists under
 // «Rămase pe acest PC:». It reads every release's results, v0.1.0's included.
-import { DEVICE_PLANS, deviceKey, scenariosOf } from './deviceplan';
+import { DEVICE_PLANS, deviceKey, scenariosOf, type DevicePlan } from './deviceplan';
 import { requestHub } from './hubhttp';
 import type { Translate } from './i18n';
 import { SCENARIO_IDS, type ScenarioId } from './results';
@@ -96,11 +96,23 @@ function describeLeft(device: ProgressDevice): string {
 
 /**
  * «Rămase pe acest PC:» with the PC's devices that lack complete results, and
- * the same line for the phone.
+ * the same line for the phone. `own` is the device the page runs on, with the
+ * scenarios that it has completed as its run counts them (completeFor, with
+ * the shell's model): they replace the hub's answer for it, which merges every
+ * model of its platform (another phone's or the emulator's runs).
  */
-export function remainingLines(progress: Progress, t: Translate): string[] {
+export function remainingLines(
+  progress: Progress,
+  t: Translate,
+  own?: { plan: DevicePlan; complete: ReadonlySet<ScenarioId> },
+): string[] {
+  const guide = progress.devices.map((device) =>
+    own !== undefined && device.id === own.plan.id
+      ? { ...device, remaining: scenariosOf(own.plan).filter((id) => !own.complete.has(id)) }
+      : device,
+  );
   return [true, false].map((pc) => {
-    const left = progress.devices.filter((device) => device.pc === pc && device.remaining.length > 0);
+    const left = guide.filter((device) => device.pc === pc && device.remaining.length > 0);
     const devices = left.length === 0 ? t('remainingNone') : left.map(describeLeft).join(', ');
     return t(pc ? 'remainingPc' : 'remainingPhone', { devices });
   });

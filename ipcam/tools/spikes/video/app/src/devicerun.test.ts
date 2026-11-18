@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ChargerState } from './charger';
 import { DEVICE_PLANS, type DevicePlan } from './deviceplan';
 import { askOnce, runQueue, type QueueEnv, type QueueEvent, type QueueOutcome } from './devicerun';
 import { ConnectError } from './hubhttp';
@@ -59,6 +60,10 @@ function harness(
     runMs?: number;
     preflight?: boolean;
     pip?: boolean;
+    /** With `pip`: whether S6 ends in picture-in-picture (true unless false). */
+    pipEntered?: boolean;
+    /** What the app knows of the charger at fake time `now` (Android); absent: it cannot read it. */
+    charger?: (now: number) => ChargerState | undefined;
   } = {},
 ): Harness {
   const doc = new FakeDocument();
@@ -106,13 +111,21 @@ function harness(
         const next = queues.get(id)?.shift() ?? result(id);
         const outcome = typeof next === 'function' ? next(doc) : next;
         if (outcome instanceof Error) throw outcome;
-        if (id === 'S6' && options.pip) pipState.inPip = true;
+        if (id === 'S6' && options.pip && options.pipEntered !== false) pipState.inPip = true;
         return outcome;
       },
       requestCamera: () => {
         log.push('camera');
         return Promise.resolve();
       },
+      ...(options.charger === undefined
+        ? {}
+        : {
+            charger: () => {
+              log.push('charger?');
+              return Promise.resolve(options.charger?.(performance.now()));
+            },
+          }),
       ...(options.preflight === undefined
         ? {}
         : {
@@ -147,9 +160,12 @@ function harness(
       },
       ...(options.pip
         ? {
-            untilPipEnds: () => {
-              log.push('pip?');
-              return pipState.inPip ? new Promise<void>((resolve) => pipState.waiters.push(resolve)) : Promise.resolve();
+            pip: {
+              active: () => pipState.inPip,
+              ended: () => {
+                log.push('pip?');
+                return pipState.inPip ? new Promise<void>((resolve) => pipState.waiters.push(resolve)) : Promise.resolve();
+              },
             },
           }
         : {}),
@@ -455,6 +471,115 @@ describe('the phone', () => {
 
     expect(ran(h)).toEqual(['S6', 'S7']);
     expect(h.log.indexOf('confirmed')).toBeLessThan(h.log.indexOf('S6'));
+  });
+});
+
+describe('the phone after S6', () => {
+  it('attention_s6_notInPip_doesNotCallThePersonAgain', async () => {
+    // S6 ended with the app already out of picture-in-picture: there is
+    // nothing to wait for, so no sound, no vibration and no «S6 s-a terminat».
+    const h = harness('phone', {
+      complete: ['S10', 'S1', 'S2', 'S3-9', 'S3-4', 'S4', 'S5', 'S8', 'S9'],
+      pip: true,
+      pipEntered: false,
+    });
+
+    const running = runQueue(h.env);
+    await vi.advanceTimersByTimeAsync(1000);
+    h.confirm.resolve();
+    await finish(running);
+
+    expect(ran(h)).toEqual(['S6', 'S7']);
+    expect(h.events).not.toContainEqual({ kind: 'pip' });
+    expect(h.log.slice(h.log.indexOf('S6'))).not.toContain('alert');
+  });
+});
+
+describe('the phone off the charger (S3 starts cold)', () => {
+  const offSince = (since: number) => (now: number) => ({ kind: 'off' as const, forMs: now - since });
+  const cold = (h: Harness) => h.events.filter((event) => event.kind === 'cold');
+  // Everything of the phone but S3-9, so that S3-9 is the first scenario that runs.
+  const allButS39: ScenarioId[] = ['S10', 'S1', 'S2', 'S3-4', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'];
+
+  it('cold_s3SoonAfterTheCharger_waitsOnScreenUntilTenMinutesOff', async () => {
+    // The phone came off the charger when the run started: S3-9 waits until it
+    // has been off for 10 minutes, counted down on the screen, so that MV5
+    // (9 tiles, thermal) starts from a cold phone.
+    const t0 = performance.now();
+    const h = harness('phone', { complete: allButS39, charger: offSince(t0) });
+
+    const running = runQueue(h.env);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(ran(h)).toEqual([]);
+    expect(cold(h)[0]).toEqual({ kind: 'cold', id: 'S3-9', leftMs: 600_000 });
+    expect(cold(h).at(-1)).toEqual({ kind: 'cold', id: 'S3-9', leftMs: 595_000 });
+    await finish(running);
+
+    expect(ran(h)).toEqual(['S3-9']);
+    expect((h.starts[0]?.at ?? 0) - t0).toBeGreaterThanOrEqual(600_000);
+    expect(cold(h).at(-1)).toEqual({ kind: 'cold', id: 'S3-9', leftMs: 0 });
+    expect(h.log.slice(0, 3)).toEqual(['wake lock', 'camera', 'charger?']);
+  });
+
+  it('cold_offTheChargerTenMinutesAlready_startsAtOnce', async () => {
+    const t0 = performance.now();
+    const h = harness('phone', { complete: allButS39, charger: offSince(t0 - 11 * 60_000) });
+
+    await finish(runQueue(h.env));
+
+    expect((h.starts[0]?.at ?? 0) - t0).toBeLessThan(1000);
+    expect(cold(h)).toEqual([]);
+  });
+
+  it('cold_pluggedInDuringTheWait_waitsAgain', async () => {
+    // 2 min off at the start; plugged in and out again 6 min 40 s later: the
+    // 10 minutes count again from then.
+    const t0 = performance.now();
+    const h = harness('phone', {
+      complete: allButS39,
+      charger: (now) => (now < t0 + 400_000 ? offSince(t0 - 120_000)(now) : offSince(t0 + 400_000)(now)),
+    });
+
+    await finish(runQueue(h.env));
+
+    expect((h.starts[0]?.at ?? 0) - t0).toBeGreaterThanOrEqual(1_000_000);
+  });
+
+  it('cold_onTheChargerOrUnknown_noWait', async () => {
+    // On the charger, S3 refuses by itself and says so («Scoateți telefonul din
+    // încărcător înainte de S3.»); without a reading there is nothing to count.
+    for (const state of [{ kind: 'on' as const }, undefined]) {
+      const t0 = performance.now();
+      const h = harness('phone', { complete: allButS39, charger: () => state });
+
+      await finish(runQueue(h.env));
+
+      expect((h.starts[0]?.at ?? 0) - t0).toBeLessThan(1000);
+      expect(cold(h)).toEqual([]);
+    }
+  });
+
+  it('cold_s34First_waitsToo', async () => {
+    // S3-9 was done in an earlier session: S3-4 is the first S3, so it waits.
+    const t0 = performance.now();
+    const h = harness('phone', {
+      complete: ['S10', 'S1', 'S2', 'S3-9', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'],
+      charger: offSince(t0),
+    });
+
+    await finish(runQueue(h.env));
+
+    expect(ran(h)).toEqual(['S3-4']);
+    expect((h.starts[0]?.at ?? 0) - t0).toBeGreaterThanOrEqual(600_000);
+  });
+
+  it('cold_pcPlans_haveNoChargerAndNeverWait', async () => {
+    const h = harness('edge');
+
+    await finish(runQueue(h.env));
+
+    expect(cold(h)).toEqual([]);
+    expect(h.log).not.toContain('charger?');
   });
 });
 

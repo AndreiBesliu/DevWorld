@@ -13,6 +13,10 @@ on:
       - 'ipcam/tools/spikes/video/e2e/**'
       # The spike app's band tests read the shared test vectors.
       - 'ipcam/tools/spikes/video/band/vectors.json'
+      # The spike app imports the automatic run's device table (deviceplan.ts), and its
+      # upgrade test reads the results that v0.1.0 wrote (results.test.ts).
+      - 'ipcam/tools/spikes/video/deviceplan/**'
+      - 'ipcam/tools/spikes/video/testdata/**'
       # The Android metrics plugin's TypeScript is typechecked and linted here.
       - 'ipcam/tools/spikes/video/android-metrics/**'
       # The native line counter; its test is in ipcam/apps/mobile/test.
@@ -31,6 +35,10 @@ on:
       - 'ipcam/tools/spikes/video/e2e/**'
       # The spike app's band tests read the shared test vectors.
       - 'ipcam/tools/spikes/video/band/vectors.json'
+      # The spike app imports the automatic run's device table (deviceplan.ts), and its
+      # upgrade test reads the results that v0.1.0 wrote (results.test.ts).
+      - 'ipcam/tools/spikes/video/deviceplan/**'
+      - 'ipcam/tools/spikes/video/testdata/**'
       # The Android metrics plugin's TypeScript is typechecked and linted here.
       - 'ipcam/tools/spikes/video/android-metrics/**'
       # The native line counter; its test is in ipcam/apps/mobile/test.
