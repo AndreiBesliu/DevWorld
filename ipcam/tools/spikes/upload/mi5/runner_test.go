@@ -28,16 +28,21 @@ type fakeRun struct {
 	// it returns the events to send.
 	script func(step string, at time.Time) []map[string]any
 	// verify answers the block's checks; reads answers readopen.
-	verify    func(n int) (ReachResult, error)
-	checks    int
-	readsOK   bool
-	uploads   string // diag uploads' lines
-	killed    time.Time
-	unblocked time.Time
-	lines     []string // the owner's lines
+	verify  func(n int) (ReachResult, error)
+	checks  int
+	readsOK bool
+	uploads string // diag uploads' lines
+	// uploadsErr is diag uploads' exit, beside its lines (a failed
+	// listing exits 1 after printing every destination's line).
+	uploadsErr error
+	killed     time.Time
+	unblocked  time.Time
+	lines      []string // the owner's lines
 	// readAt, when set, answers each readopen at the clock's time: "" for
 	// a read, else its error.
 	readAt func(now time.Time) string
+	// oneDrive runs with A5 passed: dst-od takes cam01.
+	oneDrive bool
 }
 
 func newFakeRun(t *testing.T, start time.Time) *fakeRun {
@@ -115,7 +120,7 @@ func (f *fakeRun) Diag(_ context.Context, args []string) ([]json.RawMessage, err
 				out = append(out, json.RawMessage(l))
 			}
 		}
-		return out, nil
+		return out, f.uploadsErr
 	}
 	return nil, nil
 }
@@ -135,12 +140,7 @@ func (f *fakeRun) ScheduleCleanup(_ context.Context, at time.Time) error {
 
 // labRun runs Run with f, the lab's 15-min block and 30-s segments.
 func labRun(t *testing.T, f *fakeRun, start time.Time) (*results.Mi5Data, error) {
-	cfg := Mi5Config{Cameras: 4, SegmentSecs: 30, Drive: DriveTest, BlockFor: 15 * time.Minute, ReadOpenCalls: 20, Lab: true,
-		ProviderHosts: []string{LabHost}, LanProbe: "10.1.0.4:9"}
-	opts := RunOptions{Host: f, Firewall: f, StartMs: start.UnixMilli(), Dests: Destinations(cfg), Timing: LabTiming(cfg.BlockFor),
-		Events: f.events, Clock: f.clock, Sleep: f.sleep, Resolve: func(context.Context, string) error { return nil },
-		Verify: func(context.Context) (ReachResult, error) { f.checks++; return f.verify(f.checks) }}
-	return Run(t.Context(), cfg, opts)
+	return labRunCtx(t.Context(), t, f, start)
 }
 
 // labScript is a lab run's hub: placements queued from the main start,
@@ -362,7 +362,7 @@ func TestMI5_TornSegmentEnqueuedAndUploaded(t *testing.T) {
 // labRunCtx is labRun with ctx.
 func labRunCtx(ctx context.Context, _ *testing.T, f *fakeRun, start time.Time) (*results.Mi5Data, error) {
 	cfg := Mi5Config{Cameras: 4, SegmentSecs: 30, Drive: DriveTest, BlockFor: 15 * time.Minute, ReadOpenCalls: 20, Lab: true,
-		ProviderHosts: []string{LabHost}, LanProbe: "10.1.0.4:9"}
+		ProviderHosts: []string{LabHost}, LanProbe: "10.1.0.4:9", OneDrive: f.oneDrive}
 	opts := RunOptions{Host: f, Firewall: f, StartMs: start.UnixMilli(), Dests: Destinations(cfg), Timing: LabTiming(cfg.BlockFor),
 		Events: f.events, Clock: f.clock, Sleep: f.sleep, Resolve: func(context.Context, string) error { return nil },
 		Verify: func(context.Context) (ReachResult, error) { f.checks++; return f.verify(f.checks) }}
@@ -549,5 +549,116 @@ func TestMI5_KillTearsASegmentWithParts(t *testing.T) {
 	}
 	if r := data.Restart; r == nil || r.LastConfirmedOffset != 1<<20 || !r.TornSegmentUploaded {
 		t.Errorf("restart %+v", data.Restart)
+	}
+}
+
+// odScript is labScript with OneDrive (A5 passed): dst-od's cam01
+// placements, of which od-2 the hub verified twice (a duplicate upload),
+// queued and verified with the drain's verifications.
+func odScript(f *fakeRun, start time.Time) func(string, time.Time) []map[string]any {
+	base := labScript(f, start, 1<<20)
+	return func(step string, at time.Time) []map[string]any {
+		evs := base(step, at)
+		for _, e := range evs {
+			if e["type"] != "upload_verified" || e["placementId"] != "p-1" {
+				continue
+			}
+			queued := func(id string, segAt time.Duration) map[string]any {
+				return map[string]any{"type": "upload_queued", "placementId": id, "dest": "dst-od", "cam": "cam01", "profile": "sub",
+					"startMs": start.Add(segAt).UnixMilli(), "bytes": int64(1 << 20)}
+			}
+			verified := func(id string) map[string]any {
+				return map[string]any{"type": "upload_verified", "placementId": id, "dest": "dst-od", "bytes": int64(1 << 20),
+					"calls": map[string]float64{"put": 1}}
+			}
+			return append(evs, queued("od-1", time.Minute), queued("od-2", 2*time.Minute), verified("od-1"), verified("od-2"), verified("od-2"))
+		}
+		return evs
+	}
+}
+
+// TestMI5_OneDriveAuditFromEventsWhenListUnsupported (C2-R15 (c)): with
+// A5 passed, `diag uploads --list-remote` lists dst-1 but cannot list
+// dst-od (OneDrive's List is unsupported, C2-R12): it prints both lines,
+// dst-od's three checks null, and exits 1. The run goes on to its
+// envelope: dst-1's checks come from the listing; dst-od's from the
+// hub's events and the catalog, said in AuditFrom: missing are the
+// segments the catalog verified no copy of (the deleted one is already
+// out of segments), and a placement the hub verified twice is a
+// duplicate.
+func TestMI5_OneDriveAuditFromEventsWhenListUnsupported(t *testing.T) {
+	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	f := newFakeRun(t, start)
+	f.oneDrive = true
+	f.uploads = `{"schema":"ipcam.diag.uploads/1","dest":"dst-1","segments":3,"verified":3,"missing":0,"duplicates":0,"hashMismatches":0}
+{"schema":"ipcam.diag.uploads/1","dest":"dst-od","segments":3,"verified":2,"deleted":1,"missing":null,"duplicates":null,"hashMismatches":null}`
+	f.uploadsErr = &hubproc.DiagError{Code: 1, Stderr: "ipcam-hub: diag uploads: dst-od: onedrive: list: unsupported"}
+	f.script = odScript(f, start)
+	data, err := labRun(t, f, start)
+	if err != nil {
+		t.Fatalf("a OneDrive run whose listing is unsupported: %v", err)
+	}
+	byID := map[string]results.Mi5Dest{}
+	for _, d := range data.Dests {
+		byID[d.Dest] = d
+	}
+	if d := byID["dst-1"]; d.AuditFrom != AuditListRemote || d.Verified != 3 || d.Missing != 0 || d.Duplicates != 0 {
+		t.Errorf("dst-1 %+v; want its checks from the listing", d)
+	}
+	od := byID["dst-od"]
+	if od.AuditFrom != AuditEvents || od.Deferred != "" || od.Segments != 3 || od.Verified != 2 {
+		t.Fatalf("dst-od %+v; want its checks from the events and the catalog", od)
+	}
+	if od.Missing != 1 || od.Duplicates != 1 || od.HashMismatches != 0 {
+		t.Errorf("dst-od missing %d, duplicates %d, mismatches %d; want 1 (3 segments, 2 verified, the deleted one already out), 1 (od-2 verified twice), 0",
+			od.Missing, od.Duplicates, od.HashMismatches)
+	}
+}
+
+// TestMI5_AuditRefusesAFailedListing: a failed exit of diag uploads is
+// accepted only for a destination whose List is unsupported: a Drive
+// destination whose listing failed (its checks null), or a destination
+// with no line, ends the run with the diag's error.
+func TestMI5_AuditRefusesAFailedListing(t *testing.T) {
+	diagErr := &hubproc.DiagError{Code: 1, Stderr: "ipcam-hub: diag uploads: dst-1: list failed"}
+	for name, uploads := range map[string]string{
+		"drive-null": `{"schema":"ipcam.diag.uploads/1","dest":"dst-1","segments":3,"verified":3,"missing":null,"duplicates":null,"hashMismatches":null}
+{"schema":"ipcam.diag.uploads/1","dest":"dst-od","segments":2,"verified":2,"missing":null,"duplicates":null,"hashMismatches":null}`,
+		"no-line": `{"schema":"ipcam.diag.uploads/1","dest":"dst-od","segments":2,"verified":2,"missing":null,"duplicates":null,"hashMismatches":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+			f := newFakeRun(t, start)
+			f.oneDrive = true
+			f.uploads, f.uploadsErr = uploads, diagErr
+			f.script = odScript(f, start)
+			if _, err := labRun(t, f, start); !errors.Is(err, diagErr) {
+				t.Errorf("the audit's error %v; want the diag's", err)
+			}
+		})
+	}
+}
+
+// TestMI5_OneDriveHashMismatchFromEvents (C2-R15 (c)): on OneDrive the
+// hub's own verification is the hash check: a placement whose last
+// upload ended in hash_mismatch counts as a mismatch, not as missing; one
+// verified after a mismatch counts as neither.
+func TestMI5_OneDriveHashMismatchFromEvents(t *testing.T) {
+	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	od := DestConfig{ID: "dst-od", Kind: KindOneDrive, Account: "acct-1", Cameras: []string{"cam01"}}
+	tl := newTally(start.UnixMilli(), []DestConfig{od})
+	at := start.Add(time.Hour)
+	for i, id := range []string{"od-1", "od-2", "od-3"} {
+		observeAt(tl, "upload_queued", at, map[string]any{"placementId": id, "dest": "dst-od", "cam": "cam01", "profile": "sub",
+			"startMs": start.Add(time.Duration(i+1) * time.Minute).UnixMilli(), "bytes": 1})
+	}
+	observeAt(tl, "upload_verified", at, map[string]any{"placementId": "od-1", "dest": "dst-od", "bytes": 1})
+	observeAt(tl, "upload_failed", at, map[string]any{"placementId": "od-2", "dest": "dst-od", "reason": "hash_mismatch"})
+	observeAt(tl, "upload_verified", at.Add(time.Second), map[string]any{"placementId": "od-2", "dest": "dst-od", "bytes": 1})
+	observeAt(tl, "upload_failed", at, map[string]any{"placementId": "od-3", "dest": "dst-od", "reason": "hash_mismatch"})
+	null := uploadsLine{Dest: "dst-od", Segments: 3, Verified: 2}
+	got := tl.dest(od, null, nil)
+	if got.HashMismatches != 1 || got.Missing != 0 || got.Duplicates != 0 || got.AuditFrom != AuditEvents {
+		t.Errorf("dst-od %+v; want 1 mismatch (od-3), 0 missing, 0 duplicates", got)
 	}
 }

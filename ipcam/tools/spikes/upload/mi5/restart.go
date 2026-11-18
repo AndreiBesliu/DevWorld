@@ -65,6 +65,10 @@ type placement struct {
 	queuedAtMs      int64
 	verifiedAtMs    int64
 	queuedAfterKill bool
+	// verifications counts its upload_verified events; mismatched is
+	// whether its last upload ended in hash_mismatch.
+	verifications int
+	mismatched    bool
 }
 
 // tally is what the hub's events show of a run (Task 7b's events).
@@ -175,10 +179,15 @@ func (t *tally) observe(ev hubproc.Event) {
 			}
 		}
 		p.verifiedAtMs, p.bytes = at, max(p.bytes, f.Bytes)
+		p.verifications++
+		p.mismatched = false
 		if t.inBlock(at) {
 			t.verifiedInBlock[f.Dest]++
 		}
 	case "upload_failed":
+		if p, ours := t.placements[f.PlacementID]; ours && f.Reason == "hash_mismatch" {
+			p.mismatched = true
+		}
 		if !t.inBlock(at) {
 			return
 		}
@@ -293,6 +302,35 @@ func (t *tally) segmentsDuringBlock(d DestConfig) int {
 			if s >= t.blockStart && s < t.unblockAt && (until == 0 || s < until) {
 				n++
 			}
+		}
+	}
+	return n
+}
+
+// duplicates are dest's uploads verified beyond the first of each of the
+// run's segments: a placement that the hub verified twice, or a second
+// placement of one segment (C2-R15 (c), where no listing counts them).
+func (t *tally) duplicates(dest string) int {
+	bySegment := map[string]int{}
+	for _, p := range t.placements {
+		if p.dest == dest {
+			bySegment[segmentKey(p.cam, p.startMs)] += p.verifications
+		}
+	}
+	n := 0
+	for _, v := range bySegment {
+		n += max(v-1, 0)
+	}
+	return n
+}
+
+// mismatched are dest's placements whose last upload ended in
+// hash_mismatch: the hub's own hash and size check failed (C2-R15 (c)).
+func (t *tally) mismatched(dest string) int {
+	n := 0
+	for _, p := range t.placements {
+		if p.dest == dest && p.mismatched {
+			n++
 		}
 	}
 	return n
