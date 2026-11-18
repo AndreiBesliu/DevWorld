@@ -1,0 +1,19 @@
+{
+  // The shipped sources: the spike app that Vite bundles into dist/, which
+  // spikehub embeds. Nothing here emits (the base's `noEmit` stays) and the
+  // base's DOM lib stays, because the app drives video elements, canvases and
+  // a PeerConnection.
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    // TypeScript 6 loads no @types package unless it is listed, and none is:
+    // these sources run in a browser, so `process` or `Buffer` must not
+    // typecheck in them. The tests get Node's types from tsconfig.test.json.
+    "types": [],
+    // The automatic run's table, tools/spikes/video/deviceplan/deviceplan.json,
+    // which spikehub reads too (deviceplan.ts).
+    "resolveJsonModule": true
+  },
+  "include": ["src"],
+  // The tests and their doubles import vitest, which pulls in Node's types.
+  "exclude": ["src/**/*.test.ts", "src/**/fakes.ts"]
+}

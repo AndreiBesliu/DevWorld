@@ -1,0 +1,33 @@
+// Top-level build file. Gradle, the Android Gradle plugin and Kotlin are the
+// newest releases at least 14 days old (plan Global Constraints).
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:9.4.0'
+        // AGP 9 compiles Kotlin itself (built-in Kotlin); this sets its Kotlin version.
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.20'
+    }
+}
+
+apply from: "variables.gradle"
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+// CI reads failing tests from the log (ipcam-mobile.yml): print their whole stack trace.
+subprojects {
+    tasks.withType(Test).configureEach {
+        testLogging {
+            events "failed"
+            exceptionFormat "full"
+        }
+    }
+}

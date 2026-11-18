@@ -1,0 +1,12 @@
+{
+  // The Capacitor config, the tests and the CI helpers, which all run under
+  // Node. The plugins under plugins/ are packages with their own tsconfig.json.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    // package.json says "type": "module": a file without imports, such as
+    // ci/read-page.ts with its top-level await, is a module too.
+    "moduleDetection": "force"
+  },
+  "include": ["capacitor.config.ts", "test", "ci"]
+}

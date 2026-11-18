@@ -1,0 +1,8 @@
+# Licenses allowed for dependencies that can end up in a shipped binary, as
+# go-licenses names them (SPDX identifiers). One per line; "#" starts a comment.
+MIT
+BSD-2-Clause
+BSD-3-Clause
+Apache-2.0
+ISC
+MPL-2.0

@@ -1,0 +1,7 @@
+# Media written by cmd/mediagen; media/README.md is the only tracked file there.
+/media/*
+!/media/README.md
+
+# The release build copies the spike app's dist/ into cmd/spikehub/web; .gitkeep is the only tracked file there.
+/cmd/spikehub/web/*
+!/cmd/spikehub/web/.gitkeep

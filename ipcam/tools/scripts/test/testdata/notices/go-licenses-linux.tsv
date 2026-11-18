@@ -1,0 +1,2 @@
+golang.org/x/sys	v0.48.0	BSD-3-Clause	@DATA@/modules/xsys/LICENSE
+github.com/pion/webrtc/v4	v4.1.6	MIT	@DATA@/modules/webrtc/LICENSE

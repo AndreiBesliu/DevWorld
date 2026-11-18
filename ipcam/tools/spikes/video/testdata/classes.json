@@ -1,0 +1,94 @@
+{
+  "chrome-s1-complete.json": {
+    "key": "chrome",
+    "class": "usable"
+  },
+  "chrome-s1-hidden.json": {
+    "key": "chrome",
+    "class": "interrupted"
+  },
+  "chrome-s1-interrupted-v010.json": {
+    "key": "chrome",
+    "class": "interrupted"
+  },
+  "chrome-s2-failed.json": {
+    "key": "chrome",
+    "class": "failed"
+  },
+  "chrome-s9-session-lost.json": {
+    "key": "chrome",
+    "class": "interrupted"
+  },
+  "chrome-s10-complete.json": {
+    "key": "chrome",
+    "class": "usable"
+  },
+  "chrome-s4-16-tiles.json": {
+    "key": "chrome",
+    "class": "usable"
+  },
+  "chrome-s4-9-tiles.json": {
+    "key": "chrome",
+    "class": "informative"
+  },
+  "edge-s3-9-on-charger.json": {
+    "key": "edge",
+    "class": "on-charger"
+  },
+  "android-s3-9-battery.json": {
+    "key": "android",
+    "class": "usable"
+  },
+  "android-s3-9-on-charger.json": {
+    "key": "android",
+    "class": "on-charger"
+  },
+  "android-s3-4-main-on-charger.json": {
+    "key": "android",
+    "class": "on-charger"
+  },
+  "android-s3-4-interrupted-on-charger.json": {
+    "key": "android",
+    "class": "interrupted"
+  },
+  "android-s3-9-failed-on-charger.json": {
+    "key": "android",
+    "class": "failed"
+  },
+  "android-s4-no-tiles.json": {
+    "key": "android",
+    "class": "usable"
+  },
+  "android-s4-battery.json": {
+    "key": "android",
+    "class": "usable"
+  },
+  "android-s5-early-return.json": {
+    "key": "android",
+    "class": "interrupted"
+  },
+  "windows-tauri-s4-no-tiles.json": {
+    "key": "windows-tauri",
+    "class": "informative"
+  },
+  "windows-tauri-s4-16-tiles.json": {
+    "key": "windows-tauri",
+    "class": "usable"
+  },
+  "chrome-linux-s7.json": {
+    "key": "chrome-linux",
+    "class": "usable"
+  },
+  "chrome-macos-s10.json": {
+    "key": "chrome-macos",
+    "class": "usable"
+  },
+  "edge-android-s1.json": {
+    "key": "edge-android",
+    "class": "usable"
+  },
+  "firefox-no-os-s9.json": {
+    "key": "firefox",
+    "class": "usable"
+  }
+}

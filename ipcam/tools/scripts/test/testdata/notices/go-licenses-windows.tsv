@@ -1,0 +1,4 @@
+github.com/pion/webrtc/v4	v4.1.6	MIT	@DATA@/modules/webrtc/LICENSE
+golang.org/x/sys	v0.48.0	BSD-3-Clause	@DATA@/modules/xsys/LICENSE
+example.com/winonly	v1.0.0	Apache-2.0	@DATA@/modules/winonly/COPYING
+example.com/winonly	v1.0.0	MIT	@DATA@/modules/winonly/COPYING

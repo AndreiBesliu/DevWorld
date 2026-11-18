@@ -1,0 +1,11 @@
+{
+  // The sources together with their tests, which use node:* modules and
+  // import.meta.dirname (the APP-22 lint fixture test, the NOTICE test). Only
+  // this program sees Node's types; tsconfig.json checks the shipped sources
+  // without them. `typecheck` runs both.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "exclude": []
+}

@@ -1,0 +1,291 @@
+import { defaultHlsFactory, hlsCodec, startHls, type HlsLike } from './hls';
+import { countFrames, isPlaybackActive, watchFirstFrame, type FrameCount } from './stats';
+import { defaultSetTimer, startWatchdog, type FailureReason, type SetTimer, type Watchdog } from './timers';
+import { attachTrack } from './webrtc';
+
+export type Transport = 'webrtc' | 'mse' | 'hls' | 'snapshot';
+
+export interface PlayerSource {
+  kind: 'live' | 'recording';
+  cameraId: string;
+  profile: 'main' | 'sub';
+  /**
+   * Recordings: the wall-clock time of media position 0, the reference for
+   * `seek`. Without it the reference is the Unix epoch, so `seek(new Date(ms))`
+   * is an offset of `ms` milliseconds into the recording.
+   */
+  from?: Date;
+  /** Recording: HLS playlist URL (spike); production uses a ReadRange loader (CTR-12). */
+  url?: string;
+}
+
+/** Provided by @ipcam/core; the player does not know whether the hub is on the LAN or in the cloud. */
+export interface MediaLink {
+  webrtcTrack(slot: number): Promise<MediaStreamTrack>;
+  byteStream(call: 'mse' | 'segment', req: Uint8Array): Promise<ReadableStream<Uint8Array>>;
+}
+
+export interface Player {
+  /**
+   * Binds the player to an element and a link. The player does not change the
+   * element's settings: set `muted` and `playsInline` before `play`, because
+   * browsers only autoplay muted video without a user gesture. Attaching
+   * while something plays stops it.
+   */
+  attach(video: HTMLVideoElement, link: MediaLink): void;
+  /** Resolves once playback is set up, not at the first frame: that is the `first-frame` event. */
+  play(src: PlayerSource, prefer?: Transport[]): Promise<void>;
+  /** Recordings only. Resolves once the seek is requested; the element's `seeked` event says when it is done. */
+  seek(t: Date): Promise<void>;
+  stop(): void;
+  readonly stats: { transport: Transport; codec: string; framesDecoded: number; latencyMs?: number; hardware?: boolean };
+  /**
+   * Returns the function that removes the callback.
+   *
+   * `first-frame` fires once per play, at the first presented frame of that
+   * play. Where the browser says when a frame arrived (WebRTC in Chromium), a
+   * frame that arrived before `play` was called, an earlier play's frame of
+   * the same track, does not count.
+   *
+   * `error` carries `{ reason: 'NO_FIRST_FRAME' | 'STALLED', cause?: string }`.
+   * `cause` is the last reason the player recorded for that play: the `name` of
+   * a rejected `play()` of the element (`NotAllowedError` when autoplay is
+   * blocked, for example) or `hls:<details>` for a fatal hls.js error
+   * (`hls:manifestLoadError`, for example).
+   *
+   * A callback that throws neither stops the other callbacks nor affects the
+   * player: its exception is rethrown asynchronously (`reportError`, else a
+   * microtask), the same for every event.
+   */
+  on(e: 'first-frame' | 'transport-changed' | 'error', cb: (d: unknown) => void): () => void;
+}
+
+export interface PlayerOptions {
+  /**
+   * Milliseconds on a monotonic clock. Default: `performance.now`. `first-frame`
+   * compares the start of a play on it with the `receiveTime` of
+   * requestVideoFrameCallback, which is on the performance clock.
+   */
+  now?: () => number;
+  /** Default: `setTimeout`. */
+  setTimer?: SetTimer;
+  /** The PeerConnection slot that live video is read from. Default: 0. */
+  slot?: number;
+  /** Default: hls.js with `lowLatencyMode: false`. */
+  hlsFactory?: () => HlsLike;
+}
+
+export type PlayerErrorCode = 'UNSUPPORTED_TRANSPORT' | 'NOT_ATTACHED' | 'MISSING_URL' | 'NOT_A_RECORDING';
+
+/** Why a call was refused. The message is the code. */
+export class PlayerError extends Error {
+  readonly code: PlayerErrorCode;
+
+  constructor(code: PlayerErrorCode) {
+    super(code);
+    this.name = 'PlayerError';
+    this.code = code;
+  }
+}
+
+type PlayerEvent = Parameters<Player['on']>[0];
+
+/** The payload of the `error` event. `cause` is left out when nothing was recorded. */
+function failure(reason: FailureReason, cause: string | undefined): { reason: FailureReason; cause?: string } {
+  return cause === undefined ? { reason } : { reason, cause };
+}
+
+/** The `name` of a rejection of the element's `play()`, e.g. `NotAllowedError`. */
+function causeOf(rejection: unknown): string {
+  if (typeof rejection === 'object' && rejection !== null && 'name' in rejection && typeof rejection.name === 'string') {
+    return rejection.name;
+  }
+  return 'unknown';
+}
+
+/** Raises an exception outside the current call stack, where it can neither skip a listener nor break the player. */
+function rethrowAsync(error: unknown): void {
+  if (typeof reportError === 'function') {
+    reportError(error);
+  } else {
+    queueMicrotask(() => {
+      throw error;
+    });
+  }
+}
+
+/** What a call to `play` will do, once its arguments have been checked. */
+type Plan =
+  | { readonly transport: 'webrtc' }
+  | { readonly transport: 'hls'; readonly url: string; readonly origin: Date };
+
+/**
+ * The player has one transport per kind of content for now: WebRTC for live and
+ * HLS for recordings. MSE and snapshot come later, so a `prefer` list without
+ * the one that fits is refused.
+ */
+function planFor(src: PlayerSource, prefer: Transport[] | undefined): Plan {
+  const transport = src.kind === 'live' ? 'webrtc' : 'hls';
+  if (prefer && !prefer.includes(transport)) throw new PlayerError('UNSUPPORTED_TRANSPORT');
+  if (transport === 'webrtc') return { transport };
+  if (!src.url) throw new PlayerError('MISSING_URL');
+  return { transport, url: src.url, origin: src.from ?? new Date(0) };
+}
+
+/** One call to `play`, from its start until `stop` or the next `play`. */
+interface Run {
+  readonly transport: Transport;
+  readonly startedAt: number;
+  readonly watchdog: Watchdog;
+  /** Presented frames; the stall watchdog and `stats.framesDecoded` read it. */
+  readonly frames: FrameCount;
+  /** The last reason a start or the playback went wrong, for the `cause` of an `error`. */
+  cause?: string;
+  /** Recordings: the instance and the reference time of `seek`. */
+  recording?: { readonly hls: HlsLike; readonly origin: Date };
+  stopFirstFrame?: () => void;
+  detach?: () => void;
+}
+
+export function createPlayer(opts: PlayerOptions = {}): Player {
+  const now = opts.now ?? (() => performance.now());
+  const setTimer = opts.setTimer ?? defaultSetTimer;
+  const slot = opts.slot ?? 0;
+  const hlsFactory = opts.hlsFactory ?? defaultHlsFactory;
+
+  let video: HTMLVideoElement | undefined;
+  let link: MediaLink | undefined;
+  let run: Run | undefined;
+  /** The transport of the latest play(); `transport-changed` fires when a play uses another one. */
+  let lastTransport: Transport | undefined;
+
+  const listeners: Record<PlayerEvent, Set<(data: unknown) => void>> = {
+    'first-frame': new Set(),
+    'transport-changed': new Set(),
+    error: new Set(),
+  };
+
+  const emit = (event: PlayerEvent, data: unknown): void => {
+    const registered = listeners[event];
+    // A snapshot, so that a callback may unsubscribe itself or another one.
+    for (const listener of [...registered]) {
+      if (!registered.has(listener)) continue;
+      try {
+        listener(data);
+      } catch (error) {
+        rethrowAsync(error);
+      }
+    }
+  };
+
+  const endRun = (): void => {
+    const ending = run;
+    run = undefined;
+    ending?.watchdog.cancel();
+    ending?.frames.stop();
+    ending?.stopFirstFrame?.();
+    ending?.detach?.();
+  };
+
+  const onFirstFrame = (frame: Run): void => {
+    if (run !== frame) return;
+    frame.watchdog.firstFrame();
+    emit('first-frame', { transport: frame.transport, elapsedMs: now() - frame.startedAt });
+  };
+
+  const play = async (src: PlayerSource, prefer?: Transport[]): Promise<void> => {
+    if (!video || !link) throw new PlayerError('NOT_ATTACHED');
+    const element = video;
+    const mediaLink = link;
+    const plan = planFor(src, prefer);
+
+    endRun();
+    // Counting starts before the transport does, so a first-frame listener already sees its frame.
+    const frames = countFrames(element);
+    // The deadline runs from here, so a track request that never answers is reported too.
+    const current: Run = {
+      transport: plan.transport,
+      startedAt: now(),
+      frames,
+      watchdog: startWatchdog({
+        setTimer,
+        now,
+        framesDecoded: () => frames.count(),
+        playbackActive: () => isPlaybackActive(element),
+        onFailure: (reason) => {
+          if (run === current) emit('error', failure(reason, current.cause));
+        },
+      }),
+    };
+    run = current;
+
+    try {
+      if (plan.transport === 'webrtc') {
+        const track = await mediaLink.webrtcTrack(slot);
+        if (run !== current) return; // stopped or replaced while waiting for the track
+        current.detach = attachTrack(element, track);
+      } else {
+        const hls = hlsFactory();
+        current.recording = { hls, origin: plan.origin };
+        current.detach = () => {
+          hls.destroy();
+        };
+        startHls(hls, element, plan.url, (details) => {
+          current.cause = `hls:${details}`;
+        });
+      }
+      // The transport is announced once it runs: a failed set-up announces nothing, so a retry still does.
+      if (plan.transport !== lastTransport) {
+        lastTransport = plan.transport;
+        emit('transport-changed', { transport: plan.transport });
+        if (run !== current) return; // the callback stopped or restarted the player
+      }
+      current.stopFirstFrame = watchFirstFrame(element, current.startedAt, () => {
+        onFirstFrame(current);
+      });
+      // A refused or interrupted play() raises nothing by itself: without a frame the deadline reports it, with this cause.
+      element.play().catch((rejection: unknown) => {
+        current.cause = causeOf(rejection);
+      });
+    } catch (error) {
+      if (run === current) endRun();
+      throw error;
+    }
+  };
+
+  const seek = (t: Date): Promise<void> => {
+    const recording = run?.recording;
+    if (!recording) return Promise.reject(new PlayerError('NOT_A_RECORDING'));
+    const element = recording.hls.media;
+    if (!element) return Promise.reject(new PlayerError('NOT_ATTACHED'));
+    element.currentTime = Math.max(0, (t.getTime() - recording.origin.getTime()) / 1000);
+    return Promise.resolve();
+  };
+
+  return {
+    attach(newVideo, newLink) {
+      endRun();
+      video = newVideo;
+      link = newLink;
+    },
+    play,
+    seek,
+    stop: endRun,
+    get stats() {
+      return {
+        transport: lastTransport ?? 'webrtc',
+        codec: run?.recording ? hlsCodec(run.recording.hls) : 'unknown',
+        framesDecoded: run ? run.frames.count() : 0,
+      };
+    },
+    on(event, callback) {
+      const listener = (data: unknown): void => {
+        callback(data);
+      };
+      listeners[event].add(listener);
+      return () => {
+        listeners[event].delete(listener);
+      };
+    },
+  };
+}

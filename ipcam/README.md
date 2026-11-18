@@ -14,3 +14,4 @@ Aplicație comercială pentru camere IP. Un utilizator își leagă mai multe ca
 - [`docs/superpowers/specs/`](docs/superpowers/specs/): specificațiile de design
 - [`docs/research/`](docs/research/): cercetarea tehnică din 2026-10-17 (sinteză, verificarea afirmațiilor, comparația stack-urilor client)
 - `docs/superpowers/plans/`: planurile de implementare (urmează)
+- [`docs/spike-video.md`](docs/spike-video.md): ghidul probei video din Faza 0 (b), pas cu pas, pentru PC și telefon

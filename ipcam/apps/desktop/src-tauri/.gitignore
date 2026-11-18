@@ -1,0 +1,4 @@
+# Cargo's build output.
+/target/
+# Written by tauri-build on every build (the ACL schemas of the capabilities).
+/gen/

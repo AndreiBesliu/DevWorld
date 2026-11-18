@@ -1,0 +1,2 @@
+// Texts that hold the two short answers only inside longer words, for check-guide-labels.test.sh.
+export const hint = 'Dacă nu merge, verificați Numele rețelei.';

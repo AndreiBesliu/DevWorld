@@ -1,0 +1,12 @@
+packages:
+  - apps/packages/*
+  - apps/mobile
+  - apps/mobile/plugins/*
+  - apps/desktop
+  - tools/spikes/video/app
+  # Playwright end-to-end tests (R4); not a Vitest project (vitest.config.ts).
+  - tools/spikes/video/e2e
+  - tools/spikes/video/android-metrics
+
+# Refuse versions published less than 7 days ago (minutes; spec section 11.10).
+minimumReleaseAge: 10080

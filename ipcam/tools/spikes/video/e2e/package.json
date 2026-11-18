@@ -1,0 +1,19 @@
+{
+  "name": "spike-video-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Phase 0 (b) video spike: Playwright end-to-end tests of spikehub and the spike app in Chrome and Firefox (SPIKE-ONLY, never shipped).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "26.6.4",
+    "typescript": "6.0.3"
+  }
+}
