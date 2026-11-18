@@ -17,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1459,5 +1460,65 @@ func TestDrive_AbortCancelsAnIncompleteSession(t *testing.T) {
 	}
 	if files := e.objects(false); len(files) != 0 {
 		t.Errorf("files at the fake %s, want none", describe(files))
+	}
+}
+
+// TestDrive_StoredFoldersGoneTwoDeep_Converges (P35; MI5's cut runs): a
+// crash, or a cut WAN, between files.generateIds and files.create leaves
+// a folder's ID stored and the folder missing at Drive; two such levels
+// (a camera folder and its day under it, as a cut run's first upload into
+// a new chain leaves them) made every later upload of that chain fail with
+// ErrRateLimited forever: each attempt spent the second's two create slots
+// bottom-up, on the session's create (404) and the day's (404), and the
+// bucket denied the camera folder's, which alone would have let the rest
+// succeed. The device test of a run after a cut run, and of a hub crash,
+// waited out their drains on it. Folders that a create found gone are
+// made again top-down at the next attempt, so a chain gone n levels deep
+// converges within n + 1 attempts, and two uploads at each attempt's
+// instant, as the outbox's two workers wake together, converge too.
+func TestDrive_StoredFoldersGoneTwoDeep_Converges(t *testing.T) {
+	for _, workers := range []int{1, 2} {
+		t.Run(fmt.Sprintf("%d-uploads", workers), func(t *testing.T) {
+			e := newEnv(t)
+			e.clock.SetStep(time.Second)
+			d := e.drive()
+			uploadAll(t, d, "hub/c1/2026-10-17/a.mp4", randomBytes(1000, 1))
+			// The cut chain: c2 and its day stored, never created.
+			e.folders.put("dst-1", "ipcam/hub/c2", e.generateID())
+			e.folders.put("dst-1", "ipcam/hub/c2/2026-10-17", e.generateID())
+			e.clock.SetStep(0) // each attempt's calls in one second, as the outbox's
+			done := make([]bool, workers)
+			for attempt := 1; ; attempt++ {
+				e.clock.Advance(time.Second)
+				for w := range workers {
+					if done[w] {
+						continue
+					}
+					_, err := d.BeginUpload(t.Context(), storage.ObjectKey(fmt.Sprintf("hub/c2/2026-10-17/%d.mp4", w)), 10, storage.Meta{})
+					var rl storage.ErrRateLimited
+					switch {
+					case err == nil:
+						done[w] = true
+					case !errors.As(err, &rl):
+						t.Fatalf("attempt %d, upload %d: %v, want nil or ErrRateLimited", attempt, w, err)
+					}
+				}
+				if !slices.Contains(done, false) {
+					break
+				}
+				if attempt == 3 {
+					t.Fatalf("after %d attempts the uploads into the cut chain began: %v", attempt, done)
+				}
+			}
+			for _, p := range []string{"ipcam/hub/c2", "ipcam/hub/c2/2026-10-17"} {
+				found := false
+				for _, o := range e.objects(true) {
+					found = found || o.ID == e.folders.get(p)
+				}
+				if !found {
+					t.Errorf("the folder %s (stored %s) is not at Drive", p, e.folders.get(p))
+				}
+			}
+		})
 	}
 }

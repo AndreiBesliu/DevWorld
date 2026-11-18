@@ -83,6 +83,10 @@ type Drive struct {
 	// from the last chunk (or a status query that found it complete) until
 	// Commit or Abort, which then need no status query.
 	done map[string]string
+	// gone holds the paths of the stored folders that a create found gone
+	// (its 404), until one is made again: the next upload into their chain
+	// makes them again top-down first (remakeGone).
+	gone map[string]bool
 }
 
 var _ storage.Destination = (*Drive)(nil)

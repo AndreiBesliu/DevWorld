@@ -49,6 +49,7 @@ func (d *Drive) folders(ctx context.Context, dir string, calls storage.CallCount
 		id, err := d.ensure(ctx, p, name, parent, calls)
 		if errors.Is(err, storage.ErrNotFound) && i > 0 {
 			// The parent is gone: its owner deleted it (or a folder above it).
+			d.markGone(chain[i-1].path)
 			id, err = d.remake(ctx, chain[:i], p, name, calls)
 		}
 		if err != nil {
@@ -112,7 +113,11 @@ func (d *Drive) remake(ctx context.Context, chain []folder, p, name string, call
 // store and files.create): recreate makes it again with its ID, and create
 // runs once more (P35).
 func (d *Drive) into(ctx context.Context, key storage.ObjectKey, calls storage.CallCounts, create func(parent string) error) error {
-	chain, err := d.folders(ctx, path.Dir(string(key)), calls)
+	dir := path.Dir(string(key))
+	if err := d.remakeGone(ctx, dir, calls); err != nil {
+		return err
+	}
+	chain, err := d.folders(ctx, dir, calls)
 	if err != nil {
 		return err
 	}
@@ -120,10 +125,82 @@ func (d *Drive) into(ctx context.Context, key storage.ObjectKey, calls storage.C
 	if err := create(parent); !errors.Is(err, storage.ErrNotFound) {
 		return err
 	}
+	d.markGone(chain[len(chain)-1].path)
 	if err := d.recreate(ctx, chain, len(chain)-1, calls); err != nil {
 		return err
 	}
 	return create(parent)
+}
+
+// remakeGone makes again, top-down and each with its stored ID, the
+// folders of dir's chain that a create found gone (markGone), before the
+// upload spends a create slot on anything else. Making them again
+// bottom-up, as recreate does, spends a create slot on each create that
+// finds its parent gone, so a chain gone two levels deep (a cut between
+// files.generateIds and files.create, twice) took the second's two slots
+// at every attempt, on the session's create and its day's, and the bucket
+// denied the top folder's: every later attempt failed alike (P35, MI5).
+// Top-down, each attempt makes the highest gone folder first and the
+// chain converges. A folder whose create finds its own parent gone marks
+// that parent, which then goes first.
+func (d *Drive) remakeGone(ctx context.Context, dir string, calls storage.CallCounts) error {
+	if !d.anyGone() {
+		return nil
+	}
+	names := []string{d.rootName}
+	if dir != "." {
+		names = append(names, strings.Split(dir, "/")...)
+	}
+	parent, p, parentPath := myDrive, "", ""
+	for _, name := range names {
+		p = path.Join(p, name)
+		id, ok, err := d.stored(ctx, p)
+		if err != nil || !ok {
+			return err // a folder that is not stored was never found gone
+		}
+		if d.isGone(p) {
+			_, err := d.createFolder(ctx, id, name, parent, true, calls)
+			if errors.Is(err, storage.ErrNotFound) && parentPath != "" && !d.isGone(parentPath) {
+				d.markGone(parentPath)
+				return d.remakeGone(ctx, dir, calls)
+			}
+			if err != nil {
+				return err
+			}
+			d.clearGone(p)
+		}
+		parent, parentPath = id, p
+	}
+	return nil
+}
+
+// markGone records that the stored folder at p is gone; clearGone that it
+// was made again.
+func (d *Drive) markGone(p string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.gone == nil {
+		d.gone = map[string]bool{}
+	}
+	d.gone[p] = true
+}
+
+func (d *Drive) clearGone(p string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.gone, p)
+}
+
+func (d *Drive) isGone(p string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.gone[p]
+}
+
+func (d *Drive) anyGone() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.gone) > 0
 }
 
 // recreate creates again, with its stored ID, the folder chain[i] and as
@@ -136,9 +213,13 @@ func (d *Drive) recreate(ctx context.Context, chain []folder, i int, calls stora
 	}
 	_, err := d.createFolder(ctx, chain[i].id, chain[i].name, parent, true, calls)
 	if errors.Is(err, storage.ErrNotFound) && i > 0 {
+		d.markGone(chain[i-1].path)
 		if err = d.recreate(ctx, chain, i-1, calls); err == nil {
 			_, err = d.createFolder(ctx, chain[i].id, chain[i].name, parent, true, calls)
 		}
+	}
+	if err == nil {
+		d.clearGone(chain[i].path)
 	}
 	return err
 }
