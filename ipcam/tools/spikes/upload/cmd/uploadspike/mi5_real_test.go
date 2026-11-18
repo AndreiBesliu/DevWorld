@@ -16,8 +16,9 @@ import (
 
 // mi5TestTiming is a short run's timing for the process tests: a 20-s
 // encrypted pre-run (a read a second), a 5-s warm-up, checks every 20 s,
-// a read every 3 s.
-const mi5TestTiming = `{"preRun":20000,"preRunEvery":1000,"warmUp":5000,"checkEvery":20000,"readOpenEvery":3000,"floor":2000,"quiet":8000,"drainMax":300000}`
+// a read every 3 s, and drainMax above the outbox's 5-min backoff cap (as
+// mi5ShortTiming).
+const mi5TestTiming = `{"preRun":20000,"preRunEvery":1000,"warmUp":5000,"checkEvery":20000,"readOpenEvery":3000,"floor":2000,"quiet":8000,"drainMax":480000}`
 
 // TestMI5_LabRun_RealHub (P14, P16, g3-16): a short lab run end to end on
 // the real ipcam-hub, the fork's MediaMTX, reccontroller --local's
@@ -47,7 +48,7 @@ func TestMI5_LabRun_RealHub(t *testing.T) {
 	log, seam := r.firewallLog()
 	p := r.start([]string{seam, envReccontroller + "=" + recc, envMediaDir + "=" + media, envLabLAN + "=127.0.0.1", envMI5Timing + "=" + mi5TestTiming},
 		"mi5", "--lab", "--block", "75s", "--segment-secs", "30", "--part-size", "512KiB", "--cameras", "4", "--fakes", f.base)
-	if !p.wait(10 * time.Minute) {
+	if !p.wait(15 * time.Minute) {
 		t.Fatalf("mi5 did not end\nstdout:\n%s\nstderr:\n%s", p.stdout, tail(p.stderr.String(), 40))
 	}
 	if p.code != 0 {

@@ -32,8 +32,12 @@ import (
 
 // mi5ShortTiming is the device tests' short MI5 run: a 5-s encrypted
 // pre-run (a read a second), a 2-s warm-up, checks every 20 s, a read
-// every 3 s, an 8-s quiet final drain.
-const mi5ShortTiming = `{"preRun":5000,"preRunEvery":1000,"warmUp":2000,"checkEvery":20000,"readOpenEvery":3000,"floor":2000,"quiet":8000,"drainMax":300000}`
+// every 3 s, an 8-s quiet final drain, and 8 min for each wait of the
+// restart or a drain (drainMax): above the outbox's 5-min backoff cap, so
+// that a destination still waiting out failed attempts (the Drive
+// driver's create pacing at a hub's start answers rate_limited) delays
+// the restart's moment without failing the run.
+const mi5ShortTiming = `{"preRun":5000,"preRunEvery":1000,"warmUp":2000,"checkEvery":20000,"readOpenEvery":3000,"floor":2000,"quiet":8000,"drainMax":480000}`
 
 // mi6Device is the owner's device under D2-A or D2-C, as MI5 finds it: the
 // real ipcam-hub on the fakes, setup's clients sealed in it, the
@@ -245,6 +249,7 @@ type loggedEvent struct {
 	StartMs     int64  `json:"startMs"`
 	Addr        string `json:"addr"`
 	Finalized   int    `json:"finalized"`
+	Reason      string `json:"reason"`
 }
 
 // loggedEvents are the event log's events from byte offset from on.
@@ -270,6 +275,27 @@ func (d *mi6Device) eventsLen() int {
 		return 0
 	}
 	return int(info.Size())
+}
+
+// uploadSummary counts dest's upload events and failures by reason in
+// events, for a failure's one line (the CI annotation keeps no other).
+func uploadSummary(events []loggedEvent, dest string) string {
+	n := map[string]int{}
+	for _, e := range events {
+		if e.Dest == dest && strings.HasPrefix(e.Type, "upload_") {
+			k := strings.TrimPrefix(e.Type, "upload_")
+			if e.Reason != "" {
+				k += ":" + e.Reason
+			}
+			n[k]++
+		}
+	}
+	keys := slices.Sorted(maps.Keys(n))
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s %d", k, n[k]))
+	}
+	return dest + " events: " + strings.Join(parts, ", ")
 }
 
 // pending are dst-1's placements that events queued and never verified.
@@ -370,11 +396,11 @@ func TestMI5_TakesOverTheMI6Hub(t *testing.T) {
 		t.Errorf("handoffs %v → %v; want none counted", handoffs, r.state().Handoffs)
 	}
 	run := d.openMI5(t)
-	if !m.wait(10 * time.Minute) {
+	if !m.wait(15 * time.Minute) {
 		t.Fatalf("mi5 did not end\n%s\n%s", m.stdout, tail(m.stderr.String(), 30))
 	}
 	if m.code != 0 || !strings.Contains(m.stdout.String(), msgMI5Done) {
-		t.Fatalf("mi5: exit %d (%s)\n%s\n%s", m.code, m.errorLine(), m.stdout, tail(m.stderr.String(), 30))
+		t.Fatalf("mi5: exit %d (%s; %s)\n%s\n%s", m.code, m.errorLine(), uploadSummary(d.loggedEvents(t, 0), "dst-1"), m.stdout, tail(m.stderr.String(), 30))
 	}
 	e := d.mi5Envelope(t, run.RunID)
 	if len(e.Runs) != 1 || !e.Runs[0].Valid || e.MI5 == nil || len(e.MI5.Dests) == 0 {
@@ -637,11 +663,12 @@ func TestMI5_RunAfterCutRun_CountsOnlyItsOwnSegments(t *testing.T) {
 			t.Errorf("route %+v; want fromMs %d, the second run's start", rt, run.StartMs)
 		}
 	}
-	if !second.wait(10 * time.Minute) {
+	if !second.wait(15 * time.Minute) {
 		t.Fatalf("the second mi5 did not end\n%s\n%s", second.stdout, tail(second.stderr.String(), 30))
 	}
 	if second.code != 0 {
-		t.Fatalf("the second mi5: exit %d (%s)\n%s\n%s", second.code, second.errorLine(), second.stdout, tail(second.stderr.String(), 30))
+		t.Fatalf("the second mi5: exit %d (%s; %s)\n%s\n%s", second.code, second.errorLine(), uploadSummary(d.loggedEvents(t, cutAt), "dst-1"),
+			second.stdout, tail(second.stderr.String(), 30))
 	}
 	e := d.mi5Envelope(t, run.RunID)
 	if len(e.Runs) != 1 || !e.Runs[0].Valid || e.MI5 == nil || len(e.MI5.Dests) == 0 {
