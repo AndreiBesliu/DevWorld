@@ -106,6 +106,7 @@ const (
 	msgMI5LoginDone      = "%s: autentificare reușită."
 	msgMI5LoginFailed    = "Autentificarea pentru %s nu a reușit (%s); rulați din nou uploadspike mi5."
 	msgMI5LoginNoAnswer  = "nu a venit niciun răspuns în 31 de minute"
+	msgCameraPortBusy    = "Camerele simulate au nevoie de porturile 7080–7083 și 8554, dar portul %d e folosit de alt program. Închideți acel program, apoi rulați din nou uploadspike mi5; proba nu a pornit."
 	msgFailureDetail     = "Detaliu pentru laborator (variabile de test setate): %v"
 	msgMI5Done           = "Proba MI5 s-a încheiat; rezultatele au fost scrise. Hub-ul trece la pornirea automată."
 	msgMI5EndedInvalid   = "Proba MI5 deschisă s-a încheiat fără rezultat (%s); rulați-o din nou în altă zi."
@@ -114,6 +115,17 @@ const (
 	msgMI5HubDown        = "Hub-ul s-a oprit singur în timpul probei MI5 și nu a mai pornit; proba s-a oprit. Rulați-o din nou în altă zi."
 	msgAnnotateTooMany   = "setul are %d rezultate; o adnotare primește cel mult %d"
 	msgAnnotateTooLong   = "%s are %d octeți după escapare; o adnotare primește cel mult %d"
+)
+
+// The reasons of a failed MI5 login, for the hub's status and its oauth
+// reason code (C2-R30 (5)).
+const (
+	msgLoginReasonExpired   = "codul a expirat înainte de confirmare"
+	msgLoginReasonState     = "autentificarea nu mai era valabilă în hub"
+	msgLoginReasonDenied    = "accesul a fost refuzat pe pagina furnizorului"
+	msgLoginReasonRefused   = "furnizorul a refuzat autentificarea"
+	msgLoginReasonTransient = "furnizorul nu a răspuns"
+	msgLoginReasonError     = "eroare neașteptată în hub"
 )
 
 // The MI6 login prompts, per platform and plan.

@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -203,5 +208,162 @@ func TestOwnerTiming_FinalDrainCoversTheHolder(t *testing.T) {
 	if need := hubStopWait + hubStartWait + tm.Quiet; tm.FinalDrain < need+5*time.Minute {
 		t.Errorf("the final drain's allowance %v; want the stop and start (%v), Quiet (%v) and at least 5 min more", tm.FinalDrain,
 			hubStopWait+hubStartWait, tm.Quiet)
+	}
+}
+
+// holdCameraPort takes one of reccontroller --local's TCP ports on
+// 127.0.0.1 for the test, as another program would; when every one is
+// taken already, another program holds them, which mi5 refuses all the
+// same.
+func holdCameraPort(t *testing.T) {
+	t.Helper()
+	for _, p := range cameraPorts {
+		if p.network != "tcp4" {
+			continue
+		}
+		if ln, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(p.port))); err == nil {
+			t.Cleanup(func() { _ = ln.Close() })
+			return
+		}
+	}
+}
+
+// cameraPortLine reports whether line is msgCameraPortBusy for one of the
+// camera ports.
+func cameraPortLine(line string) bool {
+	return slices.ContainsFunc(cameraPorts, func(p struct {
+		network string
+		port    int
+	}) bool {
+		return line == fmt.Sprintf(msgCameraPortBusy, p.port)
+	})
+}
+
+// TestCheckCameraPorts_RefusesATakenPort (C2-R30 (2)): each of the
+// fixed ports of the simulated cameras (TCP 7080, 7081, 7083, 8554; UDP
+// 7082) that another program holds refuses the run with the owner's line,
+// which names a taken port.
+func TestCheckCameraPorts_RefusesATakenPort(t *testing.T) {
+	for _, p := range cameraPorts {
+		t.Run(fmt.Sprintf("%s-%d", p.network, p.port), func(t *testing.T) {
+			addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(p.port))
+			var closer io.Closer
+			var err error
+			if p.network == "udp4" {
+				closer, err = net.ListenPacket("udp4", addr)
+			} else {
+				closer, err = net.Listen("tcp4", addr)
+			}
+			if err != nil {
+				t.Skipf("another program holds %s already: %v", addr, err)
+			}
+			defer func() { _ = closer.Close() }()
+			err = checkCameraPorts()
+			if err == nil || !isOwnerLine(err) || !cameraPortLine(err.Error()) {
+				t.Errorf("%s taken: %v; want the owner's line %q", addr, err, msgCameraPortBusy)
+			}
+		})
+	}
+}
+
+// TestMI5_CameraPortTakenRefusesBeforeTheLogin (C2-R30 (2)): with a
+// camera port taken by another program, mi5 refuses before any device
+// login, so the owner spends none: its own Romanian line, exit 1, no hub
+// started, no request to a hub, no envelope, no open run.
+func TestMI5_CameraPortTakenRefusesBeforeTheLogin(t *testing.T) {
+	holdCameraPort(t)
+	r := newRig(t)
+	_, seam := r.firewallLog()
+	p := r.start([]string{seam, envLabLAN + "=127.0.0.1"}, "mi5", "--block", "15m")
+	if !p.wait(30 * time.Second) {
+		t.Fatalf("mi5 went on with a camera port taken\nstdout:\n%s\nstderr:\n%s", p.stdout, p.stderr)
+	}
+	line := p.errorLine()
+	if p.code != 1 || !cameraPortLine(line) || strings.Contains(p.stderr.String(), msgError) {
+		t.Errorf("mi5: exit %d, line %q; want 1 and %q", p.code, line, msgCameraPortBusy)
+	}
+	if login := strings.SplitN(msgMI5DeviceLogin, "%", 2)[0]; strings.Contains(p.stdout.String(), login) {
+		t.Errorf("mi5 asked a login with a camera port taken:\n%s", p.stdout)
+	}
+	if starts, reqs := r.records(spiketest.RecordStart), r.records(spiketest.RecordRequest); len(starts) != 0 || len(reqs) != 0 {
+		t.Errorf("hub starts %v, requests %v; want none", starts, reqs)
+	}
+	if files, _ := filepath.Glob(filepath.Join(r.base, "results", "MI5", "*", "*.json")); len(files) != 0 {
+		t.Errorf("a refused run wrote MI5 envelopes %v", files)
+	}
+	if _, open := r.state().Open["MI5"]; open {
+		t.Error("the refused run is open")
+	}
+}
+
+// TestMI5_PreChecksComposeNoJob (C2-R30 (4)): the pre-checks write the
+// run.json that diag dest-probe reads with the final drain's composition,
+// no job, as the logins do: a run whose destinations needed no login is
+// still in the pre-run's phase there, whose job names a camera that has
+// not started.
+func TestMI5_PreChecksComposeNoJob(t *testing.T) {
+	t.Setenv(spiketest.FakeQuotaFreeEnv, "1000000000000")
+	hub, _ := spiketest.InstallFakeHub(t, t.TempDir())
+	e, _ := unitEnv(t)
+	e.hubBin = hub
+	cfg := mi5.Mi5Config{Cameras: 4, SegmentSecs: 300, Drive: mi5.DriveTest, BlockFor: 15 * time.Minute}
+	comp := &mi5Comp{cfg: cfg, dests: mi5.Destinations(cfg), startMs: time.Now().UnixMilli(), phase: mi5.PhasePreRun}
+	c := &mi5Cmd{e: e, h: &holder{e: e, mi5: comp}}
+	if err := c.preChecks(t.Context(), cfg, comp); err != nil {
+		t.Fatal(err)
+	}
+	var run struct {
+		Jobs []json.RawMessage `json:"jobs"`
+	}
+	if err := json.Unmarshal([]byte(mustRead(t, e.runJSON())), &run); err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Jobs) != 0 || comp.phase != mi5.PhaseFinal {
+		t.Errorf("the pre-checks' run.json has jobs %s (phase %s); want none (%s)", run.Jobs, comp.phase, mi5.PhaseFinal)
+	}
+}
+
+// TestMI5_LoginFailureReasonsInRomanian (C2-R30 (5)): a device login that
+// the hub reports expired or failed ends with the owner's line, whose
+// reason is Romanian text for the hub's status and reason code, never the
+// code itself.
+func TestMI5_LoginFailureReasonsInRomanian(t *testing.T) {
+	for _, tc := range []struct{ status, reason, want string }{
+		{"expired", "", msgLoginReasonExpired},
+		{"failed", "expired_token", msgLoginReasonExpired},
+		{"failed", "state", msgLoginReasonState},
+		{"failed", "access_denied", msgLoginReasonDenied},
+		{"failed", "invalid_grant", msgLoginReasonRefused},
+		{"failed", "invalid_client", msgLoginReasonRefused},
+		{"failed", "redirect_uri_mismatch", msgLoginReasonRefused},
+		{"failed", "transient", msgLoginReasonTransient},
+		{"failed", "error", msgLoginReasonError},
+		{"failed", "", msgLoginReasonError},
+		{"failed", "some_new_code", msgLoginReasonError},
+	} {
+		t.Run(tc.status+"-"+tc.reason, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if req.URL.Path == "/control/v1/oauth/begin" {
+					_, _ = w.Write([]byte(`{"state":"st-1","plan":"B1","verificationUrl":"https://example.invalid/device","userCode":"ABCD-EFGH"}`))
+					return
+				}
+				b, _ := json.Marshal(map[string]string{"status": tc.status, "reason": tc.reason})
+				_, _ = w.Write(b)
+			}))
+			t.Cleanup(srv.Close)
+			e, _ := unitEnv(t)
+			c := &mi5Cmd{e: e, h: &holder{e: e, ctl: hubproc.NewControlClient(strings.TrimPrefix(srv.URL, "http://"), strings.Repeat("ab", 32))}}
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			_, err := c.deviceLogin(ctx, mi5.DestConfig{ID: "dst-1", Kind: mi5.KindDrive, Account: "acct-1", TokenRef: "dst-1"})
+			want := fmt.Sprintf(msgMI5LoginFailed, "dst-1", tc.want)
+			if err == nil || err.Error() != want || !isOwnerLine(err) {
+				t.Errorf("the login's end %v; want %q", err, want)
+			}
+			if err != nil && (tc.reason != "" && strings.Contains(err.Error(), tc.reason) || strings.Contains(err.Error(), tc.status)) {
+				t.Errorf("the owner's line %q shows the hub's code", err)
+			}
+		})
 	}
 }

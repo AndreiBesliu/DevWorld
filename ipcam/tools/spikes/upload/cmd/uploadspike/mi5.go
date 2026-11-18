@@ -171,14 +171,15 @@ func fakesBase(s string) (string, error) {
 	return strings.TrimSuffix(line.OAuth, "/oauth"), nil
 }
 
-// runMI5 is `uploadspike mi5` (G14): it takes the device's one hub (the
-// MI6 hub through the handover, Task 9), opens the MI5 run, logs in the
-// destinations that need it, checks the quotas, the spool and the daily
-// refreshes, records the simulated cameras of reccontroller --local, runs
-// MI5's order (mi5.Run), writes the envelope, scans the results, and
-// gives the hub back: the autostart's waiting resume takes it with MI6's
-// destinations only. It is never handed over. A run that ends any other
-// way leaves its hub to end with it, and resume marks the run invalid.
+// runMI5 is `uploadspike mi5` (G14): it refuses while another program
+// holds a camera port, takes the device's one hub (the MI6 hub through the
+// handover, Task 9), opens the MI5 run, logs in the destinations that need
+// it, checks the quotas, the spool and the daily refreshes, records the
+// simulated cameras of reccontroller --local, runs MI5's order (mi5.Run),
+// writes the envelope, scans the results, and gives the hub back: the
+// autostart's waiting resume takes it with MI6's destinations only. It is
+// never handed over. A run that ends any other way leaves its hub to end
+// with it, and resume marks the run invalid.
 func runMI5(ctx context.Context, e *env, args []string) error {
 	fs := flag.NewFlagSet("mi5", flag.ContinueOnError)
 	var f mi5Flags
@@ -241,6 +242,11 @@ func (c *mi5Cmd) run(ctx context.Context) error {
 	e := c.e
 	cfg, err := c.config(ctx)
 	if err != nil {
+		return err
+	}
+	// Before the hub is taken and any login asked: a refused run started
+	// nothing and leaves nothing to close.
+	if err := checkCameraPorts(); err != nil {
 		return err
 	}
 	defer c.closeLAN()
@@ -563,6 +569,36 @@ func mi6Row(run *mi6.Run, d mi5.DestConfig, goos string) string {
 	return other
 }
 
+// cameraPorts are reccontroller --local's fixed listeners on 127.0.0.1
+// (c1's controller.DefaultListenConfig): RTSP 8554, the app 7080, the
+// link 7081, the beacon 7082 (UDP) and the upload sink 7083.
+var cameraPorts = []struct {
+	network string
+	port    int
+}{{"tcp4", 7080}, {"tcp4", 7081}, {"udp4", 7082}, {"tcp4", 7083}, {"tcp4", 8554}}
+
+// checkCameraPorts refuses the run while another program holds one of
+// the cameras' ports (C2-R30 (2)): reccontroller could not start them, and
+// the owner would have spent a login and waited through the pre-checks
+// for nothing. It binds each port as reccontroller does and lets it go.
+func checkCameraPorts() error {
+	for _, p := range cameraPorts {
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(p.port))
+		var c io.Closer
+		var err error
+		if p.network == "udp4" {
+			c, err = net.ListenPacket(p.network, addr)
+		} else {
+			c, err = net.Listen(p.network, addr)
+		}
+		if err != nil {
+			return ownerError(fmt.Sprintf(msgCameraPortBusy, p.port))
+		}
+		_ = c.Close()
+	}
+	return nil
+}
+
 // startCameras starts reccontroller --local, which serves the simulated
 // cameras on 127.0.0.1 (ports 7080–7083 and 8554), and learns their RTSP
 // base, credentials and streams through the link (g3-16).
@@ -705,9 +741,28 @@ func (c *mi5Cmd) deviceLogin(ctx context.Context, d mi5.DestConfig) (hubproc.Com
 			}
 			return hubproc.Completion{IssuedAt: time.Now()}, nil
 		case "expired", "failed":
-			return hubproc.Completion{}, ownerError(fmt.Sprintf(msgMI5LoginFailed, d.ID, s.Reason))
+			return hubproc.Completion{}, ownerError(fmt.Sprintf(msgMI5LoginFailed, d.ID, loginReason(s.Status, s.Reason)))
 		}
 	}
+}
+
+// loginReason is the owner's Romanian text for a login that the hub
+// reports ended: its status, and its oauth reason code (oauth.Reason in
+// ipcam-hub), never the code itself (C2-R30 (5)).
+func loginReason(status, reason string) string {
+	switch {
+	case status == "expired" || reason == "expired_token":
+		return msgLoginReasonExpired
+	case reason == "state":
+		return msgLoginReasonState
+	case reason == "access_denied":
+		return msgLoginReasonDenied
+	case reason == "invalid_grant" || reason == "invalid_client" || reason == "redirect_uri_mismatch":
+		return msgLoginReasonRefused
+	case reason == "transient":
+		return msgLoginReasonTransient
+	}
+	return msgLoginReasonError
 }
 
 // labClient is a client of the lab's login rig at the fakes and in the
@@ -776,6 +831,7 @@ func labLogin(ctx context.Context, ctl *hubproc.ControlClient, d mi5.DestConfig)
 // spool's free space, and no daily refresh of the hub's tokens in the
 // block's window.
 func (c *mi5Cmd) preChecks(ctx context.Context, cfg mi5.Mi5Config, comp *mi5Comp) error {
+	comp.phase = mi5.PhaseFinal // no job: the cameras start after the checks
 	st, err := runstate.Load(c.e.statePath())
 	if err != nil {
 		return err
