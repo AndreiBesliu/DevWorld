@@ -21,5 +21,5 @@ func diskFree(dir string) (int64, error) {
 	if err := syscall.Statfs(dir, &s); err != nil {
 		return 0, err
 	}
-	return int64(s.Bavail) * s.Bsize, nil //nolint:gosec // G115: a file system's size fits
+	return int64(s.Bavail) * int64(s.Bsize), nil //nolint:gosec,unconvert // G115: a file system's size fits; Bsize is int32 on arm
 }

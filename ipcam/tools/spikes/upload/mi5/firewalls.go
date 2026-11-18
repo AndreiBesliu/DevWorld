@@ -40,9 +40,12 @@ func (w *windowsFirewall) programs() []string {
 // shape's tests run on Linux).
 func winJoin(dir, name string) string { return strings.TrimRight(dir, `\/`) + `\` + name }
 
-// ps runs PowerShell lines, stopping at the first error.
+// ps runs PowerShell lines, stopping at the first error. It ends with
+// exit 0: -Command exits 1 when its last command set $? false, which a
+// removal of nothing does even with -ErrorAction SilentlyContinue; a real
+// error stops the script before that line, with exit 1.
 func (w *windowsFirewall) ps(ctx context.Context, lines []string) error {
-	script := "$ErrorActionPreference = 'Stop'; " + strings.Join(lines, "; ")
+	script := "$ErrorActionPreference = 'Stop'; " + strings.Join(lines, "; ") + "; exit 0"
 	_, err := w.run(ctx, "powershell.exe", []string{"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script}, "")
 	return err
 }

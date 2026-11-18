@@ -192,9 +192,11 @@ func InboundCheckLine(uploadspike string) string {
 		psQuote(uploadspike), psQuote(InboundGroup+"-uploadspike"))
 }
 
-// PowerShell runs lines in one PowerShell, stopping at the first error.
+// PowerShell runs lines in one PowerShell, stopping at the first error;
+// it ends with exit 0, since -Command exits 1 when its last command set
+// $? false, as a removal of nothing does under SilentlyContinue.
 func PowerShell(ctx context.Context, run Commander, lines []string) (string, error) {
-	script := "$ErrorActionPreference = 'Stop'; " + strings.Join(lines, "; ")
+	script := "$ErrorActionPreference = 'Stop'; " + strings.Join(lines, "; ") + "; exit 0"
 	return run(ctx, "powershell.exe", []string{"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script}, "")
 }
 
