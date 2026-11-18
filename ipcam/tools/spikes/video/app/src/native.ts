@@ -29,8 +29,19 @@ export interface NativeMetrics {
   gpu?: string;
 }
 
+/** What a read of the shell's metrics is for. */
+export interface MetricsRead {
+  /**
+   * The read that starts a scenario's run (scenarios/runner.ts). In the Android
+   * shell it takes the scenario of the launch extras (R5) from the plugin's
+   * handoff (AutorunHandoff.kt); the start page's own reads, as soon as it
+   * loads and later, leave it out. The Windows shell ignores it.
+   */
+  run?: boolean;
+}
+
 export interface SpikeNative {
-  metrics(): Promise<NativeMetrics>;
+  metrics(read?: MetricsRead): Promise<NativeMetrics>;
   /** Android: the Activity enters picture-in-picture. */
   enterPip?(): Promise<void>;
   /** Android: called on entering (true) and leaving (false) picture-in-picture. */
@@ -53,11 +64,12 @@ export const NATIVE_METRICS_TIMEOUT_MS = 3000;
  * The shell's metrics, or `n/a` when there is no shell or its facade throws,
  * rejects or does not answer within NATIVE_METRICS_TIMEOUT_MS: a broken bridge
  * must neither keep the page busy nor stop a run. `setTimer` arms the timeout
- * and returns its cancel function.
+ * and returns its cancel function; `read` goes to the facade.
  */
 export function readNativeMetrics(
   native: SpikeNative | undefined,
   setTimer: (fn: () => void, ms: number) => () => void,
+  read?: MetricsRead,
 ): Promise<NativeMetrics | 'n/a'> {
   if (!native) return Promise.resolve('n/a');
   return new Promise((resolve) => {
@@ -69,7 +81,7 @@ export function readNativeMetrics(
       resolve(value);
     };
     try {
-      native.metrics().then(settle, () => {
+      native.metrics(read).then(settle, () => {
         settle('n/a');
       });
     } catch {

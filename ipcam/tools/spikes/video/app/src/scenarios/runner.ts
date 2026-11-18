@@ -305,7 +305,9 @@ export async function runDefinition(id: ScenarioId, definition: ScenarioDefiniti
   try {
     let metrics: NativeMetrics | 'n/a' = 'n/a';
     if (env.native) {
-      metrics = await guard(readNativeMetrics(env.native, env.clock.setTimer));
+      // The run's own read: in the Android shell it takes the scenario of the
+      // launch extras (R5), which no other read of the page does (native.ts).
+      metrics = await guard(readNativeMetrics(env.native, env.clock.setTimer, { run: true }));
       if (metrics === 'n/a') {
         run.note('native metrics: n/a');
       } else {

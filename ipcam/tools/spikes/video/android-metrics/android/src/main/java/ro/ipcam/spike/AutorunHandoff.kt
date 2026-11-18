@@ -10,13 +10,15 @@ package ro.ipcam.spike
  * the app's resources (overlays) after the device booted, and no
  * `configChanges` entry stops it. The plugin loads the page with the query
  * ([loaded]); the page has taken the scenario when its run reads the metrics,
- * the first thing a scenario does ([handed]). From then on a restored Activity
- * runs nothing: the scenario ran, or was cut, with the old page, and the next
- * `am start` runs it again. The plugin's calls come from the UI thread and
- * from the plugin's own thread.
+ * the first thing a scenario does, and says so (`read({ run: true })`, [read]).
+ * The page's other reads do not take it: the start page reads the metrics as
+ * soon as it loads, before its run does (C1-R30). From then on a restored
+ * Activity runs nothing: the scenario ran, or was cut, with the old page, and
+ * the next `am start` runs it again. The plugin's calls come from the UI thread
+ * and from the plugin's own thread.
  */
 internal class AutorunHandoff private constructor(private var query: String?) {
-    /** The page was loaded with the query, and the next read is its scenario's. */
+    /** The page was loaded with the query: its run's read is its scenario's. */
     private var loaded = false
 
     /** The query string that the page has not taken yet, or null. */
@@ -30,13 +32,16 @@ internal class AutorunHandoff private constructor(private var query: String?) {
     }
 
     /**
-     * The page read the metrics: once it was loaded with the query, that read is
-     * its run's, and it has the scenario. A read before is the bridge's first
-     * page's, which has no scenario, and changes nothing.
+     * The page read the metrics; `run`: the read is the one that starts a
+     * scenario's run. Once the page was loaded with the query, its run's read
+     * means it has the scenario. Any other read changes nothing: the start
+     * page's own (at load, at the connection check, at the automatic run's
+     * button), and every read before [loaded]: it comes from the bridge's first
+     * page, which has no scenario.
      */
     @Synchronized
-    fun handed() {
-        if (loaded) query = null
+    fun read(run: Boolean) {
+        if (run && loaded) query = null
     }
 
     companion object {

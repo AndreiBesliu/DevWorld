@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SpikeNative } from '../native';
 import { finish, setup } from './fakes';
 import { runScenario } from './index';
 import { runDefinition, type ScenarioDefinition } from './runner';
@@ -138,6 +139,17 @@ describe('runner', () => {
     expect(t.session().closed).toBe(true);
     expect(result.interrupted).toBe(false);
     expect(result.interruption).toBeUndefined();
+  });
+
+  it('runner_theRunsFirstReadOfTheShell_isMarkedAsTheRuns', async () => {
+    // C1-R30: on Android the read that starts a run takes the launch extras' scenario
+    // (AutorunHandoff); the start page's own reads, at load and at the connection check, do not.
+    const metrics = vi.fn<SpikeNative['metrics']>(() => Promise.resolve({}));
+    const t = setup({ native: { metrics } });
+
+    await finish(runScenario('S10', t.env));
+
+    expect(metrics.mock.calls[0]).toEqual([{ run: true }]);
   });
 
   it('runner_deviceFacts_ramAndGpuFromTheShell', async () => {

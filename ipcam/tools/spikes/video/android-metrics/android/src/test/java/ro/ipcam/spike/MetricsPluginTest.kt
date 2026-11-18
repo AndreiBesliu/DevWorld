@@ -59,7 +59,7 @@ class MetricsPluginTest {
         val second = AutorunHandoff.onLoad(extrasQuery = null, restored = true, savedPending = saved)
         assertEquals("autorun=S1", second.pendingQuery)
         second.loaded()
-        second.handed()
+        second.read(run = true)
         assertNull(second.pendingQuery)
     }
 
@@ -69,7 +69,7 @@ class MetricsPluginTest {
         // process and restored the Activity from the launch Intent it kept, extras included.
         val first = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = false, savedPending = null)
         first.loaded()
-        first.handed()
+        first.read(run = true)
         val restored = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = true, savedPending = first.pendingQuery)
         assertNull(restored.pendingQuery)
         // A launch without extras runs nothing.
@@ -79,8 +79,8 @@ class MetricsPluginTest {
     @Test
     fun autorunHandoff_aRecreationBeforeThePageReadRunsTheScenarioAgain() {
         // Final fix C review, M7: the plugin loaded the page with the scenario's query, and the
-        // system created the Activity again before that page had read it. A page reads the
-        // metrics first thing when its run starts; before that read it has not taken the
+        // system created the Activity again before that page had read it. A page's run reads the
+        // metrics first thing (read({ run: true })); before that read the page has not taken the
         // scenario, so the new Activity must run it.
         val first = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = false, savedPending = null)
         first.loaded() // loadUrl
@@ -88,19 +88,37 @@ class MetricsPluginTest {
         val second = AutorunHandoff.onLoad(extrasQuery = null, restored = true, savedPending = saved)
         assertEquals("autorun=S1", second.pendingQuery)
         second.loaded()
-        second.handed() // the new page's run read the metrics: it has the scenario
+        second.read(run = true) // the new page's run read the metrics: it has the scenario
+        assertNull(second.pendingQuery)
+    }
+
+    @Test
+    fun autorunHandoff_theStartPagesOwnReadDoesNotTakeTheScenario() {
+        // C1-R30: the start page reads the metrics as soon as it loads (the shell's model and the
+        // charger), before its run reads them. The system created the Activity again between the
+        // two reads (CONFIG_ASSETS_PATHS): the new Activity must still run the scenario.
+        val first = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = false, savedPending = null)
+        first.loaded() // loadUrl
+        first.read(run = false) // the start page's read at load
+        assertEquals("autorun=S1", first.pendingQuery)
+        val second = AutorunHandoff.onLoad(extrasQuery = null, restored = true, savedPending = first.pendingQuery)
+        assertEquals("autorun=S1", second.pendingQuery)
+        second.loaded()
+        second.read(run = false)
+        assertEquals("autorun=S1", second.pendingQuery)
+        second.read(run = true) // the new page's run read the metrics: it has the scenario
         assertNull(second.pendingQuery)
     }
 
     @Test
     fun autorunHandoff_aReadBeforeTheQueryWasLoadedIsAnotherPages() {
-        // A read before loadUrl comes from the bridge's first page, which has no scenario.
+        // A read before loadUrl, even a run's, comes from the bridge's first page, which has no scenario.
         val handoff = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = false, savedPending = null)
-        handoff.handed()
+        handoff.read(run = true)
         assertEquals("autorun=S1", handoff.pendingQuery)
         handoff.loaded()
         assertEquals("autorun=S1", handoff.pendingQuery)
-        handoff.handed()
+        handoff.read(run = true)
         assertNull(handoff.pendingQuery)
     }
 
