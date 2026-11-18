@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -34,8 +33,14 @@ func processes() map[uint32]uint32 {
 	return out
 }
 
-// liveExes are the PIDs of the running processes whose image is path.
+// liveExes are the PIDs of the running processes whose image is the file
+// at path (os.SameFile: a runner's temporary folder may be named in its
+// short 8.3 form, the image in its long one).
 func liveExes(path string) []int {
+	want, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
 	var out []int
 	for pid := range processes() {
 		h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
@@ -46,7 +51,10 @@ func liveExes(path string) []int {
 		n := uint32(len(buf)) //nolint:gosec // MAX_LONG_PATH fits
 		err = windows.QueryFullProcessImageName(h, 0, &buf[0], &n)
 		_ = windows.CloseHandle(h)
-		if err == nil && strings.EqualFold(windows.UTF16ToString(buf[:n]), path) {
+		if err != nil {
+			continue
+		}
+		if got, err := os.Stat(windows.UTF16ToString(buf[:n])); err == nil && os.SameFile(got, want) {
 			out = append(out, int(pid))
 		}
 	}

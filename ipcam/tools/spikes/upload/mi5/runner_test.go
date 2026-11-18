@@ -34,6 +34,7 @@ type fakeRun struct {
 	uploads   string // diag uploads' lines
 	killed    time.Time
 	unblocked time.Time
+	lines     []string // the owner's lines
 }
 
 func newFakeRun(t *testing.T, start time.Time) *fakeRun {
@@ -89,7 +90,11 @@ func (f *fakeRun) KillHub() error                         { f.killed = f.clock()
 func (f *fakeRun) ResetConnections(context.Context) error { f.step("reset-connections"); return nil }
 func (f *fakeRun) HubConfig() hubproc.Config              { return hubproc.Config{} }
 func (f *fakeRun) RunJSON() string                        { return "run.json" }
-func (f *fakeRun) Printf(string, ...any)                  {}
+func (f *fakeRun) Printf(format string, args ...any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lines = append(f.lines, fmt.Sprintf(format, args...))
+}
 func (f *fakeRun) Diag(_ context.Context, args []string) ([]json.RawMessage, error) {
 	f.step("diag-" + args[0] + "-" + strings.Join(args[len(args)-1:], ""))
 	switch args[0] {
@@ -378,5 +383,30 @@ func TestVerifyBlocked_RunnerUnblocksOnFailure(t *testing.T) {
 		if f.unblocked.IsZero() || !f.killed.IsZero() {
 			t.Errorf("check %d failing: unblocked %v, killed %v; want unblocked and no restart", tc.failAt, f.unblocked, f.killed)
 		}
+	}
+}
+
+// TestMI5_SaysWhereTheRunIs (C2-R18): a run of hours says, in Romanian,
+// when the block starts and until when, when it ends, when the hub
+// restarted, and when the backlog is up, in that order.
+func TestMI5_SaysWhereTheRunIs(t *testing.T) {
+	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	f := newFakeRun(t, start)
+	f.uploads = `{"schema":"ipcam.diag.uploads/1","dest":"dst-1","segments":3,"verified":3,"missing":0,"duplicates":0,"hashMismatches":0}`
+	f.script = labScript(f, start, 1<<20)
+	if _, err := labRun(t, f, start); err != nil {
+		t.Fatal(err)
+	}
+	prefixes := []string{strings.SplitN(MsgBlockStarted, "%", 2)[0], MsgUnblocked, MsgRestarted, strings.SplitN(MsgDrained, "%", 2)[0]}
+	if len(f.lines) != len(prefixes) {
+		t.Fatalf("the owner's lines %q; want %d", f.lines, len(prefixes))
+	}
+	for i, p := range prefixes {
+		if !strings.HasPrefix(f.lines[i], p) {
+			t.Errorf("line %d %q; want %q…", i, f.lines[i], p)
+		}
+	}
+	if !strings.Contains(f.lines[0], "15 min") {
+		t.Errorf("the block's line %q names no length", f.lines[0])
 	}
 }

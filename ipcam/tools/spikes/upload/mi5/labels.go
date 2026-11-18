@@ -18,6 +18,11 @@ const (
 	MsgRefreshInBlock = "Blocarea ar acoperi reîmprospătarea zilnică a %s (%s). Porniți proba MI5 după %s."
 	MsgLanSilent      = "Routerul nu răspunde în rețeaua locală; proba nu poate verifica blocarea."
 	MsgNoGateway      = "Nu găsesc routerul în tabela de rutare; proba nu poate verifica blocarea."
+	// The run's progress, so a long run says where it is.
+	MsgBlockStarted = "Blocarea a început la %s și ține %s, până în jur de %s."
+	MsgUnblocked    = "Blocarea s-a încheiat; hub-ul urcă ce s-a adunat, iar în timpul urcării repornește o dată, ca după o pană."
+	MsgRestarted    = "Hub-ul a repornit în mijlocul unui upload; urcarea continuă."
+	MsgDrained      = "Tot ce s-a adunat în blocare a urcat în %s; urmează verificarea la furnizor."
 	// The lab's settings.
 	MsgPartSizeNeedsFakes = "--part-size se folosește doar cu --fakes (laboratorul)."
 	MsgOneDriveDeferred   = "amânat în Faza 0-bis: înregistrarea Microsoft cere un director plătit (A5)"

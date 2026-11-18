@@ -279,6 +279,7 @@ func (r *run) block(ctx context.Context) error {
 	start = r.now()
 	r.withTally(func(tl *tally) { tl.blockStart, tl.floorStart = start.UnixMilli(), start.Add(t.Floor).UnixMilli() })
 	end := start.Add(r.cfg.BlockFor)
+	r.host.Printf(MsgBlockStarted, start.Format("15:04"), span(r.cfg.BlockFor), end.Format("15:04"))
 	nextCheck, nextRead := start.Add(t.CheckEvery), start
 	reads := results.ReadOpenRun{}
 	var readMs []float64
@@ -323,6 +324,7 @@ func (r *run) block(ctx context.Context) error {
 	unblock := r.now()
 	r.data.BlockSecs = unblock.Sub(start).Seconds()
 	r.withTally(func(tl *tally) { tl.unblockAt = unblock.UnixMilli() })
+	r.host.Printf("%s", MsgUnblocked)
 	return nil
 }
 
@@ -452,7 +454,11 @@ func (r *run) restartMidUpload(ctx context.Context) error {
 		tl.lastConfirmed = target.offset
 	})
 	r.data.Restart = &results.Mi5Restart{KilledAtMs: killedAt.UnixMilli(), Size: target.size, LastConfirmedOffset: target.offset}
-	return r.host.StartHub(ctx, PhaseMain)
+	if err := r.host.StartHub(ctx, PhaseMain); err != nil {
+		return err
+	}
+	r.host.Printf("%s", MsgRestarted)
+	return nil
 }
 
 // drain waits until every placement of the run's own segments is
@@ -471,6 +477,7 @@ func (r *run) drain(ctx context.Context) error {
 			r.data.UplinkMbps = float64(tl.drainBytes(end.UnixMilli())) * 8 / 1e6 / r.data.RecoverySecs
 		}
 	})
+	r.host.Printf(MsgDrained, elapsed(time.Duration(r.data.RecoverySecs*float64(time.Second))))
 	if err := r.host.StopHub(ctx); err != nil {
 		return err
 	}
@@ -497,4 +504,15 @@ func (r *run) waitDrained(ctx context.Context, quiet time.Duration) error {
 			return err
 		}
 	}
+}
+
+// elapsed is a duration for the owner: "40 s", "12 min", "2 h 5 min".
+func elapsed(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%d s", d/time.Second)
+	case d < time.Hour:
+		return fmt.Sprintf("%d min", d/time.Minute)
+	}
+	return fmt.Sprintf("%d h %d min", d/time.Hour, d%time.Hour/time.Minute)
 }

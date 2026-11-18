@@ -212,7 +212,10 @@ jobs:
                 -test.run '^TestWanBlock_KeepsLanAndLoopback$' -test.v
           } 2>&1 | tee "${RUNNER_TEMP}/block-test.log"
       - name: MI5
+        # A bound below the job's, so that a run that stops moving fails this step and its
+        # log's end reaches the failure annotations (a cancelled job annotates nothing).
         id: mi5
+        timeout-minutes: 60
         run: |
           set -o pipefail
           sudo env UPLOADSPIKE_REQUIRE_NFT=1 /opt/ipcam-spike/uploadspike mi5 --lab --block 15m --segment-secs 30 \
@@ -233,5 +236,6 @@ jobs:
           for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
             log="${RUNNER_TEMP}/${id}.log"
             [[ -f "${log}" ]] || continue
-            tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            # MediaMTX's own lines (mi5's stderr carries the hub's) would hide uploadspike's.
+            grep -v 'mediamtx: ' "${log}" | tail -n 60 | tools/scripts/annotate.sh "${id}" 60
           done
