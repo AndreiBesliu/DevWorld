@@ -551,6 +551,9 @@ func (h *holder) apply(ev hubproc.Event) {
 		if err != nil {
 			return err
 		}
+		if run.Pair(f.DestID) == nil {
+			return nil // one of MI5's own logins: mi5 counts it, on its account
+		}
 		switch ev.Type {
 		case "oauth_completed":
 			run.Completed(f.DestID, f.Plan, f.ClientType, f.IssuedAtMs)

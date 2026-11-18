@@ -40,7 +40,7 @@ const (
 	envMI5Timing      = "UPLOADSPIKE_MI5_TIMING" // JSON of mi5.Timing in ms
 	envReccontroller  = "UPLOADSPIKE_RECCONTROLLER"
 	envMediaDir       = "UPLOADSPIKE_MEDIA"
-	envLabLAN         = "UPLOADSPIKE_TEST_LAB_LAN" // the lab probe's address where the host has no RFC 1918 one
+	envLabLAN         = "UPLOADSPIKE_TEST_LAB_LAN" // the LAN probe listener's address: the lab's where the host has no RFC 1918 one, and the tests' owner runs
 	identityFileName  = "ri_g.key"
 	reccontrollerName = "reccontroller"
 	linkWait          = 60 * time.Second
@@ -254,6 +254,12 @@ func (c *mi5Cmd) run(ctx context.Context) error {
 	if err := c.openRun(cfg); err != nil {
 		return err
 	}
+	// The holder's server on 127.0.0.1:7091 (Inbound listeners), once the
+	// run is open: status, and a 409 to every handover (MI5 is never
+	// handed over), whose caller exits with «Proba MI5 rulează…».
+	if err := h.serve(ctx); err != nil {
+		return c.fail(ctx, err)
+	}
 	fw := e.firewall()
 	if err := fw.RemoveStale(ctx); err != nil {
 		return c.fail(ctx, err)
@@ -410,12 +416,13 @@ func testTiming() (mi5.Timing, bool) {
 // lanProbe is the block's LAN probe: in the lab a listener of this
 // process on the runner's first RFC 1918 address; for the owner the
 // routing table's default gateway (C2-R18: nothing typed), which stays in
-// RAM and in no output.
+// RAM and in no output. The tests' seam envLabLAN gives the listener's
+// address, in the lab and in an owner's run alike.
 func (c *mi5Cmd) lanProbe(ctx context.Context) (string, error) {
-	if !c.f.lab {
+	ip := os.Getenv(envLabLAN)
+	if !c.f.lab && ip == "" {
 		return mi5.FindLanProbe(ctx)
 	}
-	ip := os.Getenv(envLabLAN)
 	if ip == "" {
 		addrs, err := handoff.RFC1918Addrs()
 		if err != nil || len(addrs) == 0 {

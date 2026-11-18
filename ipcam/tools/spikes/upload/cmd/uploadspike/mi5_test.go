@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/hostinfo"
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/hubproc"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/mi5"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/mi6"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/results"
@@ -108,31 +109,98 @@ func TestResume_OpenMI5AfterRebootIsInvalid(t *testing.T) {
 	}
 }
 
+// openMI5Of records an open MI5 run whose mi5 is the process pid that
+// started at startMs.
+func (r *rig) openMI5Of(pid int, startMs int64) {
+	r.t.Helper()
+	o := mi5Open{mi5Holder: mi5Holder{PID: pid, ProcStartMs: startMs}, RunID: "mi5-cut", StartMs: time.Now().Add(-time.Hour).UnixMilli(),
+		Drive: mi5.DriveTest, Dests: mi5.Destinations(mi5.Mi5Config{Cameras: 4, Drive: mi5.DriveTest})}
+	raw, err := json.Marshal(o)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	r.update(func(s *runstate.State) { s.Open["MI5"] = raw })
+}
+
 // TestMI5_DeadMI5WithoutResume_NextCommandEndsTheRun (Holding the hub):
-// with no resume, an open MI5 run whose mi5 died (its PID now another
-// process's) is ended by the next command that takes the free hub.lock:
-// mi6 --b1 android removes the rule, marks the run invalid and runs its
-// login.
+// with no resume running, an open MI5 run whose recorded mi5 was killed
+// (SIGKILL; TerminateProcess on Windows), its block rule left, is ended by
+// the next command that takes the free hub.lock: mi6 --b1 android removes
+// the rule, marks the run invalid («proba MI5 s-a oprit înainte de
+// final») and runs its login. A recorded PID that now names another
+// process (another start time) counts as dead. While the recorded mi5
+// lives, the same command refuses with «Proba MI5 rulează; …», sends no
+// handover and leaves the run open.
 func TestMI5_DeadMI5WithoutResume_NextCommandEndsTheRun(t *testing.T) {
-	r := newRig(t)
-	r.openMI6("android")
-	r.editMI6(func(run *mi6.Run) {
-		run.Completed("g-android", mi6.PlanA, "android", time.Now().Add(-49*time.Hour).UnixMilli())
-		run.Refreshed("g-android", 1, 96, "failed", time.Now().Add(-time.Hour).UnixMilli())
+	setup := func(t *testing.T) *rig {
+		r := newRig(t)
+		r.openMI6("android")
+		r.editMI6(func(run *mi6.Run) {
+			run.Completed("g-android", mi6.PlanA, "android", time.Now().Add(-49*time.Hour).UnixMilli())
+			run.Refreshed("g-android", 1, 96, "failed", time.Now().Add(-time.Hour).UnixMilli())
+		})
+		return r
+	}
+	// standIn is a process that plays the recorded mi5, and its start.
+	standIn := func(t *testing.T, r *rig) (*execCmd, int64) {
+		runJSON := filepath.Join(t.TempDir(), "run.json")
+		if err := os.WriteFile(runJSON, []byte(`{"sdCardConfirmed":true,"jobs":[]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p := startStandIn(t, r.hub, runJSON)
+		start, err := runstate.ProcStartMs(p.Process.Pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p, start
+	}
+	endsTheRun := func(t *testing.T, r *rig) {
+		log, seam := r.firewallLog()
+		if err := os.WriteFile(log, []byte("the block's rule, left by the dead mi5\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		signalFile := filepath.Join(t.TempDir(), "signal")
+		m := r.start([]string{seam, envSignalFile + "=" + signalFile}, "mi6", "--b1", "android")
+		waiting := strings.SplitN(promptWaiting, "%", 2)[0]
+		until(t, time.Minute, "the B1 login's wait", func() bool { return strings.Contains(m.stdout.String(), waiting) })
+		if _, open := r.state().Open["MI5"]; open || !removedBlock(log) {
+			t.Errorf("open %v, block removed %v; want the run ended and the block removed", open, removedBlock(log))
+		}
+		if e := r.cutEnvelope(); e.Runs[0].Valid || e.Runs[0].InvalidReason != invalidStopped {
+			t.Errorf("the cut run: %+v", e.Runs)
+		}
+		stopHolder(t, m, signalFile)
+	}
+	t.Run("killed", func(t *testing.T) {
+		r := setup(t)
+		p, start := standIn(t, r)
+		r.openMI5Of(p.Process.Pid, start)
+		if err := p.Process.Kill(); err != nil {
+			t.Fatal(err)
+		}
+		until(t, 30*time.Second, "the recorded mi5's death", func() bool { return !runstate.Alive(p.Process.Pid, start) })
+		endsTheRun(t, r)
 	})
-	r.openDeadMI5("")
-	log, seam := r.firewallLog()
-	signalFile := filepath.Join(t.TempDir(), "signal")
-	m := r.start([]string{seam, envSignalFile + "=" + signalFile}, "mi6", "--b1", "android")
-	waiting := strings.SplitN(promptWaiting, "%", 2)[0]
-	until(t, time.Minute, "the B1 login's wait", func() bool { return strings.Contains(m.stdout.String(), waiting) })
-	if _, open := r.state().Open["MI5"]; open || !removedBlock(log) {
-		t.Errorf("open %v, block removed %v; want the run ended and the block removed", open, removedBlock(log))
-	}
-	if e := r.cutEnvelope(); e.Runs[0].Valid || e.Runs[0].InvalidReason != invalidStopped {
-		t.Errorf("the cut run: %+v", e.Runs)
-	}
-	stopHolder(t, m, signalFile)
+	t.Run("pid-of-another-process", func(t *testing.T) {
+		r := setup(t)
+		r.openDeadMI5("")
+		endsTheRun(t, r)
+	})
+	t.Run("alive", func(t *testing.T) {
+		r := setup(t)
+		p, start := standIn(t, r)
+		r.openMI5Of(p.Process.Pid, start)
+		b := r.run("", nil, "mi6", "--b1", "android")
+		if b.code != 1 || !strings.Contains(b.stderr.String(), msgMI5Running) {
+			t.Errorf("mi6 --b1 android: exit %d, stderr %q; want 1 and %q", b.code, b.stderr, msgMI5Running)
+		}
+		if open, live := mi5State(r.state()); !open || !live || r.state().Claim != nil {
+			t.Errorf("open %v, live %v, claim %+v; want the run open and live, no claim", open, live, r.state().Claim)
+		}
+		if starts := r.startsBy(b.cmd.Process.Pid); len(starts) != 0 {
+			t.Errorf("mi6 --b1 started a hub: %+v", starts)
+		}
+	})
 }
 
 // TestMI5_PiCameraCountRefusal (P17): on a Pi whose model stays unknown,
@@ -181,5 +249,38 @@ func TestMI5_UsesStoredSdConfirmation(t *testing.T) {
 	if err := json.Unmarshal(b, &env); err != nil || env.SdConfirmation == nil || env.SdConfirmation.Text != "DA" || env.Storage != "sd" ||
 		env.Cameras != 4 || env.Host != "pi" {
 		t.Errorf("the envelope %+v (%v)", env, err)
+	}
+}
+
+// TestApply_MI5OwnLoginNotCountedAsMI6 (Destinations, Tokens): while an
+// MI6 run is open, the hub's oauth_completed for one of MI5's own logins
+// (dst-2's, on the personal account) changes no MI6 pair and counts no
+// MI6 handoff: mi5 counts its own logins, on their account, once; an MI6
+// pair's completion still counts.
+func TestApply_MI5OwnLoginNotCountedAsMI6(t *testing.T) {
+	e, _ := unitEnv(t)
+	if err := runstate.Update(e.statePath(), func(s *runstate.State) error {
+		s.Open["MI6"] = mi6.NewRun("mi6-test", time.Now(), "test", false, []string{"android", "web"}).Encode()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := &holder{e: e}
+	completed := func(dest, clientType string) hubproc.Event {
+		raw, _ := json.Marshal(map[string]any{"type": "oauth_completed", "atMs": 1, "destId": dest, "plan": mi6.PlanB1,
+			"provider": mi6.ProviderDrive, "clientType": clientType, "issuedAtMs": 1})
+		return hubproc.Event{Type: "oauth_completed", AtMs: 1, Raw: raw}
+	}
+	h.apply(completed("dst-2", "tv"))
+	st, err := runstate.Load(e.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Handoffs) != 0 {
+		t.Errorf("handoffs after MI5's own login %v; want none counted by the holder", st.Handoffs)
+	}
+	h.apply(completed("g-web", "tv"))
+	if st, _ = runstate.Load(e.statePath()); st.Handoffs[mi6.HandoffKey("google:tv")] != 1 {
+		t.Errorf("handoffs after g-web's login %v; want one", st.Handoffs)
 	}
 }

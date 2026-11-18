@@ -73,6 +73,57 @@ env:
 # error lines of a go test, else the end of the log.
 
 jobs:
+  media:
+    # Task 8: the media of reccontroller --local's simulated cameras for the windows job's
+    # MI5 device tests, made with ffmpeg (a CI tool only, never shipped), as c1's
+    # ipcam-spike-recording makes its own. The upload job makes its copy itself.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+      - name: Media
+        id: media
+        run: |
+          set -o pipefail
+          {
+            sudo apt-get install -y --no-install-recommends ffmpeg > /dev/null &&
+              go run ./tools/spikes/video/cmd/mediagen -out "${RUNNER_TEMP}/media" &&
+              go run ./tools/spikes/recording/cmd/recmediagen -out "${RUNNER_TEMP}/media" &&
+              ls -l "${RUNNER_TEMP}/media"
+          } 2>&1 | tee "${RUNNER_TEMP}/media.log"
+      - name: Upload media
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spike-upload-media
+          path: ${{ runner.temp }}/media
+          if-no-files-found: error
+          retention-days: 7
+          # H.264, H.265 and fMP4 do not compress further.
+          compression-level: 0
+      - name: Show failures as annotations
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+          done
+
   upload:
     runs-on: ubuntu-24.04
     # Task 8: the media's generation and the mi5 process tests' -timeout 30m.
@@ -249,8 +300,11 @@ jobs:
     # temporary Task Scheduler task with an S4U logon, the logon of uploadspike's
     # autostart, the sealer's round trip in it: sealed in a normal step, unsealed in the S4U
     # task, and hubproc's clean stop of a hub without a console (Task 9).
+    # Task 8: then MI5's device tests of an mi5 that ends badly, on the real ipcam-hub.exe
+    # with a Windows build of the fork and the media job's media.
+    needs: media
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     env:
       TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/... ./hub/internal/crypto/...
     defaults:
@@ -268,6 +322,7 @@ jobs:
             ipcam/go.work.sum
             ipcam/tools/go.sum
             ipcam/hub/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
             ipcam/tools/spikes/video/go.sum
             ipcam/tools/spikes/recording/go.sum
             ipcam/tools/spikes/upload/go.sum
@@ -379,6 +434,37 @@ jobs:
               tee -a "${log}"
             exit 1
           fi
+      - name: Download media
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: spike-upload-media
+          path: ${{ runner.temp }}/media
+      - name: Build the MediaMTX fork
+        id: fork-build
+        working-directory: ipcam/hub/third_party/mediamtx
+        env:
+          GOWORK: 'off'
+        run: |
+          set -o pipefail
+          {
+            go build -o "${RUNNER_TEMP}/bin/mediamtx.exe" . &&
+              "${RUNNER_TEMP}/bin/mediamtx.exe" --version
+          } 2>&1 | tee "${RUNNER_TEMP}/fork-build.log"
+      - name: MI5 device tests
+        # Task 8 (Holding the hub): an mi5 cut by TerminateProcess during its block, and a
+        # run after a cut run, on the real hub with MI6's hub under resume; the firewall seam
+        # records the block's commands and runs none. The variables make them fail instead
+        # of skipping.
+        id: mi5-device
+        env:
+          MEDIAMTX_BIN: ${{ runner.temp }}/bin/mediamtx.exe
+          RECSPIKE_REQUIRE_MEDIAMTX: '1'
+          MEDIAGEN_DIR: ${{ runner.temp }}/media
+          SPIKE_REQUIRE_MEDIA: '1'
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 30m -v -run '^(TestMI5_HolderEndsAnyWay_OneHubUnderResume|TestMI5_RunAfterCutRun_CountsOnlyItsOwnSegments)$' \
+            ./tools/spikes/upload/cmd/uploadspike/ 2>&1 | tee "${RUNNER_TEMP}/mi5-device.log"
       - name: Show failures as annotations
         # A test's indented file:line lines include the testing package's own, such as a
         # temporary folder's failed removal, which names no _test.go file.
