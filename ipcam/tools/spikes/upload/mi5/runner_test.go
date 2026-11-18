@@ -477,3 +477,77 @@ func TestMI5_ReadOpenSettlesAfterRotation(t *testing.T) {
 		})
 	}
 }
+
+// observeAt gives tl one hub event of type typ at at, with fields f.
+func observeAt(tl *tally, typ string, at time.Time, f map[string]any) {
+	f["type"], f["atMs"] = typ, at.UnixMilli()
+	raw, _ := json.Marshal(f)
+	tl.observe(hubproc.Event{Type: typ, AtMs: at.UnixMilli(), Raw: raw})
+}
+
+// TestMI5_TornSegmentIsOneOpenAtTheKill (P16's restart assertions): the
+// torn segment is one that was open when the kill came, which the
+// restarted hub's reconcile finalises and enqueues. A segment that closed
+// before the kill, whose placement the restarted hub happens to queue
+// first, is not one: the local lab run of the lab's timing counted such
+// placements and said tornSegmentUploaded while its reconcile finalised
+// nothing (the kill came 1 s after a rotation, before any part).
+func TestMI5_TornSegmentIsOneOpenAtTheKill(t *testing.T) {
+	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	kill := start.Add(10 * time.Minute)
+	tl := newTally(start.UnixMilli(), Destinations(Mi5Config{Cameras: 4, Drive: DriveTest}))
+	closedStart := kill.Add(-31 * time.Second).UnixMilli()
+	observeAt(tl, "segment_closed", kill.Add(-time.Second), map[string]any{"cam": "cam02", "profile": "sub", "startMs": closedStart})
+	tl.killedAt = kill.UnixMilli()
+	observeAt(tl, "upload_queued", kill.Add(2*time.Second), map[string]any{"placementId": "p-closed", "dest": "dst-1", "cam": "cam02",
+		"profile": "sub", "startMs": closedStart, "bytes": 1})
+	observeAt(tl, "upload_verified", kill.Add(3*time.Second), map[string]any{"placementId": "p-closed", "dest": "dst-1", "bytes": 1})
+	if tl.tornUploaded() {
+		t.Error("a segment that closed before the kill counts as the torn one")
+	}
+	openStart := kill.Add(-20 * time.Second).UnixMilli()
+	observeAt(tl, "upload_queued", kill.Add(2*time.Second), map[string]any{"placementId": "p-torn", "dest": "dst-1", "cam": "cam01",
+		"profile": "sub", "startMs": openStart, "bytes": 1})
+	if tl.tornUploaded() {
+		t.Error("the torn segment counts as uploaded before its verification")
+	}
+	observeAt(tl, "upload_verified", kill.Add(4*time.Second), map[string]any{"placementId": "p-torn", "dest": "dst-1", "bytes": 1})
+	if !tl.tornUploaded() {
+		t.Error("the torn segment, open at the kill and verified after it, does not count")
+	}
+}
+
+// TestMI5_KillTearsASegmentWithParts (P16): the restart's kill waits until
+// every camera's open segment holds parts (tearAfter after its last
+// rotation, the hub's parts being 1 s), so that the kill tears a segment
+// that the restarted hub's reconcile finalises: right after a rotation,
+// the next segment has no .part yet, and a kill there tears nothing.
+func TestMI5_KillTearsASegmentWithParts(t *testing.T) {
+	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	f := newFakeRun(t, start)
+	f.uploads = `{"schema":"ipcam.diag.uploads/1","dest":"dst-1","segments":3,"verified":3,"missing":0,"duplicates":0,"hashMismatches":0}`
+	base := labScript(f, start, 1<<20)
+	var rotated time.Time
+	f.script = func(step string, at time.Time) []map[string]any {
+		evs := base(step, at)
+		for _, e := range evs {
+			if e["type"] == "upload_progress" && e["offset"] == int64(1<<20) {
+				// The mid-upload moment after the unblock comes with a rotation.
+				rotated = at
+				evs = append(evs, map[string]any{"type": "segment_closed", "cam": "cam04", "profile": "sub", "startMs": at.Add(-30 * time.Second).UnixMilli()})
+				break
+			}
+		}
+		return evs
+	}
+	data, err := labRun(t, f, start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.IsZero() || f.killed.Sub(rotated) < tearAfter {
+		t.Errorf("killed %v after the rotation; want at least %v", f.killed.Sub(rotated), tearAfter)
+	}
+	if r := data.Restart; r == nil || r.LastConfirmedOffset != 1<<20 || !r.TornSegmentUploaded {
+		t.Errorf("restart %+v", data.Restart)
+	}
+}

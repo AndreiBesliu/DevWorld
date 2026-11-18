@@ -452,15 +452,16 @@ func percentile(v []float64, q float64) float64 {
 var ErrNoUploadAfterUnblock = errors.New("mi5: no upload in the middle of a placement after the unblock")
 
 // restartMidUpload is the restart (P16): after the unblock it waits for
-// an upload_progress with 0 < offset < size, records that placement's last
-// confirmed offset, kills the hub (MediaMTX dies with it) and starts it
-// once more. It never kills during the block.
+// an upload_progress with 0 < offset < size, at least tearAfter after the
+// cameras' last rotation (so the kill also tears an open segment), records
+// that placement's last confirmed offset, kills the hub (MediaMTX dies
+// with it) and starts it once more. It never kills during the block.
 func (r *run) restartMidUpload(ctx context.Context) error {
 	var target progress
 	deadline := r.now().Add(r.opts.Timing.DrainMax)
 	for {
 		found := false
-		r.withTally(func(tl *tally) { target, found = tl.midUpload() })
+		r.withTally(func(tl *tally) { target, found = tl.midUpload(r.now().UnixMilli()) })
 		if found {
 			break
 		}

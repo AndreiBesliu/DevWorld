@@ -5,7 +5,9 @@ package mi5
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/hubproc"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/results"
@@ -34,6 +36,13 @@ func CheckResume(r *results.Mi5Restart) error {
 	}
 	return nil
 }
+
+// tearAfter is how long after a camera's segment rotation the restart's
+// kill waits: the next segment has no .part until MediaMTX writes its
+// first part (the hub's parts are 1 s), so a kill right after a rotation
+// tears no segment; two parts in, it tears one that the restarted hub's
+// reconcile finalises (P16).
+const tearAfter = 2 * time.Second
 
 // progress is an upload_progress: a placement, its confirmed offset and
 // its size.
@@ -83,15 +92,16 @@ type tally struct {
 	segmentStarts map[string][]int64
 	// gapsAfterKill counts the recording gaps that the kill caused.
 	gapsAfterKill int
-	// rotated is when each camera's last segment closed (a new one began).
-	rotated map[string]int64
+	// rotated is when each camera's last segment closed (a new one began);
+	// closedAt when each segment (camera and start) closed.
+	rotated, closedAt map[string]int64
 }
 
 func newTally(startMs int64, dests []DestConfig) *tally {
 	t := &tally{startMs: startMs, dests: map[string]DestConfig{}, placements: map[string]*placement{},
 		verifiedInBlock: map[string]int{}, failedInBlock: map[string]int{}, rateLimitedInBlock: map[string]int{},
 		unreachable: map[string]bool{}, calls: map[string]map[string]float64{}, verified: map[string]int{},
-		segmentStarts: map[string][]int64{}, rotated: map[string]int64{}}
+		segmentStarts: map[string][]int64{}, rotated: map[string]int64{}, closedAt: map[string]int64{}}
 	for _, d := range dests {
 		t.dests[d.ID] = d
 	}
@@ -185,6 +195,9 @@ func (t *tally) observe(ev hubproc.Event) {
 	case "segment_closed":
 		if f.Profile == "sub" {
 			t.rotated[f.Cam] = at
+			if _, seen := t.closedAt[segmentKey(f.Cam, f.StartMs)]; !seen {
+				t.closedAt[segmentKey(f.Cam, f.StartMs)] = at
+			}
 		}
 		if f.Profile == "sub" && f.StartMs >= t.startMs {
 			t.segmentStarts[f.Cam] = append(t.segmentStarts[f.Cam], f.StartMs)
@@ -196,14 +209,23 @@ func (t *tally) observe(ev hubproc.Event) {
 	}
 }
 
+// segmentKey names a segment by its camera and start.
+func segmentKey(cam string, startMs int64) string { return cam + "/" + strconv.FormatInt(startMs, 10) }
+
 // midUpload is a placement in the middle of its upload after the unblock,
 // of the running hub: its latest upload_progress, after the unblock, has
 // 0 < offset < size with at least a quarter of its bytes still to go
 // (so the kill lands between two parts, not after the last), and it is
-// not verified. It is the restart's moment.
-func (t *tally) midUpload() (progress, bool) {
+// not verified. It is the restart's moment once no camera rotated within
+// tearAfter of nowMs, so that the kill also tears an open segment.
+func (t *tally) midUpload(nowMs int64) (progress, bool) {
 	if t.unblockAt == 0 || t.killedAt != 0 {
 		return progress{}, false
+	}
+	for _, at := range t.rotated {
+		if nowMs-at < tearAfter.Milliseconds() {
+			return progress{}, false
+		}
 	}
 	latest := map[string]progress{}
 	var order []string
@@ -278,10 +300,15 @@ func (t *tally) segmentsDuringBlock(d DestConfig) int {
 
 // tornUploaded reports whether the segments that the kill tore, which the
 // restarted hub's reconcile finalised and enqueued, were all uploaded:
-// placements queued after the kill for segments that started before it.
+// placements first queued after the kill for segments that started before
+// it and had not closed before it (a closed segment's placement may also
+// be queued first by the restarted hub).
 func (t *tally) tornUploaded() bool {
 	torn := 0
 	for _, p := range t.placements {
+		if closed, ok := t.closedAt[segmentKey(p.cam, p.startMs)]; ok && closed < t.killedAt {
+			continue
+		}
 		if p.queuedAfterKill && p.startMs < t.killedAt {
 			torn++
 			if p.verifiedAtMs == 0 {
