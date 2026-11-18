@@ -57,18 +57,23 @@ type mi6Device struct {
 // reverse proxy that, while blocked, cuts every request to the fake
 // providers' storage, as MI5's block cuts the uploads (the firewall seam
 // blocks nothing), and passes their OAuth endpoints. Like the lab's
-// fakeproviders -throttle 1048576, it paces the storage's request bodies
-// at 1 MiB/s, so a 512 KiB part takes about 0.5 s and the restart lands
-// between two parts of one segment instead of racing a whole upload on
-// loopback. mi5 reaches the fakes through it (--fakes); setup, mi6 and
-// resume reach them directly.
+// fakeproviders -throttle, it paces the storage's request bodies
+// (wanRate), so the restart lands between two parts of one segment
+// instead of racing a whole upload on loopback. mi5 reaches the fakes
+// through it (--fakes); setup, mi6 and resume reach them directly.
 type wanProxy struct {
 	base    string
 	blocked atomic.Bool
 }
 
-// wanRate is the proxy's pace of the storage's request bodies, bytes/s.
-const wanRate = 1 << 20
+// wanRate is the proxy's pace of the storage's request bodies, bytes/s:
+// 256 KiB/s, so a 512 KiB part takes about 2 s. Two cameras' segments
+// then go up two at a time over about 7 s after each rotation, and a
+// part ends with a quarter of its segment still to go about 2 and 4 s
+// in: the restart's moment comes tearAfter after the rotation even when
+// no backlog is left. At the lab's 1 MiB/s, both segments were up within
+// 2 s of every rotation, before the next segment had its first parts.
+const wanRate = 256 << 10
 
 // paced reads its body at wanRate.
 type paced struct{ io.ReadCloser }
@@ -182,7 +187,7 @@ func (d *mi6Device) waitBlock(t *testing.T, m *proc, from int) int {
 	var n int
 	until(t, 3*time.Minute, "the block", func() bool {
 		if m.ended() {
-			t.Fatalf("mi5 ended before its block: exit %d\n%s\n%s", m.code, m.stdout, tail(m.stderr.String(), 30))
+			t.Fatalf("mi5 ended before its block: exit %d (%s)\n%s\n%s", m.code, m.errorLine(), m.stdout, tail(m.stderr.String(), 30))
 		}
 		b, _ := os.ReadFile(d.fwLog)
 		n = len(b)
@@ -369,7 +374,7 @@ func TestMI5_TakesOverTheMI6Hub(t *testing.T) {
 		t.Fatalf("mi5 did not end\n%s\n%s", m.stdout, tail(m.stderr.String(), 30))
 	}
 	if m.code != 0 || !strings.Contains(m.stdout.String(), msgMI5Done) {
-		t.Fatalf("mi5: exit %d\n%s\n%s", m.code, m.stdout, tail(m.stderr.String(), 30))
+		t.Fatalf("mi5: exit %d (%s)\n%s\n%s", m.code, m.errorLine(), m.stdout, tail(m.stderr.String(), 30))
 	}
 	e := d.mi5Envelope(t, run.RunID)
 	if len(e.Runs) != 1 || !e.Runs[0].Valid || e.MI5 == nil || len(e.MI5.Dests) == 0 {
@@ -559,7 +564,8 @@ func (d *mi6Device) waitSegmentOpen(t *testing.T, from int) {
 // alone would stop the hub cleanly), while a camera's segment is open
 // (waitSegmentOpen), leaving torn .part files under rec/ and pending
 // dst-1 placements. resume's hub's startup reconcile finalises the torn
-// segments, and none gets a placement. A second mi5 on the same data
+// segments, and none gets a placement (a torn segment is one with no
+// segment_closed before the cut). A second mi5 on the same data
 // directory then completes: its routes start at its own start; its audit
 // counts only its own segments (the hub's events queued exactly that many
 // dst-1 placements from its start on) with 0 missing, 0 duplicates and
@@ -588,10 +594,14 @@ func TestMI5_RunAfterCutRun_CountsOnlyItsOwnSegments(t *testing.T) {
 	}
 	cutAt := d.eventsLen()
 	beforeCut := d.loggedEvents(t, 0)
-	queued := map[string]bool{} // the first run's placements, by camera and start
+	// The segments that closed before the cut, by camera and start: each
+	// of the first run's got its placement in its own transaction, though
+	// a destination in backoff queues it (upload_queued) only later. A
+	// segment that the cut tore has no segment_closed before the cut.
+	closed := map[string]bool{}
 	for _, e := range beforeCut {
-		if e.Type == "upload_queued" && e.Dest == "dst-1" {
-			queued[fmt.Sprint(e.Cam, e.StartMs)] = true
+		if e.Type == "segment_closed" {
+			closed[fmt.Sprint(e.Cam, e.StartMs)] = true
 		}
 	}
 	leftovers := pending(beforeCut, "dst-1")
@@ -631,7 +641,7 @@ func TestMI5_RunAfterCutRun_CountsOnlyItsOwnSegments(t *testing.T) {
 		t.Fatalf("the second mi5 did not end\n%s\n%s", second.stdout, tail(second.stderr.String(), 30))
 	}
 	if second.code != 0 {
-		t.Fatalf("the second mi5: exit %d\n%s\n%s", second.code, second.stdout, tail(second.stderr.String(), 30))
+		t.Fatalf("the second mi5: exit %d (%s)\n%s\n%s", second.code, second.errorLine(), second.stdout, tail(second.stderr.String(), 30))
 	}
 	e := d.mi5Envelope(t, run.RunID)
 	if len(e.Runs) != 1 || !e.Runs[0].Valid || e.MI5 == nil || len(e.MI5.Dests) == 0 {
@@ -645,8 +655,8 @@ func TestMI5_RunAfterCutRun_CountsOnlyItsOwnSegments(t *testing.T) {
 		case ev.Dest != "dst-1":
 		case ev.Type == "upload_queued" && ev.StartMs >= run.StartMs:
 			own[fmt.Sprint(ev.Cam, ev.StartMs)] = true
-		case ev.Type == "upload_queued" && !queued[fmt.Sprint(ev.Cam, ev.StartMs)]:
-			t.Errorf("a segment of the cut run that had no placement got one: %+v", ev)
+		case ev.Type == "upload_queued" && !closed[fmt.Sprint(ev.Cam, ev.StartMs)]:
+			t.Errorf("a segment that the cut tore got a placement: %+v", ev)
 		case ev.Type == "upload_verified":
 			verified[ev.PlacementID] = ev.AtMs
 		}

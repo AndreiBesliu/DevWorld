@@ -21,13 +21,15 @@ const mi5TestTiming = `{"preRun":20000,"preRunEvery":1000,"warmUp":5000,"checkEv
 
 // TestMI5_LabRun_RealHub (P14, P16, g3-16): a short lab run end to end on
 // the real ipcam-hub, the fork's MediaMTX, reccontroller --local's
-// simulated cameras and fakeproviders, throttled to 1 MiB/s as the lab
-// runs it (-throttle 1048576), so that each 512 KiB part stays about
-// 0.5 s on the wire and the restart lands between two parts of one
-// segment instead of racing a whole upload on loopback (unthrottled, a
-// segment's four parts can all go up between two of the run's 50-ms
-// polls, leaving the restart no moment): the lab's login rig, the quota
-// probe, the encrypted pre-run's reads, the recording, a 75-s block
+// simulated cameras and fakeproviders, throttled as the lab runs it, here
+// to 256 KiB/s (-throttle 262144): each 512 KiB part stays about 2 s on
+// the wire, so the restart lands between two parts of one segment
+// (unthrottled, a segment's four parts can all go up between two of the
+// run's 50-ms polls), and tearAfter after a rotation, when the cameras'
+// next segments hold parts, although the firewall seam lets the uploads
+// go on through the block and leaves no backlog (at 1 MiB/s every
+// segment was up within 2 s of its rotation): the lab's login rig, the
+// quota probe, the encrypted pre-run's reads, the recording, a 75-s block
 // (the tests' firewall seam records its commands and blocks nothing, so
 // its checks pass by the seam and the run is never judged), the restart
 // in the middle of a 512 KiB part, the drain, the final drain without
@@ -40,7 +42,7 @@ func TestMI5_LabRun_RealHub(t *testing.T) {
 		t.Skip("the lab's run is Linux's")
 	}
 	media := spiketest.Required(t, "MEDIAGEN_DIR", "SPIKE_REQUIRE_MEDIA")
-	r, f := realRigWith(t, []string{"-throttle", "1048576"})
+	r, f := realRigWith(t, []string{"-throttle", "262144"})
 	recc := binary(t, "reccontroller", "github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/recording/cmd/reccontroller")
 	log, seam := r.firewallLog()
 	p := r.start([]string{seam, envReccontroller + "=" + recc, envMediaDir + "=" + media, envLabLAN + "=127.0.0.1", envMI5Timing + "=" + mi5TestTiming},
@@ -49,7 +51,7 @@ func TestMI5_LabRun_RealHub(t *testing.T) {
 		t.Fatalf("mi5 did not end\nstdout:\n%s\nstderr:\n%s", p.stdout, tail(p.stderr.String(), 40))
 	}
 	if p.code != 0 {
-		t.Fatalf("mi5: exit %d\nstdout:\n%s\nstderr:\n%s", p.code, p.stdout, tail(p.stderr.String(), 40))
+		t.Fatalf("mi5: exit %d (%s)\nstdout:\n%s\nstderr:\n%s", p.code, p.errorLine(), p.stdout, tail(p.stderr.String(), 40))
 	}
 	if first := strings.SplitN(p.stdout.String(), "\n", 2)[0]; first != msgMI5KeepOpen {
 		t.Errorf("the first line %q; want %q", first, msgMI5KeepOpen)

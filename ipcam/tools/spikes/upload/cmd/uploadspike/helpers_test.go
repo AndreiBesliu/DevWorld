@@ -257,6 +257,21 @@ func (p *proc) exitCode() int {
 	return -1
 }
 
+// errorLine is the last «uploadspike: eroare:» line that the process
+// printed, on either stream, or "": the failure's annotation keeps only a
+// test's file:line lines, so a process's reason goes on one of them.
+func (p *proc) errorLine() string {
+	var last string
+	for _, out := range []string{p.stdout.String(), p.stderr.String()} {
+		for l := range strings.SplitSeq(out, "\n") {
+			if strings.Contains(l, msgError) {
+				last = strings.TrimSpace(l)
+			}
+		}
+	}
+	return last
+}
+
 // wait waits for the process's end.
 func (p *proc) wait(d time.Duration) bool {
 	select {
