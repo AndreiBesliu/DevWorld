@@ -35,6 +35,9 @@ const (
 	GapReboot   = "reboot"
 	GapSleep    = "sleep"
 	GapHubCrash = "hub-crash"
+	// GapMI5Block is MI5's block of the hub's WAN (P53): a daily refresh
+	// whose attempts all fell in it is blocked-by-test.
+	GapMI5Block = "mi5-block"
 )
 
 // namePattern is a run id's or a set's form: it names a file and a folder.

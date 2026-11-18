@@ -301,7 +301,7 @@ func (p *Pair) Series(gaps []results.Gap, nowMs int64) []results.RefreshDay {
 func uptime(gaps []results.Gap, from, to int64) int64 {
 	var spans [][2]int64
 	for _, g := range gaps {
-		if g.Reason != results.GapReboot && g.Reason != results.GapSleep {
+		if g.Reason != results.GapReboot && g.Reason != results.GapSleep && g.Reason != results.GapMI5Block {
 			continue
 		}
 		if s, e := max(g.StartMs, from), min(g.EndMs, to); s < e {

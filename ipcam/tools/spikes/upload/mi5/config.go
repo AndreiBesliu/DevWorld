@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -118,6 +119,9 @@ var (
 // ProviderHostsFor are the hosts that the block must cut for cfg.
 func ProviderHostsFor(cfg Mi5Config) []string {
 	if cfg.Lab {
+		if u, err := url.Parse(cfg.Fakes); err == nil && u.Host != "" {
+			return []string{u.Host} // the fakes that the lab serves (198.51.100.1:18080)
+		}
 		return []string{LabHost}
 	}
 	hosts := slices.Clone(GoogleHosts)

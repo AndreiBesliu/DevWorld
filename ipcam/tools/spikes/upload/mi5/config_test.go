@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -187,8 +188,8 @@ func TestLabConfig_AtLeastTwoChunksPerSegment(t *testing.T) {
 // the routing table's default gateway, on 80 or else 53; a gateway that
 // answers neither refuses the run, whose error names no address.
 func TestMI5_LanProbeIsDefaultGateway(t *testing.T) {
-	if os.Getenv("GOOS") == "windows" {
-		t.Skip("the Linux routing table")
+	if runtime.GOOS == "windows" {
+		t.Skip("the Linux routing table; Windows reads Get-NetRoute")
 	}
 	table := filepath.Join(t.TempDir(), "route")
 	// Default route via 192.168.1.1 (0101A8C0), flags UG (0003).

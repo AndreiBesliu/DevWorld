@@ -141,6 +141,10 @@ func takeForResume(ctx context.Context, e *env) (*holder, bool) {
 		release()
 		return nil, false
 	}
+	// An MI5 run whose mi5 died (a reboot, a closed window, a crash):
+	// the block and its cleanup go, and the run ends invalid; the hub
+	// restarts with MI6's destinations only (Holding the hub).
+	endDeadMI5(ctx, e)
 	if !hasOpenRun(e) {
 		release()
 		return nil, false

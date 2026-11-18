@@ -26,6 +26,10 @@ const usage = `Folosire:
       starea probelor deschise.
   uploadspike results
       scrie rezultatele și le pune în results-<gazdă>.zip, în folderul curent.
+  uploadspike mi5 [--drive test|test+personal|personal] [--onedrive]
+      proba MI5: hub-ul înregistrează camerele simulate cât internetul lui e blocat 6 h, apoi recuperează (≈ 8 h).
+  uploadspike mi5 --lab --block 15m --segment-secs 30 --part-size 512KiB --cameras 4 --fakes LINIA
+      laboratorul (varianta de 15 min).
   uploadspike install [--lab]
       pe PC (fereastră de administrator): pornirea automată a probei; pe Pi: sudo ./uploadspike install.
   uploadspike uninstall
@@ -92,6 +96,19 @@ const (
 	msgInstalledLab      = "Laboratorul: utilizatorul și folderele probei sunt pregătite, fără pornire automată."
 	msgUninstalled       = "Pornirea automată, blocarea și utilizatorul probei au fost scoase; datele au rămas."
 	msgAnnotateUsage     = "folosire: uploadspike annotate emit --code COD --set SET"
+	msgBadPartSize       = "valoare greșită pentru --part-size: %s (de exemplu 512KiB)"
+	msgBadFakes          = "valoare greșită pentru --fakes: linia pe care o tipărește fakeproviders"
+	msgMI5KeepOpen       = "Lăsați fereastra deschisă până la final."
+	msgMI5HowToKeepOpen  = "Proba MI5 durează aproximativ 8 ore: nu închideți fereastra și nu opriți calculatorul; PC-ul nu intră în repaus cât rulează proba, iar ecranul se poate stinge. Dacă fereastra se închide, proba se reia altă zi (zilele 1–5)."
+	msgMI5Started        = "Proba MI5 a pornit: blocarea de %v începe în jur de %s."
+	msgNoCameras         = "Camerele simulate nu au pornit (reccontroller --local): porturile 7080–7083 și 8554 trebuie să fie libere."
+	msgMI5DeviceLogin    = "Conectați contul pentru %s: deschideți %s pe orice dispozitiv, scrieți codul %s și acceptați."
+	msgMI5LoginDone      = "%s: autentificare reușită."
+	msgMI5LoginFailed    = "Autentificarea pentru %s nu a reușit (%s); rulați din nou uploadspike mi5."
+	msgMI5Done           = "Proba MI5 s-a încheiat; rezultatele au fost scrise. Hub-ul trece la pornirea automată."
+	msgMI5EndedInvalid   = "Proba MI5 deschisă s-a încheiat fără rezultat (%s); rulați-o din nou în altă zi."
+	msgMI5Running2       = "Proba MI5 rulează (pornită la %s); hub-ul nu se predă până la final."
+	msgMI5Dead           = "Proba MI5 s-a oprit înainte de final; pornirea automată o închide și o marchează nevalidă."
 	msgAnnotateTooMany   = "setul are %d rezultate; o adnotare primește cel mult %d"
 	msgAnnotateTooLong   = "%s are %d octeți după escapare; o adnotare primește cel mult %d"
 )

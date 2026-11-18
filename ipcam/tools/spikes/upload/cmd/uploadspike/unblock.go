@@ -4,9 +4,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/internal/cli"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/mi5"
@@ -35,6 +39,17 @@ func (e *env) firewall() mi5.WanBlock {
 	if e.firewallFor != nil {
 		return e.firewallFor(filepath.Dir(e.hubBin))
 	}
+	if log := os.Getenv(envFirewallLog); log != "" {
+		// The tests' seam: each command is recorded, none runs.
+		return mi5.FirewallFor(runtime.GOOS, filepath.Dir(e.hubBin), func(_ context.Context, name string, args []string, _ string) (string, error) {
+			f, err := os.OpenFile(log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // the test's own log
+			if err != nil {
+				return "", err
+			}
+			_, err = fmt.Fprintln(f, strings.Join(append([]string{name}, args...), " "))
+			return "", errors.Join(err, f.Close())
+		})
+	}
 	return mi5.FirewallFor(runtime.GOOS, filepath.Dir(e.hubBin), mi5.RunCommand)
 }
 
@@ -44,6 +59,9 @@ func (e *env) firewall() mi5.WanBlock {
 func elevate(e *env, args []string) error {
 	if isElevated() && (runtime.GOOS == "windows" || e.root()) {
 		return nil
+	}
+	if _, seam := os.LookupEnv(envRunAs); seam && runtime.GOOS != "windows" && isElevated() {
+		return nil // the tests' hub runs as uploadspike: no root needed
 	}
 	if runtime.GOOS != "windows" {
 		return ownerError(msgNeedsSudo)

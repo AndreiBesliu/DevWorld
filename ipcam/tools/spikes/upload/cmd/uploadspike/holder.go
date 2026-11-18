@@ -103,6 +103,11 @@ type holder struct {
 	hubGone    chan struct{}
 	crashAt    int64
 	crashes    retry // the restarts after a crash
+	// mi5 is the MI5 run that this process holds (`uploadspike mi5`): its
+	// composition, which holds the cameras' credentials and so lives in
+	// RAM only; sink gets each of the hub's events for it.
+	mi5  *mi5Comp
+	sink func(hubproc.Event)
 }
 
 // acquire takes the device's hub for command (One hub per device): no MI5
@@ -142,6 +147,9 @@ func acquire(ctx context.Context, e *env, command string) (*holder, error) {
 		return nil, err
 	}
 	dropClaim(e)
+	// An MI5 run whose mi5 died: the next command that takes the hub
+	// ends it when no resume did first (Holding the hub).
+	endDeadMI5(ctx, e)
 	return h, nil
 }
 
@@ -246,6 +254,7 @@ func signalContext(ctx context.Context) (context.Context, context.CancelFunc) {
 type runConfig struct {
 	DataDir         string          `json:"dataDir"`
 	MediaMTX        string          `json:"mediamtx,omitempty"`
+	IdentityFile    string          `json:"identityFile,omitempty"`
 	SDCardConfirmed bool            `json:"sdCardConfirmed"`
 	Jobs            []any           `json:"jobs"`
 	Uploads         *uploadsSection `json:"uploads,omitempty"`
@@ -264,32 +273,48 @@ type destDef struct {
 	TokenRef      string `json:"tokenRef,omitempty"`
 	BaseURL       string `json:"baseUrl,omitempty"`
 	UploadBaseURL string `json:"uploadBaseUrl,omitempty"`
+	PartSize      int64  `json:"partSize,omitempty"`
 }
 
 type oauthSection struct {
 	Endpoints map[string]string `json:"endpoints,omitempty"`
 }
 
-// compose is the hub's run.json from the device's open runs: MI6's
-// destinations from day 0 to its close (Task 8 adds MI5's), sdCardConfirmed
-// from the run state; with the fakes (the lab, the tests), their endpoints.
-func (e *env) compose(st *runstate.State) ([]byte, error) {
+// files are the hub's files from the open runs: run.json and, while this
+// process holds an MI5 run, the encrypted pre-run's identity.
+func (h *holder) files(st *runstate.State) (map[string][]byte, error) {
+	cfg, err := h.e.composeConfig(st)
+	if err != nil {
+		return nil, err
+	}
+	files := map[string][]byte{}
+	if h.mi5 != nil {
+		h.mi5.add(h.e, &cfg, files)
+	}
+	b, err := marshalRun(cfg)
+	if err != nil {
+		return nil, err
+	}
+	files["run.json"] = b
+	return files, nil
+}
+
+// composeConfig is the hub's run.json from the device's open runs: MI6's
+// destinations from day 0 to its close, sdCardConfirmed from the run
+// state; with the fakes (the lab, the tests), their endpoints. MI5's
+// destinations, jobs and routes join it only in the mi5 process that
+// holds the run (files), since its jobs carry the cameras' credentials.
+func (e *env) composeConfig(st *runstate.State) (runConfig, error) {
 	cfg := runConfig{DataDir: e.dataDir(), MediaMTX: e.mediamtx, SDCardConfirmed: st.Sd != nil, Jobs: []any{}}
 	if raw, ok := st.Open["MI6"]; ok {
 		run, err := mi6.Decode(raw)
 		if err != nil {
-			return nil, err
+			return cfg, err
 		}
 		up := &uploadsSection{HubName: "ipcam-spike", Destinations: []destDef{}, Routes: []any{}}
 		for _, p := range run.Pairs {
 			d := destDef{ID: p.Dest, Kind: p.Provider, TokenRef: p.Dest}
-			if e.fakes != "" {
-				if p.Provider == mi6.ProviderDrive {
-					d.BaseURL, d.UploadBaseURL = e.fakes+"/gdrive", e.fakes+"/gdrive-upload"
-				} else {
-					d.BaseURL = e.fakes + "/graph"
-				}
-			}
+			e.fakeDest(&d)
 			up.Destinations = append(up.Destinations, d)
 		}
 		cfg.Uploads = up
@@ -302,8 +327,25 @@ func (e *env) compose(st *runstate.State) ([]byte, error) {
 			"microsoftDevice": o + "/microsoft/devicecode",
 		}}
 	}
+	return cfg, nil
+}
+
+// marshalRun is run.json's bytes.
+func marshalRun(cfg runConfig) ([]byte, error) {
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	return append(b, '\n'), err
+}
+
+// fakeDest points d at the fakes (the lab, the tests).
+func (e *env) fakeDest(d *destDef) {
+	if e.fakes == "" {
+		return
+	}
+	if d.Kind == mi6.ProviderDrive {
+		d.BaseURL, d.UploadBaseURL = e.fakes+"/gdrive", e.fakes+"/gdrive-upload"
+	} else {
+		d.BaseURL = e.fakes + "/graph"
+	}
 }
 
 // startHub starts the device's hub with the composition of its open runs,
@@ -314,7 +356,7 @@ func (h *holder) startHub(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	runJSON, err := h.e.compose(st)
+	files, err := h.files(st)
 	if err != nil {
 		return err
 	}
@@ -323,7 +365,7 @@ func (h *holder) startHub(ctx context.Context) error {
 		return err
 	}
 	cfg := h.e.hubConfig()
-	cfg.Files, cfg.ControlToken = map[string][]byte{"run.json": runJSON}, token
+	cfg.Files, cfg.ControlToken = files, token
 	ctx, cancel := context.WithTimeout(ctx, hubStartWait)
 	defer cancel()
 	hub, err := hubproc.Start(ctx, cfg)
@@ -464,6 +506,12 @@ func (h *holder) consume(hub *hubproc.Hub, gone chan struct{}) {
 			_, _ = log.Write(append(bytes.Clone(ev.Raw), '\n'))
 		}
 		h.apply(ev)
+		h.mu.Lock()
+		sink := h.sink
+		h.mu.Unlock()
+		if sink != nil {
+			sink(ev)
+		}
 	}
 }
 

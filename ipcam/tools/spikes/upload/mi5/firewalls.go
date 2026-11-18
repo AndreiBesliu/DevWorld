@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -135,7 +136,7 @@ func (l *linuxFirewall) ScheduleCleanup(ctx context.Context, at time.Time) error
 	secs := max(int64(at.Sub(l.now()).Seconds()), 1)
 	_, _ = l.run(ctx, "systemctl", []string{"stop", CleanupName + ".timer"}, "")
 	_, err := l.run(ctx, "systemd-run", []string{"--on-active=" + strconv.FormatInt(secs, 10) + "s", "--unit", CleanupName,
-		filepath.Join(l.binDir, "uploadspike"), "unblock"}, "")
+		path.Join(filepath.ToSlash(l.binDir), "uploadspike"), "unblock"}, "")
 	if err != nil {
 		return fmt.Errorf("mi5: the cleanup timer: %w", err)
 	}

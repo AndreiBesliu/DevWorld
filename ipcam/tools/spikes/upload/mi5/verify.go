@@ -29,6 +29,9 @@ type ownerError string
 
 func (e ownerError) Error() string { return string(e) }
 
+// OwnerLine marks the error's text as a whole line for the owner.
+func (ownerError) OwnerLine() {}
+
 // reachLine is one line of diag reach.
 type reachLine struct {
 	Schema string `json:"schema"`

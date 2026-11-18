@@ -47,6 +47,7 @@ const (
 	envPauseAfter   = "UPLOADSPIKE_TEST_PAUSE_AFTER_CHECK"
 	envSignalFile   = "UPLOADSPIKE_TEST_SIGNAL_FILE"
 	envNotElevated  = "UPLOADSPIKE_TEST_NOT_ELEVATED"
+	envFirewallLog  = "UPLOADSPIKE_TEST_FIREWALL_LOG"
 	defaultHubName  = "ipcam-hub"
 	baseDirName     = "ipcam-spike"
 	linuxBase       = "/var/lib/ipcam-spike"
@@ -57,7 +58,7 @@ const (
 // one is set uploadspike says so and its envelopes record testSeams, which
 // the judges do not judge (C2-R22 (3)).
 var testSeams = []string{envBase, envHubBin, envMediaMTX, envFakes, envRunAs, envPort, envHost, envNoBrowser, envEventLog,
-	envFast, envPauseAfter, envSignalFile, envNotElevated}
+	envFast, envPauseAfter, envSignalFile, envNotElevated, envFirewallLog, envMI5Timing, envReccontroller, envMediaDir, envLabLAN}
 
 // setSeams are the names of the test seams set in this process's
 // environment.
@@ -203,6 +204,7 @@ func (e ownerError) Error() string { return string(e) }
 func report(err error, stderr io.Writer) int {
 	var code exitError
 	var owner ownerError
+	var line interface{ OwnerLine() }
 	switch {
 	case err == nil:
 		return 0
@@ -211,7 +213,7 @@ func report(err error, stderr io.Writer) int {
 	case errors.Is(err, flag.ErrHelp):
 	case errors.Is(err, context.Canceled):
 		_, _ = fmt.Fprintln(stderr, msgStoppedByYou)
-	case errors.As(err, &owner), errors.Is(err, hubproc.ErrSdCardUnconfirmed), errors.Is(err, hubproc.ErrNoSpikeUser):
+	case errors.As(err, &owner), errors.As(err, &line), errors.Is(err, hubproc.ErrSdCardUnconfirmed), errors.Is(err, hubproc.ErrNoSpikeUser):
 		_, _ = fmt.Fprintln(stderr, err)
 	default:
 		_, _ = fmt.Fprintln(stderr, msgError, err)
@@ -242,6 +244,8 @@ func run(ctx context.Context, e *env, args []string) error {
 		return runStatus(ctx, e, rest)
 	case "results":
 		return runResults(ctx, e, rest)
+	case "mi5":
+		return runMI5(ctx, e, rest)
 	case "install":
 		return runInstall(ctx, e, rest)
 	case "uninstall":

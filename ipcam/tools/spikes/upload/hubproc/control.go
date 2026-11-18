@@ -192,3 +192,10 @@ func (c *ControlClient) Targets(ctx context.Context) ([]Target, error) {
 	err := c.call(ctx, http.MethodGet, "/control/v1/visibility/targets", nil, &out)
 	return out, err
 }
+
+// ResetConnections closes the hub's upload connections, idle and in
+// flight (MI5 calls it right after its block, Task 9): each request in
+// flight fails as transient and is retried on a new connection.
+func (c *ControlClient) ResetConnections(ctx context.Context) error {
+	return c.call(ctx, http.MethodPost, "/control/v1/uploads/reset-connections", nil, nil)
+}

@@ -19,7 +19,7 @@ const (
 
 	reasonNoEnvelope   = "nicio rulare MI5 de 6 h a proprietarului (laboratorul și rezultatele cu variabile de test nu se judecă)"
 	reasonNoSegments   = "%s: niciun segment înregistrat în timpul blocării"
-	reasonNoResume     = "repornirea nu a reluat o încărcare de la un offset > 0"
+	reasonNoResume     = "repornirea nu a reluat încărcarea de la un offset > 0, cel puțin ultimul confirmat"
 	reasonNotVerified  = "%s: %d din %d segmente verificate"
 	reasonMissing      = "%s: %d lipsă, %d duplicate, %d hash-uri greșite"
 	reasonReadOpenFail = "citirea segmentului deschis: %d din %d reușite"
@@ -80,7 +80,7 @@ func Judge(envs []results.Envelope) results.Judgement {
 			}
 			j.Rows = append(j.Rows, row)
 		}
-		if d.Restart == nil || d.Restart.ResumedOffset <= 0 {
+		if CheckResume(d.Restart) != nil {
 			floors = append(floors, reasonNoResume)
 		}
 		calls, ok := 0, 0

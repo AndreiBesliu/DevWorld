@@ -161,3 +161,14 @@ func ownDir(root *os.Root, dataDir, rel string, owner *fileOwner) error {
 	}
 	return nil
 }
+
+// WriteFiles writes cfg's Files into RunJSON's folder as Start does,
+// without starting the hub: for a diag command that needs run.json
+// before the hub's first start (MI5's dest-probe).
+func WriteFiles(cfg Config) error {
+	owner, err := spikeOwner(cfg.RunAsUser)
+	if err != nil {
+		return err
+	}
+	return prepareFiles(cfg, owner)
+}

@@ -44,6 +44,9 @@ const (
 	// control and ready events, a hub that fails early: always with "1",
 	// else while the file that it names exists.
 	FakeFailStartEnv = "UPLOADSPIKE_FAKE_FAIL_START"
+	// FakePiModelEnv is the Pi model, JSON, that diag host reports; a PC
+	// (null) when unset.
+	FakePiModelEnv = "UPLOADSPIKE_FAKE_PIMODEL"
 )
 
 // The stand-in's records.
@@ -122,8 +125,12 @@ func FakeHub(args []string) int {
 		if storage == "" {
 			storage = "ssd"
 		}
-		fmt.Printf(`{"schema":"ipcam.diag.host/1","os":%q,"arch":%q,"physicalCores":4,"logicalCpus":8,"ramMb":8000,"piModel":null,"storage":%q,"writeCache":"on","recommendedCameras":4,"cores6Plus":false}`+"\n",
-			runtime.GOOS, runtime.GOARCH, storage)
+		pi := os.Getenv(FakePiModelEnv)
+		if pi == "" {
+			pi = "null"
+		}
+		fmt.Printf(`{"schema":"ipcam.diag.host/1","os":%q,"arch":%q,"physicalCores":4,"logicalCpus":8,"ramMb":8000,"piModel":%s,"storage":%q,"writeCache":"on","recommendedCameras":4,"cores6Plus":false}`+"\n",
+			runtime.GOOS, runtime.GOARCH, pi, storage)
 		return 0
 	case len(args) >= 2 && args[0] == "diag" && args[1] == "visibility":
 		return fakeVisibility(args[2:])

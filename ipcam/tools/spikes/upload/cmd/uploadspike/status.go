@@ -4,7 +4,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
+	"fmt"
+	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/internal/cli"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/mi6"
@@ -36,6 +39,15 @@ func statusLines(e *env) ([]string, error) {
 		return nil, err
 	}
 	var lines []string
+	if raw, ok := st.Open["MI5"]; ok {
+		var o mi5Open
+		_ = json.Unmarshal(raw, &o)
+		if _, live := mi5State(st); live {
+			lines = append(lines, fmt.Sprintf(msgMI5Running2, time.UnixMilli(o.StartMs).Format("15:04")))
+		} else {
+			lines = append(lines, msgMI5Dead)
+		}
+	}
 	if raw, ok := st.Open["MI6"]; ok {
 		run, err := mi6.Decode(raw)
 		if err != nil {
