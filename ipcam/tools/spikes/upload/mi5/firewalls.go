@@ -141,7 +141,7 @@ func (l *linuxFirewall) ScheduleCleanup(ctx context.Context, at time.Time) error
 	_, err := l.run(ctx, "systemd-run", []string{"--on-active=" + strconv.FormatInt(secs, 10) + "s", "--unit", CleanupName,
 		path.Join(filepath.ToSlash(l.binDir), "uploadspike"), "unblock"}, "")
 	if err != nil {
-		return fmt.Errorf("mi5: the cleanup timer: %w", err)
+		return &Failure{Line: MsgCleanupFailed, Cause: fmt.Errorf("the cleanup timer: %w", err)}
 	}
 	return nil
 }

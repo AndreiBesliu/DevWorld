@@ -58,6 +58,9 @@ type fakeRun struct {
 	restartCalls int
 	// destProbeErr is diag dest-probe's exit.
 	destProbeErr error
+	// The firewall's failures: Block's, ScheduleCleanup's, Unblock's and
+	// RemoveStale's.
+	blockErr, cleanupErr, unblockErr, staleErr error
 }
 
 func newFakeRun(t *testing.T, start time.Time) *fakeRun {
@@ -202,16 +205,16 @@ func (f *fakeRun) Diag(_ context.Context, args []string) ([]json.RawMessage, err
 }
 
 // fake firewall calls.
-func (f *fakeRun) Block(context.Context) error { f.step("block"); return nil }
+func (f *fakeRun) Block(context.Context) error { f.step("block"); return f.blockErr }
 func (f *fakeRun) Unblock(context.Context) error {
 	f.unblocked = f.clock()
 	f.step("unblock")
-	return nil
+	return f.unblockErr
 }
-func (f *fakeRun) RemoveStale(context.Context) error { f.step("remove-stale"); return nil }
+func (f *fakeRun) RemoveStale(context.Context) error { f.step("remove-stale"); return f.staleErr }
 func (f *fakeRun) ScheduleCleanup(_ context.Context, at time.Time) error {
 	f.step(fmt.Sprintf("cleanup-%d", at.UnixMilli()))
-	return nil
+	return f.cleanupErr
 }
 
 // labRun runs Run with f, the lab's 15-min block and 30-s segments.

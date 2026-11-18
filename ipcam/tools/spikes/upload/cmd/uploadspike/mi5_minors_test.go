@@ -164,3 +164,32 @@ func TestMI5_DeviceLoginBounded(t *testing.T) {
 		t.Errorf("the login's end %v; want %q", err, want)
 	}
 }
+
+// staleBlock is a firewall whose stale block will not go: RemoveStale
+// fails with err, and nothing else is called.
+type staleBlock struct{ err error }
+
+func (s staleBlock) Block(context.Context) error                      { return nil }
+func (s staleBlock) Unblock(context.Context) error                    { return nil }
+func (s staleBlock) RemoveStale(context.Context) error                { return s.err }
+func (s staleBlock) ScheduleCleanup(context.Context, time.Time) error { return nil }
+
+// TestMI5_StaleBlockThatStaysIsAnOwnerLine (C2-R29 (1)): mi5 removes a
+// block that an earlier run left before it logs in; when the firewall
+// will not remove it, the owner reads how to remove it (uploadspike
+// unblock), in Romanian, instead of the firewall's own message.
+func TestMI5_StaleBlockThatStaysIsAnOwnerLine(t *testing.T) {
+	t.Setenv(envLabLAN, "127.0.0.1")
+	hub, _ := spiketest.InstallFakeHub(t, t.TempDir())
+	e, _ := unitEnv(t)
+	e.hubBin = hub
+	refused := errors.New("nft: exit status 1: Error: Could not process rule")
+	e.firewallFor = func(string) mi5.WanBlock { return staleBlock{refused} }
+	c := &mi5Cmd{e: e, f: mi5Flags{drive: mi5.DriveTest, block: 15 * time.Minute, segmentSecs: 300}}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	err := c.run(ctx)
+	if err == nil || err.Error() != mi5.MsgUnblockFailed || !isOwnerLine(err) || !errors.Is(err, refused) {
+		t.Errorf("mi5's end %v; want %q, the firewall's error its cause", err, mi5.MsgUnblockFailed)
+	}
+}

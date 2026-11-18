@@ -32,6 +32,9 @@ const (
 	MsgAuditDestFailed      = "Verificarea finală la furnizor (ipcam-hub diag uploads) nu a putut lista destinația %s; proba s-a oprit. Spuneți-ne."
 	MsgReachFailed          = "Verificarea blocării (ipcam-hub diag reach) nu s-a putut face; proba s-a oprit. Spuneți-ne."
 	MsgReachNoProvider      = "Verificarea blocării (ipcam-hub diag reach) nu a arătat niciun furnizor; proba s-a oprit. Spuneți-ne."
+	MsgBlockFailed          = "Blocarea internetului hub-ului nu s-a putut pune (firewall-ul sistemului a refuzat-o); proba s-a oprit. Spuneți-ne."
+	MsgCleanupFailed        = "Scoaterea automată a blocării nu s-a putut programa; proba s-a oprit. Spuneți-ne."
+	MsgUnblockFailed        = "Blocarea internetului hub-ului nu s-a putut scoate: rulați uploadspike unblock (pe Pi: sudo ./uploadspike unblock), apoi spuneți-ne."
 	// The run's settings that the owner typed.
 	MsgBadCameras = "valoare greșită pentru --cameras: %d (de la 1 la %d)"
 	MsgBadSegment = "valoare greșită pentru --segment-secs: %d (cel puțin 1)"

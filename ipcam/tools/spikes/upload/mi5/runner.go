@@ -301,7 +301,7 @@ func (r *run) run(ctx context.Context) (*results.Mi5Data, error) {
 	t := r.opts.Timing
 	fw := r.opts.Firewall
 	if err := fw.RemoveStale(ctx); err != nil {
-		return nil, err
+		return nil, failure(MsgUnblockFailed, err)
 	}
 	// 1. The encrypted pre-run.
 	if err := r.host.StartHub(ctx, PhasePreRun); err != nil {
@@ -353,7 +353,7 @@ func (r *run) block(ctx context.Context) error {
 	start := r.now()
 	if err := fw.Block(ctx); err != nil {
 		_ = fw.Unblock(context.WithoutCancel(ctx))
-		return err
+		return failure(MsgBlockFailed, err)
 	}
 	if err := r.host.ResetConnections(ctx); err != nil {
 		_ = fw.Unblock(context.WithoutCancel(ctx))
@@ -361,7 +361,7 @@ func (r *run) block(ctx context.Context) error {
 	}
 	if err := fw.ScheduleCleanup(ctx, CleanupAt(start, r.cfg.BlockFor)); err != nil {
 		_ = fw.Unblock(context.WithoutCancel(ctx))
-		return err
+		return failure(MsgCleanupFailed, err)
 	}
 	if err := r.check(ctx); err != nil {
 		return err
@@ -407,7 +407,7 @@ func (r *run) block(ctx context.Context) error {
 	r.data.ReadOpen = append(r.data.ReadOpen, reads)
 	r.data.DNSResolvedDuringBlock = dns
 	if err := fw.Unblock(ctx); err != nil {
-		return err
+		return failure(MsgUnblockFailed, err)
 	}
 	unblock := r.now()
 	r.recoverBy = unblock.Add(t.DrainMax)

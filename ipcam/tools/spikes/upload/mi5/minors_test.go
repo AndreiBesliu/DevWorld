@@ -48,12 +48,17 @@ func withoutEvents(script func(string, time.Time) []map[string]any, drop func(ma
 	}
 }
 
+// errFirewall is a firewall command's failure.
+var errFirewall = errors.New("nft: exit status 1: Error: Could not process rule")
+
 // TestMI5_FailuresAreOwnerLines (C2-R29 (1), Task 9B M9): every way in
 // which MI5 itself ends a run says so in Romanian, as a whole line for the
 // owner (uploadspike prints it without «uploadspike: eroare:»), and keeps
-// the diag's error as its cause: no upload in the middle of a placement
-// after the unblock, the recovery's bound, diag dest-probe, diag uploads,
-// diag reach, and the settings that the owner typed.
+// the diag's or the firewall's error as its cause: no upload in the middle
+// of a placement after the unblock, the recovery's bound, diag dest-probe,
+// diag uploads, diag reach, the block, its cleanup and its removal (an
+// unblock that failed tells the owner how to remove it), and the settings
+// that the owner typed.
 func TestMI5_FailuresAreOwnerLines(t *testing.T) {
 	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
 	listed := `{"schema":"ipcam.diag.uploads/1","dest":"dst-1","segments":3,"verified":3,"missing":0,"duplicates":0,"hashMismatches":0}`
@@ -96,6 +101,19 @@ func TestMI5_FailuresAreOwnerLines(t *testing.T) {
 			return run(t, func(f *fakeRun) { f.uploads, f.uploadsErr = "", os.ErrNotExist })
 		}, MsgAuditFailed, os.ErrNotExist},
 		{"diag-reach-no-provider", func(*testing.T) error { _, err := judgeReach(nil); return err }, MsgReachNoProvider, nil},
+		{"block", func(t *testing.T) error { return run(t, func(f *fakeRun) { f.blockErr = errFirewall }) }, MsgBlockFailed, errFirewall},
+		{"cleanup", func(t *testing.T) error { return run(t, func(f *fakeRun) { f.cleanupErr = errFirewall }) }, MsgCleanupFailed, errFirewall},
+		{"unblock", func(t *testing.T) error { return run(t, func(f *fakeRun) { f.unblockErr = errFirewall }) }, MsgUnblockFailed, errFirewall},
+		{"stale-block", func(t *testing.T) error { return run(t, func(f *fakeRun) { f.staleErr = errFirewall }) }, MsgUnblockFailed, errFirewall},
+		{"linux-cleanup-timer", func(t *testing.T) error {
+			fw := FirewallFor("linux", "/opt/ipcam-spike", func(_ context.Context, name string, _ []string, _ string) (string, error) {
+				if name == "systemd-run" {
+					return "", errFirewall
+				}
+				return "", nil
+			})
+			return fw.ScheduleCleanup(t.Context(), start.Add(time.Hour))
+		}, MsgCleanupFailed, errFirewall},
 		{"bad-drive", func(*testing.T) error {
 			return Mi5Config{Cameras: 4, SegmentSecs: 30, BlockFor: time.Hour, Drive: "both"}.Validate()
 		}, fmt.Sprintf(MsgBadDrive, "both"), nil},

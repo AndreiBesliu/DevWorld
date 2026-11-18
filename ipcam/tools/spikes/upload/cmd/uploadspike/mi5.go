@@ -264,7 +264,7 @@ func (c *mi5Cmd) run(ctx context.Context) error {
 	}
 	fw := e.firewall()
 	if err := fw.RemoveStale(ctx); err != nil {
-		return c.fail(ctx, err)
+		return c.fail(ctx, &mi5.Failure{Line: mi5.MsgUnblockFailed, Cause: err})
 	}
 	comp, err := c.composition(cfg)
 	if err != nil {

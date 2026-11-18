@@ -53,6 +53,16 @@ func (e *Failure) Unwrap() error { return e.Cause }
 // OwnerLine marks the failure's text as a whole line for the owner.
 func (*Failure) OwnerLine() {}
 
+// failure is err as the owner's line: err itself when it is one already
+// (its own line is the more precise), else a Failure with line.
+func failure(line string, err error) error {
+	var owner interface{ OwnerLine() }
+	if errors.As(err, &owner) {
+		return err
+	}
+	return &Failure{Line: line, Cause: err}
+}
+
 // reachLine is one line of diag reach.
 type reachLine struct {
 	Schema string `json:"schema"`
