@@ -30,7 +30,7 @@ describe('the device table (deviceplan.json)', () => {
         ['S10', 'S1', 'S2', 'S3-9', 'pause 10 min', 'S3-4', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'],
       ],
     ]);
-    expect(APP_VERSION).toBe('spike-video-v0.1.1');
+    expect(APP_VERSION).toBe('spike-video-v0.1.2');
   });
 
   it('scenariosOf_leavesOutThePause', () => {

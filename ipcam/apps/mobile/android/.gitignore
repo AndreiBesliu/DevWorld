@@ -55,6 +55,10 @@ captures/
 # Keystore files: never committed (debug builds use the key the Android build generates)
 *.jks
 *.keystore
+# SPIKE-ONLY (owner's request of 2026-11-23): the spike APK's fixed debug key, so that
+# each release installs over the last one (Android refuses an update signed by
+# another key). A debug key, public on purpose; never for a published app.
+!/app/spike-debug.keystore
 
 # External native build folder generated in Android Studio 2.2 and later
 .externalNativeBuild

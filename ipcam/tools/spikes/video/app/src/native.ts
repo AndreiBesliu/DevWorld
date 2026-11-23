@@ -1,6 +1,7 @@
 // What the Android and Windows shells add to the page (Tasks 10 and 11): they
 // install `window.spikeNative`. In a browser it is undefined, and what depends
 // on it is recorded as n/a.
+import type { UpdateOffer } from './update';
 
 /** Android's PowerManager thermal status, mildest first. */
 export const THERMAL_LEVELS = ['NONE', 'LIGHT', 'MODERATE', 'SEVERE', 'CRITICAL', 'EMERGENCY', 'SHUTDOWN'] as const;
@@ -39,6 +40,20 @@ export interface SpikeNative {
   keepAwake?(on: boolean): Promise<void>;
   /** Android: vibrates the phone briefly, to call the person (the automatic run's S5 and S6). */
   vibrate?(): Promise<void>;
+  /** SPIKE-ONLY (update.ts): the shell installs its own newer release. */
+  update?: ShellUpdater;
+}
+
+/**
+ * How a shell updates itself (update.ts): which release asset it installs, and
+ * the install, which downloads the asset, checks its SHA-256 and starts the
+ * installer. `installing`: the installer runs (Windows closes and restarts the
+ * app; Android asks the person to confirm). `permission`: Android opened its
+ * setting «Install unknown apps» for the app; the person allows it and taps again.
+ */
+export interface ShellUpdater {
+  asset: string;
+  install(offer: UpdateOffer): Promise<'installing' | 'permission'>;
 }
 
 /** The facade the shell installed, if any. */

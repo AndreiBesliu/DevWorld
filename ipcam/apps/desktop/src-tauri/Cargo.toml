@@ -16,6 +16,10 @@ tauri = { version = "2.12.1", features = [] }
 tauri-plugin-single-instance = "2.5.2"
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"], optional = true }
+# SPIKE-ONLY (owner's request of 2026-11-23): the test app's own updates, one
+# PowerShell command that capabilities/spike-update.json allows and checks.
+# TODO (Phase 4): the product updates through the hub's updater (T27).
+tauri-plugin-shell = "2.6.0"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_Graphics_Dxgi"], optional = true }

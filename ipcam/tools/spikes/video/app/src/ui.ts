@@ -23,6 +23,7 @@ import type { Clock, IntersectionWatch, ScenarioEnv, Stage } from './scenarios/c
 import { runScenario } from './scenarios/index';
 import { NotStarted } from './scenarios/runner';
 import { openSession } from './session';
+import { checkForUpdate, RECHECK_MS, type UpdateOffer } from './update';
 import { holdWakeLock, type ScreenWakeLock } from './wakelock';
 
 /** Where the shells remember the hub's address. */
@@ -229,6 +230,10 @@ export function startApp(root: HTMLElement): App {
   let busy = false;
   let unattended = false;
   let deviceLine = describeDevice(device);
+  // The test app's own updates (update.ts): the newer release GitHub lists, and how its install goes.
+  let updateOffer: UpdateOffer | undefined;
+  let updateLine = '';
+  let updating = false;
   // The automatic run (post-release task A): the device's list, what spikehub
   // holds, and what the run says on the page.
   const plan = planFor(device);
@@ -317,6 +322,7 @@ export function startApp(root: HTMLElement): App {
     const title = el('h1', '', t('appTitle'));
     title.append(' ', el('small', 'version', t('version', { version: APP_VERSION })));
     header.append(title, language);
+    const updateSection = renderUpdate();
 
     const hubSection = el('section', 'hub');
     const label = el('label', '', t('hubLabel'));
@@ -359,7 +365,57 @@ export function startApp(root: HTMLElement): App {
       pendingSection.append(el('p', '', t('pendingResults', { n: pending })), resend);
     }
     // The stage stays where it is: moving a playing video element would disturb it.
-    controls.replaceChildren(header, hubSection, list, pendingSection);
+    controls.replaceChildren(header, updateSection, hubSection, list, pendingSection);
+  };
+
+  /** The offer of a newer release, under the title; empty without one. Not during a run: installing ends the app. */
+  const renderUpdate = (): HTMLElement => {
+    const block = el('section', 'update');
+    const updater = native?.update;
+    if (!updateOffer || !updater) {
+      block.hidden = true;
+      return block;
+    }
+    const offer = updateOffer;
+    const install = el('button', '', t('updateNow'));
+    install.disabled = busy || updating;
+    install.addEventListener('click', () => {
+      updating = true;
+      updateLine = t('updateDownloading');
+      render();
+      updater.install(offer).then(
+        (outcome) => {
+          updating = false;
+          updateLine = t(outcome === 'permission' ? 'updatePermission' : device.platform === 'android' ? 'updateConfirm' : 'updateInstalling');
+          render();
+        },
+        (error: unknown) => {
+          updating = false;
+          console.warn('the update failed', error);
+          updateLine = t('updateFailed', { detail: error instanceof Error ? error.message : String(error) });
+          render();
+        },
+      );
+    });
+    block.append(el('p', '', t('updateAvailable', { version: offer.version, current: APP_VERSION })), install);
+    if (updateLine) block.append(el('p', 'update-status', updateLine));
+    return block;
+  };
+
+  /** Asks GitHub for a newer release; quietly does nothing when it cannot (offline, rate limit). */
+  const lookForUpdate = async (): Promise<void> => {
+    const updater = native?.update;
+    if (!updater || unattended || updating) return;
+    try {
+      const offer = await checkForUpdate((url, init) => fetch(url, init), APP_VERSION, updater.asset);
+      if (offer?.version !== updateOffer?.version) {
+        updateOffer = offer;
+        updateLine = '';
+        render();
+      }
+    } catch (error) {
+      console.warn('the update check failed', error);
+    }
   };
 
   /** The automatic run's block, at the top of the scenario list; `completeInHub` is this device's, as its run counts it. */
@@ -592,6 +648,11 @@ export function startApp(root: HTMLElement): App {
   render();
   if (hub() !== '' && queue.pending() > 0) void queue.flush().then(render); // what the last launch could not send
   void refreshProgress();
+  if (native?.update) {
+    // After the start (an autorun sets `unattended` first), then every few hours while the app stays open.
+    setTimeout(() => void lookForUpdate(), 3000);
+    setInterval(() => void lookForUpdate(), RECHECK_MS);
+  }
 
   return {
     autorun(request) {

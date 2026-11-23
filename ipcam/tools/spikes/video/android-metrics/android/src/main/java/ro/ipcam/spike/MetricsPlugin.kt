@@ -8,16 +8,19 @@ import android.os.Build
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Bundle
 import android.os.Debug
 import android.os.PowerManager
 import android.os.Process
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.provider.Settings
 import android.util.Log
 import android.view.WindowManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
+import androidx.core.content.FileProvider
 import androidx.savedstate.SavedStateRegistry
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
@@ -25,6 +28,7 @@ import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.WebViewListener
 import com.getcapacitor.annotation.CapacitorPlugin
+import java.io.File
 import java.net.URLEncoder
 
 private const val TAG = "SpikeMetrics"
@@ -218,5 +222,44 @@ class MetricsPlugin : Plugin() {
         if (vibrator == null || !vibrator.hasVibrator()) return call.reject("this phone has no vibrator")
         vibrator.vibrate(VibrationEffect.createWaveform(VIBRATION_PATTERN_MS, -1))
         call.resolve()
+    }
+
+    /**
+     * SPIKE-ONLY (owner's request of 2026-11-23, SpikeUpdate.kt): installs the APK
+     * of a newer release, `{ url, sha256 }`. Without the permission «Install
+     * unknown apps» it opens that setting for this app and answers `permission`;
+     * otherwise it downloads and checks the APK on a thread of its own, opens
+     * Android's installer, which asks the person to confirm, and answers `installing`.
+     */
+    @PluginMethod
+    fun installUpdate(call: PluginCall) {
+        val url = call.getString("url")
+        val sha256 = call.getString("sha256")
+        if (url == null || sha256 == null || !isUpdateUrl(url) || !isSha256(sha256)) {
+            return call.reject("installUpdate needs the address and the SHA-256 of a release APK")
+        }
+        if (!context.packageManager.canRequestPackageInstalls()) {
+            Log.i(TAG, "update: asking for the permission to install apps")
+            val settings = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))
+            activity.startActivity(settings)
+            return call.resolve(JSObject().put("status", "permission"))
+        }
+        Thread {
+            try {
+                val apk = downloadVerified(url, sha256, File(context.cacheDir, "updates"))
+                Log.i(TAG, "update: downloaded and checked ${apk.length()} bytes; opening the installer")
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apk)
+                val install = Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, "application/vnd.android.package-archive")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.runOnUiThread {
+                    activity.startActivity(install)
+                    call.resolve(JSObject().put("status", "installing"))
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "update failed", e)
+                call.reject("the update failed: ${e.message}")
+            }
+        }.start()
     }
 }

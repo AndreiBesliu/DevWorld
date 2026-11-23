@@ -4,7 +4,45 @@
 // A shell built without the feature has no such command: metrics() rejects,
 // and the page records the shell's metrics as n/a.
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import type { NativeMetrics, SpikeNative } from './native';
+import { Command } from '@tauri-apps/plugin-shell';
+import type { NativeMetrics, ShellUpdater, SpikeNative } from './native';
+import type { UpdateOffer } from './update';
+
+/**
+ * SPIKE-ONLY (update.ts): the shell plugin's command that downloads the
+ * installer, checks its SHA-256 and starts it in passive mode (/P /R /UPDATE:
+ * it closes the app, installs over it and starts it again). Its PowerShell
+ * script and the checks of its two arguments are in the shell's capability
+ * (apps/desktop/src-tauri/capabilities/spike-update.json); the plugin takes
+ * the fixed arguments from there and ignores what the page sends in their place.
+ */
+export const UPDATE_COMMAND = 'spike-update';
+/** How many fixed arguments come before the address and the SHA-256. */
+export const UPDATE_FIXED_ARGS = 4;
+/** The Windows shell's release asset. */
+export const DESKTOP_ASSET = 'ipcam-desktop-setup.exe';
+
+/** What the command ended with. */
+export interface CommandOutcome {
+  code: number | null;
+  stderr: string;
+}
+
+/** The update command's arguments: placeholders for the fixed ones, then the offer's address and SHA-256. */
+export function updateArgs(offer: UpdateOffer): string[] {
+  return [...Array<string>(UPDATE_FIXED_ARGS).fill(''), offer.url, offer.sha256];
+}
+
+function desktopUpdater(run: (args: string[]) => Promise<CommandOutcome>): ShellUpdater {
+  return {
+    asset: DESKTOP_ASSET,
+    install: async (offer) => {
+      const { code, stderr } = await run(updateArgs(offer));
+      if (code !== 0) throw new Error(stderr.trim() || `the update command ended with ${String(code)}`);
+      return 'installing';
+    },
+  };
+}
 
 /** What `spike_metrics` answers (apps/desktop/src-tauri/src/spike_metrics.rs). */
 export interface TauriMetrics {
@@ -40,6 +78,8 @@ export interface TauriInstallDeps {
   /** `isTauri()`: true when the page runs in the Tauri shell. */
   tauri: boolean;
   invoke(cmd: 'spike_metrics'): Promise<TauriMetrics>;
+  /** Runs UPDATE_COMMAND with these arguments; without it the shell offers no updates. */
+  runUpdate?(args: string[]): Promise<CommandOutcome>;
   target: { spikeNative?: SpikeNative };
 }
 
@@ -66,14 +106,19 @@ function toNativeMetrics(answer: TauriMetrics): NativeMetrics {
 
 /** Installs `window.spikeNative` when the page runs in the Windows shell. */
 export function installTauriNative(
-  { tauri, invoke: call, target }: TauriInstallDeps = {
+  { tauri, invoke: call, runUpdate, target }: TauriInstallDeps = {
     tauri: isTauri(),
     invoke: (cmd) => invoke<TauriMetrics>(cmd),
+    runUpdate: async (args) => {
+      const { code, stderr } = await Command.create(UPDATE_COMMAND, args).execute();
+      return { code, stderr };
+    },
     target: globalThis as { spikeNative?: SpikeNative },
   },
 ): void {
   if (!tauri) return;
   target.spikeNative = {
     metrics: async () => toNativeMetrics(await call('spike_metrics')),
+    ...(runUpdate ? { update: desktopUpdater(runUpdate) } : {}),
   };
 }

@@ -31,6 +31,12 @@ export interface SpikeMetricsPlugin {
   keepAwake(options: { on: boolean }): Promise<void>;
   /** Vibrates the phone briefly, to call the person (the automatic run's S5 and S6). Needs VIBRATE. */
   vibrate(): Promise<void>;
+  /**
+   * SPIKE-ONLY (owner's request of 2026-11-23): installs the APK of a newer release (SpikeUpdate.kt). `permission`:
+   * Android's setting «Install unknown apps» opened, the person allows it and asks again; `installing`: Android's
+   * installer opened and asks the person to confirm.
+   */
+  installUpdate(options: { url: string; sha256: string }): Promise<{ status: 'installing' | 'permission' }>;
 }
 
 export const SpikeMetrics = registerPlugin<SpikeMetricsPlugin>('SpikeMetrics');
