@@ -33,3 +33,5 @@ if ($out -notmatch 'SHA-256 mismatch') { throw 'the update command failed, but n
 if (Test-Path -LiteralPath $file) { throw "the refused download is still there: $file" }
 if (@(Get-Process -Name 'ipcam-desktop-setup' -ErrorAction SilentlyContinue).Count -ne $before) { throw 'an installer started' }
 Write-Host 'the update command downloads the installer, checks its SHA-256 and refuses a wrong one'
+# The refused command left $LASTEXITCODE at 1, which the step would report as its own failure.
+exit 0
