@@ -67,7 +67,7 @@ Cazuri pe care le puteți rezolva singur:
   - dacă folosiți un VPN pe telefon sau pe PC, opriți-l pe durata probei.
 - **«Hub-ul nu a răspuns la timp (timeout).»<!--app-->** De obicei e firewall-ul Windows. Deschideți „Setări” → „Rețea și internet” → rețeaua dvs. (Wi-Fi sau Ethernet) și alegeți la tipul profilului de rețea „Rețea privată”. Dacă ați apăsat „Anulare” în fereastra firewall-ului: în Start căutați „Permiteți o aplicație prin Paravanul de protecție Windows”, apăsați „Modificare setări”, găsiți spikehub și bifați coloana „Privat”.
 - **«Conexiunea a fost refuzată (refused).»<!--app-->** spikehub nu rulează sau adresa are alt port. Porniți spikehub și verificați că adresa se termină cu `:7080`.
-- **«Hub-ul a refuzat cererea (rejected): …»<!--app-->** spikehub e mai vechi decât aplicația: reluați pasul 1, ca să aveți spikehub v0.1.1.
+- **«Hub-ul a refuzat cererea (rejected): …»<!--app-->** spikehub e mai vechi decât aplicația: reluați pasul 1, ca să aveți spikehub-ul ultimei versiuni.
 - **«întrerupt: conexiunea cu hub-ul s-a pierdut.»<!--app-->** Verificați că fereastra spikehub e deschisă și că PC-ul e pornit, apoi apăsați din nou «Rulează tot pentru acest dispozitiv»<!--app-->.
 - **«Scoateți telefonul din încărcător înainte de S3.»<!--app-->** sau un rând cu **«telefonul era la încărcător»<!--app-->**. S3 se măsoară doar pe baterie. Scoateți încărcătorul și apăsați din nou «Rulează tot pentru acest dispozitiv»<!--app-->.
 - **«Rezultate netrimise: …»<!--app-->** Rezultatele sunt păstrate în aplicație. Cu spikehub pornit, apăsați «Trimite acum»<!--app-->.
@@ -77,10 +77,19 @@ Cazuri pe care le puteți rezolva singur:
 
 Puteți face pauză oricând, și în mijlocul unui dispozitiv. Închideți fereastra spikehub; rezultatele deja salvate rămân în folderul `results`. Data viitoare porniți din nou `spikehub.exe` și apăsați din nou butonul: aplicația continuă de unde ați rămas.
 
-## Pasul 1. Treceți la versiunea v0.1.1
+## Versiuni noi, direct din aplicație
+
+De la v0.1.2, aplicațiile instalate («Proba ipcam»<!--android--> pe telefon și «ipcam-desktop»<!--desktop--> pe PC) verifică singure, la pornire și apoi la câteva ore, dacă am publicat o versiune nouă. Când există, sus în pagină scrie «Există o versiune nouă: … (aveți …).»<!--app--> și apare butonul «Actualizează acum»<!--app-->. Nu apăsați butonul în timpul unei rulări; atunci e oricum dezactivat.
+
+- **Pe PC:** după «Se descarcă actualizarea…»<!--app-->, aplicația se închide, se instalează versiunea nouă și pornește din nou singură, în câteva secunde. Adresa hub-ului rămâne ținută minte.
+- **Pe telefon:** aplicația descarcă versiunea nouă, apoi Android vă întreabă dacă o instalați: apăsați „Actualizați” (sau „Instalați”). Prima dată, Android poate cere permisiunea „Instalare aplicații necunoscute” pentru «Proba ipcam»<!--android-->: activați „Permiteți din această sursă”, reveniți în aplicație și apăsați din nou «Actualizează acum»<!--app-->.
+
+Aplicația verifică fiecare fișier descărcat cu suma de control pe care GitHub o afișează pentru release; dacă nu se potrivește, nu instalează nimic și scrie «Actualizarea nu a reușit: …»<!--app-->. `spikehub` (arhiva `spikehub-windows.zip`) nu se actualizează singur: când o versiune nouă îl schimbă, vă scriem în chat.
+
+## Pasul 1. Treceți la versiunea v0.1.2
 
 1. Închideți fereastra spikehub, dacă e deschisă.
-2. Pe PC, deschideți pagina de release „spike-video-v0.1.1”, pe care v-o trimitem în chat (o găsiți și la <https://github.com/AndreiBesliu/DevWorld/releases>). Descărcați `spikehub-windows.zip` și `ipcam-desktop-setup.exe`. Dacă browserul spune că fișierul „nu este descărcat frecvent”, alegeți „Păstrați” (eventual „Păstrați oricum”): programele de test nu sunt semnate digital, pentru că semnătura costă bani.
+2. Pe PC, deschideți pagina de release „spike-video-v0.1.2”, pe care v-o trimitem în chat (o găsiți și la <https://github.com/AndreiBesliu/DevWorld/releases>). Descărcați `spikehub-windows.zip` și `ipcam-desktop-setup.exe`. Dacă browserul spune că fișierul „nu este descărcat frecvent”, alegeți „Păstrați” (eventual „Păstrați oricum”): programele de test nu sunt semnate digital, pentru că semnătura costă bani.
 3. Clic dreapta pe `spikehub-windows.zip` → „Extragere totală”. La „Fișierele vor fi extrase în acest folder”, apăsați „Răsfoire” și alegeți folderul în care ați extras versiunea v0.1.0 (cel cu `spikehub.exe` și folderul `results`). Apăsați „Extragere”.
 4. Windows anunță că folderul are deja fișiere cu aceleași nume. Alegeți „Înlocuiți fișierele din destinație”.
 5. Nu ștergeți și nu mutați folderul `results`: rezultatele de până acum, cu cele din Chrome, rămân acolo și contează.
@@ -139,8 +148,8 @@ La S9 pot apărea «profil video nesuportat»<!--app--> sau «calitate redusă: 
 
 ### Instalare
 
-1. Dacă aveți aplicația veche «Proba ipcam»<!--android-->, dezinstalați-o: țineți apăsat pe pictograma ei → „Dezinstalare”. Fiecare versiune de test are o semnătură nouă, așa că Android nu o instalează peste cea veche.
-2. Pe telefon, deschideți în Chrome pagina de release „spike-video-v0.1.1” și apăsați pe `ipcam-spike.apk`. Dacă Chrome avertizează că fișierul poate fi periculos, alegeți „Descărcați oricum”.
+1. Dacă aveți aplicația veche «Proba ipcam»<!--android-->, dezinstalați-o: țineți apăsat pe pictograma ei → „Dezinstalare”. Versiunile până la v0.1.1 au avut fiecare altă semnătură, așa că Android nu instalează v0.1.2 peste ele. De la v0.1.2 semnătura rămâne aceeași, iar versiunile următoare vin din aplicație (vedeți „Versiuni noi, direct din aplicație”).
+2. Pe telefon, deschideți în Chrome pagina de release „spike-video-v0.1.2” și apăsați pe `ipcam-spike.apk`. Dacă Chrome avertizează că fișierul poate fi periculos, alegeți „Descărcați oricum”.
 3. Deschideți fișierul descărcat (din notificare sau din „Fișierele mele” → „Descărcări”). Dacă Android spune că nu are permisiunea să instaleze aplicații din această sursă, apăsați „Setări”, activați „Permiteți din această sursă”, reveniți și apăsați „Instalați”.
 4. Play Protect poate avertiza că nu cunoaște aplicația. Apăsați „Mai multe detalii”, apoi „Instalați oricum”. Dacă instalarea e oprită de „Blocare automată” (Auto Blocker): „Setări” → „Securitate și confidențialitate” → „Blocare automată” → dezactivați. Instalați, apoi reactivați-o.
 

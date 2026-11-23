@@ -98,7 +98,7 @@ func TestProgress_CountsOnlyCompleteResultsPerDevice(t *testing.T) {
 
 	p := hub.getProgress(t)
 
-	if p.Version != "spike-video-v0.1.1" {
+	if p.Version != "spike-video-v0.1.2" {
 		t.Errorf("version %q", p.Version)
 	}
 	want := []progressGroup{

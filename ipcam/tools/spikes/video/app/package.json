@@ -17,6 +17,7 @@
     "@ipcam/capacitor-pip": "workspace:*",
     "@ipcam/player": "workspace:*",
     "@tauri-apps/api": "2.12.1",
+    "@tauri-apps/plugin-shell": "2.6.0",
     "hash-wasm": "4.12.0",
     "spike-android-metrics": "workspace:*"
   },

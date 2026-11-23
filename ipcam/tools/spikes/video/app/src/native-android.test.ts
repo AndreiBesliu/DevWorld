@@ -33,6 +33,9 @@ function fakePlugins(read: Awaited<ReturnType<AndroidPlugins['metrics']['read']>
       read: vi.fn(() => Promise.resolve(read)),
       keepAwake: vi.fn<AndroidPlugins['metrics']['keepAwake']>(() => Promise.resolve()),
       vibrate: vi.fn<AndroidPlugins['metrics']['vibrate']>(() => Promise.resolve()),
+      installUpdate: vi.fn<AndroidPlugins['metrics']['installUpdate']>(() =>
+        Promise.resolve({ status: 'installing' as const }),
+      ),
     },
   } satisfies AndroidPlugins;
   const emitPip = (on: boolean): void => {
@@ -84,6 +87,12 @@ describe('installAndroidNative', () => {
     // The automatic run calls the person for S5 and S6 (post-release task A).
     await native.vibrate?.();
     expect(plugins.metrics.vibrate).toHaveBeenCalledTimes(1);
+
+    // The test app's own updates: the release's APK, by the address and SHA-256 that GitHub lists.
+    expect(native.update?.asset).toBe('ipcam-spike.apk');
+    const offer = { version: 'spike-video-v0.1.2', url: 'https://github.com/x.apk', sha256: 'ab' };
+    await expect(native.update?.install(offer)).resolves.toBe('installing');
+    expect(plugins.metrics.installUpdate.mock.calls).toEqual([[{ url: 'https://github.com/x.apk', sha256: 'ab' }]]);
   });
 
   it('nativeAndroid_twoPipCallbacks_shareOneNativeListener', () => {
