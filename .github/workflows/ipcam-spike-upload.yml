@@ -53,6 +53,8 @@ on:
       # The line endings of the checkout on the windows job.
       - 'ipcam/.gitattributes'
       - '.github/workflows/ipcam-spike-upload.yml'
+  # Task 10: a manual run, which runs every job and the ffmpeg-pin job too.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -292,6 +294,81 @@ jobs:
               grep -vE '^(W[0-9]{4} |/)' "${log}" | tail -n 60 | tools/scripts/annotate.sh "${id}" 60
             fi
           done
+
+  ffmpeg-pin:
+    # Task 10 (P41): picks the BtbN LGPL FFmpeg build that uploadspike mi8 fetches at run time
+    # (FFMPEG_BRANCH, win64 and linuxarm64), and prints its URLs and SHA-256s as the notice
+    # "ffmpeg-pin: {...}", which mi8/ffmpeg.go's constants are copied from. BtbN keeps the last
+    # 14 daily builds and each month's last build for two years, so the job takes only a
+    # month's last build, of a month before the current one, at least 14 days old: a daily
+    # build at the 14-day edge would be pruned before the owner's run. Runs on a manual run, or
+    # when the head commit's message holds [ffmpeg-pin].
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[ffmpeg-pin]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FFMPEG_BRANCH: '9.0'
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pin
+        id: pin
+        run: |
+          set -euo pipefail
+          {
+            work="${RUNNER_TEMP}/ffmpeg-pin"
+            mkdir -p "${work}"
+            gh api --paginate repos/BtbN/FFmpeg-Builds/releases \
+              --jq '.[] | {tag: .tag_name, published: .published_at, assets: [.assets[] | {name, url: .browser_download_url}]}' \
+              > "${work}/releases.jsonl"
+            echo "releases listed: $(wc -l < "${work}/releases.jsonl")"
+            month="$(date -u +%Y-%m)"
+            cutoff="$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+            branch="${FFMPEG_BRANCH//./\\.}"
+            # Each month's last dated build (autobuild-YYYY-MM-DD-HH-MM), months before this one.
+            jq -s --arg month "${month}" '
+              [ .[] | select(.tag | test("^autobuild-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}$"))
+                | . + {month: .tag[10:17]} | select(.month < $month) ]
+              | group_by(.month) | map(max_by(.tag)) | sort_by(.tag) | reverse' \
+              "${work}/releases.jsonl" > "${work}/month-ends.json"
+            pick="$(jq -c --arg cutoff "${cutoff}" --arg b "${branch}" '
+              [ .[] | select(.published <= $cutoff)
+                | {tag, published,
+                   win64: ([.assets[] | select(.name | test("^ffmpeg-n.*-win64-lgpl-" + $b + "\\.zip$"))][0]),
+                   linuxarm64: ([.assets[] | select(.name | test("^ffmpeg-n.*-linuxarm64-lgpl-" + $b + "\\.tar\\.xz$"))][0])}
+                | select(.win64 != null and .linuxarm64 != null) ][0] // empty' "${work}/month-ends.json")"
+            if [[ -z "${pick}" ]]; then
+              echo "no month-end build of FFmpeg ${FFMPEG_BRANCH} with both LGPL archives, 14 days old; the month-ends' LGPL win64 assets:"
+              jq -r '.[:4][] | .tag + ": " + ([.assets[].name | select(test("win64-lgpl"))] | join(" "))' "${work}/month-ends.json"
+              exit 1
+            fi
+            tag="$(jq -r .tag <<< "${pick}")"
+            # The pick is its month's last build: no later dated release of that month exists.
+            later="$(jq -r --arg tag "${tag}" 'select(.tag | startswith($tag[0:17])) | select(.tag > $tag) | .tag' "${work}/releases.jsonl")"
+            if [[ -n "${later}" ]]; then
+              echo "${tag} is not its month's last build: ${later}"
+              exit 1
+            fi
+            out='{}'
+            for arch in win64 linuxarm64; do
+              url="$(jq -r ".${arch}.url" <<< "${pick}")"
+              curl -fsSL --retry 3 -A 'ipcam-spike/0.1' -o "${work}/${arch}" "${url}"
+              sum="$(sha256sum "${work}/${arch}" | cut -d' ' -f1)"
+              echo "${arch}: ${url} $(stat -c %s "${work}/${arch}") bytes sha256 ${sum}"
+              out="$(jq -c --arg a "${arch}" --arg u "${url}" --arg s "${sum}" '.[$a] = {url: $u, sha256: $s}' <<< "${out}")"
+            done
+            out="$(jq -c --arg tag "${tag}" --arg p "$(jq -r .published <<< "${pick}")" '{tag: $tag, published: $p} + .' <<< "${out}")"
+            echo "ffmpeg-pin: ${out}" | tools/scripts/annotate.sh ffmpeg-pin 1 notice
+          } 2>&1 | tee "${RUNNER_TEMP}/pin.log"
+      - name: Show failures as annotations
+        if: failure()
+        run: |
+          [[ -f "${RUNNER_TEMP}/pin.log" ]] && tail -n 60 "${RUNNER_TEMP}/pin.log" | tools/scripts/annotate.sh pin 60
 
   windows:
     # On windows-latest: the same trees' tests and build (the markers test reads a CRLF
