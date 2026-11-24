@@ -16,3 +16,4 @@ Aplicație comercială pentru camere IP. Un utilizator își leagă mai multe ca
 - `docs/superpowers/plans/`: planurile de implementare (urmează)
 - [`docs/spike-video.md`](docs/spike-video.md): ghidul probei video din Faza 0 (b), pas cu pas, pentru PC și telefon
 - [`docs/spike-recording.md`](docs/spike-recording.md): ghidul probei de înregistrare din Faza 0 (c1), pas cu pas, pentru PC, Raspberry Pi și telefon
+- [`docs/spike-upload.md`](docs/spike-upload.md): ghidul probei de upload din Faza 0 (c2), pas cu pas, pentru PC, Raspberry Pi și telefon
