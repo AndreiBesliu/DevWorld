@@ -177,7 +177,10 @@ type subscription struct {
 	closeOnce sync.Once
 	closeErr  error
 
-	lastOK atomicTime // the last successful create, Renew or PullMessages
+	// lastOK is the last successful Renew or PullMessages, or Subscribe's
+	// first create. A create again is no success: a camera that takes
+	// CreatePullPointSubscription but fails every PullMessages is a loss.
+	lastOK atomicTime
 
 	// The loop's own.
 	p         *pullPoint
@@ -248,8 +251,8 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// maxPullFailures is how many failed PullMessages in a row make the loop
-// drop the subscription and create another.
+// maxPullFailures is how many failed PullMessages, or Renews, in a row
+// make the loop drop the subscription and create another.
 const maxPullFailures = 2
 
 // loop pulls the subscription's messages, renews it at RenewAt, and creates
@@ -258,9 +261,10 @@ func (s *subscription) loop(ctx context.Context) {
 	defer close(s.done)
 	defer close(s.eventsCh)
 	opts := s.c.opts
-	failures := 0
+	failures, renewFailures := 0, 0
 	for ctx.Err() == nil {
 		if s.p == nil {
+			failures, renewFailures = 0, 0
 			if !s.recreate(ctx) {
 				if !sleep(ctx, opts.retryDelay()) {
 					return
@@ -272,6 +276,7 @@ func (s *subscription) loop(ctx context.Context) {
 			err := s.c.renew(ctx, s.p, opts.Term)
 			switch {
 			case err == nil:
+				renewFailures = 0
 				s.ok()
 				s.termStart = s.c.now()
 			case errors.Is(err, errGone):
@@ -280,6 +285,14 @@ func (s *subscription) loop(ctx context.Context) {
 			case ctx.Err() != nil:
 				return
 			default:
+				// Any other answer (a timeout, a plain HTTP 404 for an
+				// address the camera forgot, another fault) is retried a
+				// few times, then the subscription is created again: its
+				// term may have lapsed on the camera.
+				renewFailures++
+				if renewFailures >= maxPullFailures || s.c.now().Sub(s.termStart) >= opts.Term {
+					s.drop(ctx)
+				}
 				if !sleep(ctx, opts.retryDelay()) {
 					return
 				}
@@ -298,7 +311,14 @@ func (s *subscription) loop(ctx context.Context) {
 		case ctx.Err() != nil:
 			return
 		case errors.Is(err, errGone):
-			s.p = nil
+			// Unsubscribed as far as the camera answers: one that says so
+			// wrongly would else fill its PullPoints. A camera that takes
+			// every create but forgets it at once must not get a create
+			// storm either.
+			s.drop(ctx)
+			if !sleep(ctx, opts.retryDelay()) {
+				return
+			}
 		default:
 			failures++
 			if failures >= maxPullFailures {
@@ -319,7 +339,8 @@ func (s *subscription) drop(ctx context.Context) {
 	s.p = nil
 }
 
-// recreate creates the subscription again; false when it failed.
+// recreate creates the subscription again; false when it failed. It is no
+// success for the health clock: only a Renew or PullMessages is.
 func (s *subscription) recreate(ctx context.Context) bool {
 	if err := s.c.syncClock(ctx); err != nil {
 		return false
@@ -329,7 +350,6 @@ func (s *subscription) recreate(ctx context.Context) bool {
 		return false
 	}
 	s.p, s.termStart = p, s.c.now()
-	s.ok()
 	return true
 }
 
@@ -348,25 +368,28 @@ func (s *subscription) deliver(ctx context.Context, msgs []eventMessage) bool {
 	return true
 }
 
-// watch emits the signals from the time since the last success, every
-// healthTick: SignalUnhealthy past UnhealthyAfter, SignalLost past
-// LostAfter, each once a loss, and SignalHealthy when a request succeeds
-// after SignalUnhealthy.
+// watch emits the signals from the time since the last success:
+// SignalUnhealthy once UnhealthyAfter has passed, SignalLost once LostAfter
+// has, each once a loss, and SignalHealthy when a request succeeds after
+// SignalUnhealthy. It wakes at the next deadline, so a signal is never
+// later than its deadline by more than the scheduler's delay, and at least
+// every healthTick, so that a recovery is seen within one.
 func (s *subscription) watch(ctx context.Context) {
 	defer close(s.watchDone)
 	defer close(s.signalsCh)
 	opts := s.c.opts
-	tick := time.NewTicker(opts.healthTick())
-	defer tick.Stop()
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	unhealthy, lost := false, false
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
+		case <-timer.C:
 		}
 		now := s.c.now()
-		age := now.Sub(s.lastOK.Load())
+		last := s.lastOK.Load()
+		age := now.Sub(last)
 		var kinds []string
 		switch {
 		case age <= opts.UnhealthyAfter:
@@ -391,5 +414,21 @@ func (s *subscription) watch(ctx context.Context) {
 				return
 			}
 		}
+		timer.Reset(nextCheck(opts, age, unhealthy, lost))
 	}
+}
+
+// nextCheck is the wait until watch's next check, given the time since the
+// last success: just past the next deadline that has not signalled yet,
+// and at most healthTick.
+func nextCheck(opts Options, age time.Duration, unhealthy, lost bool) time.Duration {
+	const past = time.Millisecond
+	d := opts.healthTick()
+	switch {
+	case !unhealthy:
+		d = min(d, opts.UnhealthyAfter-age+past)
+	case !lost:
+		d = min(d, opts.LostAfter-age+past)
+	}
+	return max(d, past)
 }

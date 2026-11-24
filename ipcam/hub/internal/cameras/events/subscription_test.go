@@ -1,9 +1,17 @@
 package events
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,6 +98,51 @@ func nextSignal(t *testing.T, sub Subscription, d time.Duration) (Signal, bool) 
 	}
 }
 
+// schedulingSlack is what a signal's deadline may be missed by on a busy
+// runner: 3 s of §8.2's time, never a health tick (5 s).
+const schedulingSlack = minute / 20
+
+// faultProxy is a camera in front of sim: answer gives the reply to a
+// request whose body it matches (status and body; ok false forwards it).
+func faultProxy(t *testing.T, sim *onviftest.Sim, cam CameraRef,
+	answer func(body string) (status int, reply string, ok bool),
+) CameraRef {
+	t.Helper()
+	target, err := url.Parse(sim.XAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := &httputil.ReverseProxy{
+		Rewrite:  func(r *httputil.ProxyRequest) { r.SetURL(&url.URL{Scheme: target.Scheme, Host: target.Host}) },
+		ErrorLog: log.New(io.Discard, "", 0),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return
+		}
+		if status, reply, ok := answer(string(body)); ok {
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, reply)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		rp.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	cam.XAddr = srv.URL + target.Path
+	return cam
+}
+
+// soapFaultReply is a SOAP 1.2 fault with the subcode.
+func soapFaultReply(subcode string) string {
+	return `<?xml version="1.0" encoding="UTF-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" ` +
+		`xmlns:ter="http://www.onvif.org/ver10/error" xmlns:wsrf-rw="http://docs.oasis-open.org/wsrf/rw-2">` +
+		`<s:Body><s:Fault><s:Code><s:Value>s:Sender</s:Value><s:Subcode><s:Value>` + subcode +
+		`</s:Value></s:Subcode></s:Code><s:Reason><s:Text xml:lang="en">fault</s:Text></s:Reason></s:Fault></s:Body></s:Envelope>`
+}
+
 // waitFor polls cond every 10 ms for up to d.
 func waitFor(d time.Duration, cond func() bool) bool {
 	deadline := time.Now().Add(d)
@@ -154,11 +207,13 @@ func TestEvents_HealthyFalseAfterLoss(t *testing.T) {
 	}
 	lostAt := time.Now()
 	sim.SetSilent(true)
-	s, ok := nextSignal(t, sub, opts.UnhealthyAfter+opts.UnhealthyAfter/2)
+	// The signal is due at the last success + UnhealthyAfter, which is
+	// before lostAt + UnhealthyAfter; schedulingSlack covers a busy runner.
+	s, ok := nextSignal(t, sub, opts.UnhealthyAfter+schedulingSlack)
 	if !ok || s.Kind != SignalUnhealthy || s.Cam != cam.ID {
 		t.Fatalf("signal = %+v, %v; want %s for %s", s, ok, SignalUnhealthy, cam.ID)
 	}
-	if after := time.Since(lostAt); after > opts.UnhealthyAfter+opts.UnhealthyAfter/2 {
+	if after := time.Since(lostAt); after > opts.UnhealthyAfter+schedulingSlack {
 		t.Errorf("events_unhealthy came %v after the loss; want within %v", after, opts.UnhealthyAfter)
 	}
 	if sub.Healthy() {
@@ -302,5 +357,94 @@ func TestEvents_StreamAndSnapshotURI(t *testing.T) {
 	}
 	if got, err := SnapshotURI(t.Context(), cam, "sub", fastOptions()); err != nil || got != "http://cam/snap.jpg" {
 		t.Errorf("SnapshotURI = %q, %v", got, err)
+	}
+}
+
+// TestEvents_PullFaultsAreALoss (HUB-11, P44, MI8): a camera that takes
+// every CreatePullPointSubscription but fails every PullMessages delivers no
+// event, so it is a loss: a create again is no success for the health clock.
+// Healthy() turns false, events_unhealthy comes within 60 s of the last
+// success and events_lost after 5 min, whether the pulls answer a generic
+// fault, an HTTP 500 or a fault that the subscription is unknown.
+func TestEvents_PullFaultsAreALoss(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		reply  string
+	}{
+		{"generic fault", http.StatusBadRequest, soapFaultReply("ter:ActionNotSupported")},
+		{"HTTP 500", http.StatusInternalServerError, "internal error"},
+		{"unknown subscription", http.StatusBadRequest, soapFaultReply("wsrf-rw:ResourceUnknownFault")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sim, cam := newSim(t, onviftest.Config{})
+			var faulting atomic.Bool
+			cam = faultProxy(t, sim, cam, func(body string) (int, string, bool) {
+				if faulting.Load() && strings.Contains(body, "PullMessages>") {
+					return tc.status, tc.reply, true
+				}
+				return 0, "", false
+			})
+			opts := fastOptions()
+			start := time.Now()
+			sub := subscribe(t, cam, opts)
+			faulting.Store(true)
+			lostAt := time.Now()
+			s, ok := nextSignal(t, sub, opts.UnhealthyAfter+schedulingSlack)
+			if !ok || s.Kind != SignalUnhealthy {
+				t.Fatalf("signal = %+v, %v; want %s within %v of the faults", s, ok, SignalUnhealthy, opts.UnhealthyAfter)
+			}
+			if sub.Healthy() {
+				t.Error("Healthy() = true while every PullMessages fails")
+			}
+			s, ok = nextSignal(t, sub, opts.LostAfter)
+			if !ok || s.Kind != SignalLost {
+				t.Fatalf("signal = %+v, %v; want %s", s, ok, SignalLost)
+			}
+			if after := time.Since(lostAt); after < opts.LostAfter-opts.UnhealthyAfter/4 {
+				t.Errorf("events_lost came %v after the faults; want about %v", after, opts.LostAfter)
+			}
+			// Each create again follows a retryDelay at least.
+			if c, d := sim.Counts(), time.Since(start); c.Creates > 2+int(d/opts.retryDelay()) {
+				t.Errorf("creates = %d in %v; want at most one per %v", c.Creates, d, opts.retryDelay())
+			}
+			faulting.Store(false)
+			if s, ok = nextSignal(t, sub, 3*opts.UnhealthyAfter); !ok || s.Kind != SignalHealthy {
+				t.Fatalf("signal = %+v, %v; want %s once PullMessages succeeds", s, ok, SignalHealthy)
+			}
+		})
+	}
+}
+
+// TestEvents_RenewFailureRecreates: once the renew is due, a Renew that
+// fails with anything but "unknown subscription" (here a plain HTTP 404,
+// as a camera that rebooted answers for an address it forgot) is retried,
+// then the subscription is created again, instead of renewing forever with
+// no PullMessages in between.
+func TestEvents_RenewFailureRecreates(t *testing.T) {
+	sim, cam := newSim(t, onviftest.Config{})
+	var renews atomic.Int32
+	cam = faultProxy(t, sim, cam, func(body string) (int, string, bool) {
+		if strings.Contains(body, ":Renew>") && renews.Load() == 0 {
+			return http.StatusNotFound, "not found", true
+		}
+		return 0, "", false
+	})
+	opts := fastOptions()
+	sub := subscribe(t, cam, opts)
+	if !waitFor(opts.RenewAt+4*opts.UnhealthyAfter, func() bool { return sim.Counts().Creates >= 2 }) {
+		t.Fatalf("counts = %+v after a renew that answered 404; want the subscription created again", sim.Counts())
+	}
+	renews.Store(1)
+	pulls := sim.Counts().Pulls
+	if !waitFor(2*opts.UnhealthyAfter, func() bool { return sim.Counts().Pulls > pulls+2 }) {
+		t.Errorf("pulls %d → %d after the create; want the subscription pulling", pulls, sim.Counts().Pulls)
+	}
+	if !waitFor(2*opts.UnhealthyAfter, sub.Healthy) {
+		t.Error("Healthy() = false after the subscription was created again")
+	}
+	if n := sim.Subscriptions(); n != 1 {
+		t.Errorf("the camera holds %d subscriptions; want 1", n)
 	}
 }
