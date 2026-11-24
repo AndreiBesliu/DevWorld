@@ -78,18 +78,18 @@ func (o Options) withDefaults() Options {
 }
 
 // The timings derived from UnhealthyAfter: with its 60 s, a PullMessages
-// waits 10 s at most for a message, any request gets 10 s more to answer
-// (so a silent camera is noticed after 20 s), a failed request is retried
-// after 10 s and the health is checked every 5 s.
+// waits 10 s at most for a message, any request gets 20 s more to answer
+// (so a silent camera's PullMessages fails after 30 s), a failed request is
+// retried after 5 s and the health is checked every 5 s.
 
 // pullWait is the longest a PullMessages waits for a message.
 func (o Options) pullWait() time.Duration { return o.UnhealthyAfter / 6 }
 
 // callTimeout is the time a request gets to answer.
-func (o Options) callTimeout() time.Duration { return o.UnhealthyAfter / 6 }
+func (o Options) callTimeout() time.Duration { return o.UnhealthyAfter / 3 }
 
 // retryDelay is the wait after a failed request.
-func (o Options) retryDelay() time.Duration { return o.UnhealthyAfter / 6 }
+func (o Options) retryDelay() time.Duration { return o.UnhealthyAfter / 12 }
 
 // healthTick is the period of the health check.
 func (o Options) healthTick() time.Duration { return o.UnhealthyAfter / 12 }

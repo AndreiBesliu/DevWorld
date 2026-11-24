@@ -110,6 +110,9 @@ func waitFor(d time.Duration, cond func() bool) bool {
 func TestEvents_RenewsBefore10Min(t *testing.T) {
 	sim, cam := newSim(t, onviftest.Config{MaxPullPoints: 5})
 	opts := fastOptions()
+	// Health is not under test here: a slow runner's late answer must not
+	// count as a loss that creates the subscription again.
+	opts.UnhealthyAfter = 4 * minute
 	sub, err := Subscribe(t.Context(), cam, opts)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
