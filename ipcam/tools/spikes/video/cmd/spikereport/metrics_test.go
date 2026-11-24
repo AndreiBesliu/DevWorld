@@ -846,6 +846,29 @@ func TestComputeMV_NotesTheHubJitterOfTheRunTheyCameFrom(t *testing.T) {
 	}
 }
 
+// A grid run after a wait that the owner skipped («Sari peste așteptare») keeps its verdicts:
+// MV3 and MV5 say that the wait was skipped, the thresholds a warm phone can only fail.
+func TestComputeMV_NotesASkippedWaitAtTheHeatThresholds(t *testing.T) {
+	rs := androidRuns()
+	grid := find(t, rs, androidDevice, "S3-9")
+	grid.Notes = append(grid.Notes, "wait skipped: off the charger for 65 s of 600 before S3-9")
+	mv := ComputeMV(rs)
+	for _, code := range []string{"MV3/9", "MV5/9"} {
+		v := mv[mvKey(androidDevice, code)]
+		if !v.Pass {
+			t.Errorf("%s = %+v: a skipped wait does not change the verdict", code, v)
+		}
+		if joined := strings.Join(v.Notes, "\n"); !strings.Contains(joined, "așteptarea dinaintea rulării a fost sărită (`wait skipped: off the charger for 65 s of 600 before S3-9`)") {
+			t.Errorf("%s notes = %q, want the skipped wait", code, joined)
+		}
+	}
+	for _, code := range []string{"MV4/9", "MV3/4", "MV5/4"} {
+		if joined := strings.Join(mv[mvKey(androidDevice, code)].Notes, "\n"); strings.Contains(joined, "sărită") {
+			t.Errorf("%s notes = %q: its run waited", code, joined)
+		}
+	}
+}
+
 func TestMVKeyAndFormat(t *testing.T) {
 	if got := mvKey("android", "MV3/9"); got != "android/MV3/9" {
 		t.Errorf("mvKey = %q", got)

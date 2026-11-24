@@ -55,6 +55,17 @@ export interface SpikeNative {
   update?: ShellUpdater;
   /** SPIKE-ONLY (hubprocess.ts): Windows starts spikehub as its hidden child and passes its output on. */
   hub?: ShellHub;
+  /** SPIKE-ONLY (hubfinder.ts): Android, the networks in which the page looks for spikehub. */
+  lanAddresses?(): Promise<LanAddress[]>;
+}
+
+/**
+ * A private IPv4 address of the device and the length of its network's prefix
+ * (192.168.1.57 and 24). For the screen only: it never goes into a result (PH0-22).
+ */
+export interface LanAddress {
+  address: string;
+  prefix: number;
 }
 
 /** Where a hub started by the shell sends what it writes, and its end. */

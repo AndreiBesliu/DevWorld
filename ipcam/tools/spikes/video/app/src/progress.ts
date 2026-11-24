@@ -63,15 +63,16 @@ function readProgress(body: unknown): Progress {
 
 /**
  * What the hub holds. Rejects with a ConnectError like the camera list; a hub
- * older than v0.1.1 has no such route and answers 404 (`rejected`).
+ * older than v0.1.1 has no such route and answers 404 (`rejected`). The
+ * search for the hub (hubfinder.ts) waits a shorter `timeoutMs`.
  */
-export function fetchProgress(hubUrl: string): Promise<Progress> {
+export function fetchProgress(hubUrl: string, timeoutMs = PROGRESS_TIMEOUT_MS): Promise<Progress> {
   return requestHub(
     hubUrl.replace(/\/+$/, ''),
     '/spike/v1/progress',
     { cache: 'no-store' },
     async (response) => readProgress(await response.json()),
-    PROGRESS_TIMEOUT_MS,
+    timeoutMs,
   );
 }
 

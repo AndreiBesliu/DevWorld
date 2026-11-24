@@ -1,6 +1,6 @@
 # Proba de înregistrare (Faza 0 c1): ghid pas cu pas
 
-Acest ghid vă arată cum rulați proba de înregistrare pe PC-ul cu Windows 11, pe Raspberry Pi și pe telefonul Samsung Galaxy A24. Proba verifică dacă înregistrarea camerelor rezistă la opriri bruște și la pene de curent, cât timp rulează fără oprire, câte camere poate înregistra fiecare dispozitiv și cât de repede se citesc și se redau înregistrările criptate. Camerele sunt simulate de un program al probei; nu folosim camerele dvs. reale. Toate rezultatele ajung la final într-un singur folder de pe PC, pe care ni-l trimiteți.
+Acest ghid vă arată cum rulați proba de înregistrare pe PC-ul cu Windows 11, pe Raspberry Pi și pe telefonul Samsung Galaxy A54. Proba verifică dacă înregistrarea camerelor rezistă la opriri bruște și la pene de curent, cât timp rulează fără oprire, câte camere poate înregistra fiecare dispozitiv și cât de repede se citesc și se redau înregistrările criptate. Camerele sunt simulate de un program al probei; nu folosim camerele dvs. reale. Toate rezultatele ajung la final într-un singur folder de pe PC, pe care ni-l trimiteți.
 
 Textele între «» apar exact așa în programele probei. Textele între „” sunt ale Windows, Android sau Raspberry Pi OS și pot diferi puțin, în funcție de versiune. Nimic de plătit și niciun cont nou.
 
@@ -11,7 +11,7 @@ Textele între «» apar exact așa în programele probei. Textele între „”
 Aveți nevoie de:
 
 - PC-ul cu Windows 11 și Raspberry Pi-ul, legate la același router (cu cablu, dacă se poate), cu internet, ca să-și potrivească ceasul;
-- telefonul Galaxy A24, pe Wi-Fi-ul aceluiași router;
+- telefonul Galaxy A54, pe Wi-Fi-ul aceluiași router;
 - spațiu liber pe disc, cât scrie mai jos la MI2 și la MI3;
 - o copie a cardului SD sau a SSD-ului Pi-ului (pasul 4).
 
