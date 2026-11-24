@@ -3,7 +3,16 @@ import { describe, expect, it } from 'vitest';
 import { createI18n } from './i18n';
 import type { InterruptReason, ScenarioResult } from './results';
 import { ConnectError } from './session';
-import { connectErrorLines, defaultHubUrl, offersRepeat, queueEventLines, queueOutcomeLines, statusText, type Status } from './ui';
+import {
+  connectErrorLines,
+  defaultHubUrl,
+  hubStatusText,
+  offersRepeat,
+  queueEventLines,
+  queueOutcomeLines,
+  statusText,
+  type Status,
+} from './ui';
 
 const HUB = 'http://192.168.1.20:7080';
 
@@ -312,5 +321,21 @@ describe('the automatic run on the page', () => {
     );
     expect(t('runAll')).toBe('Rulează tot pentru acest dispozitiv');
     expect(t('rerunAll')).toBe('Rulează din nou tot');
+  });
+});
+
+describe('the hub panel (Windows shell)', () => {
+  it('hubStatus_saysWhatToDo', () => {
+    const { t } = createI18n({ lang: 'ro' });
+    expect(hubStatusText({ kind: 'running', listening: true }, t)).toBe('Hub-ul rulează. Ce scrie el apare mai jos.');
+    expect(hubStatusText({ kind: 'ended', code: 1 }, t)).toBe(
+      'Hub-ul s-a oprit singur (cod 1). Motivul e în ultimele rânduri de mai jos.',
+    );
+    expect(hubStatusText({ kind: 'ended', code: null }, t)).toContain('(cod ?)');
+    expect(hubStatusText({ kind: 'missing' }, t)).toContain('nu este spikehub.exe');
+    expect(hubStatusText({ kind: 'failed', detail: '' }, t)).toBe('Scrieți folderul spikehub, apoi apăsați «Pornește hub-ul».');
+    expect(hubStatusText({ kind: 'failed', detail: 'os error 267' }, t)).toBe('Hub-ul nu poate porni din acest folder: os error 267');
+    const en = createI18n({ lang: 'en' }).t;
+    expect(hubStatusText({ kind: 'stopped' }, en)).toBe('The hub is stopped.');
   });
 });
