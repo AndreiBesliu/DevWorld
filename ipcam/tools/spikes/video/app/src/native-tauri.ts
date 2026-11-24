@@ -4,8 +4,9 @@
 // A shell built without the feature has no such command: metrics() rejects,
 // and the page records the shell's metrics as n/a.
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { downloadDir } from '@tauri-apps/api/path';
 import { Command } from '@tauri-apps/plugin-shell';
-import type { NativeMetrics, ShellUpdater, SpikeNative } from './native';
+import { HubStartError, type NativeMetrics, type ShellHub, type ShellUpdater, type SpikeNative } from './native';
 import type { UpdateOffer } from './update';
 
 /**
@@ -40,6 +41,96 @@ function desktopUpdater(run: (args: string[]) => Promise<CommandOutcome>): Shell
       const { code, stderr } = await run(updateArgs(offer));
       if (code !== 0) throw new Error(stderr.trim() || `the update command ended with ${String(code)}`);
       return 'installing';
+    },
+  };
+}
+
+/**
+ * SPIKE-ONLY (owner's request of 2026-11-24, plan 2026-11-24-spike-hub-panel):
+ * the shell plugin's command that starts spikehub. The shell's capability
+ * (apps/desktop/src-tauri/capabilities/spike-hub.json) fixes the whole command
+ * line, `cmd /d /c .\spikehub.exe -browser=false`; the page chooses only the
+ * working directory, the folder that holds spikehub.exe, `media` and `results`.
+ * The plugin starts it without a console window and, with `processGroup`, in a
+ * job object, so that a kill ends cmd and spikehub together; it also kills it
+ * when the app exits.
+ */
+export const HUB_COMMAND = 'spike-hub';
+/** cmd's exit code when it finds no such program: the folder has no spikehub.exe. */
+export const CMD_NOT_FOUND = 9009;
+/** The folder that the release's spikehub-windows.zip extracts to, offered in Downloads. */
+export const HUB_FOLDER_NAME = 'spikehub-windows';
+
+/** What a started hub reports; the plugin's Command events, narrowed. */
+export interface HubEvents {
+  line(text: string): void;
+  close(code: number | null): void;
+  error(message: string): void;
+}
+
+/** Starts HUB_COMMAND in `folder`; rejects with the plugin's message when nothing starts. */
+export type SpawnHub = (folder: string, events: HubEvents) => Promise<{ kill(): Promise<void> }>;
+
+async function spawnHub(folder: string, events: HubEvents): Promise<{ kill(): Promise<void> }> {
+  const command = Command.create(HUB_COMMAND, [], { cwd: folder, encoding: 'utf-8', processGroup: true });
+  command.stdout.on('data', (line) => {
+    events.line(line);
+  });
+  command.stderr.on('data', (line) => {
+    events.line(line);
+  });
+  command.on('close', ({ code }) => {
+    events.close(code);
+  });
+  command.on('error', (message) => {
+    events.error(message);
+  });
+  return command.spawn();
+}
+
+/** The hub as native.ts's ShellHub, over `spawn`; `downloads` is the PC's Downloads folder. */
+export function desktopHub(spawn: SpawnHub, downloads: () => Promise<string>): ShellHub {
+  return {
+    start: async (folder, out) => {
+      let ended = false;
+      const end = (value: number | null | 'missing'): void => {
+        if (ended) return;
+        ended = true;
+        out.exit(value);
+      };
+      let child: { kill(): Promise<void> };
+      try {
+        child = await spawn(folder, {
+          line: (text) => {
+            out.line(text.replace(/\r?\n$/, ''));
+          },
+          close: (code) => {
+            end(code === CMD_NOT_FOUND ? 'missing' : code);
+          },
+          // The plugin lost the child (a broken pipe, say): the hub may run on, but the page no longer hears it.
+          error: (message) => {
+            out.line(message);
+            end(null);
+          },
+        });
+      } catch (error) {
+        throw new HubStartError(error instanceof Error ? error.message : String(error));
+      }
+      return {
+        stop: async () => {
+          if (ended) return;
+          await child.kill();
+          end(null);
+        },
+      };
+    },
+    defaultFolder: async () => {
+      try {
+        const folder = (await downloads()).replace(/[\\/]+$/, '');
+        return folder ? `${folder}\\${HUB_FOLDER_NAME}` : undefined;
+      } catch {
+        return undefined;
+      }
     },
   };
 }
@@ -80,6 +171,10 @@ export interface TauriInstallDeps {
   invoke(cmd: 'spike_metrics'): Promise<TauriMetrics>;
   /** Runs UPDATE_COMMAND with these arguments; without it the shell offers no updates. */
   runUpdate?(args: string[]): Promise<CommandOutcome>;
+  /** Starts HUB_COMMAND; without it the shell offers no hub. */
+  spawnHub?: SpawnHub;
+  /** The PC's Downloads folder, where the hub's folder is looked for first. */
+  downloads?(): Promise<string>;
   target: { spikeNative?: SpikeNative };
 }
 
@@ -106,13 +201,15 @@ function toNativeMetrics(answer: TauriMetrics): NativeMetrics {
 
 /** Installs `window.spikeNative` when the page runs in the Windows shell. */
 export function installTauriNative(
-  { tauri, invoke: call, runUpdate, target }: TauriInstallDeps = {
+  { tauri, invoke: call, runUpdate, spawnHub: spawn, downloads, target }: TauriInstallDeps = {
     tauri: isTauri(),
     invoke: (cmd) => invoke<TauriMetrics>(cmd),
     runUpdate: async (args) => {
       const { code, stderr } = await Command.create(UPDATE_COMMAND, args).execute();
       return { code, stderr };
     },
+    spawnHub,
+    downloads: downloadDir,
     target: globalThis as { spikeNative?: SpikeNative },
   },
 ): void {
@@ -120,5 +217,6 @@ export function installTauriNative(
   target.spikeNative = {
     metrics: async () => toNativeMetrics(await call('spike_metrics')),
     ...(runUpdate ? { update: desktopUpdater(runUpdate) } : {}),
+    ...(spawn ? { hub: desktopHub(spawn, downloads ?? (() => Promise.reject(new Error('no Downloads folder')))) } : {}),
   };
 }

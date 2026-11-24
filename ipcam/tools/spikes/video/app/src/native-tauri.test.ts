@@ -1,14 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
+  CMD_NOT_FOUND,
+  desktopHub,
+  HUB_COMMAND,
+  HUB_FOLDER_NAME,
   installTauriNative,
   updateArgs,
   UPDATE_COMMAND,
   UPDATE_FIXED_ARGS,
+  type HubEvents,
+  type SpawnHub,
   type TauriInstallDeps,
   type TauriMetrics,
 } from './native-tauri';
-import type { SpikeNative } from './native';
+import { HubStartError, type SpikeNative } from './native';
 
 /** What the shell's `spike_metrics` command answers on a Windows 11 PC. */
 const WIN1: TauriMetrics = {
@@ -173,3 +179,118 @@ describe('the Windows shell updates itself', () => {
   });
 });
 
+
+/** The shell's capability for the hub (apps/desktop/src-tauri/capabilities/spike-hub.json). */
+interface HubCapability {
+  windows: string[];
+  permissions: (string | { identifier: string; allow: { name: string; cmd: string; args: unknown[] }[] })[];
+}
+
+const hubCapability = JSON.parse(
+  readFileSync(new URL('../../../../../apps/desktop/src-tauri/capabilities/spike-hub.json', import.meta.url), 'utf8'),
+) as HubCapability;
+
+/** A spawn double: what the hub's events would carry, and whether it was killed. */
+function fakeSpawn(): { spawn: SpawnHub; events: () => HubEvents; folders: string[]; kills: () => number } {
+  let events: HubEvents | undefined;
+  const folders: string[] = [];
+  let kills = 0;
+  const spawn: SpawnHub = (folder, e) => {
+    folders.push(folder);
+    events = e;
+    return Promise.resolve({
+      kill: () => {
+        kills++;
+        return Promise.resolve();
+      },
+    });
+  };
+  return {
+    spawn,
+    events: () => {
+      if (!events) throw new Error('nothing was spawned');
+      return events;
+    },
+    folders,
+    kills: () => kills,
+  };
+}
+
+describe('the Windows shell starts the hub', () => {
+  it('nativeTauri_hub_passesLinesAndTheEnd', async () => {
+    const fake = fakeSpawn();
+    const hub = desktopHub(fake.spawn, () => Promise.resolve('C:\\Users\\a\\Downloads'));
+    const lines: string[] = [];
+    const ends: (number | null | 'missing')[] = [];
+
+    await hub.start('C:\\hub', { line: (l) => lines.push(l), exit: (e) => ends.push(e) });
+    fake.events().line('spikehub spike-video-v0.1.2\r\n');
+    fake.events().line('time=… msg="spikehub listens"\n');
+    fake.events().close(1);
+    fake.events().close(1); // the plugin's error and close can both come: one end only
+
+    expect(fake.folders).toEqual(['C:\\hub']);
+    expect(lines).toEqual(['spikehub spike-video-v0.1.2', 'time=… msg="spikehub listens"']);
+    expect(ends).toEqual([1]);
+  });
+
+  it('nativeTauri_hub_cmdNotFound_isMissing', async () => {
+    // cmd ends with 9009 when the folder has no .\spikehub.exe.
+    const fake = fakeSpawn();
+    const ends: (number | null | 'missing')[] = [];
+    await desktopHub(fake.spawn, () => Promise.resolve('D')).start('C:\\empty', { line: vi.fn(), exit: (e) => ends.push(e) });
+    fake.events().close(CMD_NOT_FOUND);
+    expect(ends).toEqual(['missing']);
+  });
+
+  it('nativeTauri_hub_stopKillsOnce', async () => {
+    const fake = fakeSpawn();
+    const ends: (number | null | 'missing')[] = [];
+    const running = await desktopHub(fake.spawn, () => Promise.resolve('D')).start('C:\\hub', {
+      line: vi.fn(),
+      exit: (e) => ends.push(e),
+    });
+    await running.stop();
+    fake.events().close(1); // the killed job's code comes after: the end was already told
+    await running.stop();
+    expect(fake.kills()).toBe(1);
+    expect(ends).toEqual([null]);
+  });
+
+  it('nativeTauri_hub_spawnFailure_isHubStartError', async () => {
+    // A folder that does not exist: Windows refuses the working directory.
+    const spawn: SpawnHub = () => Promise.reject(new Error('The directory name is invalid. (os error 267)'));
+    const start = desktopHub(spawn, () => Promise.resolve('D')).start('C:\\nowhere', { line: vi.fn(), exit: vi.fn() });
+    await expect(start).rejects.toBeInstanceOf(HubStartError);
+    await expect(start).rejects.toMatchObject({ detail: 'The directory name is invalid. (os error 267)' });
+  });
+
+  it('nativeTauri_hub_defaultFolderIsInDownloads', async () => {
+    const spawn = fakeSpawn().spawn;
+    await expect(desktopHub(spawn, () => Promise.resolve('C:\\Users\\besli\\Downloads\\')).defaultFolder()).resolves.toBe(
+      `C:\\Users\\besli\\Downloads\\${HUB_FOLDER_NAME}`,
+    );
+    await expect(desktopHub(spawn, () => Promise.reject(new Error('no path permission'))).defaultFolder()).resolves.toBeUndefined();
+  });
+
+  it('nativeTauri_hub_onlyWithSpawn', () => {
+    const withHub: { spikeNative?: SpikeNative } = {};
+    installTauriNative({ tauri: true, invoke: vi.fn(), spawnHub: fakeSpawn().spawn, downloads: vi.fn(), target: withHub });
+    expect(withHub.spikeNative?.hub).toBeDefined();
+    const without: { spikeNative?: SpikeNative } = {};
+    installTauriNative({ tauri: true, invoke: vi.fn(), target: without });
+    expect(without.spikeNative?.hub).toBeUndefined();
+  });
+
+  it('nativeTauri_hubCapability_fixesTheWholeCommandLine', () => {
+    // The page chooses only the working directory: every argument is fixed, and nothing else may run.
+    expect(hubCapability.windows).toEqual(['main']);
+    const spawn = hubCapability.permissions.find((p) => typeof p !== 'string' && p.identifier === 'shell:allow-spawn');
+    if (!spawn || typeof spawn === 'string') throw new Error('the capability does not allow shell:allow-spawn');
+    expect(spawn.allow).toEqual([{ name: HUB_COMMAND, cmd: 'cmd', args: ['/d', '/c', '.\\spikehub.exe', '-browser=false'] }]);
+    expect(hubCapability.permissions.filter((p) => typeof p === 'string').sort()).toEqual([
+      'core:path:allow-resolve-directory',
+      'shell:allow-kill',
+    ]);
+  });
+});
