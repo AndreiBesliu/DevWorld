@@ -15,6 +15,10 @@ on:
       - 'ipcam/tools/spikes/upload/**'
       # uploadreport imports the video module's redact package.
       - 'ipcam/tools/spikes/video/**'
+      # Task 11: the committed report and its CSVs (Task 13), which the Report scan step
+      # checks for the token patterns.
+      - 'ipcam/docs/research/*phase0c-upload*'
+      - 'ipcam/docs/research/phase0-data/phase0c-upload-*'
       # The hub shares requirements with the recorder spike, so in the workspace that
       # module's go.mod can select newer versions of the hub's dependencies, and its go.sum
       # holds their checksums; the upload job also builds its reccontroller and runs its
@@ -37,6 +41,10 @@ on:
       - 'ipcam/tools/spikes/upload/**'
       # uploadreport imports the video module's redact package.
       - 'ipcam/tools/spikes/video/**'
+      # Task 11: the committed report and its CSVs (Task 13), which the Report scan step
+      # checks for the token patterns.
+      - 'ipcam/docs/research/*phase0c-upload*'
+      - 'ipcam/docs/research/phase0-data/phase0c-upload-*'
       # The hub shares requirements with the recorder spike, so in the workspace that
       # module's go.mod can select newer versions of the hub's dependencies, and its go.sum
       # holds their checksums; the upload job also builds its reccontroller and runs its
@@ -252,6 +260,19 @@ jobs:
           set -o pipefail
           grep -E '^(ok|FAIL)\s' "${RUNNER_TEMP}/test.log" | sed -E 's|github\.com/[^/]+/[^/]+/ipcam/||' |
             tools/scripts/annotate.sh test-times 60 notice
+      - name: Report scan
+        # Task 11 (P45): the committed upload report and its CSVs through the redaction
+        # scanner and the token patterns; ipcam-spikes' redaction job runs the scanner alone.
+        id: report-scan
+        run: |
+          set -o pipefail
+          shopt -s nullglob
+          files=(docs/research/*phase0c-upload*.md docs/research/phase0-data/phase0c-upload-*.csv)
+          if ((${#files[@]})); then
+            go run ./tools/spikes/upload/cmd/uploadreport -scan "${files[@]}" 2>&1 | tee "${RUNNER_TEMP}/report-scan.log"
+          else
+            echo "no committed upload report yet" | tee "${RUNNER_TEMP}/report-scan.log"
+          fi
       - name: Video build list
         # R04: the modules that join the workspace must not move a dependency of the video spike.
         id: build-list

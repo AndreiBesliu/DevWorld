@@ -47,6 +47,23 @@ func TestTask10FilesMarked(t *testing.T) {
 	}
 }
 
+// task11Files are the report generator's files (Task 11): each exists and
+// is marked.
+var task11Files = []string{
+	"cmd/uploadreport/main.go", "cmd/uploadreport/inputs.go", "cmd/uploadreport/annotations.go",
+	"cmd/uploadreport/render.go", "cmd/uploadreport/faza0bis.go", "cmd/uploadreport/csv.go", "results/tokens.go",
+}
+
+// TestTask11FilesMarked: the report generator's files exist and carry the
+// marker.
+func TestTask11FilesMarked(t *testing.T) {
+	for _, path := range task11Files {
+		if err := checkMarked(path); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
 // markerLine is the first line that a file of the given type must have.
 func markerLine(path string) (string, error) {
 	switch filepath.Ext(path) {
