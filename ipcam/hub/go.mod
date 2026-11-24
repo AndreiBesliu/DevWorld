@@ -8,6 +8,7 @@ require (
 	github.com/bluenviron/gortsplib/v5 v5.6.6
 	github.com/bluenviron/mediacommon/v2 v2.9.6
 	github.com/google/uuid v1.6.0
+	github.com/kerberos-io/onvif v1.2.3
 	golang.org/x/crypto v0.57.0
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/sys v0.48.0
@@ -17,7 +18,9 @@ require (
 require (
 	filippo.io/hpke v0.4.0 // indirect
 	github.com/abema/go-mp4 v1.7.3 // indirect
+	github.com/clbanning/mxj/v2 v2.7.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect

@@ -24,7 +24,8 @@ const diagLines = "ipcam-hub diag host [--rec <dir>]\n       ipcam-hub diag pimo
 	"       ipcam-hub diag reach --hosts <host[:port],…> [--lan <host:port>]\n" +
 	"       ipcam-hub diag uploads --config <run.json> [--list-remote]\n" +
 	"       ipcam-hub diag visibility --config <run.json> --creator <destId> --reader <destId>\n" +
-	"       ipcam-hub diag scan-secrets [--config <run.json>] --dir <results dir> < {\"value\":…} lines"
+	"       ipcam-hub diag scan-secrets [--config <run.json>] --dir <results dir> < {\"value\":…} lines\n" +
+	"       ipcam-hub diag onvif [--probe | --uris [--profile sub]] < {\"id\":…,\"xaddr\":…,\"user\":…,\"pass\":…} lines"
 
 // diagUsage is the usage of the diag subcommands.
 const diagUsage = "usage: " + diagLines
@@ -35,7 +36,8 @@ const diagUsage = "usage: " + diagLines
 // object on stdout; or, for the upload spike (Task 7b), a read of the open
 // segment, a destination's probe, what the network reaches and the uploads'
 // counts, as JSON lines; or a cell of the cross-client visibility matrix and
-// the known-secrets scan (Task 9). Only scan-secrets reads stdin.
+// the known-secrets scan (Task 9); or the MI8 spike's ONVIF probe, URIs and
+// events (Task 10). Only scan-secrets and onvif read stdin.
 func diagCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
@@ -61,6 +63,8 @@ func diagCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return diagVisibilityCommand(args[1:], stdout, stderr)
 		case "scan-secrets":
 			return diagScanSecretsCommand(args[1:], stdin, stdout, stderr)
+		case "onvif":
+			return diagOnvifCommand(args[1:], stdin, stdout, stderr)
 		}
 	}
 	_, _ = fmt.Fprintln(stderr, diagUsage)

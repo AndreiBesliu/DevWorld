@@ -137,7 +137,7 @@ jobs:
       # the real ipcam-hub, which starts MediaMTX even without jobs), so ipcam-hub's process
       # tests that need only the fork run here too, as c1's ipcam-spike-recording runs them:
       # accepted double coverage. Those that need the media skip here.
-      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/... ./hub/internal/crypto/...
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/... ./hub/internal/crypto/... ./hub/internal/cameras/...
     defaults:
       run:
         working-directory: ipcam
@@ -306,7 +306,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 50
     env:
-      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/... ./hub/internal/crypto/...
+      TREES: ./tools/spikes/upload/... ./hub ./hub/internal/storage/... ./hub/internal/outbox/... ./hub/internal/catalog/... ./hub/cmd/ipcam-hub/... ./hub/internal/playback/... ./hub/internal/crypto/... ./hub/internal/cameras/...
     defaults:
       run:
         working-directory: ipcam
