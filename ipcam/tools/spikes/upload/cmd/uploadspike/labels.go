@@ -131,10 +131,10 @@ const (
 
 // The MI6 login prompts, per platform and plan.
 const (
-	promptAndroidA  = "Pe telefon (Android): deschideți aplicația video, scenariul «OAUTH», și apăsați «Conectare %s». Aplicația găsește singură hub-ul."
-	promptWindowsA  = "Pe PC (Windows): deschideți aplicația video, scenariul «OAUTH», și apăsați «Conectare %s»."
-	promptWebA      = "În browserul PC-ului: deschideți aplicația video web, scenariul «OAUTH», și apăsați «Conectare %s»."
-	promptB1        = "%s cu B1: apăsați «Conectare %s» în scenariul «OAUTH»; aplicația arată un cod. Deschideți adresa afișată, scrieți codul și acceptați."
+	promptAndroidA  = "Pe telefon (Android): deschideți aplicația video, scrieți în câmpul «Adresa hub-ului» adresa de mai sus, apoi la rândul «Conectare la stocare (MI6)» apăsați «Pornește» și conectați contul %s."
+	promptWindowsA  = "Pe PC (Windows): deschideți aplicația video, scrieți în câmpul «Adresa hub-ului» http://localhost:7091, apoi la rândul «Conectare la stocare (MI6)» apăsați «Pornește» și conectați contul %s."
+	promptWebA      = "În browserul PC-ului: deschideți aplicația video web (pagina spikehub), scrieți în câmpul «Adresa hub-ului» http://localhost:7091, apoi la rândul «Conectare la stocare (MI6)» apăsați «Pornește» și conectați contul %s."
+	promptB1        = "%s cu B1: la rândul «Conectare la stocare (MI6)» apăsați «Pornește» (contul %s); aplicația arată o adresă și un cod. Deschideți adresa pe orice dispozitiv, scrieți codul și acceptați."
 	promptWaiting   = "Aștept autentificarea %s × %s…"
 	promptPlanAFail = "Planul A pentru %s × %s a fost refuzat (%s). Rulăm B1 acum, în aceeași zi."
 	promptB1Fail    = "B1 pentru %s × %s a fost refuzat (%s): perechea trece pe B2."

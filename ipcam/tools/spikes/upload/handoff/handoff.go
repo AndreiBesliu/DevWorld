@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -44,6 +45,10 @@ const (
 	readHeaderWait = 10 * time.Second
 	hubCallTimeout = 40 * time.Second
 	lanDrain       = 5 * time.Second
+	// resultsGrace is how long a LAN session stays open, for the app's
+	// results only, after its login ended: the app publishes the OAUTH
+	// row's result once the run ends, which is after the login's end.
+	resultsGrace = 3 * time.Minute
 )
 
 // appOrigins are the origins that the video app runs from, which its
@@ -108,6 +113,9 @@ type Options struct {
 	OneDrive bool
 	// LANLife bounds a LAN session; 0 is 10 min. Tests shorten it.
 	LANLife time.Duration
+	// ResultsGrace bounds a LAN session after its login ended (EndLogin);
+	// 0 is 3 min. Tests shorten it.
+	ResultsGrace time.Duration
 }
 
 // Server is the handoff server.
@@ -130,12 +138,14 @@ type begun struct {
 }
 
 // lanSession is the LAN listener of a remote login or reader session, on
-// addrs.
+// addrs. Once its login ends (EndLogin, or a complete on it) it answers
+// only the app's results endpoint, for resultsGrace.
 type lanSession struct {
-	key   string
-	addrs []net.IP
-	srvs  []*http.Server
-	timer *time.Timer
+	key         string
+	addrs       []net.IP
+	srvs        []*http.Server
+	timer       *time.Timer
+	resultsOnly atomic.Bool
 }
 
 // lanAddrs lists the host's RFC 1918 IPv4 addresses; tests replace it.
@@ -246,9 +256,10 @@ func (s *Server) Close() {
 
 // OpenLAN listens on <lan-ip>:<port> on each RFC 1918 IPv4 address of the
 // host, never the wildcard, for a login or a reader session of another
-// device, named key, until a login completes through the server, CloseLAN,
-// LANLife (10 min, a login state's life) or ctx's end. An open session is
-// replaced. A host without such an address is an error.
+// device, named key, until CloseLAN, LANLife (10 min, a login state's
+// life) or ctx's end; once its login ends (EndLogin, or a complete through
+// it), it answers only the app's results, for at most ResultsGrace. An
+// open session is replaced. A host without such an address is an error.
 func (s *Server) OpenLAN(ctx context.Context, key string) error {
 	addrs, err := lanAddrs()
 	if err != nil {
@@ -305,6 +316,35 @@ func (s *Server) CloseLAN() {
 	if sess != nil {
 		s.closeSession(sess)
 	}
+}
+
+// EndLogin ends the open LAN session's login: the session then answers
+// only the app's results endpoint, and closes after resultsGrace (or
+// earlier, through CloseLAN, OpenLAN or ctx's end). Without an open
+// session it does nothing.
+func (s *Server) EndLogin() {
+	s.mu.Lock()
+	sess := s.lan
+	s.mu.Unlock()
+	if sess != nil {
+		s.endLogin(sess)
+	}
+}
+
+// endLogin turns sess, if it is still the open session, into its results
+// grace.
+func (s *Server) endLogin(sess *lanSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lan != sess || sess.resultsOnly.Load() {
+		return
+	}
+	sess.resultsOnly.Store(true)
+	grace := s.opts.ResultsGrace
+	if grace <= 0 {
+		grace = resultsGrace
+	}
+	sess.timer.Reset(grace)
 }
 
 // closeSession closes sess, once: its listeners at once, its connections
@@ -386,6 +426,10 @@ func (s *Server) handler(sess *lanSession) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		if !s.ownHost(r.Host) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not allowed"})
+			return
+		}
+		if sess != nil && sess.resultsOnly.Load() && r.URL.Path != "/spike/v1/results" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "the login on this address has ended"})
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -596,10 +640,11 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request, sess *lanSessi
 		return
 	}
 	writeJSON(w, http.StatusOK, done)
-	// The session ends once this answer is out: its listener closes at
-	// once, and its connections after their answers (closeSession).
+	// The session's login ends with this answer: from now on it answers
+	// only the app's results, which the app posts when its run ends, and
+	// closes after resultsGrace (endLogin).
 	if sess != nil {
-		go s.closeSession(sess) //nolint:gosec // G118: the session ends after this request, on its own drain bound
+		s.endLogin(sess)
 	}
 }
 

@@ -257,7 +257,9 @@ func (h *holder) login(ctx context.Context, def mi6.PairDef, plan string) error 
 		h.e.printf("%s", loginPrompt(def, plan))
 		h.e.printf(promptWaiting, platform, provider)
 		end, err := h.waitEnd(ctx, def.Dest)
-		h.srv.CloseLAN()
+		// The app posts the run's result after the login's end: the LAN
+		// session stays for that only, briefly (handoff's results grace).
+		h.srv.EndLogin()
 		if err != nil {
 			return err
 		}

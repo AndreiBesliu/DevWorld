@@ -449,7 +449,8 @@ func wildcardListener(t *testing.T, port int) bool {
 // the real port 7091 while 127.0.0.1:7091 listens, the only test that binds
 // it: no LAN socket before; during an Android login a socket on each of
 // the host's RFC 1918 addresses and none on 0.0.0.0; closed after the
-// login's complete, and after LANLife without one (10 min in production).
+// login's complete once its results grace ends (3 min in production), and
+// after LANLife without a complete (10 min in production).
 // The upload job requires an RFC 1918 address (UPLOADSPIKE_REQUIRE_LAN=1).
 func TestHandoffServer_LanListenerOnlyDuringRemoteLogin(t *testing.T) {
 	if runtime.GOOS != "linux" {
@@ -467,7 +468,7 @@ func TestHandoffServer_LanListenerOnlyDuringRemoteLogin(t *testing.T) {
 	}
 	hub, _ := startFakeControl(t)
 	d := newFakeDriver()
-	s := New(hub, Options{Driver: d, ResultsDir: t.TempDir(), LANLife: 700 * time.Millisecond})
+	s := New(hub, Options{Driver: d, ResultsDir: t.TempDir(), LANLife: 700 * time.Millisecond, ResultsGrace: 300 * time.Millisecond})
 	if err := s.ServeLoopback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -675,13 +676,15 @@ func TestHandoffServer_OwnHostsAndOriginsOnly(t *testing.T) {
 
 // TestHandoffServer_CompleteClosesItsOwnSession (Task 9B review M5): a
 // login that completes on the loopback listener leaves another device's
-// open LAN session alone; one that completes on the LAN session closes
-// that session.
+// open LAN session alone; one that completes on the LAN session ends that
+// session's login: the session answers only the app's results (the app
+// posts the OAUTH row's result after the login), then closes after its
+// results grace.
 func TestHandoffServer_CompleteClosesItsOwnSession(t *testing.T) {
 	lanAddrs = func() ([]net.IP, error) { return []net.IP{net.IPv4(127, 0, 0, 2)}, nil }
 	t.Cleanup(func() { lanAddrs = RFC1918Addrs })
 	skipWithoutLoopbackAlias(t)
-	s, _, _ := startServer(t, Options{})
+	s, _, _ := startServer(t, Options{ResultsGrace: 700 * time.Millisecond})
 	if err := s.OpenLAN(t.Context(), "g-android"); err != nil {
 		t.Fatal(err)
 	}
@@ -696,11 +699,27 @@ func TestHandoffServer_CompleteClosesItsOwnSession(t *testing.T) {
 	if resp := do(t, http.MethodPost, lan+"/spike/v1/oauth/complete", `{"state":"st-1","code":"c-1"}`); resp.StatusCode != http.StatusOK {
 		t.Fatalf("complete on the LAN: %d", resp.StatusCode)
 	}
+	// The results grace: the login's endpoints are gone, the results stay.
+	for _, path := range []string{"/spike/v1/oauth/next?platform=android", "/spike/v1/oauth/begin?dest=g-android&platform=android&plan=A", "/spike/v1/cameras"} {
+		if resp := do(t, http.MethodGet, lan+path, ""); resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s on the LAN after the complete: %d; want 404", path, resp.StatusCode)
+		}
+	}
+	if resp := do(t, http.MethodPost, lan+"/spike/v1/oauth/complete", `{"state":"st-1","code":"c-1"}`); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("a second complete on the LAN: %d; want 404", resp.StatusCode)
+	}
+	result := `{"scenario":"OAUTH","device":{"platform":"android","ua":"x"}}`
+	if resp := do(t, http.MethodPost, lan+"/spike/v1/results", result, "Origin", "http://localhost", "Content-Type", "text/plain"); resp.StatusCode != http.StatusCreated {
+		t.Errorf("the app's result on the LAN after the complete: %d; want 201", resp.StatusCode)
+	}
+	if key, open := s.LANOpen(); !open || key != "g-android" {
+		t.Errorf("the session closed before its results grace ended (open %v, key %q)", open, key)
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for _, open := s.LANOpen(); open && time.Now().Before(deadline); _, open = s.LANOpen() {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if _, open := s.LANOpen(); open {
-		t.Error("the LAN session stays open after its login completed on it")
+		t.Error("the LAN session stays open after its results grace")
 	}
 }
