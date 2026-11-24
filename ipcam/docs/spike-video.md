@@ -61,7 +61,7 @@ Aplicația ține minte ce s-a rulat: pe pagina ei, rândul «Rămase pe acest PC
 Cazuri pe care le puteți rezolva singur:
 
 - **«Nu mă pot conecta la hub.»<!--app-->** Verificați, în ordine:
-  - fereastra spikehub e deschisă pe PC;
+  - fereastra spikehub e deschisă pe PC, sau, în «ipcam-desktop»<!--desktop-->, chenarul hub-ului arată «Hub-ul rulează. Ce scrie el apare mai jos.»<!--app-->;
   - adresa din aplicație e scrisă exact ca în fereastra spikehub;
   - telefonul e pe același Wi-Fi ca PC-ul, nu pe rețeaua pentru oaspeți („Guest”);
   - dacă folosiți un VPN pe telefon sau pe PC, opriți-l pe durata probei.
@@ -135,8 +135,16 @@ La S9 pot apărea «profil video nesuportat»<!--app--> sau «calitate redusă: 
 1. Închideți browserele. Dacă aveți instalată versiunea veche, dezinstalați întâi «ipcam-desktop»<!--desktop-->: „Setări” → „Aplicații” → „Aplicații instalate”.
 2. Dublu clic pe `ipcam-desktop-setup.exe`. La „Windows a protejat PC-ul”, apăsați „Mai multe informații”, apoi „Rulați oricum”.
 3. Instalatorul e în engleză. Apăsați „Next” până la „Install”, apoi „Finish”. Se deschide fereastra «Proba ipcam»<!--desktop-->; dacă nu, porniți din Start aplicația «ipcam-desktop»<!--desktop-->.
-4. În câmpul «Adresa hub-ului (o vedeți în fereastra spikehub)»<!--app--> scrieți `http://127.0.0.1:7080`, dacă nu e deja acolo. Aplicația ține minte adresa.
-5. Apăsați «Rulează tot pentru acest dispozitiv»<!--app-->, ca în browsere, și lăsați fereastra vizibilă până la «Gata: …»<!--app-->.
+4. Închideți fereastra spikehub de la pasul 2, dacă e deschisă. De la v0.1.2, aplicația pornește ea spikehub, fără fereastră de terminal: ce scria spikehub în fereastra lui apare în aplicație.
+5. Sus în aplicație, în chenarul «Hub-ul pe acest PC (spikehub)»<!--app-->, câmpul «Folderul spikehub (cel cu spikehub.exe și folderele media și results)»<!--app--> arată folderul în care aplicația caută spikehub. Dacă nu e folderul de la pasul 1, scrieți-l pe cel corect: în File Explorer, deschideți folderul, clic în bara de adresă, copiați și lipiți aici. Apăsați «Pornește hub-ul»<!--app-->.
+6. Sub butoane apare «Hub-ul rulează. Ce scrie el apare mai jos.»<!--app-->, iar dedesubt rândurile lui spikehub, de exemplu «Adresele acestui calculator în rețeaua locală:»<!--hub-->. Dacă firewall-ul Windows întreabă ceva, faceți ca la pasul 2.4. Când spikehub e gata, aplicația scrie singură `http://127.0.0.1:7080` în câmpul «Adresa hub-ului (o vedeți în fereastra spikehub)»<!--app-->, dacă e gol, și verifică conexiunea. Dacă acolo e altă adresă, scrieți `http://127.0.0.1:7080`.
+7. Apăsați «Rulează tot pentru acest dispozitiv»<!--app-->, ca în browsere, și lăsați fereastra vizibilă până la «Gata: …»<!--app-->.
+8. Aplicația ține minte folderul: la următoarea pornire, pornește singură spikehub. Când închideți aplicația, se oprește și spikehub. Cu «Oprește hub-ul»<!--app--> îl opriți fără să închideți aplicația. Pentru telefon (pasul 5), lăsați aplicația deschisă, cu hub-ul pornit, sau porniți `spikehub.exe` ca la pasul 2.
+
+Dacă în chenar scrie:
+
+- «În acest folder nu este spikehub.exe. Scrieți folderul în care ați extras spikehub-windows.zip.»<!--app-->: corectați folderul și apăsați din nou «Pornește hub-ul»<!--app-->.
+- «Hub-ul s-a oprit singur (cod …). Motivul e în ultimele rânduri de mai jos.»<!--app-->: citiți ultimele rânduri. Dacă scrie «îl folosește alt program?»<!--hub-->, fereastra spikehub de la pasul 2 e încă deschisă: închideți-o și apăsați din nou «Pornește hub-ul»<!--app-->. Altfel, faceți o captură și scrieți-ne.
 
 ## Pasul 5. Telefonul Galaxy A24
 

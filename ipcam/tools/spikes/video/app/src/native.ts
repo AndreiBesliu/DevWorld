@@ -42,6 +42,51 @@ export interface SpikeNative {
   vibrate?(): Promise<void>;
   /** SPIKE-ONLY (update.ts): the shell installs its own newer release. */
   update?: ShellUpdater;
+  /** SPIKE-ONLY (hubprocess.ts): Windows starts spikehub as its hidden child and passes its output on. */
+  hub?: ShellHub;
+}
+
+/** Where a hub started by the shell sends what it writes, and its end. */
+export interface HubOutput {
+  /** One line of the hub's stdout or stderr, without its line break. */
+  line(text: string): void;
+  /**
+   * The hub ended, by itself or stopped: its exit code, null when it is unknown,
+   * or `missing` when the folder has no spikehub.exe.
+   */
+  exit(end: number | null | 'missing'): void;
+}
+
+/** A hub that the shell started. */
+export interface RunningHub {
+  /** Ends the hub and whatever it started; `exit` follows. */
+  stop(): Promise<void>;
+}
+
+/**
+ * SPIKE-ONLY (owner's request of 2026-11-24): spikehub as the shell's hidden
+ * child, without a console window, so that the PC needs no terminal.
+ */
+export interface ShellHub {
+  /**
+   * Starts spikehub.exe in `folder` (which holds it, `media` and `results`).
+   * Rejects with a HubStartError when nothing could start there, such as a
+   * folder that does not exist.
+   */
+  start(folder: string, out: HubOutput): Promise<RunningHub>;
+  /** The folder to offer before the person picks one, or undefined when the shell cannot tell. */
+  defaultFolder(): Promise<string | undefined>;
+}
+
+/** The shell could not start the hub in the folder; `detail` is what the system said, for the screen. */
+export class HubStartError extends Error {
+  readonly detail: string;
+
+  constructor(detail: string) {
+    super(detail);
+    this.name = 'HubStartError';
+    this.detail = detail;
+  }
 }
 
 /**
