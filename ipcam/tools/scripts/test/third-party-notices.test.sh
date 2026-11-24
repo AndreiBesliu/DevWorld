@@ -2,7 +2,8 @@
 # Tests of tools/scripts/third-party-notices.sh with a fake `go` and a fake
 # `pnpm` that answer from testdata/notices: go-licenses' report of the
 # workspace's binaries (spikehub; ipcam-hub, recspike, reccontroller and
-# recspike-probe) and of the MediaMTX fork's for Windows and for Linux, the
+# recspike-probe; ipcam-hub, uploadspike, reccontroller and uploadspike-probe)
+# and of the MediaMTX fork's for Windows and for Linux, the
 # fork's keywrap module, `pnpm list` of the spike app's production packages,
 # and the license files of each. The fork's own LICENSE and versions are the
 # repository's.
@@ -53,6 +54,8 @@ for arg in "$@"; do
 done
 echo "${folder} ${ignores[*]}" >> "${FAKE_IGNORES:-/dev/null}"
 report="go-licenses-${GOOS}.tsv"
+# The upload release's binaries add uploadspike's modules to the workspace's.
+[[ " ${packages[*]} " != *' ./tools/spikes/upload/cmd/uploadspike '* ]] || report="go-licenses-upload-${GOOS}.tsv"
 if [[ "${folder}" == mediamtx ]]; then
   [[ "${GOWORK:-}" == off ]] || { echo 'fake go-licenses: the fork runs with GOWORK=off' >&2; exit 2; }
   report="go-licenses-fork-${GOOS}.tsv"
@@ -134,7 +137,7 @@ ipcam github.com/AndreiBesliu/DevWorld/ipcam
 ipcam github.com/AndreiBesliu/DevWorld/ipcam" -- cat "${tmp}/video-ignores"
 
 check 'an argument is a usage error' 2 --has usage -- env PATH="${tmp}/bin:${PATH}" FAKE_DATA="${data}" "${script}" extra
-check 'an unknown release is a usage error' 2 --has usage -- notices_of audio
+check 'an unknown release is a usage error that names every release' 2 --has 'video|recording|upload' -- notices_of audio
 
 # The recording release: the Go modules of ipcam-hub, recspike, reccontroller
 # and recspike-probe, the fork's with GOWORK=off, MediaMTX's own MIT license,
@@ -190,4 +193,51 @@ sed 's|"version": "1.7.3"|"version": "1.6.15"|' "${data}/pnpm-list.json" > "${tm
 check 'an app hls.js of another version than the one that the fork embeds fails the recording notices' 1 \
   --has 'hls.js v1.7.3: no npm package of this version whose license to quote for the hls.min.js in mediamtx' -- \
   notices_of recording FAKE_LIST="${tmp}/other-hlsjs-list.json"
+
+# The upload release (phase0c2 Task 12): the Go modules of ipcam-hub,
+# uploadspike and reccontroller for each target, of uploadspike-probe for
+# ARMv6, the fork's with GOWORK=off, MediaMTX, hls.js and keywrap as in the
+# recording release, and the app's npm packages, the Capacitor and Tauri
+# plugins of its OAuth login among them.
+upload_list="${data}/pnpm-list-upload.json"
+check 'the upload notices hold the modules of every binary and of the fork, MediaMTX, hls.js, keywrap and the app' 0 \
+  --has 'Go: the standard library and runtime (go1.27.2)' \
+  --has $'Go module: golang.org/x/oauth2 v0.36.0\nLicense: BSD-3-Clause' \
+  --has 'BSD 3-Clause text of golang.org/x/oauth2 (fixture).' \
+  --has $'Go module: github.com/clbanning/mxj/v2 v2.7.0\nLicense: MIT' \
+  --has $'Go module: github.com/pion/webrtc/v4 v4.1.6\nLicense: MIT' \
+  --has $'Go module: github.com/datarhei/gosrt v0.11.1\nLicense: MIT' \
+  --has 'MediaMTX' \
+  --has "MediaMTX ${fork_version}, the fork that mediamtx is built from (hub/third_party/mediamtx)"$'\nLicense: MIT' \
+  --has $'hls.js v1.7.3, embedded in mediamtx as hls.min.js\nLicense: Apache-2.0' \
+  --has 'hls.js' \
+  --has $'Go module: github.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c, its package aes/keywrap\nLicense: BSD-2-Clause' \
+  --has 'npm package: @capacitor/browser ' \
+  --has $'npm package: @capacitor/browser 8.0.5\nLicense: MIT' \
+  --has $'npm package: @capacitor/app 8.1.2\nLicense: MIT' \
+  --has $'npm package: @tauri-apps/plugin-opener 2.7.2\nLicense: MIT OR Apache-2.0' \
+  --has $'npm package: @fabianlars/tauri-plugin-oauth 2.1.0\nLicense: MIT OR Apache-2.0' \
+  --has 'Apache License 2.0 of @fabianlars/tauri-plugin-oauth (fixture).' \
+  --has 'ipcam-desktop-setup.exe' \
+  --has 'Licențele componentelor terțe din programele probei de upload' \
+  --lacks 'recspike' --lacks 'spikehub' -- notices_of upload FAKE_LIST="${upload_list}" FAKE_CALLS="${tmp}/upload-calls"
+upload_bins='./hub/cmd/ipcam-hub ./tools/spikes/upload/cmd/uploadspike ./tools/spikes/recording/cmd/reccontroller'
+check 'the upload notices read the binaries of each target, the probe for ARMv6, and the fork with GOWORK=off' 0 --is "ipcam windows/amd64/ on ${upload_bins}
+ipcam linux/arm64/ on ${upload_bins}
+ipcam linux/arm/7 on ${upload_bins}
+ipcam linux/arm/6 on ./tools/spikes/upload/cmd/uploadspike-probe
+mediamtx windows/amd64/ off .
+mediamtx linux/arm64/ off .
+mediamtx linux/arm/7 off ." -- cat "${tmp}/upload-calls"
+check 'the upload release writes its notices' 0 -- notices_of upload FAKE_LIST="${upload_list}" FAKE_IGNORES="${tmp}/upload-ignores"
+check 'the upload release ignores keywrap too, which it names by hand' 0 --is "ipcam ${ignored}
+ipcam ${ignored}
+ipcam ${ignored}
+ipcam ${ignored}
+mediamtx ${ignored}
+mediamtx ${ignored}
+mediamtx ${ignored}" -- cat "${tmp}/upload-ignores"
+check 'the upload release is accepted by the usage check' 0 -- notices_of upload FAKE_LIST="${upload_list}"
+check 'the video notices do not change with the upload fixtures' 0 --is "${out}" -- notices
+check 'the recording notices do not name the upload modules' 0 --lacks 'golang.org/x/oauth2' --lacks 'clbanning' -- notices_of recording
 finish third-party-notices.test.sh
