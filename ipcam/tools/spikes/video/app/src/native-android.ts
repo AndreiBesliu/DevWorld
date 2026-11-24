@@ -7,6 +7,9 @@ import { Pip, type PipPlugin } from '@ipcam/capacitor-pip';
 import { SpikeMetrics, type AndroidMetrics, type SpikeMetricsPlugin } from 'spike-android-metrics';
 import { THERMAL_LEVELS, type MetricsRead, type NativeMetrics, type SpikeNative, type ThermalStatus } from './native';
 
+/** SPIKE-ONLY (update.ts): the Android shell's release asset. */
+export const ANDROID_ASSET = 'ipcam-spike.apk';
+
 export interface AndroidPlugins {
   pip: Pick<PipPlugin, 'enter' | 'addListener'>;
   metrics: SpikeMetricsPlugin;
@@ -68,5 +71,9 @@ export function installAndroidNative(
     onPip: pipFanOut(pip),
     keepAwake: (on) => metrics.keepAwake({ on }),
     vibrate: () => metrics.vibrate(),
+    update: {
+      asset: ANDROID_ASSET,
+      install: async ({ url, sha256 }) => (await metrics.installUpdate({ url, sha256 })).status,
+    },
   };
 }

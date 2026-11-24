@@ -72,7 +72,7 @@ func TestPlan_StepsAreKnownScenarios(t *testing.T) {
 }
 
 func TestPlan_Version(t *testing.T) {
-	if Version() != "spike-video-v0.1.1" {
+	if Version() != "spike-video-v0.1.2" {
 		t.Errorf("version %q", Version())
 	}
 }

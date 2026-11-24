@@ -20,7 +20,7 @@ describe('runner', () => {
 
     const result = await finish(runScenario('S10', t.env));
 
-    expect(result.appVersion).toBe('spike-video-v0.1.1');
+    expect(result.appVersion).toBe('spike-video-v0.1.2');
   });
 
   it('runner_stageIsShownOverThePageDuringTheRunAndTakenAwayAfter', async () => {

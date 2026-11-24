@@ -20,6 +20,14 @@
 # have ended with exit code 0, the first must be the only app process, and its
 # window must no longer be minimized (the first instance restored it).
 #
+# Last, the hub panel (SPIKE-ONLY, plan 2026-11-24-spike-hub-panel): in a
+# spikehub folder like the owner's (spikehub.exe, media, results), the app,
+# started without arguments, must start spikehub when the page's «Pornește
+# hub-ul» is pressed: the hub must answer on port 7080 within 30 s, run with no
+# window, and the panel must show its line «spikehub listens». «Oprește hub-ul»
+# must end it; started again, closing the app must end it too. It runs last
+# because the page then remembers the folder, and starts a hub at each launch.
+#
 # The DevTools port is opened by the machine policy AdditionalBrowserArguments
 # for the app's executable, which the script writes. The runner's processes are
 # elevated, and WebView2 Runtime 150 and later ignores the variable
@@ -56,6 +64,7 @@ $hubUrl = 'http://127.0.0.1:7080'
 $debugPort = 9222
 $argumentsPolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
 $pageState = Join-Path $PSScriptRoot 'page-state.ts'
+$pageHub = Join-Path $PSScriptRoot 'page-hub.ts'
 # Start-Process takes the programs and the hub its folders by full path.
 $App = (Resolve-Path -LiteralPath $App).Path
 $Hub = (Resolve-Path -LiteralPath $Hub).Path
@@ -276,6 +285,137 @@ function Test-SingleInstance {
   }
 }
 
+# Opens the app's DevTools port by the machine policy (see the top). Each
+# missing key of the policy's path is created on its own, and an existing key
+# is left as it is (New-Item -Force would replace it and drop its values). The
+# policy's value name is the executable's file name.
+function Set-DevToolsPolicy {
+  $key = 'HKLM:'
+  foreach ($name in $argumentsPolicy.Substring($key.Length + 1).Split('\')) {
+    $key = "$key\$name"
+    if (-not (Test-Path -LiteralPath $key)) { $null = New-Item -Path $key }
+  }
+  $null = New-ItemProperty -LiteralPath $argumentsPolicy -Name $policyValue -Value "--remote-debugging-port=$debugPort" -PropertyType String -Force
+}
+
+# Removes the policy's value, and warns when it is still there.
+function Remove-DevToolsPolicy {
+  Remove-ItemProperty -LiteralPath $argumentsPolicy -Name $policyValue -ErrorAction SilentlyContinue
+  # The value opens a DevTools port for the app: say so if it is still there.
+  if ($null -ne (Get-ItemProperty -LiteralPath $argumentsPolicy -Name $policyValue -ErrorAction SilentlyContinue)) {
+    Write-Annotation warning 'windows policy' "the policy value $policyValue is still set under $argumentsPolicy after Remove-ItemProperty"
+  }
+}
+
+# The hub panel's state after an action of page-hub.ts (start <folder>, stop,
+# read), parsed, or a string that says why it cannot be read.
+function Invoke-HubPanel([string[]] $Action) {
+  $ErrorActionPreference = 'Continue'
+  $text = (& node $pageHub $debugPort @Action 2>&1 | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0) { return "the page cannot be read through the DevTools port: $text" }
+  try { $state = $text | ConvertFrom-Json } catch { return "the page answered no JSON: $text" }
+  # DevTools' own answer, when the page's expression returned nothing.
+  if ($null -eq (Get-Field $state 'panel')) { return "the page answered no panel state: $text" }
+  $state
+}
+
+# The spikehub processes started from $Exe. PowerShell unrolls a function's
+# array: callers wrap the call in @() to count it (StrictMode has no Count on
+# $null or on a single process).
+function Get-HubProcesses([string] $Exe) {
+  Get-Process -Name spikehub -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe }
+}
+
+# Waits up to $Seconds for no spikehub of $Exe; returns whether none is left.
+function Wait-HubGone([string] $Exe, [int] $Seconds) {
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  while (@(Get-HubProcesses $Exe).Count -gt 0) {
+    if ((Get-Date) -ge $deadline) { return $false }
+    Start-Sleep -Milliseconds 500
+  }
+  $true
+}
+
+# Waits up to $Seconds for the hub to answer on port 7080; returns whether it did.
+function Wait-HubAnswers([int] $Seconds) {
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  while ($true) {
+    try {
+      $null = Invoke-WebRequest -Uri "$hubUrl/spike/v1/cameras" -TimeoutSec 2
+      return $true
+    } catch {
+      if ((Get-Date) -ge $deadline) { return $false }
+      Start-Sleep -Seconds 1
+    }
+  }
+}
+
+# The hub panel (see the top). Returns $null, or what is wrong and a diagnosis.
+function Test-HubPanel {
+  # A spikehub folder as the owner has one after extracting spikehub-windows.zip.
+  $folder = (New-Item -ItemType Directory -Force -Path (Join-Path $Work 'spikehub-windows')).FullName
+  $exe = Join-Path $folder 'spikehub.exe'
+  Copy-Item -LiteralPath $Hub -Destination $exe
+  $null = New-Item -ItemType Junction -Path (Join-Path $folder 'media') -Target $Media
+  $null = New-Item -ItemType Directory -Force -Path (Join-Path $folder 'results')
+  $appErr = Join-Path $Work 'app-hub.err.log'
+  $process = Start-Process -FilePath $App -RedirectStandardOutput (Join-Path $Work 'app-hub.out.log') `
+    -RedirectStandardError $appErr -PassThru
+  $null = $process.Handle
+  $panel = $null
+  $diagnosis = { "panel: $($panel | ConvertTo-Json -Compress)`napp stderr:`n$(Get-Tail $appErr 8)" }
+  try {
+    # The page's panel, once WebView2 has loaded it.
+    $deadline = (Get-Date).AddSeconds(60)
+    while ($true) {
+      $panel = Invoke-HubPanel @('read')
+      if ($panel -isnot [string] -and $panel.panel) { break }
+      if ($process.HasExited) { return "the app ended with exit code $($process.ExitCode) before its page showed the hub panel" }
+      if ((Get-Date) -ge $deadline) { return "the page showed no hub panel within 60 s`n$(& $diagnosis)" }
+      Start-Sleep -Seconds 1
+    }
+    if ($panel.status -ne 'Hub-ul e oprit.') { return "the hub panel did not start as stopped`n$(& $diagnosis)" }
+
+    $panel = Invoke-HubPanel @('start', $folder)
+    if (-not (Wait-HubAnswers 30)) { return "the hub started from the panel did not answer on port 7080 within 30 s`n$(& $diagnosis)" }
+    $hubs = @(Get-HubProcesses $exe)
+    if ($hubs.Count -ne 1) { return "$($hubs.Count) spikehub processes run from the folder, not 1`n$(& $diagnosis)" }
+    # The app started it through cmd: spikehub's parent is cmd, whose parent is the app. A console
+    # window, had one opened, would count as cmd's window: neither may have one.
+    $hubInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $($hubs[0].Id)"
+    if (-not $hubInfo) { return "spikehub (pid $($hubs[0].Id)) ended right after it answered`n$(& $diagnosis)" }
+    $cmd = Get-CimInstance Win32_Process -Filter "ProcessId = $($hubInfo.ParentProcessId)"
+    if (-not $cmd -or $cmd.Name -ne 'cmd.exe' -or $cmd.ParentProcessId -ne $process.Id) {
+      return "spikehub's parent is $(if ($cmd) { "$($cmd.Name) (pid $($cmd.ProcessId), parent $($cmd.ParentProcessId))" } else { 'gone' }), not the app's cmd (app pid $($process.Id))"
+    }
+    $windowed = @(@($hubs[0]) + @(Get-Process -Id $cmd.ProcessId -ErrorAction SilentlyContinue) | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })
+    if ($windowed) { return "the hub started from the panel has a window «$($windowed[0].MainWindowTitle)» ($($windowed[0].ProcessName))" }
+    $deadline = (Get-Date).AddSeconds(10)
+    while ($true) {
+      $panel = Invoke-HubPanel @('read')
+      if ($panel -isnot [string] -and "$($panel.log)".Contains('spikehub listens') -and $panel.status -eq 'Hub-ul rulează. Ce scrie el apare mai jos.') { break }
+      if ((Get-Date) -ge $deadline) { return "the panel did not show the hub running with its line «spikehub listens» within 10 s`n$(& $diagnosis)" }
+      Start-Sleep -Seconds 1
+    }
+
+    $panel = Invoke-HubPanel @('stop')
+    if (-not (Wait-HubGone $exe 10)) { return "«Oprește hub-ul» left spikehub running after 10 s`n$(& $diagnosis)" }
+    Start-Sleep -Seconds 1
+    $panel = Invoke-HubPanel @('read')
+    if ($panel -is [string] -or $panel.status -ne 'Hub-ul e oprit.') { return "after «Oprește hub-ul» the panel does not say the hub is stopped`n$(& $diagnosis)" }
+
+    $panel = Invoke-HubPanel @('start', $folder)
+    if (-not (Wait-HubAnswers 30)) { return "the hub started again from the panel did not answer within 30 s`n$(& $diagnosis)" }
+    Stop-App $process
+    if (-not (Wait-HubGone $exe 10)) { return 'closing the app left its spikehub running after 10 s' }
+    Write-Annotation notice 'windows hub panel' 'the panel started spikehub without a window, showed «spikehub listens», stopped it, and closing the app ended it'
+    $null
+  } finally {
+    Stop-App $process
+    Get-HubProcesses $exe | Stop-Process -Force -ErrorAction SilentlyContinue
+  }
+}
+
 # -browser=false: spikehub opens its page in the default browser on Windows, which a runner must not do.
 $hubProcess = Start-Process -FilePath $Hub -ArgumentList '-sims', '4', '-media', $Media, '-results', $results, '-browser=false' `
   -RedirectStandardOutput $hubOut -RedirectStandardError $hubLog -PassThru
@@ -293,37 +433,36 @@ while ($true) {
   }
 }
 
-# Every WebView2 the app creates opens its DevTools port, which Read-Page asks.
-# The policy's value name is the executable's file name. Each missing key of
-# the policy's path is created on its own, and an existing key is left as it is
-# (New-Item -Force would replace it and drop its values).
+# Every WebView2 the app creates opens its DevTools port, which Read-Page and
+# Invoke-HubPanel ask.
 $policyValue = Split-Path -Leaf $App
-$key = 'HKLM:'
-foreach ($name in $argumentsPolicy.Substring($key.Length + 1).Split('\')) {
-  $key = "$key\$name"
-  if (-not (Test-Path -LiteralPath $key)) { $null = New-Item -Path $key }
-}
 $failures = 0
 try {
-  $null = New-ItemProperty -LiteralPath $argumentsPolicy -Name $policyValue -Value "--remote-debugging-port=$debugPort" -PropertyType String -Force
+  Set-DevToolsPolicy
   for ($start = 1; $start -le $Starts; $start++) {
     if (-not (Test-Start "start $start of $Starts" $start)) { $failures++ }
   }
 } finally {
-  Remove-ItemProperty -LiteralPath $argumentsPolicy -Name $policyValue -ErrorAction SilentlyContinue
-  # The value opens a DevTools port for the app: say so if it is still there.
-  if ($null -ne (Get-ItemProperty -LiteralPath $argumentsPolicy -Name $policyValue -ErrorAction SilentlyContinue)) {
-    Write-Annotation warning 'windows policy' "the policy value $policyValue is still set under $argumentsPolicy after Remove-ItemProperty"
-  }
+  Remove-DevToolsPolicy
   Stop-Process -Id $hubProcess.Id -ErrorAction SilentlyContinue
 }
 try { $singleProblem = Test-SingleInstance } catch { $singleProblem = "the check could not run: $_" }
+# The panel's hub needs port 7080, which the hub above held.
+$null = $hubProcess.WaitForExit(10000)
+try {
+  Set-DevToolsPolicy
+  try { $panelProblem = Test-HubPanel } catch { $panelProblem = "the check could not run: $_ (windows-smoke.ps1 line $($_.InvocationInfo.ScriptLineNumber))" }
+} finally {
+  Remove-DevToolsPolicy
+}
 
 $summary = if ($failures) { "$failures of $Starts starts failed" } else { "all $Starts starts stored S1 with 20 samples" }
 $single = if ($singleProblem) { 'failed' } else { 'a second start restored the first window and ended' }
+$panelSummary = if ($panelProblem) { 'failed' } else { 'the app started and ended spikehub' }
 if ($env:GITHUB_STEP_SUMMARY) {
-  Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Windows smoke test (WIN-2): $summary; single instance (R52): $single"
+  Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Windows smoke test (WIN-2): $summary; single instance (R52): $single; hub panel: $panelSummary"
 }
 if ($singleProblem) { Write-Annotation error 'windows single instance' $singleProblem }
+if ($panelProblem) { Write-Annotation error 'windows hub panel' $panelProblem }
 Write-Annotation $(if ($failures) { 'error' } else { 'notice' }) 'windows S1' $summary
-if ($failures -or $singleProblem) { exit 1 }
+if ($failures -or $singleProblem -or $panelProblem) { exit 1 }
