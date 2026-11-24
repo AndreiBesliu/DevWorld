@@ -1,6 +1,7 @@
 package onviftest
 
 import (
+	"context"
 	"crypto/sha1" //nolint:gosec // G505: the PasswordDigest under test
 	"encoding/base64"
 	"io"
@@ -126,5 +127,47 @@ func TestSim_DigestOnlyRefusesWSSE(t *testing.T) {
 	}
 	if status, body := send(t, s.XAddr(), "", `<tds:GetSystemDateAndTime/>`); status != http.StatusOK || !strings.Contains(body, "UTCDateTime") {
 		t.Errorf("GetSystemDateAndTime: status %d %s", status, body)
+	}
+}
+
+// TestSim_SilenceCutsPullsInFlight: SetSilent(true) also silences a
+// PullMessages that was already waiting, so the last answer a client gets
+// comes before the silence began (the events tests time a loss from it).
+func TestSim_SilenceCutsPullsInFlight(t *testing.T) {
+	s := newTestSim(t, Config{})
+	create := `<tev:CreatePullPointSubscription><tev:InitialTerminationTime>PT10S</tev:InitialTerminationTime></tev:CreatePullPointSubscription>`
+	status, body := send(t, s.srv.URL+eventsPath, wsse(testPass, time.Now()), create)
+	if status != http.StatusOK {
+		t.Fatalf("create: status %d %s", status, body)
+	}
+	start := strings.Index(body, "<wsa:Address>") + len("<wsa:Address>")
+	end := strings.Index(body, "</wsa:Address>")
+	if start < len("<wsa:Address>") || end < start {
+		t.Fatalf("create: no subscription address in %s", body)
+	}
+	addr := body[start:end]
+	env := `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:wsse="x" xmlns:wsu="y" xmlns:tev="z">` +
+		wsse(testPass, time.Now()) + `<s:Body><tev:PullMessages><tev:Timeout>PT0.2S</tev:Timeout>` +
+		`<tev:MessageLimit>10</tev:MessageLimit></tev:PullMessages></s:Body></s:Envelope>`
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, addr, strings.NewReader(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered := make(chan error, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		answered <- err
+	}()
+	for s.Counts().Pulls == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	s.SetSilent(true)
+	if err := <-answered; err == nil {
+		t.Error("a PullMessages that was waiting when the camera fell silent got an answer")
 	}
 }

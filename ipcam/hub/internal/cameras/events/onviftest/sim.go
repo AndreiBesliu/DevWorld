@@ -148,7 +148,8 @@ func (s *Sim) Close() {
 	})
 }
 
-// SetSilent makes the camera stop answering any request, or answer again.
+// SetSilent makes the camera stop answering any request, those already
+// waiting (a PullMessages' long poll) included, or answer again.
 func (s *Sim) SetSilent(silent bool) {
 	s.mu.Lock()
 	s.silent = silent
@@ -574,13 +575,13 @@ func (s *Sim) pull(w http.ResponseWriter, r *http.Request, body []byte) {
 		sub.queue = nil
 		s.mu.Unlock()
 		if len(msgs) > 0 {
-			s.pullReply(w, sub, msgs)
+			s.pullReply(w, r, sub, msgs)
 			return
 		}
 		select {
 		case <-sub.wake:
 		case <-timer.C:
-			s.pullReply(w, sub, nil)
+			s.pullReply(w, r, sub, nil)
 			return
 		case <-r.Context().Done():
 			return
@@ -590,11 +591,20 @@ func (s *Sim) pull(w http.ResponseWriter, r *http.Request, body []byte) {
 	}
 }
 
-// pullReply is PullMessages' response with msgs.
-func (s *Sim) pullReply(w http.ResponseWriter, sub *pullSub, msgs []string) {
+// pullReply is PullMessages' response with msgs, unless the camera fell
+// silent while the request waited: then it holds the request unanswered,
+// as serve does a new one.
+func (s *Sim) pullReply(w http.ResponseWriter, r *http.Request, sub *pullSub, msgs []string) {
 	s.mu.Lock()
-	expires := sub.expires
+	expires, silent := sub.expires, s.silent
 	s.mu.Unlock()
+	if silent {
+		select {
+		case <-r.Context().Done():
+		case <-s.done:
+		}
+		return
+	}
 	reply(w, `<tev:PullMessagesResponse><tev:CurrentTime>`+s.now().Format(time.RFC3339)+`</tev:CurrentTime><tev:TerminationTime>`+
 		expires.Format(time.RFC3339)+`</tev:TerminationTime>`+strings.Join(msgs, "")+`</tev:PullMessagesResponse>`)
 }
