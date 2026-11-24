@@ -216,8 +216,9 @@ check 'the upload notices hold the modules of every binary and of the fork, Medi
   --has $'npm package: @capacitor/browser 8.0.5\nLicense: MIT' \
   --has $'npm package: @capacitor/app 8.1.2\nLicense: MIT' \
   --has $'npm package: @tauri-apps/plugin-opener 2.7.2\nLicense: MIT OR Apache-2.0' \
-  --has $'npm package: @fabianlars/tauri-plugin-oauth 2.1.0\nLicense: MIT OR Apache-2.0' \
-  --has 'Apache License 2.0 of @fabianlars/tauri-plugin-oauth (fixture).' \
+  --has $'npm package: @fabianlars/tauri-plugin-oauth 2.1.0 (its license files quoted from tools/licenses/npm/@fabianlars/tauri-plugin-oauth@2.1.0: the package has none)\nLicense: MIT OR Apache-2.0' \
+  --has 'Copyright (c) 2022 - Present FabianLars' \
+  --has '[LICENSE_APACHE-2.0]' --has 'Version 2.0, January 2004' --has '[LICENSE_MIT]' \
   --has 'ipcam-desktop-setup.exe' \
   --has 'Licențele componentelor terțe din programele probei de upload' \
   --lacks 'recspike' --lacks 'spikehub' -- notices_of upload FAKE_LIST="${upload_list}" FAKE_CALLS="${tmp}/upload-calls"
@@ -237,6 +238,11 @@ ipcam ${ignored}
 mediamtx ${ignored}
 mediamtx ${ignored}
 mediamtx ${ignored}" -- cat "${tmp}/upload-ignores"
+# A package whose tarball has no license file and whose version has no
+# texts quoted by hand under tools/licenses/npm still fails.
+jq '.[0].dependencies["@fabianlars/tauri-plugin-oauth"].version = "2.0.0"' "${upload_list}" > "${tmp}/other-oauth-list.json"
+check 'a package without a license file and without texts quoted by hand fails' 1 \
+  --has '@fabianlars/tauri-plugin-oauth 2.0.0: no license file in' -- notices_of upload FAKE_LIST="${tmp}/other-oauth-list.json"
 check 'the upload release is accepted by the usage check' 0 -- notices_of upload FAKE_LIST="${upload_list}"
 check 'the video notices do not change with the upload fixtures' 0 --is "${out}" -- notices
 check 'the recording notices do not name the upload modules' 0 --lacks 'golang.org/x/oauth2' --lacks 'clbanning' -- notices_of recording

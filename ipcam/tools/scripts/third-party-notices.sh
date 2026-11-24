@@ -21,6 +21,8 @@
 #     production dependencies, as pnpm lists them), which includes every
 #     package bundled into it, and the NOTICE files of this repository's own
 #     packages among them (the player's carries video-rtc.js's MIT notice).
+#     A package whose tarball has no license file is quoted from the texts
+#     copied by hand into tools/licenses/npm/<name>@<version>/ (its README).
 #     The upload release's uploadspike also embeds the app, for its web login.
 # The Android libraries of the APK and the Rust crates of ipcam-desktop are
 # not listed; the release notes say so.
@@ -218,12 +220,19 @@ EOF
       [[ ${#notices[@]} -eq 0 ]] || entry "Notices of ${name} (part of this repository)" "" "${notices[@]}"
       continue
     fi
+    heading="npm package: ${name} ${version}"
     if [[ ${#files[@]} -eq 0 ]]; then
-      problems+=("${name} ${version}: no license file in ${path}")
-      continue
+      by_hand="tools/licenses/npm/${name}@${version}"
+      [[ -d "${by_hand}" ]] && mapfile -t files < <(find "${by_hand}" -maxdepth 1 -type f \
+        \( -iname 'licen[cs]e*' -o -iname 'copying*' -o -iname 'notice*' \) | LC_ALL=C sort)
+      if [[ ${#files[@]} -eq 0 ]]; then
+        problems+=("${name} ${version}: no license file in ${path}")
+        continue
+      fi
+      heading+=" (its license files quoted from ${by_hand}: the package has none)"
     fi
     license="$(jq -r '.license // ([.licenses[]?.type] | join(", ")) // ""' "${path}/package.json" 2>/dev/null || true)"
-    entry "npm package: ${name} ${version}" "${license}" "${files[@]}"
+    entry "${heading}" "${license}" "${files[@]}"
   done <<< "${npm_packages}"
 
   if [[ ${#problems[@]} -gt 0 ]]; then
