@@ -4,6 +4,7 @@ import android.os.PowerManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import java.net.InetAddress
 
 class MetricsPluginTest {
     @Test
@@ -38,6 +39,27 @@ class MetricsPluginTest {
         assertEquals(true, onCharger(null, true))
         assertEquals(false, onCharger(null, false))
         assertNull(onCharger(null, null))
+    }
+
+    @Test
+    fun privateIpv4_keepsThePrivateIpv4AddressesWithTheirPrefix() {
+        val ip = { text: String -> InetAddress.getByName(text) }
+        val found = privateIpv4(
+            listOf(
+                ip("192.168.1.57") to 24,
+                ip("fe80::1") to 64,
+                ip("10.0.2.16") to 24,
+                ip("172.20.5.9") to 20,
+                ip("169.254.10.1") to 16,
+                ip("127.0.0.1") to 8,
+                ip("8.8.8.8") to 24,
+                ip("2a02:2f0e::1") to 64,
+            ),
+        )
+        assertEquals(
+            listOf(LanAddress("192.168.1.57", 24), LanAddress("10.0.2.16", 24), LanAddress("172.20.5.9", 20)),
+            found,
+        )
     }
 
     @Test

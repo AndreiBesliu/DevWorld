@@ -14,6 +14,7 @@ import { APP_VERSION, planFor, scenariosOf, type DevicePlan } from './deviceplan
 import { askOnce, reasonOf, runQueue, type QueueEvent, type QueueOutcome } from './devicerun';
 import { decodesH264 } from './h264check';
 import { ConnectError } from './hubhttp';
+import { FIND_TIMEOUT_MS, searchHubs, type FindState, type Search } from './hubfinder';
 import { HubControl, LOCAL_HUB, type HubState } from './hubprocess';
 import { createI18n, minutesAndSeconds, type MessageKey, type Translate } from './i18n';
 import { sampleLoss, sampleStats } from './metrics';
@@ -264,7 +265,14 @@ export function startApp(root: HTMLElement): App {
   const plan = planFor(device);
   let progress: Progress | undefined;
   let runLines: string[] = [];
+  // SPIKE-ONLY (hubfinder.ts): Android looks for spikehub in the phone's Wi-Fi and lists what it finds.
+  let findState: FindState | undefined;
+  let search: Search | undefined;
+  /** The box that shows runLines, so that a countdown can write its line in place. */
+  let runStatus: HTMLElement | undefined;
   let onContinue: (() => void) | undefined;
+  /** «Sari peste așteptare» while a wait of the run is offered to be skipped (devicerun.ts, offerSkip). */
+  let onSkip: (() => void) | undefined;
   const attention = createAttention({
     audio: () => {
       const Context = (globalThis as { AudioContext?: new () => AudioOut }).AudioContext;
@@ -360,7 +368,29 @@ export function startApp(root: HTMLElement): App {
     });
     const connectionBox = el('div', connectionFailed ? 'connection failed' : 'connection');
     connectionBox.append(...connection.map((line) => el('p', '', line)));
-    hubSection.append(label, check, connectionBox, el('p', 'device', t('device', { device: deviceLine })));
+    hubSection.append(label, check);
+    if (native?.lanAddresses) {
+      const find = el('button', 'find-hub', t('findHub'));
+      find.disabled = busy || search !== undefined;
+      find.addEventListener('click', () => {
+        findHubs(false);
+      });
+      hubSection.append(find);
+    }
+    if (findState) {
+      const found = el('div', 'found-hubs');
+      found.append(...findLines(findState, t).map((line) => el('p', '', line)));
+      for (const url of findState.kind === 'searching' || findState.kind === 'done' ? findState.found : []) {
+        const pick = el('button', 'found-hub', url);
+        pick.disabled = busy;
+        pick.addEventListener('click', () => {
+          useFoundHub(url);
+        });
+        found.append(pick);
+      }
+      hubSection.append(found);
+    }
+    hubSection.append(connectionBox, el('p', 'device', t('device', { device: deviceLine })));
 
     const completeInHub = progress ? completeFor(progress, device, shellModel) : new Set<ScenarioId>();
     const list = el('section', 'scenarios');
@@ -499,7 +529,16 @@ export function startApp(root: HTMLElement): App {
     }
     const lines = el('div', 'run-status');
     lines.append(...runLines.map((line) => el('p', '', line)));
+    runStatus = lines;
     block.append(lines);
+    if (onSkip) {
+      const skip = onSkip;
+      const button = el('button', 'skip-wait', t('skipWait'));
+      button.addEventListener('click', () => {
+        skip();
+      });
+      block.append(button, el('p', 'guide', t('skipWaitGuide')));
+    }
     if (onContinue) {
       const proceed = onContinue;
       const go = el('button', 'continue', t('continue'));
@@ -528,10 +567,19 @@ export function startApp(root: HTMLElement): App {
     const lines = queueEventLines(event, t);
     if (event.kind === 'resumed' || event.kind === 'retry') stage.notice(lines?.[0] ?? '');
     if (event.kind === 'result' && !event.result.interrupted) stage.notice('');
-    if (lines !== undefined) {
-      runLines = event.kind === 'resumed' || event.kind === 'retry' ? [...runLines.slice(-1), ...lines] : lines;
-      render();
+    if (lines === undefined) return;
+    runLines = event.kind === 'resumed' || event.kind === 'retry' ? [...runLines.slice(-1), ...lines] : lines;
+    // A countdown changes its line every second: written in place, since a
+    // page drawn again under the finger would lose a tap on «Sari peste așteptare».
+    const shown = runStatus?.isConnected ? [...runStatus.children] : [];
+    if ((event.kind === 'pause' || event.kind === 'cold') && shown.length === runLines.length) {
+      runLines.forEach((line, i) => {
+        const p = shown[i];
+        if (p) p.textContent = line;
+      });
+      return;
     }
+    render();
   };
 
   // Picture-in-picture (S6, Android): the run waits until the person brings the app back.
@@ -542,12 +590,22 @@ export function startApp(root: HTMLElement): App {
     if (!on) for (const resolve of pipWaiters.splice(0)) resolve();
   });
 
-  /** Runs one scenario of the automatic run as the start page does, and shows its status. */
-  const runQueued = async (id: ScenarioId, hubUrl: string, ask: (question: string) => Promise<boolean>): Promise<ScenarioResult> => {
+  /**
+   * Runs one scenario of the automatic run as the start page does, and shows
+   * its status. `notes` (the waits skipped before it) join the result's notes
+   * before it is stored.
+   */
+  const runQueued = async (
+    id: ScenarioId,
+    hubUrl: string,
+    ask: (question: string) => Promise<boolean>,
+    notes: readonly string[],
+  ): Promise<ScenarioResult> => {
     statuses.set(id, { kind: 'running' });
     render();
     try {
-      const result = await runScenario(id, await environment(hubUrl, { ask }));
+      const measured = await runScenario(id, await environment(hubUrl, { ask }));
+      const result = notes.length === 0 ? measured : { ...measured, notes: [...measured.notes, ...notes] };
       statuses.set(id, { kind: 'done', result, queued: true });
       await publish(result, queue);
       return result;
@@ -563,6 +621,7 @@ export function startApp(root: HTMLElement): App {
   /** «Rulează tot pentru acest dispozitiv», or with `rerunAll` «Rulează din nou tot» (devicerun.ts). */
   const runDevice = async (devicePlan: DevicePlan, rerunAll: boolean): Promise<void> => {
     attention.prime(); // in the tap: the sound of S5 and S6 comes later, without one
+    search?.stop(); // its requests would share the Wi-Fi with the measurements
     busy = true;
     connection = [];
     connectionFailed = false;
@@ -581,7 +640,7 @@ export function startApp(root: HTMLElement): App {
         rerunAll,
         doc: document,
         clock,
-        runScenario: (id) => runQueued(id, hubUrl, ask),
+        runScenario: (id, notes) => runQueued(id, hubUrl, ask, notes),
         requestCamera: async () => {
           runLines = [t('autoCamera'), t(device.platform === 'android' ? 'mv4ExplainAndroid' : 'mv4Explain')];
           render();
@@ -617,6 +676,19 @@ export function startApp(root: HTMLElement): App {
               },
             }
           : {}),
+        offerSkip: () => {
+          const pressed = new Promise<void>((resolve) => {
+            onSkip = resolve;
+          });
+          render();
+          return {
+            pressed,
+            withdraw: () => {
+              onSkip = undefined;
+              render();
+            },
+          };
+        },
         show: onQueueEvent,
       });
       runLines = queueOutcomeLines(outcome, t);
@@ -631,10 +703,46 @@ export function startApp(root: HTMLElement): App {
     } finally {
       stage.notice('');
       onContinue = undefined;
+      onSkip = undefined;
       busy = false;
       render();
       void refreshProgress();
     }
+  };
+
+  /** A hub that the search found: it goes into the field, the search stops, and the connection is checked. */
+  const useFoundHub = (url: string): void => {
+    search?.stop();
+    hubInput.value = url;
+    void checkConnection();
+  };
+
+  /**
+   * Looks for spikehub in the phone's Wi-Fi (hubfinder.ts). `atLaunch`: the
+   * search that the app starts by itself, with an empty field, which takes the
+   * hub when it finds exactly one and the field is still empty.
+   */
+  const findHubs = (atLaunch: boolean): void => {
+    const lanAddresses = native?.lanAddresses;
+    if (!lanAddresses || search) return;
+    const started = searchHubs({
+      lanAddresses: () => lanAddresses(),
+      ask: async (url) => {
+        await fetchProgress(url, FIND_TIMEOUT_MS);
+      },
+      show: (state) => {
+        findState = state;
+        render();
+      },
+    });
+    search = started;
+    render();
+    void started.done.then((found) => {
+      search = undefined;
+      const [only] = found;
+      if (atLaunch && found.length === 1 && only !== undefined && hub() === '' && !busy) useFoundHub(only);
+      else render();
+    });
   };
 
   const checkConnection = async (): Promise<void> => {
@@ -666,6 +774,7 @@ export function startApp(root: HTMLElement): App {
   };
 
   const run = async (id: ScenarioId, go: () => Promise<ScenarioResult>): Promise<void> => {
+    search?.stop(); // its requests would share the Wi-Fi with the measurements
     busy = true;
     statuses.set(id, { kind: 'running' });
     connection = [];
@@ -714,6 +823,12 @@ export function startApp(root: HTMLElement): App {
   root.replaceChildren(controls, stage.root);
   render();
   if (hub() !== '' && queue.pending() > 0) void queue.flush().then(render); // what the last launch could not send
+  // With an empty field, the phone looks for the hub by itself; after the autorun's start, which brings its own hub.
+  if (native?.lanAddresses) {
+    setTimeout(() => {
+      if (!unattended && hub() === '') findHubs(true);
+    }, 0);
+  }
   void refreshProgress();
   if (native?.update) {
     // After the start (an autorun sets `unattended` first), then every few hours while the app stays open.
@@ -728,6 +843,20 @@ export function startApp(root: HTMLElement): App {
       return run(request.scenario, () => autorun(request, { connect: environment, queue }));
     },
   };
+}
+
+/** What the page says of the search for the hub; the hubs it found follow as buttons. */
+export function findLines(state: FindState, t: Translate): string[] {
+  switch (state.kind) {
+    case 'searching':
+      return [t('findSearching', { networks: state.networks.join(', ') })];
+    case 'done':
+      return state.found.length === 0 ? [t('findNone', { networks: state.networks.join(', ') })] : [t('findFound')];
+    case 'no-network':
+      return [t('findNoNetwork')];
+    case 'failed':
+      return [t('findFailed', { detail: state.detail })];
+  }
 }
 
 /** What the hub's panel says of its state. */
