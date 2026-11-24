@@ -13,3 +13,12 @@ coverage/
 /fakeproviders.exe
 /uploadreport
 /uploadreport.exe
+# The same binaries built inside their own command folder (go build in cmd/<name>).
+tools/spikes/upload/cmd/*/uploadspike
+tools/spikes/upload/cmd/*/uploadspike.exe
+tools/spikes/upload/cmd/*/uploadspike-probe
+tools/spikes/upload/cmd/*/uploadspike-probe.exe
+tools/spikes/upload/cmd/*/uploadreport
+tools/spikes/upload/cmd/*/uploadreport.exe
+hub/cmd/ipcam-hub/ipcam-hub
+hub/cmd/ipcam-hub/ipcam-hub.exe
