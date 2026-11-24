@@ -16,7 +16,9 @@ func TestOnvifsim_ReadyCommandsAndCounts(t *testing.T) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	done := make(chan int, 1)
-	go func() { done <- run([]string{"-user", "u", "-pass", "p", "-cam", "Hikvision/A", "-cam", "Dahua/B"}, inR, outW, io.Discard) }()
+	go func() {
+		done <- run([]string{"-user", "u", "-pass", "p", "-cam", "Hikvision/A", "-cam", "Dahua/B"}, inR, outW, io.Discard)
+	}()
 	lines := bufio.NewScanner(outR)
 	next := func() map[string]any {
 		t.Helper()
