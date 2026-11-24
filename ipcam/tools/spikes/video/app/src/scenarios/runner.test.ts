@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SpikeNative } from '../native';
 import { finish, setup } from './fakes';
 import { runScenario } from './index';
+import { runDefinition, type ScenarioDefinition } from './runner';
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -102,6 +104,32 @@ describe('runner', () => {
     expect(result.samples).toEqual({});
   });
 
+  it('runner_figures_areAtTheTopOfTheResult_andDroppedWithALostSession', async () => {
+    // A figure is one number at the top of the result (AGE's mbps, bytes and
+    // ms); like the samples, none is kept when the hub session is lost (R49).
+    const t = setup();
+    const definition: ScenarioDefinition = {
+      async run(run) {
+        run.figure('bytes', 4096);
+        await run.session(1);
+        run.figure('ms', 20);
+        await run.sleep(60_000);
+        run.figure('mbps', 1.6);
+      },
+    };
+
+    const kept = await finish(runDefinition('AGE', definition, t.env));
+    expect(kept).toMatchObject({ scenario: 'AGE', bytes: 4096, ms: 20, mbps: 1.6, samples: {} });
+
+    const lost = setup();
+    const running = runDefinition('AGE', definition, lost.env);
+    await vi.advanceTimersByTimeAsync(5000);
+    lost.session().setState('failed');
+    const result = await finish(running);
+    expect(result.interruption?.kind).toBe('session-lost');
+    expect(Object.keys(result).filter((key) => ['mbps', 'bytes', 'ms'].includes(key))).toEqual([]);
+  });
+
   it('runner_theRunsOwnTeardown_isNotALoss', async () => {
     // The runner closes the sessions at the end: that close is not a lost hub.
     const t = setup();
@@ -111,6 +139,17 @@ describe('runner', () => {
     expect(t.session().closed).toBe(true);
     expect(result.interrupted).toBe(false);
     expect(result.interruption).toBeUndefined();
+  });
+
+  it('runner_theRunsFirstReadOfTheShell_isMarkedAsTheRuns', async () => {
+    // C1-R30: on Android the read that starts a run takes the launch extras' scenario
+    // (AutorunHandoff); the start page's own reads, at load and at the connection check, do not.
+    const metrics = vi.fn<SpikeNative['metrics']>(() => Promise.resolve({}));
+    const t = setup({ native: { metrics } });
+
+    await finish(runScenario('S10', t.env));
+
+    expect(metrics.mock.calls[0]).toEqual([{ run: true }]);
   });
 
   it('runner_deviceFacts_ramAndGpuFromTheShell', async () => {

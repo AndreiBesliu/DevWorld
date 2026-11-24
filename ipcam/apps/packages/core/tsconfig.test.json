@@ -1,0 +1,11 @@
+{
+  // The sources together with their tests and fixtures, which use node:*
+  // modules and import.meta.dirname. Only this program sees Node's types;
+  // tsconfig.json checks the shipped sources without them. `typecheck` runs both.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["agerange", "*.ts"],
+  "exclude": []
+}

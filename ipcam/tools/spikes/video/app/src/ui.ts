@@ -297,6 +297,9 @@ export function startApp(root: HTMLElement): App {
   // marks count by (a results folder may hold another phone's or the
   // emulator's runs), and the charger, which an S3 of the phone waits on
   // (charger.ts). Read at the start, at the connection check and at the button.
+  // None of these reads is a run's: in the Android shell they leave the scenario
+  // of the launch extras (R5) to the run's own read (native.ts), so an Activity
+  // that the system creates again in between still runs it (C1-R30).
   let shellModel: string | undefined;
   const chargerWatch = watchCharger(() => clock.now());
   const seeShell = (metrics: NativeMetrics | 'n/a'): void => {

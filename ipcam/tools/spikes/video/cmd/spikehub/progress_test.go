@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/video/deviceplan"
 )
 
 // getProgress asks the hub what is complete and what is left.
@@ -180,6 +182,44 @@ func TestProgress_PassesOverFilesThatAreNotResults(t *testing.T) {
 
 	if want := `[{"key":"chrome","platform":"chrome","scenarios":["S9"]}]`; mustJSON(t, p.Complete) != want {
 		t.Errorf("complete = %s, want %s", mustJSON(t, p.Complete), want)
+	}
+}
+
+// The progress counts exactly the device table's scenarios. The app also lists
+// the recorder spike's AGE (MI4), which is in no device's run: a complete AGE
+// result, as the app posts it, counts for no device, and no device lacks it.
+func TestProgress_PassesOverScenariosOutsideTheDeviceTable(t *testing.T) {
+	var table []string
+	for _, d := range deviceplan.Devices() {
+		for _, s := range d.Scenarios() {
+			if !slices.Contains(table, s) {
+				table = append(table, s)
+			}
+		}
+	}
+	if got, want := slices.Sorted(slices.Values(scenarioOrder)), slices.Sorted(slices.Values(table)); !slices.Equal(got, want) {
+		t.Errorf("scenarioOrder %v, want the device table's scenarios %v", scenarioOrder, table)
+	}
+
+	hub := newTestHub(t, 1)
+	age := result("AGE", phone, `"appVersion":"spike-video-v0.1.1"`, `"mbps":85.5`, `"bytes":33554432`, `"ms":3139.5`)
+	if resp, body := hub.postResults(t, age); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	writeResultFile(t, hub.resultsDir, "android-samsung-sm-a245f-20261117-110200-s1.json", result("S1", phone))
+
+	p := hub.getProgress(t)
+
+	if want := `[{"key":"android","platform":"android","model":"samsung SM-A245F","scenarios":["S1"]}]`; mustJSON(t, p.Complete) != want {
+		t.Errorf("complete = %s, want %s", mustJSON(t, p.Complete), want)
+	}
+	for _, d := range p.Devices {
+		if slices.Contains(d.Remaining, "AGE") {
+			t.Errorf("%s: remaining %v holds AGE", d.ID, d.Remaining)
+		}
+	}
+	if got := deviceOf(t, p, "phone").Remaining; len(got) != 10 || slices.Contains(got, "S1") {
+		t.Errorf("phone: remaining %v, want its 11 scenarios but S1", got)
 	}
 }
 

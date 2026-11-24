@@ -1,0 +1,15 @@
+{
+  // The shipped sources. The package ships TypeScript source (package.json
+  // "exports"): its consumers, Vite builds, compile it. So nothing here emits
+  // and the base's `noEmit` stays.
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    // TypeScript 6 loads no @types package unless it is listed, and none is:
+    // these sources run in a browser or WebView, so `process` or `Buffer` must
+    // not typecheck in them. The tests get Node's types from tsconfig.test.json.
+    "types": []
+  },
+  "include": ["agerange"],
+  // The tests and their fixtures read the golden files with node:* modules.
+  "exclude": ["agerange/**/*.test.ts", "agerange/fixtures.ts"]
+}

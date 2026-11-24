@@ -13,6 +13,8 @@ on:
       - 'ipcam/tools/spikes/video/e2e/**'
       # The spike app's band tests read the shared test vectors.
       - 'ipcam/tools/spikes/video/band/vectors.json'
+      # @ipcam/core's agerange tests read the Go golden files and the CCTV vectors there.
+      - 'ipcam/hub/internal/crypto/testdata/**'
       # The spike app imports the automatic run's device table (deviceplan.ts), and its
       # upgrade test reads the results that v0.1.0 wrote (results.test.ts).
       - 'ipcam/tools/spikes/video/deviceplan/**'
@@ -35,6 +37,8 @@ on:
       - 'ipcam/tools/spikes/video/e2e/**'
       # The spike app's band tests read the shared test vectors.
       - 'ipcam/tools/spikes/video/band/vectors.json'
+      # @ipcam/core's agerange tests read the Go golden files and the CCTV vectors there.
+      - 'ipcam/hub/internal/crypto/testdata/**'
       # The spike app imports the automatic run's device table (deviceplan.ts), and its
       # upgrade test reads the results that v0.1.0 wrote (results.test.ts).
       - 'ipcam/tools/spikes/video/deviceplan/**'

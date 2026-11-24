@@ -71,6 +71,80 @@ class MetricsPluginTest {
     }
 
     @Test
+    fun autorunHandoff_aRecreatedActivityRunsTheScenarioItsPageNeverGot() {
+        // The emulator job's first cold start (3b35760): the system created the Activity again
+        // (changingConfigurations=true) before the first one had handed the scenario to its
+        // page. load() had taken the extras off the Intent, so the second Activity saw none.
+        val first = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = false, savedPending = null)
+        assertEquals("autorun=S1", first.pendingQuery)
+        val saved = first.pendingQuery // onSaveInstanceState before the page got the query
+        val second = AutorunHandoff.onLoad(extrasQuery = null, restored = true, savedPending = saved)
+        assertEquals("autorun=S1", second.pendingQuery)
+        second.loaded()
+        second.read(run = true)
+        assertNull(second.pendingQuery)
+    }
+
+    @Test
+    fun autorunHandoff_aRestoredActivityDoesNotRunAScenarioItsPageHadAgain() {
+        // Process death: the page ran S1, the app went to the background, the system killed its
+        // process and restored the Activity from the launch Intent it kept, extras included.
+        val first = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = false, savedPending = null)
+        first.loaded()
+        first.read(run = true)
+        val restored = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = true, savedPending = first.pendingQuery)
+        assertNull(restored.pendingQuery)
+        // A launch without extras runs nothing.
+        assertNull(AutorunHandoff.onLoad(extrasQuery = null, restored = false, savedPending = null).pendingQuery)
+    }
+
+    @Test
+    fun autorunHandoff_aRecreationBeforeThePageReadRunsTheScenarioAgain() {
+        // Final fix C review, M7: the plugin loaded the page with the scenario's query, and the
+        // system created the Activity again before that page had read it. A page's run reads the
+        // metrics first thing (read({ run: true })); before that read the page has not taken the
+        // scenario, so the new Activity must run it.
+        val first = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = false, savedPending = null)
+        first.loaded() // loadUrl
+        val saved = first.pendingQuery // onSaveInstanceState before the page's read
+        val second = AutorunHandoff.onLoad(extrasQuery = null, restored = true, savedPending = saved)
+        assertEquals("autorun=S1", second.pendingQuery)
+        second.loaded()
+        second.read(run = true) // the new page's run read the metrics: it has the scenario
+        assertNull(second.pendingQuery)
+    }
+
+    @Test
+    fun autorunHandoff_theStartPagesOwnReadDoesNotTakeTheScenario() {
+        // C1-R30: the start page reads the metrics as soon as it loads (the shell's model and the
+        // charger), before its run reads them. The system created the Activity again between the
+        // two reads (CONFIG_ASSETS_PATHS): the new Activity must still run the scenario.
+        val first = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = false, savedPending = null)
+        first.loaded() // loadUrl
+        first.read(run = false) // the start page's read at load
+        assertEquals("autorun=S1", first.pendingQuery)
+        val second = AutorunHandoff.onLoad(extrasQuery = null, restored = true, savedPending = first.pendingQuery)
+        assertEquals("autorun=S1", second.pendingQuery)
+        second.loaded()
+        second.read(run = false)
+        assertEquals("autorun=S1", second.pendingQuery)
+        second.read(run = true) // the new page's run read the metrics: it has the scenario
+        assertNull(second.pendingQuery)
+    }
+
+    @Test
+    fun autorunHandoff_aReadBeforeTheQueryWasLoadedIsAnotherPages() {
+        // A read before loadUrl, even a run's, comes from the bridge's first page, which has no scenario.
+        val handoff = AutorunHandoff.onLoad(extrasQuery = "autorun=S1", restored = false, savedPending = null)
+        handoff.read(run = true)
+        assertEquals("autorun=S1", handoff.pendingQuery)
+        handoff.loaded()
+        assertEquals("autorun=S1", handoff.pendingQuery)
+        handoff.read(run = true)
+        assertNull(handoff.pendingQuery)
+    }
+
+    @Test
     fun pageForLog_dropsTheHubAddressAndKeepsTheScenario() {
         assertEquals(
             "http://localhost/ (autorun S1)",

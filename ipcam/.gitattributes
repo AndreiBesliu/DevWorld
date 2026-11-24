@@ -5,3 +5,8 @@
 # shebang ("env: 'bash\r': No such file or directory"), so the scripts stay
 # byte-identical to the repository instead of relying on that.
 *.sh text eol=lf
+
+# The vendored MediaMTX fork stays byte-identical to the repository in every
+# checkout: MTX-0's tests compare the SHA-256 of its generated hls.min.js
+# with SOURCE.md, which core.autocrlf on the windows job would change.
+hub/third_party/mediamtx/** -text

@@ -1,0 +1,285 @@
+name: ipcam-spike-recording-lab
+
+# MI1's lab sets of the Phase 0 (c1) recorder spike (ipcam/docs/superpowers/plans/2026-10-18-phase0c1-recorder-spike.md,
+# Task 7, G10, R03): lab-linux-kill9, lab-linux-qemu-reset and lab-windows-kill9, each 20
+# default runs and the O17-off run, in two shards of up to 3 h on GitHub's runners. Each
+# run's envelope goes out as one notice (C32), which recreport reads with
+# gh api repos/<owner>/<repo>/check-runs/<job id>/annotations. The jobs run only on a
+# dispatch, or when the head commit's subject (its first line) holds [lab]; the push trigger
+# registers the workflow on its first push.
+
+on:
+  workflow_dispatch:
+  push:
+    # Branch pushes only, as in the other ipcam workflows: a tag push ignores path filters.
+    branches: ['**']
+    paths:
+      - 'ipcam/hub/**'
+      - 'ipcam/tools/spikes/recording/**'
+      # The recording module imports the video module, and the build job runs its mediagen.
+      - 'ipcam/tools/spikes/video/**'
+      - 'ipcam/tools/go.mod'
+      - 'ipcam/tools/go.sum'
+      - 'ipcam/tools/scripts/**'
+      - 'ipcam/go.work'
+      - 'ipcam/go.work.sum'
+      - '.github/workflows/ipcam-spike-recording-lab.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipcam-spike-recording-lab-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The Go version comes from go.work alone; never switch toolchains silently.
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+# Every step that runs a command writes its output to ${RUNNER_TEMP}/<step id>.log; the last
+# step of each job turns the log of each failed step into one error annotation, since job
+# logs cannot be read from everywhere and annotations can.
+
+jobs:
+  gate:
+    # Whether the lab runs: on a dispatch, or when the head commit's subject holds [lab]. A
+    # commit body that mentions it does not count: a squash merge joins the bodies of the
+    # branch's commits into the head commit's message on main.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      lab: ${{ steps.subject.outputs.lab }}
+    steps:
+      - name: Read the subject
+        id: subject
+        env:
+          EVENT: ${{ github.event_name }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          subject="${MESSAGE%%$'\n'*}"
+          lab=false
+          if [[ "${EVENT}" == workflow_dispatch || "${subject}" == *'[lab]'* ]]; then
+            lab=true
+          fi
+          echo "lab=${lab}" | tee -a "${GITHUB_OUTPUT}"
+      - name: Show failures as annotations
+        # This job has no checkout, so no annotate.sh: one line names the failed step.
+        if: failure()
+        run: echo "::error title=gate::Reading the head commit's subject failed; the lab jobs did not run."
+
+  build:
+    # The media, and ipcam-hub, the MediaMTX fork, recspike and reccontroller for linux/amd64
+    # and windows/amd64.
+    needs: gate
+    if: needs.gate.outputs.lab == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ipcam
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ipcam/go.work
+          cache-dependency-path: |
+            ipcam/go.work.sum
+            ipcam/tools/go.sum
+            ipcam/tools/spikes/video/go.sum
+            ipcam/tools/spikes/recording/go.sum
+            ipcam/hub/third_party/mediamtx/go.sum
+      - name: Install ffmpeg
+        # ffmpeg with libx264 only generates the test media. It is never shipped and never part
+        # of a release asset (Global Constraints, Licenses).
+        id: ffmpeg
+        run: |
+          set -o pipefail
+          {
+            sudo apt-get update &&
+              sudo apt-get install --yes --no-install-recommends ffmpeg &&
+              ffmpeg -version | sed -n 1p
+          } 2>&1 | tee "${RUNNER_TEMP}/ffmpeg.log"
+      - name: Generate media
+        id: generate
+        run: |
+          set -o pipefail
+          {
+            go run ./tools/spikes/video/cmd/mediagen -out "${RUNNER_TEMP}/media" &&
+              go run ./tools/spikes/recording/cmd/recmediagen -out "${RUNNER_TEMP}/media"
+          } 2>&1 | tee "${RUNNER_TEMP}/generate.log"
+      - name: Build
+        id: build
+        run: |
+          set -o pipefail
+          {
+            for goos in linux windows; do
+              out="${RUNNER_TEMP}/lab-${goos}"
+              ext=""
+              [[ ${goos} == windows ]] && ext=.exe
+              GOOS=${goos} GOARCH=amd64 go build -o "${out}/" ./hub/cmd/ipcam-hub \
+                ./tools/spikes/recording/cmd/recspike ./tools/spikes/recording/cmd/reccontroller &&
+                (cd hub/third_party/mediamtx && GOWORK=off GOOS=${goos} GOARCH=amd64 go build -o "${out}/mediamtx${ext}" .) ||
+                exit 1
+            done
+            ls -l "${RUNNER_TEMP}/lab-linux" "${RUNNER_TEMP}/lab-windows"
+          } 2>&1 | tee "${RUNNER_TEMP}/build.log"
+      - name: Upload the media
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lab-media
+          path: ${{ runner.temp }}/media
+          if-no-files-found: error
+          retention-days: 7
+          # H.264, H.265 and fMP4 do not compress further.
+          compression-level: 0
+      - name: Upload the Linux binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lab-linux
+          path: ${{ runner.temp }}/lab-linux
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload the Windows binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lab-windows
+          path: ${{ runner.temp }}/lab-windows
+          if-no-files-found: error
+          retention-days: 7
+      - name: Show failures as annotations
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] || continue
+            tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+          done
+
+  shard:
+    # One shard of a lab set: 10 runs, shard 2's 11 with the O17-off run (R03). Its envelopes
+    # go out as one notice per run that counts, with its part of the set: parts 1 to 10 from
+    # shard 1, 11 to 21 from shard 2, at most 10 notices per step and 11 per job (C32).
+    needs: build
+    name: shard ${{ matrix.set }} ${{ matrix.shard }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: linux, runner: ubuntu-24.04, kind: kill9, set: lab-linux-kill9, shard: 1, first: 1}
+          - {os: linux, runner: ubuntu-24.04, kind: kill9, set: lab-linux-kill9, shard: 2, first: 11}
+          - {os: linux, runner: ubuntu-24.04, kind: qemu-reset, set: lab-linux-qemu-reset, shard: 1, first: 1}
+          - {os: linux, runner: ubuntu-24.04, kind: qemu-reset, set: lab-linux-qemu-reset, shard: 2, first: 11}
+          - {os: windows, runner: windows-latest, kind: kill9, set: lab-windows-kill9, shard: 1, first: 1}
+          - {os: windows, runner: windows-latest, kind: kill9, set: lab-windows-kill9, shard: 2, first: 11}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: ipcam
+        shell: bash
+    env:
+      EXE: ${{ matrix.os == 'windows' && '.exe' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lab-${{ matrix.os }}
+          path: ${{ runner.temp }}/lab
+      - name: Download the media
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lab-media
+          path: ${{ runner.temp }}/media
+      - name: Prepare the runner
+        # LAB, MEDIA and LINES for the steps after it, as bash paths: on Windows a glob does not
+        # match under RUNNER_TEMP's backslashes. Artifacts lose the executable bit. A qemu-reset
+        # shard needs QEMU, cloud-localds and KVM (TST-09): tools/scripts/mi1-qemu-setup.sh.
+        id: prepare
+        run: |
+          set -o pipefail
+          tmp="${RUNNER_TEMP}"
+          if [[ "${RUNNER_OS}" == Windows ]]; then
+            tmp=$(cygpath -u "${RUNNER_TEMP}")
+          fi
+          {
+            echo "LAB=${tmp}/lab"
+            echo "MEDIA=${tmp}/media"
+            echo "LINES=${tmp}/lines"
+          } >> "${GITHUB_ENV}"
+          {
+            if [[ "${RUNNER_OS}" == Linux ]]; then
+              chmod +x "${tmp}/lab"/*
+            fi
+            if [[ "${{ matrix.kind }}" == qemu-reset ]]; then
+              tools/scripts/mi1-qemu-setup.sh
+            fi
+          } 2>&1 | tee "${RUNNER_TEMP}/prepare.log"
+      - name: Run the shard
+        # recspike's output stays as it is, so that its mi1-diag lines start a line. The step
+        # stops before the job's limit, so that the steps after it still send what it measured.
+        id: shard
+        timeout-minutes: 165
+        run: |
+          set -o pipefail
+          tools/scripts/mi1-lab.sh "${LAB}" "${MEDIA}" "${{ matrix.kind }}" "${{ matrix.shard }}" 2>&1 |
+            tee "${RUNNER_TEMP}/shard.log"
+      - name: Split the envelopes
+        # One line per run that counts, with its part of the set (recspike annotate split).
+        id: split
+        if: always()
+        run: |
+          set -o pipefail
+          "${LAB}/recspike${EXE}" annotate split "${LAB}/results/MI1/${{ matrix.set }}"/*.json \
+            --first "${{ matrix.first }}" --out "${LINES}" 2>&1 | tee "${RUNNER_TEMP}/split.log"
+      - name: Envelopes 1 to 10
+        id: emit1
+        if: always()
+        run: |
+          set -o pipefail
+          "${LAB}/recspike${EXE}" annotate emit "${LINES}" --batch 1 2> "${RUNNER_TEMP}/emit1.log" |
+            while IFS= read -r line; do
+              printf '%s\n' "${line}" | tools/scripts/annotate.sh "${{ matrix.set }}" 1 notice
+            done
+      - name: Envelopes 11 to 20
+        id: emit2
+        if: always()
+        run: |
+          set -o pipefail
+          "${LAB}/recspike${EXE}" annotate emit "${LINES}" --batch 2 2> "${RUNNER_TEMP}/emit2.log" |
+            while IFS= read -r line; do
+              printf '%s\n' "${line}" | tools/scripts/annotate.sh "${{ matrix.set }}" 1 notice
+            done
+      - name: Explain the losses over their limit
+        # A run whose stream lost more than its limit printed one "mi1-diag: <json>" line that
+        # explains it (Task 7.2d); each goes out as a notice, at most 10, in a step of its own
+        # (C32). It never changes the job's result.
+        if: always()
+        run: |
+          sed -n 's/^mi1-diag: //p' "${RUNNER_TEMP}/shard.log" | head -n 10 | while IFS= read -r line; do
+            printf '%s\n' "${line}" | tools/scripts/annotate.sh mi1-diag 1 notice
+          done || true
+      - name: Show failures as annotations
+        # The failed step's log; for the shard, also the controller's screen and, on a
+        # qemu-reset shard, the end of the guest's console.
+        if: failure()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          for id in $(jq -r 'to_entries[] | select(.value.outcome == "failure") | .key' <<< "${STEPS}"); do
+            log="${RUNNER_TEMP}/${id}.log"
+            [[ -f "${log}" ]] && tail -n 60 "${log}" | tools/scripts/annotate.sh "${id}" 60
+            if [[ ${id} == shard ]]; then
+              [[ -f "${LAB}/reccontroller.out" ]] && tail -n 40 "${LAB}/reccontroller.out" | tools/scripts/annotate.sh reccontroller 40
+              console="${LAB}/work/qemu/console.log"
+              [[ -f "${console}" ]] && tail -n 60 "${console}" | tools/scripts/annotate.sh "guest console" 60
+            fi
+          done
+          true

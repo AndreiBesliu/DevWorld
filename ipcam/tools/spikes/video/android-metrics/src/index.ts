@@ -25,8 +25,17 @@ export interface AndroidMetrics {
   webview?: string;
 }
 
+export interface ReadOptions {
+  /**
+   * The read that starts a scenario's run (the app's scenarios/runner.ts). On the page that the plugin loaded with
+   * the launch extras' query it takes the scenario, which an Activity created again after it no longer runs; no
+   * other read does (AutorunHandoff.kt).
+   */
+  run?: boolean;
+}
+
 export interface SpikeMetricsPlugin {
-  read(): Promise<AndroidMetrics>;
+  read(options?: ReadOptions): Promise<AndroidMetrics>;
   /** Keeps the screen on (FLAG_KEEP_SCREEN_ON) while `on` is true. */
   keepAwake(options: { on: boolean }): Promise<void>;
   /** Vibrates the phone briefly, to call the person (the automatic run's S5 and S6). Needs VIBRATE. */

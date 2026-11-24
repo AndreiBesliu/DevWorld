@@ -246,6 +246,22 @@ describe('the automatic run', () => {
     expect(ran(h)).toEqual(['S10', 'S1', 'S2', 'S3-9', 'S9']);
   });
 
+  it('skip_scenarioOutsideTheTable_isNeitherRunNorSkipped', async () => {
+    // AGE (the recorder spike's MI4) is run from the list only: a complete AGE
+    // changes nothing, and no run of the table starts it, «Rulează din nou tot» included.
+    const h = harness('edge', { complete: ['AGE', 'S10'] });
+
+    expect(await finish(runQueue(h.env))).toEqual({ kind: 'done', ran: ['S1', 'S2', 'S3-9', 'S9'], skipped: ['S10'], failed: [] });
+    expect(ran(h)).toEqual(['S1', 'S2', 'S3-9', 'S9']);
+
+    const again = harness('chrome', { complete: ['AGE'], rerunAll: true });
+    const outcome = await finish(runQueue(again.env));
+
+    expect(ran(again)).toEqual(['S10', 'S1', 'S2', 'S3-9', 'S3-16', 'S4', 'S7', 'S9']);
+    expect(outcome).toMatchObject({ kind: 'done', skipped: [] });
+    expect(again.events.flatMap((event) => (event.kind === 'scenario' ? [event.total] : []))).toEqual(Array<number>(8).fill(8));
+  });
+
   it('skip_nothingLeft_startsNothing', async () => {
     const h = harness('edge', { complete: ['S10', 'S1', 'S2', 'S3-9', 'S9'], preflight: true });
 

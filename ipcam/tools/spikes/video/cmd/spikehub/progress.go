@@ -24,7 +24,11 @@ import (
 // device that the report keys it to: both are spikereport's own rules
 // (resultrules), so that the run skips nothing that the report cannot judge.
 
-// scenarioOrder is the order of the scenario ids in the answers (results.ts SCENARIO_IDS).
+// scenarioOrder holds the scenarios of the device table (deviceplan), in the
+// order of results.ts SCENARIO_IDS, which is the order of the answers. The app
+// lists one more, the recorder spike's AGE (MI4), which runs from the list
+// only and in no device's run: its results are passed over, like an unknown
+// scenario's, so it is never complete and never left.
 var scenarioOrder = []string{"S1", "S2", "S3-4", "S3-9", "S3-16", "S4", "S5", "S6", "S7", "S8", "S9", "S10"}
 
 // maxProgressFileBytes is the largest results file that the progress reads;
