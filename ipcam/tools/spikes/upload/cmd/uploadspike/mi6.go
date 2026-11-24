@@ -257,7 +257,7 @@ func (h *holder) login(ctx context.Context, def mi6.PairDef, plan string) error 
 		if def.Platform == "web" {
 			h.printWebApp()
 		}
-		h.e.printf("%s", loginPrompt(def, plan))
+		h.e.printf("%s", loginPrompt(def, plan, h.e.port))
 		h.e.printf(promptWaiting, platform, provider)
 		end, err := h.waitEnd(ctx, def.Dest)
 		// The app posts the run's result after the login's end: the LAN
@@ -290,8 +290,10 @@ func (h *holder) login(ctx context.Context, def mi6.PairDef, plan string) error 
 	}
 }
 
-// loginPrompt is the owner's prompt for a pair's login under plan.
-func loginPrompt(def mi6.PairDef, plan string) string {
+// loginPrompt is the owner's prompt for a pair's login under plan; port is
+// the handoff server's. The Windows app reaches a hub on this PC at
+// localhost, and one on the Pi at the addresses printed above the prompt.
+func loginPrompt(def mi6.PairDef, plan string, port int) string {
 	provider := mi6.ProviderName(def.Provider)
 	if plan == mi6.PlanB1 {
 		return fmt.Sprintf(promptB1, mi6.PlatformName(def.Platform), provider)
@@ -300,7 +302,11 @@ func loginPrompt(def mi6.PairDef, plan string) string {
 	case "android":
 		return fmt.Sprintf(promptAndroidA, provider)
 	case "windows":
-		return fmt.Sprintf(promptWindowsA, provider)
+		hub := "http://localhost:" + strconv.Itoa(port)
+		if remote(def.Platform) {
+			hub = hubAddressAbove
+		}
+		return fmt.Sprintf(promptWindowsA, hub, provider)
 	}
 	return fmt.Sprintf(promptWebA, provider)
 }

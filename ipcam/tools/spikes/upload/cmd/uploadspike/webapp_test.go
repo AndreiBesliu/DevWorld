@@ -41,7 +41,7 @@ func TestWebApp_URLs(t *testing.T) {
 func TestWebApp_PromptsNameNoOtherProgram(t *testing.T) {
 	for _, plan := range []string{mi6.PlanA, mi6.PlanB1} {
 		for _, provider := range []string{mi6.ProviderDrive, mi6.ProviderOneDrive} {
-			p := loginPrompt(mi6.PairDef{Dest: "x-web", Provider: provider, Platform: "web"}, plan)
+			p := loginPrompt(mi6.PairDef{Dest: "x-web", Provider: provider, Platform: "web"}, plan, 7091)
 			if strings.Contains(p, "spikehub") {
 				t.Errorf("%s %s: %q names spikehub", plan, provider, p)
 			}
@@ -49,5 +49,20 @@ func TestWebApp_PromptsNameNoOtherProgram(t *testing.T) {
 	}
 	if !strings.Contains(msgWebApp, "%s") {
 		t.Errorf("msgWebApp %q has no address", msgWebApp)
+	}
+}
+
+// TestLoginPrompt_WindowsHubAddress (Task 12): the Windows app's prompt
+// names http://localhost:7091 when the hub runs on the PC, and the address
+// printed above it when the hub runs on the Pi (D2-B), where localhost is
+// the PC itself.
+func TestLoginPrompt_WindowsHubAddress(t *testing.T) {
+	p := loginPrompt(mi6.PairDef{Dest: "g-windows", Provider: mi6.ProviderDrive, Platform: "windows"}, mi6.PlanA, 7091)
+	want := "http://localhost:7091"
+	if remote("windows") {
+		want = "adresa de mai sus"
+	}
+	if !strings.Contains(p, "«Adresa hub-ului» "+want+",") {
+		t.Errorf("windows prompt %q; want the field's value %q", p, want)
 	}
 }

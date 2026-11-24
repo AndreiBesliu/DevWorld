@@ -138,7 +138,8 @@ const (
 // The MI6 login prompts, per platform and plan.
 const (
 	promptAndroidA  = "Pe telefon (Android): deschideți aplicația video, scrieți în câmpul «Adresa hub-ului» adresa de mai sus, apoi la rândul «Conectare la stocare (MI6)» apăsați «Pornește» și conectați contul %s."
-	promptWindowsA  = "Pe PC (Windows): deschideți aplicația video, scrieți în câmpul «Adresa hub-ului» http://localhost:7091, apoi la rândul «Conectare la stocare (MI6)» apăsați «Pornește» și conectați contul %s."
+	promptWindowsA  = "Pe PC (Windows): deschideți aplicația video, scrieți în câmpul «Adresa hub-ului» %s, apoi la rândul «Conectare la stocare (MI6)» apăsați «Pornește» și conectați contul %s."
+	hubAddressAbove = "adresa de mai sus"
 	promptWebA      = "În browserul PC-ului: deschideți aplicația video web, la adresa de mai sus, apoi la rândul «Conectare la stocare (MI6)» apăsați «Pornește» și conectați contul %s."
 	msgWebApp       = "Aplicația video web: %s"
 	promptB1        = "%s cu B1: la rândul «Conectare la stocare (MI6)» apăsați «Pornește» (contul %s); aplicația arată o adresă și un cod. Deschideți adresa pe orice dispozitiv, scrieți codul și acceptați."
