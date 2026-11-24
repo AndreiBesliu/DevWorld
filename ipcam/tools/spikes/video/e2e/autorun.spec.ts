@@ -117,7 +117,7 @@ test('«Rulează tot pentru acest dispozitiv» runs Chrome’s list, skips what 
     ['S9', false],
   ]);
   for (const result of ran) {
-    expect(result.appVersion).toBe('spike-video-v0.1.1');
+    expect(result.appVersion).toBe('spike-video-v0.1.2');
     expect(result.notes.filter((note) => note.startsWith('failed'))).toEqual([]);
   }
   expect(ran[0]?.notes).toContain('prompt: no');

@@ -14,6 +14,7 @@ import { APP_VERSION, planFor, scenariosOf, type DevicePlan } from './deviceplan
 import { askOnce, reasonOf, runQueue, type QueueEvent, type QueueOutcome } from './devicerun';
 import { decodesH264 } from './h264check';
 import { ConnectError } from './hubhttp';
+import { HubControl, LOCAL_HUB, type HubState } from './hubprocess';
 import { createI18n, minutesAndSeconds, type MessageKey, type Translate } from './i18n';
 import { sampleLoss, sampleStats } from './metrics';
 import { readNativeMetrics, spikeNative, type NativeMetrics } from './native';
@@ -23,6 +24,7 @@ import type { Clock, IntersectionWatch, ScenarioEnv, Stage } from './scenarios/c
 import { runScenario } from './scenarios/index';
 import { NotStarted } from './scenarios/runner';
 import { openSession } from './session';
+import { checkForUpdate, RECHECK_MS, type UpdateOffer } from './update';
 import { holdWakeLock, type ScreenWakeLock } from './wakelock';
 
 /** Where the shells remember the hub's address. */
@@ -229,6 +231,34 @@ export function startApp(root: HTMLElement): App {
   let busy = false;
   let unattended = false;
   let deviceLine = describeDevice(device);
+  // The test app's own updates (update.ts): the newer release GitHub lists, and how its install goes.
+  let updateOffer: UpdateOffer | undefined;
+  let updateLine = '';
+  let updating = false;
+  // SPIKE-ONLY (hubprocess.ts): the hub that the Windows shell starts, and its panel, built once so that
+  // a new line of the hub neither rebuilds the page nor takes the focus from the folder field.
+  const hubControl = native?.hub
+    ? new HubControl({
+        shell: native.hub,
+        storage,
+        onChange: () => {
+          drawHub();
+        },
+        onListening: () => {
+          if (hub() === '') hubInput.value = LOCAL_HUB;
+          if (!busy) void checkConnection();
+        },
+      })
+    : undefined;
+  const hubPanel = el('section', 'hub-process');
+  const hubFolderInput = el('input');
+  hubFolderInput.type = 'text';
+  hubFolderInput.autocomplete = 'off';
+  hubFolderInput.spellcheck = false;
+  const hubStartButton = el('button', 'hub-start');
+  const hubStopButton = el('button', 'hub-stop');
+  const hubStatus = el('p', 'hub-status');
+  const hubLog = el('pre', 'hub-log');
   // The automatic run (post-release task A): the device's list, what spikehub
   // holds, and what the run says on the page.
   const plan = planFor(device);
@@ -320,6 +350,8 @@ export function startApp(root: HTMLElement): App {
     const title = el('h1', '', t('appTitle'));
     title.append(' ', el('small', 'version', t('version', { version: APP_VERSION })));
     header.append(title, language);
+    const updateSection = renderUpdate();
+    drawHub();
 
     const hubSection = el('section', 'hub');
     const label = el('label', '', t('hubLabel'));
@@ -362,7 +394,82 @@ export function startApp(root: HTMLElement): App {
       pendingSection.append(el('p', '', t('pendingResults', { n: pending })), resend);
     }
     // The stage stays where it is: moving a playing video element would disturb it.
-    controls.replaceChildren(header, hubSection, list, pendingSection);
+    controls.replaceChildren(header, updateSection, ...(hubControl ? [hubPanel] : []), hubSection, list, pendingSection);
+  };
+
+  /**
+   * Brings the hub's panel up to date. Its log only outside a run: during one
+   * the stage covers the page, and a scenario's measurements see no extra
+   * layout; the render at the run's end draws it.
+   */
+  const drawHub = (): void => {
+    if (!hubControl) return;
+    const state = hubControl.state();
+    hubPanel.querySelector('h2')?.replaceChildren(t('hubTitle'));
+    hubPanel.querySelector('label > span')?.replaceChildren(t('hubFolderLabel'));
+    hubStartButton.textContent = t('hubStart');
+    hubStopButton.textContent = t('hubStop');
+    hubStartButton.disabled = busy || hubControl.busy();
+    hubStopButton.disabled = busy || (state.kind !== 'running' && state.kind !== 'starting');
+    hubFolderInput.disabled = hubControl.busy();
+    hubStatus.textContent = hubStatusText(state, t);
+    hubStatus.className = `hub-status ${hubFailed(state) ? 'failed' : ''}`.trim();
+    if (busy) return;
+    const lines = hubControl.log.lines();
+    const atEnd = hubLog.scrollTop + hubLog.clientHeight >= hubLog.scrollHeight - 4;
+    hubLog.textContent = lines.length > 0 ? lines.join('\n') : t('hubLogEmpty');
+    if (atEnd) hubLog.scrollTop = hubLog.scrollHeight;
+  };
+
+  /** The offer of a newer release, under the title; empty without one. Not during a run: installing ends the app. */
+  const renderUpdate = (): HTMLElement => {
+    const block = el('section', 'update');
+    const updater = native?.update;
+    if (!updateOffer || !updater) {
+      block.hidden = true;
+      return block;
+    }
+    const offer = updateOffer;
+    const install = el('button', '', t('updateNow'));
+    install.disabled = busy || updating;
+    install.addEventListener('click', () => {
+      updating = true;
+      updateLine = t('updateDownloading');
+      render();
+      // The installer ends the app; the hub it started goes first, so that none is left running.
+      (hubControl ? hubControl.stop() : Promise.resolve()).then(() => updater.install(offer)).then(
+        (outcome) => {
+          updating = false;
+          updateLine = t(outcome === 'permission' ? 'updatePermission' : device.platform === 'android' ? 'updateConfirm' : 'updateInstalling');
+          render();
+        },
+        (error: unknown) => {
+          updating = false;
+          console.warn('the update failed', error);
+          updateLine = t('updateFailed', { detail: error instanceof Error ? error.message : String(error) });
+          render();
+        },
+      );
+    });
+    block.append(el('p', '', t('updateAvailable', { version: offer.version, current: APP_VERSION })), install);
+    if (updateLine) block.append(el('p', 'update-status', updateLine));
+    return block;
+  };
+
+  /** Asks GitHub for a newer release; quietly does nothing when it cannot (offline, rate limit). */
+  const lookForUpdate = async (): Promise<void> => {
+    const updater = native?.update;
+    if (!updater || unattended || updating) return;
+    try {
+      const offer = await checkForUpdate((url, init) => fetch(url, init), APP_VERSION, updater.asset);
+      if (offer?.version !== updateOffer?.version) {
+        updateOffer = offer;
+        updateLine = '';
+        render();
+      }
+    } catch (error) {
+      console.warn('the update check failed', error);
+    }
   };
 
   /** The automatic run's block, at the top of the scenario list; `completeInHub` is this device's, as its run counts it. */
@@ -590,11 +697,32 @@ export function startApp(root: HTMLElement): App {
       return result;
     });
 
+  if (hubControl) {
+    const folderLabel = el('label');
+    folderLabel.append(el('span'), hubFolderInput);
+    hubStartButton.addEventListener('click', () => {
+      void hubControl.start(hubFolderInput.value);
+    });
+    hubStopButton.addEventListener('click', () => {
+      void hubControl.stop();
+    });
+    hubPanel.append(el('h2'), folderLabel, hubStartButton, hubStopButton, hubStatus, hubLog);
+    // A remembered folder starts the hub by itself; not under autorun (CI), which brings its own hub.
+    void hubControl.load().then(() => {
+      hubFolderInput.value = hubControl.folder();
+      if (!unattended && hubControl.remembered()) void hubControl.start(hubFolderInput.value);
+    });
+  }
   const controls = el('div', 'controls');
   root.replaceChildren(controls, stage.root);
   render();
   if (hub() !== '' && queue.pending() > 0) void queue.flush().then(render); // what the last launch could not send
   void refreshProgress();
+  if (native?.update) {
+    // After the start (an autorun sets `unattended` first), then every few hours while the app stays open.
+    setTimeout(() => void lookForUpdate(), 3000);
+    setInterval(() => void lookForUpdate(), RECHECK_MS);
+  }
 
   return {
     autorun(request) {
@@ -603,6 +731,31 @@ export function startApp(root: HTMLElement): App {
       return run(request.scenario, () => autorun(request, { connect: environment, queue }));
     },
   };
+}
+
+/** What the hub's panel says of its state. */
+export function hubStatusText(state: HubState, t: Translate): string {
+  switch (state.kind) {
+    case 'stopped':
+      return t('hubStopped');
+    case 'starting':
+      return t('hubStarting');
+    case 'running':
+      return t('hubRunning');
+    case 'stopping':
+      return t('hubStopping');
+    case 'ended':
+      return t('hubEnded', { code: state.code ?? '?' });
+    case 'missing':
+      return t('hubMissing');
+    case 'failed':
+      return state.detail === '' ? t('hubNoFolder') : t('hubFailed', { detail: state.detail });
+  }
+}
+
+/** Whether the hub's state asks the person to do something. */
+function hubFailed(state: HubState): boolean {
+  return state.kind === 'ended' || state.kind === 'missing' || state.kind === 'failed';
 }
 
 function withWakeLock(wakeLock: ScreenWakeLock | undefined): { wakeLock?: ScreenWakeLock } {

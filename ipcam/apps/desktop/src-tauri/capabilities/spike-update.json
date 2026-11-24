@@ -1,0 +1,31 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "spike-update",
+  "description": "SPIKE-ONLY (owner's request of 2026-11-23, update.ts of the spike app): the page may run one PowerShell command, which downloads a spike-video-v* ipcam-desktop-setup.exe from this repository's GitHub releases, checks it against the SHA-256 that GitHub lists, and starts it in passive mode (/P /R /UPDATE): it closes the app, installs over it and starts it again. The address and the SHA-256 are the only arguments the page chooses, and both are checked here. TODO (Phase 4): the product updates through the hub's updater (T27).",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "spike-update",
+          "cmd": "powershell",
+          "args": [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "& { param($u, $h) $ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $d = Join-Path $env:TEMP 'ipcam-update'; New-Item -ItemType Directory -Force -Path $d | Out-Null; $f = Join-Path $d 'ipcam-desktop-setup.exe'; Invoke-WebRequest -UseBasicParsing -Uri $u -OutFile $f; if ((Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash -ne $h) { Remove-Item -LiteralPath $f; throw 'SHA-256 mismatch' }; Start-Process -FilePath $f -ArgumentList '/P','/R','/UPDATE' }",
+            {
+              "validator": "https://github\\.com/AndreiBesliu/DevWorld/releases/download/spike-video-v[0-9]+\\.[0-9]+\\.[0-9]+/ipcam-desktop-setup\\.exe"
+            },
+            {
+              "validator": "[0-9a-f]{64}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

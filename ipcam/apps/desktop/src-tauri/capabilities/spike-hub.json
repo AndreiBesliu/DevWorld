@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "spike-hub",
+  "description": "SPIKE-ONLY (owner's request of 2026-11-24, plan 2026-11-24-spike-hub-panel, native-tauri.ts of the spike app): the page may start spikehub as the app's hidden child and stop it. The whole command line is fixed here, cmd /d /c .\\spikehub.exe -browser=false; the page chooses only its working directory, the folder that holds spikehub.exe, media and results. cmd is there because Windows does not look for a relative program in the child's working directory; the plugin starts it without a console window and, with processGroup, in a job object, so that a kill ends cmd and spikehub together. The Downloads folder is where the page looks for the hub's folder first. TODO (Phase 4): the product's hub is a Windows service (§4.9), whose state the shell shows.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "spike-hub",
+          "cmd": "cmd",
+          "args": [
+            "/d",
+            "/c",
+            ".\\spikehub.exe",
+            "-browser=false"
+          ]
+        }
+      ]
+    },
+    "shell:allow-kill",
+    "core:path:allow-resolve-directory"
+  ]
+}

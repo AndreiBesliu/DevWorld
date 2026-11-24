@@ -49,6 +49,9 @@ fn main() {
         }));
     #[cfg(feature = "spike-metrics")]
     let builder = spike_metrics::install(builder);
+    // SPIKE-ONLY (owner's request of 2026-11-23): the test app's own updates, the
+    // one command of capabilities/spike-update.json. TODO (Phase 4): the hub's updater (T27).
+    let builder = builder.plugin(tauri_plugin_shell::init());
     builder
         .setup(|app| {
             let url = WebviewUrl::App(page(std::env::args().skip(1)).into());
