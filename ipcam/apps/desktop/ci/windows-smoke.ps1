@@ -319,15 +319,17 @@ function Invoke-HubPanel([string[]] $Action) {
   $state
 }
 
-# The spikehub processes started from $Exe.
+# The spikehub processes started from $Exe. PowerShell unrolls a function's
+# array: callers wrap the call in @() to count it (StrictMode has no Count on
+# $null or on a single process).
 function Get-HubProcesses([string] $Exe) {
-  @(Get-Process -Name spikehub -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe })
+  Get-Process -Name spikehub -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe }
 }
 
 # Waits up to $Seconds for no spikehub of $Exe; returns whether none is left.
 function Wait-HubGone([string] $Exe, [int] $Seconds) {
   $deadline = (Get-Date).AddSeconds($Seconds)
-  while ((Get-HubProcesses $Exe).Count -gt 0) {
+  while (@(Get-HubProcesses $Exe).Count -gt 0) {
     if ((Get-Date) -ge $deadline) { return $false }
     Start-Sleep -Milliseconds 500
   }
@@ -376,11 +378,13 @@ function Test-HubPanel {
 
     $panel = Invoke-HubPanel @('start', $folder)
     if (-not (Wait-HubAnswers 30)) { return "the hub started from the panel did not answer on port 7080 within 30 s`n$(& $diagnosis)" }
-    $hubs = Get-HubProcesses $exe
+    $hubs = @(Get-HubProcesses $exe)
     if ($hubs.Count -ne 1) { return "$($hubs.Count) spikehub processes run from the folder, not 1`n$(& $diagnosis)" }
     # The app started it through cmd: spikehub's parent is cmd, whose parent is the app. A console
     # window, had one opened, would count as cmd's window: neither may have one.
-    $cmd = Get-CimInstance Win32_Process -Filter "ProcessId = $((Get-CimInstance Win32_Process -Filter "ProcessId = $($hubs[0].Id)").ParentProcessId)"
+    $hubInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $($hubs[0].Id)"
+    if (-not $hubInfo) { return "spikehub (pid $($hubs[0].Id)) ended right after it answered`n$(& $diagnosis)" }
+    $cmd = Get-CimInstance Win32_Process -Filter "ProcessId = $($hubInfo.ParentProcessId)"
     if (-not $cmd -or $cmd.Name -ne 'cmd.exe' -or $cmd.ParentProcessId -ne $process.Id) {
       return "spikehub's parent is $(if ($cmd) { "$($cmd.Name) (pid $($cmd.ProcessId), parent $($cmd.ParentProcessId))" } else { 'gone' }), not the app's cmd (app pid $($process.Id))"
     }
@@ -447,7 +451,7 @@ try { $singleProblem = Test-SingleInstance } catch { $singleProblem = "the check
 $null = $hubProcess.WaitForExit(10000)
 try {
   Set-DevToolsPolicy
-  try { $panelProblem = Test-HubPanel } catch { $panelProblem = "the check could not run: $_" }
+  try { $panelProblem = Test-HubPanel } catch { $panelProblem = "the check could not run: $_ (windows-smoke.ps1 line $($_.InvocationInfo.ScriptLineNumber))" }
 } finally {
   Remove-DevToolsPolicy
 }
