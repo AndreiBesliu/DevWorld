@@ -24,6 +24,11 @@ The other upstream tests are not run. Some of them fail in the fork because of M
   - **Files touched.** `go.mod`, `go.sum`.
   - **Test.** The fork's govulncheck step in `ipcam-spike-recording.yml`.
   - **Rebase status.** MediaMTX v1.21.2 still requires v0.59.0, so a re-vendor to it redoes this change. Drop it once upstream requires v0.60.0 or later.
+- `github.com/gorilla/websocket` v1.5.3 → v1.5.4-0.20240701034025-d67f41855da4, by `GOWORK=off go get github.com/gorilla/websocket@v1.5.4-0.20240701034025-d67f41855da4 && GOWORK=off go mod tidy`.
+  - **Why.** The security exception to the 14-day rule (ruling R09). govulncheck now finds GO-2026-6278 (a weak PRNG for the client's mask key) reachable from the fork, through gin's and gortsplib's WebSocket paths, and fails the fork's step. No release carries the fix: the advisory names the fixing commit d67f418, which the video spike already requires (commit 0433aa2).
+  - **Files touched.** `go.mod`, `go.sum`.
+  - **Test.** The fork's govulncheck step in `ipcam-spike-recording.yml`.
+  - **Rebase status.** Redo after a re-vendor while upstream still requires v1.5.3; drop it once upstream requires a release with the fix.
 - `require github.com/AndreiBesliu/DevWorld/ipcam/hub v0.0.0` (resolved by MTX-0's `replace`), `filippo.io/age` v1.3.2 (MTX-2's tests) and `go` 1.26.0 → 1.27.2, by `GOWORK=off go mod tidy` once MTX-2 imports `hub/internal/crypto`, then `v0.0.0` in place of the pseudo-version that tidy writes for a replaced module.
   - **Why.** MTX-2 encrypts with the hub's own age writer (C03, C04). The hub module declares `go 1.27.2`, so the fork, which requires it, must too. The versions it brings (`filippo.io/age` v1.3.2, `filippo.io/hpke` v0.4.0, `golang.org/x/crypto` v0.57.0) are the hub's. The hub's module graph also raises the test-only `github.com/rogpeppe/go-internal` (through `kr/pretty`) from v1.14.1 to v1.16.0 in `go.sum`.
   - **Files touched.** `go.mod`, `go.sum`.
