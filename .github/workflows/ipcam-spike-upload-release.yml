@@ -32,6 +32,10 @@ name: ipcam-spike-upload-release
 
 on:
   push:
+    # THROWAWAY: a branch push registers this workflow, so that a manual run
+    # (workflow_dispatch) can start it; reverted by the next commit.
+    branches:
+      - 'ipcam/phase0c2-upload-spike'
     tags:
       - 'spike-upload-v*'
     # GitHub does not evaluate path filters for tag pushes: the tag pattern is
