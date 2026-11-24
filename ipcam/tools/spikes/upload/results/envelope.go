@@ -38,6 +38,10 @@ const (
 	// GapMI5Block is MI5's block of the hub's WAN (P53): a daily refresh
 	// whose attempts all fell in it is blocked-by-test.
 	GapMI5Block = "mi5-block"
+	// GapMI8Stopped is a stretch between two MI8 sessions of one envelope
+	// when MI8's process had ended on the same boot (its window closed, or
+	// it was killed): uploadspike mi8 --continue resumes the series.
+	GapMI8Stopped = "mi8-stopped"
 )
 
 // namePattern is a run id's or a set's form: it names a file and a folder.
@@ -88,6 +92,9 @@ type Envelope struct {
 	// MI5 is an MI5 envelope's upload during the outage (G14); the
 	// pi-probe marker has none.
 	MI5 *Mi5Data `json:"mi5,omitempty"`
+	// MI8 is an MI8 envelope's 72 h of ONVIF events against the motion
+	// reference (G17).
+	MI8 *Mi8Data `json:"mi8,omitempty"`
 }
 
 // PiModelInfo is the Pi's model as ipcam-hub's diag host reports it.
@@ -225,5 +232,13 @@ func (e Envelope) Validate() error {
 	check(e.AccountKind == "" || slices.Contains(accountKinds, e.AccountKind), "results: unknown account kind %q", e.AccountKind)
 	check((e.MI6 != nil) == (e.Code == "MI6"), "results: MI6 data belongs to an MI6 envelope only")
 	check(e.MI5 == nil || e.Code == "MI5", "results: MI5 data belongs to an MI5 envelope only")
+	check(e.MI8 == nil || e.Code == "MI8", "results: MI8 data belongs to an MI8 envelope only")
+	if e.MI8 != nil {
+		for _, c := range e.MI8.Cameras {
+			check(cameraPattern.MatchString(c.Camera), "results: camera %q is not a pseudonym", c.Camera)
+			check(c.ReferenceMethod == "" || slices.Contains(referenceMethods, c.ReferenceMethod),
+				"results: unknown reference method %q", c.ReferenceMethod)
+		}
+	}
 	return errors.Join(errs...)
 }

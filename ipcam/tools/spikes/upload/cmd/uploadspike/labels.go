@@ -38,6 +38,12 @@ const usage = `Folosire:
       scoate blocarea internetului hub-ului (proba MI5), oricând.
   uploadspike annotate emit --code COD --set SET
       laboratorul: fiecare rezultat ca o linie JSON.
+  uploadspike mi8 [--one-per-brand]
+      proba MI8: evenimentele ONVIF ale camerelor dvs., 72 de ore; întreabă adresa, utilizatorul și parola fiecărei camere.
+  uploadspike mi8 --probe-only
+      verifică doar camerele: marca, modelul, evenimentele ONVIF (în săptămâna MI6).
+  uploadspike mi8 --continue
+      reia proba MI8 după o repornire, cu aceleași camere.
 `
 
 // The commands' lines.
@@ -211,4 +217,49 @@ const (
 	pageNotFound        = "Pagina nu există aici."
 	pageSetupBadBody    = "pagina nu a trimis clienții în forma așteptată"
 	pageSetupHubRefused = "hub-ul nu i-a putut sigila; vedeți fereastra uploadspike"
+)
+
+// The MI8 command's lines (Task 10).
+const (
+	msgMI8Running       = "MI8 rulează deja; progresul îl vedeți cu uploadspike status."
+	msgMI8Background    = "MI8 rulează în fundal 72 de ore. Puteți închide fereastra; progresul îl vedeți cu uploadspike status."
+	msgMI8KeepWindow    = "Lăsați fereastra deschisă 72 de ore." //nolint:gosec // G101: an owner's line
+	msgMI8Stopped       = "MI8 s-a oprit; rulați uploadspike mi8 --continue."
+	msgMI8Progress      = "MI8 rulează: %.1f h observate din 72."
+	msgMI8StoppedHours  = "MI8: %.1f h observate din 72 până la oprire."
+	msgMI8Camera        = "  %s (%s): %d episoade de mișcare, %d cu eveniment ONVIF, %d pierderi tăcute ale abonării."
+	msgMI8CameraFailed  = "  %s (%s): abonare eșuată (configurare)."
+	msgMI8Done          = "Proba MI8 s-a încheiat (72 h): rezultatele au fost scrise. Rulați uploadspike results."
+	msgMI8NoRun         = "Nicio probă MI8 deschisă: rulați uploadspike mi8."
+	msgMI8OpenRun       = "Proba MI8 deschisă s-a oprit; rulați uploadspike mi8 --continue."
+	msgMI8NoCameras     = "Nicio cameră nu are evenimente ONVIF cu PullPoint: proba MI8 nu pornește."
+	msgMI8BadCount      = "Scrieți un număr de camere între 1 și 16."
+	msgMI8BadAddress    = "Adresa nu este de forma IP sau IP:port; scrieți-o din nou."
+	msgMI8NoAnswer      = "Lipsește răspunsul; rulați din nou uploadspike mi8."
+	msgMI8Selected      = "Intră în proba MI8: %s."
+	msgMI8NotSelected   = "%s nu intră în proba MI8 (o cameră pe marcă, --one-per-brand)."
+	msgMI8ProbeOK       = "%s: %s %s (evenimente ONVIF: %s, PullPoint: %s)."
+	msgMI8ProbeNoEvents = "%s: %s %s: abonare eșuată (configurare): camera nu oferă evenimente ONVIF cu PullPoint."
+	msgMI8ProbePort     = "%s: portul ONVIF nu răspunde. Verificați portul ONVIF în pașii A7 ai mărcii (Reolink: 8000)."
+	msgMI8ProbeAuth     = "%s: utilizatorul sau parola ONVIF nu sunt acceptate."
+	msgMI8ProbeDown     = "%s: camera nu răspunde."
+	msgMI8NotThisCamera = "Aceasta nu este camera %s (%s). Verificați adresa."
+	msgMI8ContinueHours = "Proba MI8 continuă: %.1f h observate din 72."
+	msgMI8ContinueCam   = "%s: %s"
+	msgMI8Skipped       = "%s nu intră în această sesiune."
+	msgMI8FFmpeg        = "Descarc FFmpeg pentru referința de mișcare (o singură dată)…"
+	msgMI8NoFFmpeg      = "FFmpeg nu este disponibil pe acest dispozitiv: referința de mișcare folosește instantaneele camerelor."
+	msgMI8CopyFailed    = "MI8 nu a pornit în fundal; rulați din nou uploadspike mi8."
+	msgMI8Yes           = "da"
+	msgMI8No            = "nu"
+	msgMI8UnknownBrand  = "marcă necunoscută"
+)
+
+// The MI8 prompts.
+const (
+	promptMI8Count   = "Câte camere intră în proba MI8? "
+	promptMI8Address = "Camera %s: adresa (IP sau IP:port ONVIF; fără port, 80): "
+	promptMI8User    = "Camera %s: utilizatorul ONVIF: "
+	promptMI8Pass    = "Camera %s: parola ONVIF (nu se afișează): " //nolint:gosec // G101: an owner's line
+	promptMI8Again   = "Camera %s: adresa (IP sau IP:port ONVIF; Enter ca să o săriți în această sesiune): "
 )

@@ -238,6 +238,44 @@ func Lock(path string) (release func(), err error) {
 	return func() { _, _ = unlock(f), f.Close() }, nil
 }
 
+// MI8Lock is MI8's own lock, <base>/state/mi8.lock: one MI8 per device,
+// held for the whole run (Task 10), apart from run-state.lock.
+const MI8Lock = "mi8.lock"
+
+// LockFile takes the lock at path as Lock does, and returns its open file,
+// which holds the lock for as long as it, or a copy of its descriptor, stays
+// open: on Linux uploadspike mi8 hands it to its detached copy as an
+// inherited descriptor (exec.Cmd.ExtraFiles), so the lock never lapses
+// between the two processes (flock belongs to the open file description,
+// which the copy shares). ErrLocked while another open file holds it.
+func LockFile(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil { //nolint:gosec // G703: uploadspike's own state folder
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) //nolint:gosec // uploadspike's own lock file
+	if err != nil {
+		return nil, err
+	}
+	ok, err := tryLock(f)
+	switch {
+	case err != nil:
+		_ = f.Close()
+		return nil, err
+	case !ok:
+		_ = f.Close()
+		return nil, ErrLocked
+	}
+	return f, nil
+}
+
+// HoldsLock reports whether f, an inherited lock file, holds its lock: a
+// lock of the same open file description is taken again without waiting,
+// and any other holder refuses it.
+func HoldsLock(f *os.File) bool {
+	ok, err := tryLock(f)
+	return err == nil && ok
+}
+
 // Heartbeat records a heartbeat at now (wall), mono (the host's monotonic
 // clock, which stops while it sleeps) on boot bootID, and returns the gap
 // since the last heartbeat, if there is one, which it also appends to

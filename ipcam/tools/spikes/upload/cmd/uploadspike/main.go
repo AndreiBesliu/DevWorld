@@ -58,7 +58,8 @@ const (
 // one is set uploadspike says so and its envelopes record testSeams, which
 // the judges do not judge (C2-R22 (3)).
 var testSeams = []string{envBase, envHubBin, envMediaMTX, envFakes, envRunAs, envPort, envHost, envNoBrowser, envEventLog,
-	envFast, envPauseAfter, envSignalFile, envNotElevated, envFirewallLog, envMI5Timing, envReccontroller, envMediaDir, envLabLAN}
+	envFast, envPauseAfter, envSignalFile, envNotElevated, envFirewallLog, envMI5Timing, envReccontroller, envMediaDir, envLabLAN,
+	envMI8Timing, envFFmpeg}
 
 // setSeams are the names of the test seams set in this process's
 // environment.
@@ -254,6 +255,8 @@ func run(ctx context.Context, e *env, args []string) error {
 		return runUnblock(ctx, e, rest)
 	case "annotate":
 		return runAnnotate(ctx, e, rest)
+	case "mi8":
+		return runMI8(ctx, e, rest)
 	}
 	_, _ = fmt.Fprint(e.out, usage)
 	return ownerError(fmt.Sprintf(msgUnknownCommand, cmd))

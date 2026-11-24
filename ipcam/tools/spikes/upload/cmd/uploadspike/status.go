@@ -56,6 +56,7 @@ func statusLines(e *env) ([]string, error) {
 		mi5Open, _ := mi5State(st)
 		lines = append(lines, mi6.StatusLines(run, st.Gaps, e.now(), mi5Open)...)
 	}
+	lines = append(lines, mi8StatusLines(st)...)
 	if len(lines) == 0 {
 		lines = []string{msgNoOpenRun}
 	}

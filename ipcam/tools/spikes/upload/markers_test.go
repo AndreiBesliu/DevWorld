@@ -30,6 +30,23 @@ var markedNonGoFiles = []string{
 	"../video/app/src/scenarios/oauth.ts",
 }
 
+// task10Files are the MI8 spike's files (Task 10): each exists and is marked.
+var task10Files = []string{
+	"mi8/runner.go", "mi8/cameras.go", "mi8/rtsp.go", "mi8/ffmpeg.go", "mi8/snapshot.go", "mi8/motionref.go",
+	"mi8/episodes.go", "mi8/judge.go", "cmd/uploadspike/mi8.go", "cmd/uploadspike/detach_linux.go",
+	"cmd/uploadspike/detach_other.go", "results/mi8.go",
+}
+
+// TestTask10FilesMarked: the MI8 spike's files exist and carry the marker,
+// so that the spike's deletion finds them all.
+func TestTask10FilesMarked(t *testing.T) {
+	for _, path := range task10Files {
+		if err := checkMarked(path); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
 // markerLine is the first line that a file of the given type must have.
 func markerLine(path string) (string, error) {
 	switch filepath.Ext(path) {
