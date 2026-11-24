@@ -140,4 +140,3 @@ func TestEvents_PausesAfter3AuthFailures(t *testing.T) {
 		t.Error("no request after the pause")
 	}
 }
-
