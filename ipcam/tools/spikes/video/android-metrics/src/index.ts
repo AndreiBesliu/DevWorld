@@ -37,6 +37,11 @@ export interface SpikeMetricsPlugin {
    * installer opened and asks the person to confirm.
    */
   installUpdate(options: { url: string; sha256: string }): Promise<{ status: 'installing' | 'permission' }>;
+  /**
+   * SPIKE-ONLY (owner's request of 2026-11-24): the private IPv4 addresses of the phone's Wi-Fi and Ethernet networks
+   * and their prefix lengths, in which the page looks for spikehub. For the screen only, never in a result (PH0-22).
+   */
+  lanAddresses(): Promise<{ addresses: { address: string; prefix: number }[] }>;
 }
 
 export const SpikeMetrics = registerPlugin<SpikeMetricsPlugin>('SpikeMetrics');

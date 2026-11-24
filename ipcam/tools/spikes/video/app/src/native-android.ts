@@ -74,5 +74,6 @@ export function installAndroidNative(
       asset: ANDROID_ASSET,
       install: async ({ url, sha256 }) => (await metrics.installUpdate({ url, sha256 })).status,
     },
+    lanAddresses: async () => (await metrics.lanAddresses()).addresses,
   };
 }

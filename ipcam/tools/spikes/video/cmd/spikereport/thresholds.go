@@ -239,6 +239,7 @@ func (e *evaluator) mv3(r *Run, tiles int) {
 		notes = append(notes, line)
 	}
 	notes = append(notes, lossNote(r)...)
+	notes = append(notes, skippedWaitNotes(r)...)
 	e.finish(tileCode("MV3", tiles), value, "fps", checks, notes)
 }
 
@@ -295,6 +296,19 @@ func (e *evaluator) mv4Main() {
 	}
 }
 
+// skippedWaitNotes are the notes at MV3 and MV5 of a grid run that started after a wait that
+// the owner skipped («Sari peste așteptare», plan 2026-11-24-spike-skip-wait-find-hub). The
+// wait lets the phone start cold; a phone that is still warm can only measure worse on heat
+// and fps, so a pass stands and a fail is to be repeated with the whole wait.
+func skippedWaitNotes(r *Run) []string {
+	var out []string
+	for _, n := range notesWithPrefix(r, "wait skipped: ") {
+		out = append(out, "așteptarea dinaintea rulării a fost sărită (`"+n+"`): un telefon încă cald iese cel mult mai prost "+
+			"la temperatură și fps, deci un „Da” rămâne valabil, iar un „Nu” se repetă cu așteptarea întreagă")
+	}
+	return out
+}
+
 func thermalName(index float64) string {
 	i := int(index)
 	if i < 0 || i >= len(thermalLevels) {
@@ -333,7 +347,7 @@ func (e *evaluator) mv5(r *Run, tiles int) {
 		rate = (bat[0] - bat[len(bat)-1]) * 3600 / (float64(len(grid)) * statsEverySeconds)
 		checks = append(checks, holds(atMost(rate, mv5MaxBatteryPh), "baterie "+number(rate, 1)+" %/h"))
 	}
-	e.finish(tileCode("MV5", tiles), rate, "%/h", checks, runNotes(r))
+	e.finish(tileCode("MV5", tiles), rate, "%/h", checks, append(runNotes(r), skippedWaitNotes(r)...))
 }
 
 // ---- MV6, MV7: the PC and the long run ----

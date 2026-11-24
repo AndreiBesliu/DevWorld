@@ -6,6 +6,7 @@ import { ConnectError } from './session';
 import {
   connectErrorLines,
   defaultHubUrl,
+  findLines,
   hubStatusText,
   offersRepeat,
   queueEventLines,
@@ -337,5 +338,34 @@ describe('the hub panel (Windows shell)', () => {
     expect(hubStatusText({ kind: 'failed', detail: 'os error 267' }, t)).toBe('Hub-ul nu poate porni din acest folder: os error 267');
     const en = createI18n({ lang: 'en' }).t;
     expect(hubStatusText({ kind: 'stopped' }, en)).toBe('The hub is stopped.');
+  });
+});
+
+describe('the search for the hub (Android)', () => {
+  const { t } = createI18n({ lang: 'ro' });
+  const networks = ['192.168.1.0/24'];
+
+  it('findLines_saysWhereItLooksAndWhatToDoWithoutAHub', () => {
+    expect(findLines({ kind: 'searching', networks, found: [] }, t)).toEqual([
+      'Caut spikehub în rețeaua 192.168.1.0/24; durează cel mult 15 secunde.',
+    ]);
+    expect(findLines({ kind: 'done', networks, found: [HUB] }, t)).toEqual(['Atingeți adresa hub-ului, ca s-o folosiți:']);
+    const [none = ''] = findLines({ kind: 'done', networks, found: [] }, t);
+    expect(none).toContain('Nu am găsit spikehub în rețeaua 192.168.1.0/24.');
+    expect(none).toContain('«Caută hub-ul în rețea»');
+    expect(findLines({ kind: 'no-network' }, t)).toEqual([
+      'Telefonul nu e conectat la Wi-Fi. Conectați-l la același Wi-Fi ca PC-ul și apăsați din nou «Caută hub-ul în rețea».',
+    ]);
+    expect(findLines({ kind: 'failed', detail: 'not implemented' }, t)).toEqual([
+      'Telefonul nu și-a putut citi rețeaua (not implemented). Scrieți adresa din fereastra spikehub.',
+    ]);
+  });
+});
+
+describe('«Sari peste așteptare»', () => {
+  it('skipWait_saysWhenToUseIt', () => {
+    const { t } = createI18n({ lang: 'ro' });
+    expect(t('skipWait')).toBe('Sari peste așteptare');
+    expect(t('skipWaitGuide')).toContain('Doar dacă telefonul e rece la atingere.');
   });
 });
