@@ -20,6 +20,11 @@
 // - An S3 starts from a cold phone (MV5): on the phone, the run waits before it
 //   until the app has seen the phone off the charger for COLD_START_MS,
 //   counted down on the screen (charger.ts; ruling B-R5, item 2).
+// - The person may skip that wait and the cooling pause («Sari peste
+//   așteptare», owner's request of 2026-11-24, plan
+//   2026-11-24-spike-skip-wait-find-hub): a phone that is still warm can only
+//   measure worse on heat, fps and CPU, never better. The next scenario's
+//   result notes the skipped wait (`wait skipped: …`), on each of its attempts.
 // - The screen stays on for the whole run (a wake lock), pauses included.
 import type { ChargerState } from './charger';
 import type { DevicePlan } from './deviceplan';
@@ -81,11 +86,12 @@ export interface QueueEnv {
   doc: VisibilitySource;
   clock: Clock;
   /**
-   * Runs a scenario and stores its result, as the start page does. Rejects as
-   * runScenario does: a ConnectError (the hub cannot be reached) or NotStarted
-   * (S3 on the charger) ends the run.
+   * Runs a scenario and stores its result, as the start page does, with
+   * `notes` added to the result's notes (the waits the person skipped before
+   * it). Rejects as runScenario does: a ConnectError (the hub cannot be
+   * reached) or NotStarted (S3 on the charger) ends the run.
    */
-  runScenario(id: ScenarioId): Promise<ScenarioResult>;
+  runScenario(id: ScenarioId, notes: readonly string[]): Promise<ScenarioResult>;
   /** The one camera prompt (getUserMedia) for the S3 scenarios, before the unattended part. */
   requestCamera(): Promise<void>;
   /** Whether the browser decodes H.264 (Firefox); absent where nothing is checked. */
@@ -108,7 +114,20 @@ export interface QueueEnv {
    * cannot read it (the PC), where an S3 does not wait.
    */
   charger?(): Promise<ChargerState | undefined>;
+  /**
+   * Offers «Sari peste așteptare» for a wait that has begun (before an S3, the
+   * cooling pause): `pressed` resolves when the person presses it, and
+   * `withdraw` takes the button away once the wait has ended, either way.
+   * Absent: the waits run out.
+   */
+  offerSkip?(): SkipOffer;
   show(event: QueueEvent): void;
+}
+
+/** «Sari peste așteptare» while a wait runs (QueueEnv.offerSkip). */
+export interface SkipOffer {
+  pressed: Promise<void>;
+  withdraw(): void;
 }
 
 /**
@@ -165,32 +184,59 @@ function callPerson(env: QueueEnv, untilHidden: boolean): () => void {
   return stop;
 }
 
-/** A wait of `ms`, counted down on the page every second with the event that `event` makes of the time left. */
-function countDown(env: QueueEnv, ms: number, event: (leftMs: number) => QueueEvent): Promise<void> {
+/** How a wait ended: it ran out, or the person skipped it after `waitedMs`. */
+type WaitEnd = { kind: 'done' } | { kind: 'skipped'; waitedMs: number };
+
+/**
+ * A wait of `ms`, counted down on the page every second with the event that
+ * `event` makes of the time left, which the person may skip where the page
+ * offers it (offerSkip).
+ */
+function countDown(env: QueueEnv, ms: number, event: (leftMs: number) => QueueEvent): Promise<WaitEnd> {
   const start = env.clock.now();
+  const elapsed = (): number => Math.round(env.clock.now() - start);
   return new Promise((resolve) => {
-    const tick = (): void => {
-      const leftMs = Math.max(0, ms - Math.round(env.clock.now() - start));
-      env.show(event(leftMs));
-      if (leftMs === 0) resolve();
-      else env.clock.setTimer(tick, Math.min(PAUSE_TICK_MS, leftMs));
+    let ended = false;
+    let cancel: () => void = () => undefined;
+    const offer = ms > 0 ? env.offerSkip?.() : undefined;
+    const end = (how: WaitEnd): void => {
+      if (ended) return;
+      ended = true;
+      cancel();
+      offer?.withdraw();
+      resolve(how);
     };
+    const tick = (): void => {
+      const leftMs = Math.max(0, ms - elapsed());
+      env.show(event(leftMs));
+      if (leftMs === 0) end({ kind: 'done' });
+      else cancel = env.clock.setTimer(tick, Math.min(PAUSE_TICK_MS, leftMs));
+    };
+    void offer?.pressed.then(() => {
+      end({ kind: 'skipped', waitedMs: Math.min(ms, elapsed()) });
+    });
     tick();
   });
 }
+
+const seconds = (ms: number): number => Math.round(ms / 1000);
 
 /**
  * Before S3 `id`: waits until the app has seen the phone off the charger for
  * COLD_START_MS, and reads the charger again after each wait, since the phone
  * may have been plugged in meanwhile. On the charger, or without a reading,
- * nothing to wait for: S3 itself refuses the charger and says so.
+ * nothing to wait for: S3 itself refuses the charger and says so. Answers the
+ * note of a wait that the person skipped, undefined otherwise.
  */
-async function coldStart(env: QueueEnv, id: ScenarioId): Promise<void> {
-  if (!env.charger) return;
+async function coldStart(env: QueueEnv, id: ScenarioId): Promise<string | undefined> {
+  if (!env.charger) return undefined;
   for (;;) {
     const state = await env.charger();
-    if (state?.kind !== 'off' || state.forMs >= COLD_START_MS) return;
-    await countDown(env, COLD_START_MS - state.forMs, (leftMs) => ({ kind: 'cold', id, leftMs }));
+    if (state?.kind !== 'off' || state.forMs >= COLD_START_MS) return undefined;
+    const wait = await countDown(env, COLD_START_MS - state.forMs, (leftMs) => ({ kind: 'cold', id, leftMs }));
+    if (wait.kind === 'skipped') {
+      return `wait skipped: off the charger for ${seconds(state.forMs + wait.waitedMs)} s of ${seconds(COLD_START_MS)} before ${id}`;
+    }
   }
 }
 
@@ -235,9 +281,12 @@ export async function runQueue(env: QueueEnv): Promise<QueueOutcome> {
   const wakeLock = await env.holdWakeLock();
   try {
     let index = 0;
+    // The note of a cooling pause that the person skipped, for the scenario after it.
+    let skipped: string[] = [];
     for (const step of steps) {
       if (step.kind === 'pause') {
-        await countDown(env, step.ms, (leftMs) => ({ kind: 'pause', leftMs }));
+        const wait = await countDown(env, step.ms, (leftMs) => ({ kind: 'pause', leftMs }));
+        if (wait.kind === 'skipped') skipped = [`wait skipped: cooling pause after ${seconds(wait.waitedMs)} s of ${seconds(step.ms)}`];
         continue;
       }
       if (needsCamera && !cameraAsked && step.id !== 'S10') {
@@ -246,7 +295,8 @@ export async function runQueue(env: QueueEnv): Promise<QueueOutcome> {
         await env.requestCamera();
       }
       index += 1;
-      const outcome = await runOne(env, step.id, index, scenarios.length);
+      const outcome = await runOne(env, step.id, index, scenarios.length, skipped);
+      skipped = [];
       if (typeof outcome === 'object') return { kind: 'interrupted-too-often', id: step.id, reason: outcome.tooOften };
       if (outcome === 'failed') failures.push(step.id);
     }
@@ -258,18 +308,25 @@ export async function runQueue(env: QueueEnv): Promise<QueueOutcome> {
 
 /**
  * Runs one scenario until it completes, fails twice or is interrupted too
- * often; for the last, with the reason of the last interruption.
+ * often; for the last, with the reason of the last interruption. `skipped`
+ * holds the note of the cooling pause skipped before it; each attempt's result
+ * carries it, with the notes of the cold starts skipped so far.
  */
 async function runOne(
   env: QueueEnv,
   id: ScenarioId,
   index: number,
   total: number,
+  skipped: readonly string[],
 ): Promise<'done' | 'failed' | { tooOften: InterruptReason }> {
   let interruptions = 0;
   let failedRuns = 0;
+  const notes = [...skipped];
   for (let attempt = 1; ; attempt += 1) {
-    if (id.startsWith('S3-')) await coldStart(env, id);
+    if (id.startsWith('S3-')) {
+      const note = await coldStart(env, id);
+      if (note !== undefined) notes.push(note);
+    }
     await untilVisible(env.doc);
     let stopCalling: () => void = () => undefined;
     if (id === 'S6') {
@@ -284,7 +341,7 @@ async function runOne(
     env.show({ kind: 'scenario', id, index, total, attempt });
     let result: ScenarioResult;
     try {
-      result = await env.runScenario(id);
+      result = await env.runScenario(id, [...notes]);
     } finally {
       stopCalling();
     }

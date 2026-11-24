@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Pe scurt pentru proprietar.** Construim o probă care măsoară, pe dispozitivele dvs., dacă tehnologia aleasă pentru aplicații (varianta B: o singură aplicație web, împachetată pentru Android și Windows) afișează fluent mai multe camere deodată:
-- pe Samsung Galaxy A24 (4 și 9 camere);
+- pe Samsung Galaxy A54 (4 și 9 camere; notat inițial A24, corectat prin O20);
 - pe PC, în Chrome, Edge și Firefox;
 - în aplicația de Windows (16 camere).
 
@@ -11,7 +11,7 @@ Camerele sunt simulate: fiecare imagine poartă un cod pe care proba îl citeșt
 
 Ce aveți de făcut: porniți un program pe PC, instalați o aplicație de test pe telefon și apăsați pe rând scenariile. Durează în total aproximativ 3–4 ore, în una sau mai multe sesiuni. Totul e gratuit. iPhone-ul și testele prin internetul mobil vin în Faza 0-bis.
 
-**Goal:** Measure MV1–MV10 and MV12–MV15 and gates G5, G6, G7 (shell origins and `http://localhost`), G9 and G19 on the owner's Galaxy A24, the owner's Windows 11 PC (Chrome, Edge, Firefox, Tauri/WebView2) and CI. The output is the Phase 0 (b) report with the A3 verdict for Android, web and Windows.
+**Goal:** Measure MV1–MV10 and MV12–MV15 and gates G5, G6, G7 (shell origins and `http://localhost`), G9 and G19 on the owner's Galaxy A54 (O20; first noted as a Galaxy A24), the owner's Windows 11 PC (Chrome, Edge, Firefox, Tauri/WebView2) and CI. The output is the Phase 0 (b) report with the A3 verdict for Android, web and Windows.
 
 **Architecture:**
 - **`spikehub`.** A Go spike hub in `tools/spikes/video`. It plays pre-encoded simulated cameras (and, optionally, the owner's own RTSP cameras) into a single Pion PeerConnection per viewer. The client offers N+1 `recvonly` video transceivers plus an `rpc` data channel, and the hub binds cameras to slots over that channel (A7, §6.3). The hub serves the spike web app, a 10-minute fMP4 HLS recording and a results endpoint over plain HTTP on the LAN; this shortcut is for the spike only.
@@ -517,7 +517,7 @@ The guide covers, in order:
 2. Unpack and run `spikehub.exe`. Allow it on **Rețele private** in the Windows firewall prompt. Read the phone URL from the window.
 3. On the PC: open Chrome at `http://localhost:7080`, run S1, S2, S3-9, S3-16, S4, S7, S9 and S10; repeat in Edge and Firefox (S1, S2, S3-9, S9, S10).
 4. Install `ipcam-desktop` and run S3-16, S4 and S10.
-5. On the Galaxy A24: allow installing from the browser, install `ipcam-spike.apk`, connect to the same Wi-Fi (not guest), enter the URL, then run S1, S2, S3-4, S3-9 (with the camera-light explanation for MV4), S4, S5, S6, S7, S8, S9 and S10. v0.1.0's guide kept the phone plugged in only for S4, with S3 on battery. Since spike-video-v0.1.1 (post-release task A, B-R4) the automatic run keeps the phone on battery for the whole run, S4 included, from at least 90 % charge: S3 refuses the charger (R48), and the report judges MV7 on a phone S4 recorded on battery (`TestMV7_ThePhonesS4OnBattery_IsJudged`).
+5. On the Galaxy A54: allow installing from the browser, install `ipcam-spike.apk`, connect to the same Wi-Fi (not guest), enter the URL, then run S1, S2, S3-4, S3-9 (with the camera-light explanation for MV4), S4, S5, S6, S7, S8, S9 and S10. v0.1.0's guide kept the phone plugged in only for S4, with S3 on battery. Since spike-video-v0.1.1 (post-release task A, B-R4) the automatic run keeps the phone on battery for the whole run, S4 included, from at least 90 % charge: S3 refuses the charger (R48), and the report judges MV7 on a phone S4 recorded on battery (`TestMV7_ThePhonesS4OnBattery_IsJudged`).
 6. Optional: start `spikehub -real` and type the RTSP URLs of your own cameras.
 7. Zip the `results` folder and attach it in the chat or put it in `ipcam-teste/` on Google Drive.
 

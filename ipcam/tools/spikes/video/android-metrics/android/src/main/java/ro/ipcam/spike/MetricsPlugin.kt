@@ -8,6 +8,8 @@ import android.os.Build
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Configuration
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Bundle
 import android.os.Debug
@@ -22,6 +24,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import androidx.core.content.FileProvider
 import androidx.savedstate.SavedStateRegistry
+import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -29,6 +32,8 @@ import com.getcapacitor.PluginMethod
 import com.getcapacitor.WebViewListener
 import com.getcapacitor.annotation.CapacitorPlugin
 import java.io.File
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.URLEncoder
 
 private const val TAG = "SpikeMetrics"
@@ -71,6 +76,20 @@ internal fun pageForLog(url: String?): String {
     val scenario = Regex("[?&]autorun=([^&#]*)").find(url)?.groupValues?.get(1)
     return url.substringBefore('?').substringBefore('#') + (scenario?.let { " (autorun $it)" } ?: "")
 }
+
+/** A private IPv4 address of the phone and the length of its network's prefix. */
+internal data class LanAddress(val address: String, val prefix: Int)
+
+/**
+ * The private IPv4 addresses (10/8, 172.16/12, 192.168/16) among a network's
+ * addresses, given as address and prefix length (LinkProperties.linkAddresses):
+ * the subnets in which the spike app looks for spikehub (hubfinder.ts). IPv6,
+ * loopback, link-local and public addresses are left out.
+ */
+internal fun privateIpv4(addresses: List<Pair<InetAddress, Int>>): List<LanAddress> =
+    addresses.mapNotNull { (address, prefix) ->
+        if (address is Inet4Address && address.isSiteLocalAddress) LanAddress(address.hostAddress ?: return@mapNotNull null, prefix) else null
+    }
 
 /** The automatic run's call: off, on, off, on (ms), once. */
 private val VIBRATION_PATTERN_MS = longArrayOf(0, 400, 200, 400)
@@ -246,6 +265,35 @@ class MetricsPlugin : Plugin() {
             if (on) activity.window.addFlags(flag) else activity.window.clearFlags(flag)
             call.resolve()
         }
+    }
+
+    /**
+     * SPIKE-ONLY (owner's request of 2026-11-24, plan 2026-11-24-spike-skip-wait-find-hub):
+     * `{ addresses: [{ address, prefix }] }`, the private IPv4 addresses of the
+     * phone's Wi-Fi and Ethernet networks, in which the page looks for
+     * spikehub. Mobile data is left out: its addresses can be private too
+     * (carrier NAT), and no hub is there. The page shows them on the screen
+     * only; they never go into a result or a log (PH0-22).
+     */
+    @PluginMethod
+    fun lanAddresses(call: PluginCall) {
+        val addresses = JSArray()
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+            ?: return call.resolve(JSObject().put("addresses", addresses))
+        @Suppress("DEPRECATION") // allNetworks: the one call that lists every network without a callback
+        val networks = connectivity.allNetworks
+        for (network in networks) {
+            val capabilities = connectivity.getNetworkCapabilities(network) ?: continue
+            val local = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+            if (!local) continue
+            val link = connectivity.getLinkProperties(network) ?: continue
+            for (found in privateIpv4(link.linkAddresses.map { it.address to it.prefixLength })) {
+                addresses.put(JSObject().put("address", found.address).put("prefix", found.prefix))
+            }
+        }
+        Log.i(TAG, "lan addresses: ${addresses.length()}")
+        call.resolve(JSObject().put("addresses", addresses))
     }
 
     /** Vibrates twice, to call the person to S5 and S6 of the automatic run: a WebView ignores navigator.vibrate. */

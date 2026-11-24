@@ -13,7 +13,7 @@ export type Step = { kind: 'scenario'; id: ScenarioId } | { kind: 'pause'; ms: n
 export interface DevicePlan {
   /** `chrome`, `edge`, `firefox`, `ipcam-desktop` or `phone`, as spikehub names it. */
   id: string;
-  /** What the owner reads: Chrome, Edge, Firefox, ipcam-desktop, Galaxy A24. */
+  /** What the owner reads: Chrome, Edge, Firefox, ipcam-desktop, Galaxy A54. */
   label: string;
   platform: Platform;
   /** The owner's PC (a browser or ipcam-desktop); false for the phone. */

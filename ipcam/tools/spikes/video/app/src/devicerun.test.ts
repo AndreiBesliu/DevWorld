@@ -41,14 +41,16 @@ type Outcome = ScenarioResult | Error | ((doc: FakeDocument) => ScenarioResult |
 interface Harness {
   env: QueueEnv;
   doc: FakeDocument;
-  /** Scenario starts, in order, with the fake time they started at. */
-  starts: { id: ScenarioId; at: number }[];
+  /** Scenario starts, in order, with the fake time they started at and the notes the run passed for the result. */
+  starts: { id: ScenarioId; at: number; notes: readonly string[] }[];
   events: QueueEvent[];
   /** What happened, in order: scenario starts and the queue's calls. */
   log: string[];
   wakeLock: { held: number; released: number };
   confirm: { resolve: () => void };
   pip: { end: () => void; inPip: boolean };
+  /** With `skip`: how often the skip was offered and withdrawn, and the person's press. */
+  skip: { offered: number; withdrawn: number; press: () => void };
 }
 
 function harness(
@@ -64,6 +66,8 @@ function harness(
     pipEntered?: boolean;
     /** What the app knows of the charger at fake time `now` (Android); absent: it cannot read it. */
     charger?: (now: number) => ChargerState | undefined;
+    /** Whether the page offers «Sari peste așteptare» (offerSkip). */
+    skip?: boolean;
   } = {},
 ): Harness {
   const doc = new FakeDocument();
@@ -74,6 +78,7 @@ function harness(
   const queues = new Map<ScenarioId, Outcome[]>(Object.entries(options.outcomes ?? {}) as [ScenarioId, Outcome[]][]);
   let confirmResolve: () => void = () => undefined;
   const pipState = { inPip: false, waiters: [] as (() => void)[] };
+  const skip = { offered: 0, withdrawn: 0, press: () => undefined as void };
   const h: Harness = {
     doc,
     starts,
@@ -90,6 +95,7 @@ function harness(
         return pipState.inPip;
       },
     },
+    skip,
     env: {
       plan: plan(planId),
       complete: new Set(options.complete ?? []),
@@ -104,8 +110,8 @@ function harness(
           };
         },
       },
-      runScenario: async (id) => {
-        starts.push({ id, at: performance.now() });
+      runScenario: async (id, notes) => {
+        starts.push({ id, at: performance.now(), notes });
         log.push(id);
         await new Promise((resolve) => setTimeout(resolve, options.runMs ?? 30_000));
         const next = queues.get(id)?.shift() ?? result(id);
@@ -166,6 +172,30 @@ function harness(
                 log.push('pip?');
                 return pipState.inPip ? new Promise<void>((resolve) => pipState.waiters.push(resolve)) : Promise.resolve();
               },
+            },
+          }
+        : {}),
+      ...(options.skip
+        ? {
+            offerSkip: () => {
+              skip.offered += 1;
+              log.push('skip?');
+              let pressed: () => void = () => undefined;
+              const offer = {
+                pressed: new Promise<void>((resolve) => {
+                  pressed = resolve;
+                }),
+                withdraw: () => {
+                  skip.withdrawn += 1;
+                  skip.press = () => undefined;
+                },
+              };
+              skip.press = () => {
+                log.push('skipped');
+                skip.press = () => undefined;
+                pressed();
+              };
+              return offer;
             },
           }
         : {}),
@@ -596,6 +626,78 @@ describe('the phone off the charger (S3 starts cold)', () => {
 
     expect(cold(h)).toEqual([]);
     expect(h.log).not.toContain('charger?');
+  });
+});
+
+describe('«Sari peste așteptare»: the phone is cold already', () => {
+  const offSince = (since: number) => (now: number) => ({ kind: 'off' as const, forMs: now - since });
+  const allButS39: ScenarioId[] = ['S10', 'S1', 'S2', 'S3-4', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'];
+
+  it('skip_coldStart_startsTheS3AtOnceAndNotesTheSkippedWait', async () => {
+    // Off the charger for 1 min when the run reads it; the person skips 5 s later.
+    const t0 = performance.now();
+    const h = harness('phone', { complete: allButS39, charger: offSince(t0 - 60_000), skip: true });
+
+    const running = runQueue(h.env);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(ran(h)).toEqual([]);
+    expect(h.skip.offered).toBe(1);
+    h.skip.press();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(ran(h)).toEqual(['S3-9']);
+    expect((h.starts[0]?.at ?? 0) - t0).toBeLessThan(6000);
+    expect(h.starts[0]?.notes).toEqual(['wait skipped: off the charger for 65 s of 600 before S3-9']);
+    expect(h.skip.withdrawn).toBe(1);
+    await finish(running);
+    expect(h.skip.offered).toBe(1);
+  });
+
+  it('skip_coolingPause_startsS34AtOnceAndNotesItOnEachOfItsAttempts', async () => {
+    const note = 'wait skipped: cooling pause after 5 s of 600';
+    const h = harness('phone', { pip: true, skip: true, outcomes: { 'S3-4': [interrupted('S3-4')] } });
+
+    const running = runQueue(h.env);
+    await vi.advanceTimersByTimeAsync(4 * 30_000 + 5000);
+    expect(ran(h).at(-1)).toBe('S3-9');
+    expect(h.skip.offered).toBe(1);
+    h.skip.press();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ran(h).at(-1)).toBe('S3-4');
+
+    // S3-4 was interrupted once and starts again; then S4, S5 and S6, which waits for «Continuă».
+    await vi.advanceTimersByTimeAsync(30_000 + 10 * 30_000);
+    h.confirm.resolve();
+    await vi.advanceTimersByTimeAsync(31_000);
+    h.pip.end();
+    await finish(running);
+
+    expect(h.starts.filter((start) => start.id === 'S3-4').map((start) => start.notes)).toEqual([[note], [note]]);
+    expect(h.starts.filter((start) => start.id !== 'S3-4').flatMap((start) => start.notes)).toEqual([]);
+  });
+
+  it('skip_notPressed_withdrawnWhenTheWaitEnds_andNoNote', async () => {
+    const t0 = performance.now();
+    const h = harness('phone', { complete: allButS39, charger: offSince(t0), skip: true });
+
+    await finish(runQueue(h.env));
+
+    expect(h.skip).toMatchObject({ offered: 1, withdrawn: 1 });
+    expect((h.starts[0]?.at ?? 0) - t0).toBeGreaterThanOrEqual(600_000);
+    expect(h.starts[0]?.notes).toEqual([]);
+  });
+
+  it('skip_noWait_nothingOffered', async () => {
+    const t0 = performance.now();
+    const phone = harness('phone', { complete: allButS39, charger: offSince(t0 - 11 * 60_000), skip: true });
+    const pc = harness('chrome', { skip: true });
+
+    await finish(runQueue(phone.env));
+    await finish(runQueue(pc.env));
+
+    expect(phone.skip.offered).toBe(0);
+    expect(pc.skip.offered).toBe(0);
+    expect([...phone.starts, ...pc.starts].flatMap((start) => start.notes)).toEqual([]);
   });
 });
 

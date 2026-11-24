@@ -36,6 +36,9 @@ function fakePlugins(read: Awaited<ReturnType<AndroidPlugins['metrics']['read']>
       installUpdate: vi.fn<AndroidPlugins['metrics']['installUpdate']>(() =>
         Promise.resolve({ status: 'installing' as const }),
       ),
+      lanAddresses: vi.fn<AndroidPlugins['metrics']['lanAddresses']>(() =>
+        Promise.resolve({ addresses: [{ address: '192.168.1.57', prefix: 24 }] }),
+      ),
     },
   } satisfies AndroidPlugins;
   const emitPip = (on: boolean): void => {
@@ -93,6 +96,9 @@ describe('installAndroidNative', () => {
     const offer = { version: 'spike-video-v0.1.2', url: 'https://github.com/x.apk', sha256: 'ab' };
     await expect(native.update?.install(offer)).resolves.toBe('installing');
     expect(plugins.metrics.installUpdate.mock.calls).toEqual([[{ url: 'https://github.com/x.apk', sha256: 'ab' }]]);
+
+    // The search for spikehub: the phone's Wi-Fi addresses (hubfinder.ts).
+    await expect(native.lanAddresses?.()).resolves.toEqual([{ address: '192.168.1.57', prefix: 24 }]);
   });
 
   it('nativeAndroid_onlyARunsReadAsksThePluginForTheScenario', async () => {

@@ -9,6 +9,14 @@ const ro = {
   otherLanguage: 'English',
   hubLabel: 'Adresa hub-ului (o vedeți în fereastra spikehub)',
   check: 'Verifică conexiunea',
+  findHub: 'Caută hub-ul în rețea',
+  findSearching: 'Caut spikehub în rețeaua {networks}; durează cel mult 15 secunde.',
+  findFound: 'Atingeți adresa hub-ului, ca s-o folosiți:',
+  findNone:
+    'Nu am găsit spikehub în rețeaua {networks}. Verificați că spikehub rulează pe PC, că telefonul e pe același Wi-Fi ' +
+    'și că firewall-ul permite spikehub, apoi apăsați din nou «Caută hub-ul în rețea». Sau scrieți adresa din fereastra spikehub.',
+  findNoNetwork: 'Telefonul nu e conectat la Wi-Fi. Conectați-l la același Wi-Fi ca PC-ul și apăsați din nou «Caută hub-ul în rețea».',
+  findFailed: 'Telefonul nu și-a putut citi rețeaua ({detail}). Scrieți adresa din fereastra spikehub.',
   checking: 'Se verifică…',
   connected: 'Conectat: {cameras} camere simulate, perechea ICE {pair}.',
   device: 'Dispozitiv: {device}',
@@ -127,6 +135,10 @@ const ro = {
     'Înainte de {id}, telefonul stă 10 minute fără încărcător, ca să nu fie cald: mai sunt {time}. ' +
     'Lăsați-l pe masă, scos din încărcător; rularea continuă singură.',
   autoAttention: '{id} are nevoie de dvs.: urmați instrucțiunea de pe ecran.',
+  skipWait: 'Sari peste așteptare',
+  skipWaitGuide:
+    'Doar dacă telefonul e rece la atingere. Un telefon încă cald poate ieși doar mai prost la temperatură și fps, nu mai bine; ' +
+    'rezultatul notează că ați sărit așteptarea.',
   s6Guide:
     'S6 are nevoie de dvs. După «Continuă», aplicația trece singură într-o fereastră mică. Nu o atingeți. Când S6 se termină, ' +
     'după 5 minute, telefonul sună: atunci atingeți fereastra mică și pictograma de mărire, ca să reveniți în aplicație.',
@@ -161,6 +173,14 @@ const en: Record<MessageKey, string> = {
   otherLanguage: 'Română',
   hubLabel: 'Hub address (shown in the spikehub window)',
   check: 'Check the connection',
+  findHub: 'Find the hub on the network',
+  findSearching: 'Looking for spikehub in the network {networks}; this takes 15 seconds at most.',
+  findFound: 'Tap the hub’s address to use it:',
+  findNone:
+    'spikehub was not found in the network {networks}. Check that spikehub runs on the PC, that the phone is on the same Wi-Fi ' +
+    'and that the firewall allows spikehub, then press «Find the hub on the network» again. Or type the address from the spikehub window.',
+  findNoNetwork: 'The phone is not on Wi-Fi. Connect it to the same Wi-Fi as the PC and press «Find the hub on the network» again.',
+  findFailed: 'The phone could not read its network ({detail}). Type the address from the spikehub window.',
   checking: 'Checking…',
   connected: 'Connected: {cameras} simulated cameras, ICE pair {pair}.',
   device: 'Device: {device}',
@@ -272,6 +292,10 @@ const en: Record<MessageKey, string> = {
     'Before {id}, the phone stays off the charger for 10 minutes, so that it is not warm: {time} left. ' +
     'Leave it on the table, off the charger; the run goes on by itself.',
   autoAttention: '{id} needs you: follow the instruction on the screen.',
+  skipWait: 'Skip the wait',
+  skipWaitGuide:
+    'Only if the phone feels cool. A phone that is still warm can only measure worse on heat and fps, not better; ' +
+    'the result notes that you skipped the wait.',
   s6Guide:
     'S6 needs you. After «Continue», the app goes into a small window by itself. Do not touch it. When S6 ends, ' +
     'after 5 minutes, the phone rings: then tap the small window and the enlarge icon to return to the app.',

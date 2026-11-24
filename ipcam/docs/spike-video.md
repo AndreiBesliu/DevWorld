@@ -1,13 +1,13 @@
 # Proba video (Faza 0 b): ghid pas cu pas
 
-Acest ghid vă arată cum rulați proba video pe PC-ul cu Windows 11 și pe telefonul Samsung Galaxy A24. Proba măsoară cât de repede și cât de fluent afișează aplicația noastră mai multe camere deodată. Camerele sunt simulate de un program care rulează pe PC: `spikehub`. Toate rezultatele ajung singure într-un folder de pe PC. La final ni-l trimiteți.
+Acest ghid vă arată cum rulați proba video pe PC-ul cu Windows 11 și pe telefonul Samsung Galaxy A54. Proba măsoară cât de repede și cât de fluent afișează aplicația noastră mai multe camere deodată. Camerele sunt simulate de un program care rulează pe PC: `spikehub`. Toate rezultatele ajung singure într-un folder de pe PC. La final ni-l trimiteți.
 
 Din versiunea `spike-video-v0.1.1`, pe fiecare dispozitiv apăsați un singur buton: «Rulează tot pentru acest dispozitiv»<!--app-->. Aplicația recunoaște singură dispozitivul, rulează scenariile lui în ordine și le sare pe cele care au deja rezultate complete în spikehub.
 
 ## Ce aveți nevoie
 
 - PC-ul cu Windows 11, legat la routerul de acasă (prin Wi-Fi sau cablu), cu Chrome, Edge și Firefox.
-- Telefonul Galaxy A24 și încărcătorul lui, pe Wi-Fi-ul aceluiași router.
+- Telefonul Galaxy A54 și încărcătorul lui, pe Wi-Fi-ul aceluiași router.
 - Aproximativ 3 ore și 30 de minute pentru ce a rămas după Chrome, în una sau mai multe sesiuni. Cât rulează, nu trebuie să stați lângă dispozitiv.
 - Nimic de plătit și niciun cont nou. Nu vă cerem nicio parolă.
 
@@ -22,7 +22,7 @@ Textele între «» apar exact așa în programele de test. Textele între „�
 | PC: Edge | S10, S1, S2, S3-9, S9 | 20 min |
 | PC: Firefox | S10, S1, S2, S3-9, S9 | 25 min, cu verificarea pluginului |
 | PC: ipcam-desktop | S10, S1, S2, S3-16, S4, S7, S9 | 55 min, cu instalarea |
-| Telefon: Galaxy A24 | S10, S1, S2, S3-9, pauză de 10 min, S3-4, S4, S5, S6, S7, S8, S9 | 1 oră și 35 min, cu instalarea și pauza |
+| Telefon: Galaxy A54 | S10, S1, S2, S3-9, pauză de 10 min, S3-4, S4, S5, S6, S7, S8, S9 | 1 oră și 35 min, cu instalarea și pauza |
 | Trimiteți rezultatele | | 5 min |
 
 Aplicația ține minte ce s-a rulat: pe pagina ei, rândul «Rămase pe acest PC: …»<!--app--> arată dispozitivele PC-ului care mai au scenarii de rulat, iar rândul de dedesubt arată telefonul. Un scenariu care are deja rezultat complet arată «gata (rezultatul e în spikehub)»<!--app-->.
@@ -86,10 +86,10 @@ De la v0.1.2, aplicațiile instalate («Proba ipcam»<!--android--> pe telefon �
 
 Aplicația verifică fiecare fișier descărcat cu suma de control pe care GitHub o afișează pentru release; dacă nu se potrivește, nu instalează nimic și scrie «Actualizarea nu a reușit: …»<!--app-->. `spikehub` (arhiva `spikehub-windows.zip`) nu se actualizează singur: când o versiune nouă îl schimbă, vă scriem în chat.
 
-## Pasul 1. Treceți la versiunea v0.1.2
+## Pasul 1. Treceți la versiunea v0.1.3
 
 1. Închideți fereastra spikehub, dacă e deschisă.
-2. Pe PC, deschideți pagina de release „spike-video-v0.1.2”, pe care v-o trimitem în chat (o găsiți și la <https://github.com/AndreiBesliu/DevWorld/releases>). Descărcați `spikehub-windows.zip` și `ipcam-desktop-setup.exe`. Dacă browserul spune că fișierul „nu este descărcat frecvent”, alegeți „Păstrați” (eventual „Păstrați oricum”): programele de test nu sunt semnate digital, pentru că semnătura costă bani.
+2. Pe PC, deschideți pagina de release „spike-video-v0.1.3”, pe care v-o trimitem în chat (o găsiți și la <https://github.com/AndreiBesliu/DevWorld/releases>). Descărcați `spikehub-windows.zip` și `ipcam-desktop-setup.exe`. Dacă browserul spune că fișierul „nu este descărcat frecvent”, alegeți „Păstrați” (eventual „Păstrați oricum”): programele de test nu sunt semnate digital, pentru că semnătura costă bani.
 3. Clic dreapta pe `spikehub-windows.zip` → „Extragere totală”. La „Fișierele vor fi extrase în acest folder”, apăsați „Răsfoire” și alegeți folderul în care ați extras versiunea v0.1.0 (cel cu `spikehub.exe` și folderul `results`). Apăsați „Extragere”.
 4. Windows anunță că folderul are deja fișiere cu aceleași nume. Alegeți „Înlocuiți fișierele din destinație”.
 5. Nu ștergeți și nu mutați folderul `results`: rezultatele de până acum, cu cele din Chrome, rămân acolo și contează.
@@ -146,7 +146,7 @@ Dacă în chenar scrie:
 - «În acest folder nu este spikehub.exe. Scrieți folderul în care ați extras spikehub-windows.zip.»<!--app-->: corectați folderul și apăsați din nou «Pornește hub-ul»<!--app-->.
 - «Hub-ul s-a oprit singur (cod …). Motivul e în ultimele rânduri de mai jos.»<!--app-->: citiți ultimele rânduri. Dacă scrie «îl folosește alt program?»<!--hub-->, fereastra spikehub de la pasul 2 e încă deschisă: închideți-o și apăsați din nou «Pornește hub-ul»<!--app-->. Altfel, faceți o captură și scrieți-ne.
 
-## Pasul 5. Telefonul Galaxy A24
+## Pasul 5. Telefonul Galaxy A54
 
 ### Pregătire
 
@@ -156,8 +156,8 @@ Dacă în chenar scrie:
 
 ### Instalare
 
-1. Dacă aveți aplicația veche «Proba ipcam»<!--android-->, dezinstalați-o: țineți apăsat pe pictograma ei → „Dezinstalare”. Versiunile până la v0.1.1 au avut fiecare altă semnătură, așa că Android nu instalează v0.1.2 peste ele. De la v0.1.2 semnătura rămâne aceeași, iar versiunile următoare vin din aplicație (vedeți „Versiuni noi, direct din aplicație”).
-2. Pe telefon, deschideți în Chrome pagina de release „spike-video-v0.1.2” și apăsați pe `ipcam-spike.apk`. Dacă Chrome avertizează că fișierul poate fi periculos, alegeți „Descărcați oricum”.
+1. Dacă aveți aplicația veche «Proba ipcam»<!--android-->, dezinstalați-o: țineți apăsat pe pictograma ei → „Dezinstalare”. Versiunile până la v0.1.1 au avut fiecare altă semnătură, așa că Android nu instalează o versiune nouă peste ele. De la v0.1.2 semnătura rămâne aceeași, iar versiunile următoare vin din aplicație (vedeți „Versiuni noi, direct din aplicație”).
+2. Pe telefon, deschideți în Chrome pagina de release „spike-video-v0.1.3” și apăsați pe `ipcam-spike.apk`. Dacă Chrome avertizează că fișierul poate fi periculos, alegeți „Descărcați oricum”.
 3. Deschideți fișierul descărcat (din notificare sau din „Fișierele mele” → „Descărcări”). Dacă Android spune că nu are permisiunea să instaleze aplicații din această sursă, apăsați „Setări”, activați „Permiteți din această sursă”, reveniți și apăsați „Instalați”.
 4. Play Protect poate avertiza că nu cunoaște aplicația. Apăsați „Mai multe detalii”, apoi „Instalați oricum”. Dacă instalarea e oprită de „Blocare automată” (Auto Blocker): „Setări” → „Securitate și confidențialitate” → „Blocare automată” → dezactivați. Instalați, apoi reactivați-o.
 
@@ -166,10 +166,11 @@ Avertismentele apar pentru că aplicația de test nu vine din Magazin Play și n
 ### Rulare
 
 1. Deschideți aplicația «Proba ipcam»<!--android-->. Rulați proba doar în ea, nu în browserul telefonului.
-2. În câmpul «Adresa hub-ului (o vedeți în fereastra spikehub)»<!--app--> scrieți adresa notată la pasul 2.6, cea de forma `http://…:7080`, și apăsați «Verifică conexiunea»<!--app-->. Trebuie să apară «Conectat: …»<!--app-->. Nu scrieți `127.0.0.1`: acea adresă merge doar pe PC.
+2. Cu câmpul «Adresa hub-ului (o vedeți în fereastra spikehub)»<!--app--> gol, aplicația caută singură spikehub în rețeaua Wi-Fi a telefonului și scrie «Caut spikehub în rețeaua …»<!--app-->. Dacă găsește un singur hub, îl scrie în câmp și verifică singură conexiunea. Altfel, sub «Atingeți adresa hub-ului, ca s-o folosiți:»<!--app--> apare câte un buton pentru fiecare hub găsit: atingeți-l. Puteți căuta oricând din nou cu «Caută hub-ul în rețea»<!--app-->. Trebuie să apară «Conectat: …»<!--app-->.
+   - Dacă scrie «Nu am găsit spikehub în rețeaua …»<!--app-->, verificați că spikehub rulează pe PC și că telefonul e pe același Wi-Fi, apoi căutați din nou. Sau scrieți în câmp adresa notată la pasul 2.6, cea de forma `http://…:7080`, și apăsați «Verifică conexiunea»<!--app-->. Nu scrieți `127.0.0.1`: acea adresă merge doar pe PC.
 3. Verificați că telefonul e scos din încărcător (de cel puțin 10 minute, ca la pregătire) și apăsați «Rulează tot pentru acest dispozitiv»<!--app-->.
 4. Răspundeți la întrebarea lui S10. Când Android cere acces la cameră, alegeți „Cât timp folosiți aplicația”: fără el, verdictul pentru telefon nu se poate da. Indicatorul verde al camerei poate apărea câteva secunde în colțul ecranului.
-5. Așezați telefonul pe masă, nu în buzunar și nu pe o pernă, cu aplicația deschisă. Ecranul rămâne aprins. Aplicația numără cele 10 minute fără încărcător de când l-a văzut scos, cel mai devreme de când ați deschis-o. Dacă nu au trecut încă, înainte de S3-9 așteaptă și numără pe ecran: «Înainte de …, telefonul stă 10 minute fără încărcător, ca să nu fie cald: mai sunt …»<!--app-->. După S3-9 urmează o pauză de 10 minute, numărată pe ecran, ca telefonul să se răcească; rularea continuă singură.
+5. Așezați telefonul pe masă, nu în buzunar și nu pe o pernă, cu aplicația deschisă. Ecranul rămâne aprins. Aplicația numără cele 10 minute fără încărcător de când l-a văzut scos, cel mai devreme de când ați deschis-o. Dacă nu au trecut încă, înainte de S3-9 așteaptă și numără pe ecran: «Înainte de …, telefonul stă 10 minute fără încărcător, ca să nu fie cald: mai sunt …»<!--app-->. După S3-9 urmează o pauză de 10 minute, numărată pe ecran, ca telefonul să se răcească; rularea continuă singură. Dacă telefonul e deja rece la atingere, puteți apăsa în timpul oricărei dintre cele două numărători «Sari peste așteptare»<!--app-->: un telefon încă cald poate ieși doar mai prost la temperatură, nu mai bine, iar rezultatul notează că ați sărit așteptarea.
 6. **S5.** Telefonul sună și vibrează. Pe ecran scrie «Apăsați butonul Acasă și reveniți după ora … (cel puțin 2 minute).»<!--app-->, cu o oră a ceasului telefonului. Apăsați Acasă. Când ceasul arată ora afișată sau mai târziu, redeschideți «Proba ipcam»<!--android--> (din aplicațiile recente sau de pe pictograma ei). Aplicația măsoară singură cât durează până revine imaginea.
 7. **S6.** Telefonul sună din nou. Apăsați «Continuă»<!--app-->: aplicația trece singură într-o fereastră mică, peste ecranul de start. Nu o atingeți. După 5 minute telefonul sună: atingeți fereastra mică și pictograma de mărire, ca să reveniți în aplicație.
 8. Rularea continuă singură cu S7, S8 și S9, până la «Gata: toate scenariile acestui dispozitiv au rezultate.»<!--app-->
