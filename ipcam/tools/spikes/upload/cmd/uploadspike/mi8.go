@@ -27,7 +27,7 @@ import (
 // MI8's test seams: its timing, and an ffmpeg to use without a download
 // ("-": none, the snapshot diff).
 const (
-	envMI8Timing = "UPLOADSPIKE_TEST_MI8_TIMING" // target=10s,progress=1s,firstframe=5s,beat=0s
+	envMI8Timing = "UPLOADSPIKE_TEST_MI8_TIMING" // target=10s,progress=1s,firstframe=5s,beat=0s,authpause=60s
 	envFFmpeg    = "UPLOADSPIKE_FFMPEG"
 )
 
@@ -38,15 +38,23 @@ const mi8Closed = "MI8Closed"
 const maxMI8Cameras = 16
 
 // mi8Timing is MI8's timing: the observed time that closes the run, the
-// progress's period, the wait for a substream's first frame, and a delay of
-// the detached copy's first heartbeat (a test seam).
+// progress's period, the wait for a substream's first frame, a delay of
+// the detached copy's first heartbeat (a test seam), and the pause after a
+// probe whose login the camera refused.
 type mi8Timing struct {
-	target, progress, firstFrame, firstBeat time.Duration
+	target, progress, firstFrame, firstBeat, authPause time.Duration
 }
+
+// mi8AuthPause is §8.2's pause after 3 refused logins. A probe is a new
+// diag onvif process, which forgets the pause it began, and it tries up to
+// 3 logins (WS-UsernameToken, HTTP digest, basic): so --continue waits it
+// out before it probes that camera again, and the owner's account is not
+// locked by a few quick retries.
+const mi8AuthPause = 60 * time.Second
 
 // timing reads envMI8Timing over MI8's defaults.
 func mi8TimingOf() (mi8Timing, error) {
-	t := mi8Timing{target: mi8.Target, progress: time.Minute}
+	t := mi8Timing{target: mi8.Target, progress: time.Minute, authPause: mi8AuthPause}
 	v := os.Getenv(envMI8Timing)
 	if v == "" {
 		return t, nil
@@ -66,6 +74,8 @@ func mi8TimingOf() (mi8Timing, error) {
 			t.firstFrame = d
 		case "beat":
 			t.firstBeat = d
+		case "authpause":
+			t.authPause = d
 		default:
 			return t, fmt.Errorf("%s: %s", envMI8Timing, kv)
 		}
@@ -343,8 +353,13 @@ func continueCameras(ctx context.Context, e *env, hub mi8.Hub) ([]mi8.CameraRef,
 	for _, c := range run.Cameras {
 		e.printf(msgMI8ContinueCam, c.Camera, cameraLabel(c.Brand, c.Model))
 	}
+	timing, err := mi8TimingOf()
+	if err != nil {
+		return nil, err
+	}
 	var cams []mi8.CameraRef
 	for _, c := range run.Cameras {
+		var refusedAt time.Time
 		for {
 			ref, ok, err := askCamera(e, c.Camera, true)
 			if err != nil {
@@ -354,7 +369,18 @@ func continueCameras(ctx context.Context, e *env, hub mi8.Hub) ([]mi8.CameraRef,
 				e.printf(msgMI8Skipped, c.Camera)
 				break
 			}
+			if wait := timing.authPause - time.Since(refusedAt); !refusedAt.IsZero() && wait > 0 {
+				e.printf(msgMI8AuthPause, c.Camera, int((wait+time.Second-1)/time.Second))
+				select {
+				case <-time.After(wait):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
 			probes, _ := hub.Probe(ctx, []mi8.CameraRef{ref})
+			if len(probes) == 1 && probes[0].Error == mi8.ProbeErrAuth {
+				refusedAt = time.Now()
+			}
 			if len(probes) == 1 && probes[0].SameCamera(c.Brand, c.Model) {
 				cams = append(cams, ref)
 				break

@@ -244,6 +244,7 @@ const (
 	msgMI8ProbeAuth     = "%s: utilizatorul sau parola ONVIF nu sunt acceptate."
 	msgMI8ProbeDown     = "%s: camera nu răspunde."
 	msgMI8NotThisCamera = "Aceasta nu este camera %s (%s). Verificați adresa."
+	msgMI8AuthPause     = "%s: aștept %d s înainte de o nouă încercare, ca să nu se blocheze contul ONVIF al dvs." //nolint:gosec // G101: an owner's line
 	msgMI8ContinueHours = "Proba MI8 continuă: %.1f h observate din 72."
 	msgMI8ContinueCam   = "%s: %s"
 	msgMI8Skipped       = "%s nu intră în această sesiune."

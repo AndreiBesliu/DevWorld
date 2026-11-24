@@ -353,3 +353,38 @@ func TestMI8_ContinueRefusesAnotherCamera(t *testing.T) {
 		t.Errorf("mi8 over a stopped run: exit %d, stdout:\n%s\nstderr:\n%s", p.exitCode(), p.stdout, p.stderr)
 	}
 }
+
+// TestMI8_ContinueWaitsOutAuthPause (§8.2): each probe is a new diag onvif
+// process that tries up to 3 logins and forgets its pause, so --continue
+// waits out the pause before it probes a camera whose login was just
+// refused, and says so, instead of sending the camera 3 more refused logins
+// at each retyped password.
+func TestMI8_ContinueWaitsOutAuthPause(t *testing.T) {
+	s := startOnvifSim(t, "Hikvision/A")
+	r := mi8Rig(t, "1h")
+	const pause = 2 * time.Second
+	for i, v := range r.env {
+		if strings.HasPrefix(v, envMI8Timing+"=") {
+			r.env[i] = v + ",authpause=" + pause.String()
+		}
+	}
+	r.stopMI8()
+	r.openMI8Run(time.Hour, mi8.CameraState{Camera: "real-1", Brand: "Hikvision", Model: "A"})
+	wrong := fmt.Sprintf("%s\n%s\n%s\n", s.Hosts[0], camUser, "wrong-"+camPass)
+	start := time.Now()
+	p := r.run(wrong+wrong+"\n", nil, "mi8", "--continue")
+	elapsed := time.Since(start)
+	out := p.stdout.String()
+	if n := strings.Count(out, fmt.Sprintf(msgMI8ProbeAuth, "real-1")); n != 2 {
+		t.Errorf("%d refused probes, want 2:\n%s", n, out)
+	}
+	if want := fmt.Sprintf(msgMI8AuthPause, "real-1", 2); strings.Count(out, want) != 1 {
+		t.Errorf("stdout lacks one %q:\n%s", want, out)
+	}
+	if elapsed < pause {
+		t.Errorf("the second probe came %v after the first run began; want the %v pause first", elapsed, pause)
+	}
+	if p.exitCode() != 1 {
+		t.Errorf("exit %d, want 1 (no camera left)", p.exitCode())
+	}
+}
