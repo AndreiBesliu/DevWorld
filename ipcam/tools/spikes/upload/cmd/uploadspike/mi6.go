@@ -254,6 +254,9 @@ func (h *holder) login(ctx context.Context, def mi6.PairDef, plan string) error 
 				firewallHint(ctx, h.e)
 			}
 		}
+		if def.Platform == "web" {
+			h.printWebApp()
+		}
 		h.e.printf("%s", loginPrompt(def, plan))
 		h.e.printf(promptWaiting, platform, provider)
 		end, err := h.waitEnd(ctx, def.Dest)
@@ -300,6 +303,14 @@ func loginPrompt(def mi6.PairDef, plan string) string {
 		return fmt.Sprintf(promptWindowsA, provider)
 	}
 	return fmt.Sprintf(promptWebA, provider)
+}
+
+// printWebApp prints the web app's addresses for a web login (Task 12).
+func (h *holder) printWebApp() {
+	addrs, _ := handoff.RFC1918Addrs()
+	for _, u := range webAppURLs(remote("web"), h.e.port, addrs) {
+		h.e.printf(msgWebApp, u)
+	}
 }
 
 // printAddresses prints this device's LAN addresses for the other device.

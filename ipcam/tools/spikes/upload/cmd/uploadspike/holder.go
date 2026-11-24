@@ -405,7 +405,7 @@ func (h *holder) serve(ctx context.Context) error {
 		h.ends, h.webCells, h.handover = make(chan loginEnd, 64), make(chan results.VisibilityCell, 64), make(chan struct{})
 	}
 	h.mu.Unlock()
-	h.srv = handoff.New(h.ctl, handoff.Options{Clock: h.e.now, Port: h.e.port, ResultsDir: h.e.resultsDir(), Driver: h, OneDrive: oneDrive})
+	h.srv = handoff.New(h.ctl, handoff.Options{Clock: h.e.now, Port: h.e.port, ResultsDir: h.e.resultsDir(), Driver: h, OneDrive: oneDrive, App: appFS()})
 	return h.srv.ServeLoopback(ctx)
 }
 

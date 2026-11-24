@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/hubproc"
@@ -721,5 +722,48 @@ func TestHandoffServer_CompleteClosesItsOwnSession(t *testing.T) {
 	}
 	if _, open := s.LANOpen(); open {
 		t.Error("the LAN session stays open after its results grace")
+	}
+}
+
+// TestHandoffServer_ServesTheWebApp (Task 12): the video app's web build,
+// which the web pairs' logins use (no other program of the upload release
+// serves it), is served under /app/ on loopback and on an open LAN
+// session, as static files; the address the app's hub field starts with
+// is the page's origin, so the app reaches this server without typing.
+// Without a build (a repository checkout) /app/ answers 404 with the
+// Romanian not-found page.
+func TestHandoffServer_ServesTheWebApp(t *testing.T) {
+	lanAddrs = func() ([]net.IP, error) { return []net.IP{net.IPv4(127, 0, 0, 2)}, nil }
+	t.Cleanup(func() { lanAddrs = RFC1918Addrs })
+	skipWithoutLoopbackAlias(t)
+	app := fstest.MapFS{
+		"index.html":      {Data: []byte("<title>Proba video ipcam</title>")},
+		"assets/index.js": {Data: []byte("console.log(1)")},
+	}
+	s, _, _ := startServer(t, Options{App: app})
+	if err := s.OpenLAN(t.Context(), "web"); err != nil {
+		t.Fatal(err)
+	}
+	for _, base := range []string{fmt.Sprintf("http://127.0.0.1:%d", s.Port()), fmt.Sprintf("http://127.0.0.2:%d", s.Port())} {
+		for path, want := range map[string]string{"/app/": "Proba video ipcam", "/app/assets/index.js": "console.log(1)"} {
+			resp := do(t, http.MethodGet, base+path, "")
+			b, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), want) {
+				t.Errorf("GET %s%s: %d %q; want 200 with %q", base, path, resp.StatusCode, b, want)
+			}
+		}
+		if resp := do(t, http.MethodGet, base+"/app", ""); resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s/app: %d; want the app after its redirect", base, resp.StatusCode)
+		}
+	}
+	empty, _, _ := startServer(t, Options{App: fstest.MapFS{".gitkeep": {}}})
+	resp := do(t, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/app/", empty.Port()), "")
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(string(b), notFoundText) {
+		t.Errorf("GET /app/ without a build: %d %q; want 404 with %q", resp.StatusCode, b, notFoundText)
+	}
+	none, _, _ := startServer(t, Options{})
+	if resp := do(t, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/app/", none.Port()), ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /app/ without App: %d; want 404", resp.StatusCode)
 	}
 }

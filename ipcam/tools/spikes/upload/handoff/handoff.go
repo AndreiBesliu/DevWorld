@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -116,6 +117,10 @@ type Options struct {
 	// ResultsGrace bounds a LAN session after its login ended (EndLogin);
 	// 0 is 3 min. Tests shorten it.
 	ResultsGrace time.Duration
+	// App is the video app's web build, served under /app/ for the web
+	// pairs' logins (Task 12): no other program of the upload release
+	// serves it. nil, or a tree without index.html, serves nothing.
+	App fs.FS
 }
 
 // Server is the handoff server.
@@ -408,6 +413,7 @@ func (s *Server) handler(sess *lanSession) http.Handler {
 	mux.Handle("/spike/v1/visibility/interrupted", reader(s.webInterrupted))
 	mux.Handle("/spike/v1/visibility/config", reader(s.readerConfig))
 	mux.HandleFunc("GET /oauth/device", s.devicePage)
+	mux.Handle("GET /app/", s.appFiles())
 	if s.opts.OneDrive {
 		mux.HandleFunc("GET /oauth/callback", s.callback)
 	}
@@ -513,6 +519,18 @@ func (s *Server) cors(allowed []string, h http.HandlerFunc) http.Handler {
 		}
 		h(w, r)
 	})
+}
+
+// appFiles serves the video app's web build under /app/ (relative URLs:
+// vite's base is ./), or the not-found page when there is none.
+func (s *Server) appFiles() http.Handler {
+	if s.opts.App == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { notFound(w) })
+	}
+	if _, err := fs.Stat(s.opts.App, "index.html"); err != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { notFound(w) })
+	}
+	return http.StripPrefix("/app/", http.FileServerFS(s.opts.App))
 }
 
 // notFoundText is what a browser shows for a page that is not served
