@@ -13,6 +13,7 @@ import (
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/mi8"
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/runstate"
+	"golang.org/x/sys/unix"
 )
 
 // canDetach: on Linux MI8 runs its 72 h in a detached copy of uploadspike,
@@ -98,7 +99,7 @@ func closeStdin() {
 		_ = os.Stdin.Close()
 		return
 	}
-	_ = syscall.Dup2(int(null.Fd()), 0) //nolint:gosec // descriptors
+	_ = unix.Dup2(int(null.Fd()), 0) //nolint:gosec // descriptors
 	_ = null.Close()
 }
 
