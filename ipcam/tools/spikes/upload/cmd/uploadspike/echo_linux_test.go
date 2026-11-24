@@ -12,8 +12,14 @@ import (
 )
 
 // openPTY opens a pseudo-terminal pair: the master, which plays the owner's
-// keyboard, and the slave, uploadspike's terminal.
-func openPTY(t *testing.T) (master, slave *os.File) {
+// keyboard, and the slave, uploadspike's terminal. The master closes at t's
+// end and the slave at keep's, which outlives t: a secret's read that a cut
+// left behind blocks in read(2) on the slave's descriptor, outside the os
+// package, until the master's close hangs the terminal up; its deferred
+// restore then runs on that descriptor. Were the slave closed with t, the
+// next test's pty could take the descriptor's number, and that restore
+// would turn its echo back on in the middle of its secret's read.
+func openPTY(t, keep *testing.T) (master, slave *os.File) {
 	t.Helper()
 	m, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
 	if err != nil {
@@ -31,7 +37,7 @@ func openPTY(t *testing.T) (master, slave *os.File) {
 	if err != nil {
 		t.Skipf("the slave: %v", err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
+	keep.Cleanup(func() { _ = s.Close() })
 	return m, s
 }
 
@@ -49,9 +55,10 @@ func echoOn(t *testing.T, f *os.File) bool {
 // Ctrl-C, that ends setup while it asks a secret without echo gives the
 // owner's terminal its echo back.
 func TestSetupTerminal_EchoRestoredWhenCut(t *testing.T) {
+	parent := t
 	for _, cut := range []string{"handover", "signal"} {
 		t.Run(cut, func(t *testing.T) {
-			master, slave := openPTY(t)
+			master, slave := openPTY(t, parent)
 			if !echoOn(t, slave) {
 				t.Fatal("a new terminal does not echo")
 			}
