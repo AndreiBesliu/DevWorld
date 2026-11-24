@@ -1,6 +1,6 @@
 # Spike: skip the phone's waits, and find the hub from the phone (v0.1.3)
 
-**Pe scurt pentru proprietar.** Pe 2026-11-24, în timpul probei pe Galaxy A24, ați cerut două lucruri pentru aplicația de test. De la v0.1.3:
+**Pe scurt pentru proprietar.** Pe 2026-11-24, în timpul probei pe Galaxy A54, ați cerut două lucruri pentru aplicația de test. De la v0.1.3:
 
 - în rularea automată, cât timp aplicația așteaptă cele 10 minute fără încărcător dinaintea lui S3 sau pauza de răcire de după S3-9, apare butonul «Sari peste așteptare». Rezultatul scenariului care urmează notează că așteptarea a fost sărită, iar raportul spune asta lângă pragurile de temperatură și fps;
 - pe telefon, aplicația caută singură spikehub în rețeaua Wi-Fi la care e conectat telefonul și arată adresele găsite ca butoane. O atingere completează adresa și verifică conexiunea. Dacă găsește un singur hub și câmpul e gol, îl completează singură.

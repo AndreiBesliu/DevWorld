@@ -18,7 +18,7 @@ func TestPlan_IsTheTableOfTheAutomaticRun(t *testing.T) {
 		{ID: "edge", Label: "Edge", Platform: "edge", PC: true, Steps: []string{"S10", "S1", "S2", "S3-9", "S9"}},
 		{ID: "firefox", Label: "Firefox", Platform: "firefox", PC: true, Steps: []string{"S10", "S1", "S2", "S3-9", "S9"}},
 		{ID: "ipcam-desktop", Label: "ipcam-desktop", Platform: "windows-tauri", PC: true, Steps: []string{"S10", "S1", "S2", "S3-16", "S4", "S7", "S9"}},
-		{ID: "phone", Label: "Galaxy A24", Platform: "android", Steps: []string{
+		{ID: "phone", Label: "Galaxy A54", Platform: "android", Steps: []string{
 			"S10", "S1", "S2", "S3-9", Pause, "S3-4", "S4", "S5", "S6", "S7", "S8", "S9",
 		}},
 	}

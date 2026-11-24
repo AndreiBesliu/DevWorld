@@ -24,7 +24,7 @@ describe('the device table (deviceplan.json)', () => {
       ['ipcam-desktop', 'ipcam-desktop', 'windows-tauri', true, ['S10', 'S1', 'S2', 'S3-16', 'S4', 'S7', 'S9']],
       [
         'phone',
-        'Galaxy A24',
+        'Galaxy A54',
         'android',
         false,
         ['S10', 'S1', 'S2', 'S3-9', 'pause 10 min', 'S3-4', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'],

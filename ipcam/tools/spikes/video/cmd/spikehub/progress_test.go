@@ -128,7 +128,7 @@ func TestProgress_CountsOnlyCompleteResultsPerDevice(t *testing.T) {
 	if d := deviceOf(t, p, "chrome"); d.Label != "Chrome" || !d.PC {
 		t.Errorf("chrome: %+v", d)
 	}
-	if d := deviceOf(t, p, "phone"); d.Label != "Galaxy A24" || d.PC {
+	if d := deviceOf(t, p, "phone"); d.Label != "Galaxy A54" || d.PC {
 		t.Errorf("phone: %+v", d)
 	}
 }

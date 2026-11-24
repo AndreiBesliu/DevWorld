@@ -1,13 +1,13 @@
 # Proba video (Faza 0 b): ghid pas cu pas
 
-Acest ghid vă arată cum rulați proba video pe PC-ul cu Windows 11 și pe telefonul Samsung Galaxy A24. Proba măsoară cât de repede și cât de fluent afișează aplicația noastră mai multe camere deodată. Camerele sunt simulate de un program care rulează pe PC: `spikehub`. Toate rezultatele ajung singure într-un folder de pe PC. La final ni-l trimiteți.
+Acest ghid vă arată cum rulați proba video pe PC-ul cu Windows 11 și pe telefonul Samsung Galaxy A54. Proba măsoară cât de repede și cât de fluent afișează aplicația noastră mai multe camere deodată. Camerele sunt simulate de un program care rulează pe PC: `spikehub`. Toate rezultatele ajung singure într-un folder de pe PC. La final ni-l trimiteți.
 
 Din versiunea `spike-video-v0.1.1`, pe fiecare dispozitiv apăsați un singur buton: «Rulează tot pentru acest dispozitiv»<!--app-->. Aplicația recunoaște singură dispozitivul, rulează scenariile lui în ordine și le sare pe cele care au deja rezultate complete în spikehub.
 
 ## Ce aveți nevoie
 
 - PC-ul cu Windows 11, legat la routerul de acasă (prin Wi-Fi sau cablu), cu Chrome, Edge și Firefox.
-- Telefonul Galaxy A24 și încărcătorul lui, pe Wi-Fi-ul aceluiași router.
+- Telefonul Galaxy A54 și încărcătorul lui, pe Wi-Fi-ul aceluiași router.
 - Aproximativ 3 ore și 30 de minute pentru ce a rămas după Chrome, în una sau mai multe sesiuni. Cât rulează, nu trebuie să stați lângă dispozitiv.
 - Nimic de plătit și niciun cont nou. Nu vă cerem nicio parolă.
 
@@ -22,7 +22,7 @@ Textele între «» apar exact așa în programele de test. Textele între „�
 | PC: Edge | S10, S1, S2, S3-9, S9 | 20 min |
 | PC: Firefox | S10, S1, S2, S3-9, S9 | 25 min, cu verificarea pluginului |
 | PC: ipcam-desktop | S10, S1, S2, S3-16, S4, S7, S9 | 55 min, cu instalarea |
-| Telefon: Galaxy A24 | S10, S1, S2, S3-9, pauză de 10 min, S3-4, S4, S5, S6, S7, S8, S9 | 1 oră și 35 min, cu instalarea și pauza |
+| Telefon: Galaxy A54 | S10, S1, S2, S3-9, pauză de 10 min, S3-4, S4, S5, S6, S7, S8, S9 | 1 oră și 35 min, cu instalarea și pauza |
 | Trimiteți rezultatele | | 5 min |
 
 Aplicația ține minte ce s-a rulat: pe pagina ei, rândul «Rămase pe acest PC: …»<!--app--> arată dispozitivele PC-ului care mai au scenarii de rulat, iar rândul de dedesubt arată telefonul. Un scenariu care are deja rezultat complet arată «gata (rezultatul e în spikehub)»<!--app-->.
@@ -146,7 +146,7 @@ Dacă în chenar scrie:
 - «În acest folder nu este spikehub.exe. Scrieți folderul în care ați extras spikehub-windows.zip.»<!--app-->: corectați folderul și apăsați din nou «Pornește hub-ul»<!--app-->.
 - «Hub-ul s-a oprit singur (cod …). Motivul e în ultimele rânduri de mai jos.»<!--app-->: citiți ultimele rânduri. Dacă scrie «îl folosește alt program?»<!--hub-->, fereastra spikehub de la pasul 2 e încă deschisă: închideți-o și apăsați din nou «Pornește hub-ul»<!--app-->. Altfel, faceți o captură și scrieți-ne.
 
-## Pasul 5. Telefonul Galaxy A24
+## Pasul 5. Telefonul Galaxy A54
 
 ### Pregătire
 

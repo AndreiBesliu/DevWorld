@@ -32,7 +32,7 @@
     },
     {
       "id": "phone",
-      "label": "Galaxy A24",
+      "label": "Galaxy A54",
       "platform": "android",
       "pc": false,
       "steps": ["S10", "S1", "S2", "S3-9", "pause", "S3-4", "S4", "S5", "S6", "S7", "S8", "S9"]
