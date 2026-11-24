@@ -298,10 +298,18 @@ const (
 	KindLost            = "events_lost"
 	KindHealthy         = "events_healthy"
 	KindSubscribeFailed = "subscribe_failed"
+	KindSubscribed      = "subscribed"
 )
 
-// Line is a line of diag onvif's default mode: an event, a signal or a
-// failed subscription.
+// The reasons of a subscribe_failed line.
+const (
+	ReasonAuth        = "auth"
+	ReasonNoPullPoint = "no-pullpoint"
+	ReasonUnreachable = "unreachable"
+)
+
+// Line is a line of diag onvif's default mode: a subscription created, an
+// event, a signal or a failed subscription.
 type Line struct {
 	Type   string `json:"type"`
 	Cam    string `json:"cam"`

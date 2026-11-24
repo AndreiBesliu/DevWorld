@@ -27,6 +27,7 @@ const (
 	onvifTypeSnapshotURI     = "snapshot_uri"
 	onvifTypeEvent           = "onvif_event"
 	onvifTypeSubscribeFailed = "subscribe_failed"
+	onvifTypeSubscribed      = "subscribed"
 )
 
 // onvifOptions are the subscriptions' options; the tests shorten them.
@@ -118,9 +119,10 @@ func (w *lineWriter) print(v any) {
 //   - --uris: {"type":"stream_uri","cam","uri"} and {"type":"snapshot_uri",…}
 //     of --profile (sub by default), or the same types with "error";
 //   - default: subscribe to each camera until stdin closes or SIGTERM, and
-//     print onvif_event {cam, atMs, topic, motion}, events_unhealthy,
-//     events_lost and events_healthy {cam, atMs}, or subscribe_failed {cam,
-//     reason: auth|no-pullpoint|unreachable}.
+//     print subscribed {cam, atMs} once its subscription is created, then
+//     onvif_event {cam, atMs, topic, motion}, events_unhealthy, events_lost
+//     and events_healthy {cam, atMs}; or subscribe_failed {cam, reason:
+//     auth|no-pullpoint|unreachable}.
 //
 // No line, and nothing on stderr, holds a camera's address, user, password
 // or serial number; only --uris prints the URIs the camera returns. It exits
@@ -260,6 +262,9 @@ func onvifSubscribe(ctx context.Context, cam onvif.CameraRef, out *lineWriter) {
 		out.print(onvifErrorLine{Type: onvifTypeSubscribeFailed, Cam: cam.ID, Reason: reason})
 		return
 	}
+	// A quiet camera prints nothing more for hours: MI8 must know that it
+	// subscribed, so that a later failure does not hide its series.
+	out.print(onvifSignalLine{Type: onvifTypeSubscribed, Cam: cam.ID, AtMs: time.Now().UnixMilli()})
 	evs, sigs := sub.Events(), sub.Signals()
 	for evs != nil || sigs != nil {
 		select {

@@ -196,8 +196,8 @@ func TestDiagOnvif_URIs(t *testing.T) {
 }
 
 // TestDiagOnvif_SubscribesUntilStdinCloses: by default each camera is
-// subscribed to as its line arrives, its events are printed with the hub's
-// receipt time, a camera that refuses the login is subscribe_failed auth,
+// subscribed to as its line arrives and announced by one subscribed line,
+// its events are printed with the hub's receipt time, a camera that refuses the login is subscribe_failed auth,
 // and closing stdin unsubscribes and exits 0.
 func TestDiagOnvif_SubscribesUntilStdinCloses(t *testing.T) {
 	fastOnvif(t)
@@ -232,9 +232,9 @@ func TestDiagOnvif_SubscribesUntilStdinCloses(t *testing.T) {
 	waitUntil(t, "the camera's subscription", func() bool { return sim.Subscriptions() == 1 })
 	before := time.Now().UnixMilli()
 	sim.Emit("tns1:RuleEngine/CellMotionDetector/Motion", true)
-	var event, failed map[string]any
+	var event, failed, subscribed map[string]any
 	timeout := time.After(5 * time.Second)
-	for event == nil || failed == nil {
+	for event == nil || failed == nil || subscribed == nil {
 		select {
 		case m := <-lines:
 			switch m["type"] {
@@ -242,10 +242,18 @@ func TestDiagOnvif_SubscribesUntilStdinCloses(t *testing.T) {
 				event = m
 			case onvifTypeSubscribeFailed:
 				failed = m
+			case onvifTypeSubscribed:
+				if subscribed != nil || event != nil {
+					t.Errorf("subscribed %v after %v, %v; want one, before the events", m, subscribed, event)
+				}
+				subscribed = m
 			}
 		case <-timeout:
-			t.Fatalf("event %v, failed %v; want both", event, failed)
+			t.Fatalf("event %v, failed %v, subscribed %v; want all three", event, failed, subscribed)
 		}
+	}
+	if subscribed["cam"] != "real-1" || subscribed["atMs"].(float64) <= 0 {
+		t.Errorf("subscribed = %v; want real-1's, with its time", subscribed)
 	}
 	if event["cam"] != "real-1" || event["motion"] != true || event["topic"] != "tns1:RuleEngine/CellMotionDetector/Motion" ||
 		event["atMs"].(float64) < float64(before) {

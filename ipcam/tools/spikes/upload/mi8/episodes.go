@@ -16,12 +16,16 @@ import (
 // silent losses. It holds no address, user, password or URI, and outlives
 // MI8's process: uploadspike mi8 --continue adds a new session's to it.
 type CameraState struct {
-	Camera          string                `json:"camera"`
-	Brand           string                `json:"brand"`
-	Model           string                `json:"model"`
-	ReferenceMethod string                `json:"referenceMethod,omitempty"`
-	RefLagMs        int64                 `json:"refLagMs,omitempty"`
-	SilentLosses    int                   `json:"silentLosses,omitempty"`
+	Camera          string `json:"camera"`
+	Brand           string `json:"brand"`
+	Model           string `json:"model"`
+	ReferenceMethod string `json:"referenceMethod,omitempty"`
+	RefLagMs        int64  `json:"refLagMs,omitempty"`
+	SilentLosses    int    `json:"silentLosses,omitempty"`
+	// SubscribeFailed is set by any failed subscription, Subscribed by any
+	// that was created: the camera is reported as «abonare eșuată» only when
+	// it never subscribed in the run, so that a brief failure (a camera
+	// still booting) never hides its series.
 	SubscribeFailed bool                  `json:"subscribeFailed,omitempty"`
 	Subscribed      bool                  `json:"subscribed,omitempty"`
 	Episodes        []results.EpisodeTime `json:"episodes,omitempty"`
@@ -180,11 +184,12 @@ const eventKeep = 10 * time.Second
 
 // onEvent records a camera's notification at the hub's receipt time.
 func (t *tracker) onEvent(atMs int64, motion bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.st.Subscribed = true // an event comes only through a subscription
 	if !motion {
 		return
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.events = append(t.events, atMs)
 	t.events = slices.DeleteFunc(t.events, func(e int64) bool { return e < atMs-eventKeep.Milliseconds() })
 	if t.open != nil && !t.open.Matched && Matches(t.open.StartMs, atMs, t.lag(), MatchWindow) {
@@ -201,7 +206,7 @@ func (t *tracker) onSignal(kind string) {
 		t.st.SilentLosses++
 	case KindSubscribeFailed:
 		t.st.SubscribeFailed = true
-	case KindHealthy, KindUnhealthy:
+	case KindSubscribed, KindHealthy, KindUnhealthy:
 		t.st.Subscribed = true
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -206,4 +208,129 @@ func TestSnapshot_DigestAuth(t *testing.T) {
 	if len(f.Gray) != FrameSize || f.Gray[40*FrameWidth+10] < 200 {
 		t.Errorf("the frame is not the snapshot's picture")
 	}
+}
+
+// TestMI8_LaterSubscribeFailedKeepsSeries: a camera that subscribed once in
+// the run, shown by its subscribed line or by any event, keeps its series
+// when a later subscription fails (a camera still booting after a power
+// cut): it is judged on its episodes, never «abonare eșuată».
+func TestMI8_LaterSubscribeFailedKeepsSeries(t *testing.T) {
+	for _, first := range []string{KindSubscribed, KindEvent} {
+		t.Run(first, func(t *testing.T) {
+			st := CameraState{Camera: "real-1", Brand: "Hikvision", Model: "X"}
+			for i := range 30 {
+				at := int64(i) * time.Hour.Milliseconds()
+				st.Episodes = append(st.Episodes, results.EpisodeTime{StartMs: at, EndMs: at + 5000, Matched: true})
+			}
+			tr := &tracker{st: &st, lag: func() time.Duration { return 0 }}
+			if first == KindEvent {
+				tr.onEvent(time.Now().UnixMilli(), false)
+			} else {
+				tr.onSignal(first)
+			}
+			tr.onSignal(KindSubscribeFailed)
+			c := tr.snapshot().Result()
+			if c.SubscribeFailed || c.Episodes != 30 {
+				t.Fatalf("result = failed %v, %d episodes; want the 30 episodes judged", c.SubscribeFailed, c.Episodes)
+			}
+			s := &State{RunID: "r", Sessions: []Session{{StartMs: 0, EndMs: 73 * time.Hour.Milliseconds()}}, Cameras: []CameraState{tr.snapshot()}}
+			env := s.Envelope(Meta{Host: "pi", Set: "pi", OS: "linux", Storage: "ssd"}, 73*time.Hour.Milliseconds())
+			if j := Judge([]results.Envelope{env}); j.Verdict != results.Pass {
+				t.Errorf("verdict %q, rows %+v; want trece", j.Verdict, j.Rows)
+			}
+		})
+	}
+	st := CameraState{Camera: "real-2"}
+	tr := &tracker{st: &st, lag: func() time.Duration { return 0 }}
+	tr.onSignal(KindSubscribeFailed)
+	if !tr.snapshot().Result().SubscribeFailed {
+		t.Error("a camera that never subscribed is not «abonare eșuată»")
+	}
+}
+
+// connGate is a TCP front of an address that refuses every connection until
+// opened, as a camera still booting does.
+type connGate struct {
+	ln       net.Listener
+	open     atomic.Bool
+	refusals atomic.Int32
+}
+
+func startConnGate(t *testing.T, target string) *connGate {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &connGate{ln: ln}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			if !g.open.Load() {
+				g.refusals.Add(1)
+				_ = c.Close()
+				continue
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				u, err := net.Dial("tcp", target)
+				if err != nil {
+					return
+				}
+				defer func() { _ = u.Close() }()
+				go func() { _, _ = io.Copy(u, c) }()
+				_, _ = io.Copy(c, u)
+			}()
+		}
+	}()
+	return g
+}
+
+// TestMI8_UnreachableAtStartIsAskedAgain: a camera that does not answer when
+// the session starts (subscribe_failed unreachable, no URIs) is asked again
+// after the pause, unlike one that refuses the login: once it answers it is
+// subscribed and not «abonare eșuată», and its URIs are read again, so its
+// reference runs.
+func TestMI8_UnreachableAtStartIsAskedAgain(t *testing.T) {
+	snap := startSnapshotCam(t, testUser, testPass)
+	s := startSim(t, testUser, testPass, []string{"-snapshot", snap.URL + "/snap.jpg"}, "Hikvision/A")
+	g := startConnGate(t, s.Hosts[0])
+	xaddr := strings.Replace(s.XAddrs[0], s.Hosts[0], g.ln.Addr().String(), 1)
+	st := session(8 * time.Second)
+	st.Cameras = []CameraState{{Camera: "real-1", Brand: "Hikvision", Model: "A"}}
+	var failedSeen atomic.Bool
+	cfg := Mi8Config{Hub: Hub{Bin: hubBin(t)}, State: st, ProgressEvery: 100 * time.Millisecond, Resubscribe: 500 * time.Millisecond,
+		Cameras: []CameraRef{{ID: "real-1", XAddr: xaddr, User: testUser, Pass: testPass}},
+		Progress: func(s State) error {
+			if s.Cameras[0].SubscribeFailed {
+				failedSeen.Store(true)
+			}
+			return nil
+		}}
+	type ran struct {
+		env results.Envelope
+		err error
+	}
+	done := make(chan ran, 1)
+	go func() {
+		env, err := Run(t.Context(), cfg)
+		done <- ran{env, err}
+	}()
+	until(t, 6*time.Second, "the failed subscription", failedSeen.Load)
+	g.open.Store(true)
+	until(t, 6*time.Second, "the subscription once the camera answers", func() bool { return s.counts()[0].Subscriptions == 1 })
+	until(t, 6*time.Second, "the snapshots once the URIs are read again", func() bool { return snap.fetches.Load() > 0 })
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("Run: %v", got.err)
+	}
+	env := got.env
+	if c := env.MI8.Cameras[0]; c.SubscribeFailed || c.ReferenceMethod != results.ReferenceSnapshot {
+		t.Errorf("real-1 = failed %v, reference %q; want subscribed, on snapshots", c.SubscribeFailed, c.ReferenceMethod)
+	}
+	until(t, 20*time.Second, "the unsubscribe", func() bool { return s.counts()[0].Subscriptions == 0 })
 }

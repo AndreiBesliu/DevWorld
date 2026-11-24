@@ -172,40 +172,45 @@ loop:
 	return env, progressErr
 }
 
-// subscribe runs diag onvif's subscriptions until ctx ends, and passes their
-// lines to the cameras' trackers.
+// subscribe runs diag onvif's subscriptions until ctx ends, one process per
+// camera, and passes their lines to the cameras' trackers.
 func (r *runner) subscribe(ctx context.Context) {
 	hub := r.cfg.Hub
 	if hub.Start == nil {
 		hub.Start = r.cfg.Start
 	}
-	failed := map[string]bool{}
+	var wg sync.WaitGroup
+	for _, c := range r.cfg.Cameras {
+		if t := r.trackers[c.ID]; t != nil {
+			wg.Go(func() { r.subscribeCamera(ctx, hub, c, t) })
+		}
+	}
+	wg.Wait()
+}
+
+// subscribeCamera runs diag onvif's subscription of one camera until ctx
+// ends, again after Resubscribe when it ends on its own or the subscription
+// could not be created: a camera still booting, or one whose PullPoints the
+// last session's subscriptions still hold, is asked again. Only a refused
+// login stops it for the session: the camera's account must not be locked.
+func (r *runner) subscribeCamera(ctx context.Context, hub Hub, c CameraRef, t *tracker) {
 	for ctx.Err() == nil {
-		var cams []CameraRef
-		for _, c := range r.cfg.Cameras {
-			if !failed[c.ID] {
-				cams = append(cams, c)
-			}
-		}
-		if len(cams) == 0 {
-			<-ctx.Done()
-			return
-		}
-		sub, err := hub.Subscribe(ctx, cams)
+		refused := false
+		sub, err := hub.Subscribe(ctx, []CameraRef{c})
 		if err == nil {
 			for l := range sub.Lines() {
-				t := r.trackers[l.Cam]
-				if t == nil {
+				if l.Cam != c.ID {
 					continue
 				}
 				switch l.Type {
 				case KindEvent:
 					t.onEvent(l.AtMs, l.Motion)
 				case KindSubscribeFailed:
-					// A configuration fault: the camera is not asked again in
-					// this session, apart from coverage.
-					failed[l.Cam] = true
 					t.onSignal(l.Type)
+					refused = refused || l.Reason == ReasonAuth
+					// diag onvif serves the camera no more: end it, and
+					// subscribe again below.
+					sub.Stop()
 				default:
 					t.onSignal(l.Type)
 				}
@@ -213,6 +218,10 @@ func (r *runner) subscribe(ctx context.Context) {
 			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 			_ = sub.Wait(closeCtx)
 			cancel()
+		}
+		if refused {
+			<-ctx.Done()
+			return
 		}
 		select {
 		case <-ctx.Done():
@@ -227,10 +236,17 @@ type lagger interface {
 	Lag() time.Duration
 }
 
+// refreshURIsAfter is how many rounds in a row without a reference make
+// reference ask diag onvif for the camera's URIs again.
+const refreshURIsAfter = 3
+
 // reference runs a camera's motion reference until ctx ends: the substream
 // through FFmpeg when it decodes, else the snapshots; a reference that ends
-// on its own starts again.
+// on its own starts again. URIs that are missing (diag onvif --uris failed
+// at the session's start, a camera still booting) or that keep failing are
+// read again after the pause.
 func (r *runner) reference(ctx context.Context, c CameraRef, u URIs, t *tracker) {
+	misses := 0
 	for ctx.Err() == nil {
 		var src lagger
 		method := ""
@@ -253,7 +269,14 @@ func (r *runner) reference(ctx context.Context, c CameraRef, u URIs, t *tracker)
 		}
 		select {
 		case <-ctx.Done():
+			return
 		case <-time.After(r.cfg.Resubscribe):
+		}
+		if misses++; u == (URIs{}) || misses >= refreshURIsAfter {
+			misses = 0
+			if got, _ := r.cfg.Hub.URIs(ctx, []CameraRef{c}); got[c.ID] != (URIs{}) {
+				u = got[c.ID]
+			}
 		}
 	}
 }
