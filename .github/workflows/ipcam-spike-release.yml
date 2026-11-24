@@ -560,7 +560,7 @@ jobs:
           {
             echo "Proba video din Faza 0 (b). Ghidul pas cu pas: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${TAG}/ipcam/docs/spike-video.md"
             echo
-            echo "Pe PC (Windows 11): spikehub-windows.zip și ipcam-desktop-setup.exe. Pe telefon (Galaxy A24): ipcam-spike.apk."
+            echo "Pe PC (Windows 11): spikehub-windows.zip și ipcam-desktop-setup.exe. Pe telefon (Galaxy A54): ipcam-spike.apk."
             echo
             echo "Celelalte fișiere nu vă trebuie: spikehub pentru Linux pe ARM (de exemplu un Raspberry Pi) cu spike-video-media.zip,"
             echo "lista componentelor (SBOM), licențele componentelor terțe (THIRD_PARTY_NOTICES.txt) și sumele de control (SHA256SUMS)."
