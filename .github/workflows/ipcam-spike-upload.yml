@@ -19,6 +19,8 @@ on:
       # checks for the token patterns.
       - 'ipcam/docs/research/*phase0c-upload*'
       - 'ipcam/docs/research/phase0-data/phase0c-upload-*'
+      # The owner's guide, which uploadspike's guide test reads.
+      - 'ipcam/docs/spike-upload.md'
       # The hub shares requirements with the recorder spike, so in the workspace that
       # module's go.mod can select newer versions of the hub's dependencies, and its go.sum
       # holds their checksums; the upload job also builds its reccontroller and runs its
@@ -45,6 +47,8 @@ on:
       # checks for the token patterns.
       - 'ipcam/docs/research/*phase0c-upload*'
       - 'ipcam/docs/research/phase0-data/phase0c-upload-*'
+      # The owner's guide, which uploadspike's guide test reads.
+      - 'ipcam/docs/spike-upload.md'
       # The hub shares requirements with the recorder spike, so in the workspace that
       # module's go.mod can select newer versions of the hub's dependencies, and its go.sum
       # holds their checksums; the upload job also builds its reccontroller and runs its

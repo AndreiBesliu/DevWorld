@@ -1,7 +1,8 @@
 // Runs the setup page's script (setup.html, rendered by the Go test, path
 // in argv[2]) in a Node vm with stand-ins for the DOM, and drops on it the
 // client JSON files of argv[3] (a JSON array of {name, text}), all at once,
-// as the owner does. It prints one JSON line: every field's value after
+// as the owner does: argv[4] "select" picks them in the file field, "drop"
+// drops them on the page, whose drop must be taken. It prints one JSON line: every field's value after
 // the drop.
 /* global process, console */
 import fs from "node:fs";
@@ -9,6 +10,7 @@ import vm from "node:vm";
 
 const html = fs.readFileSync(process.argv[2], "utf8");
 const files = JSON.parse(process.argv[3]);
+const mode = process.argv[4] ?? "select";
 const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
 
 const names = [...html.matchAll(/name="([a-z]+-(?:id|secret))"/g)].map((m) => m[1]);
@@ -16,7 +18,9 @@ const fields = Object.fromEntries(names.map((n) => [n, { value: "" }]));
 const elements = {};
 const element = (id) => (elements[id] ??= { id, textContent: "", children: [], listeners: {},
   append(c) { this.children.push(c); }, addEventListener(t, f) { this.listeners[t] = f; } });
+const docListeners = {};
 const document = {
+  addEventListener(t, f) { docListeners[t] = f; },
   getElementById: element,
   createElement: () => ({ textContent: "" }),
   querySelectorAll: () => [],
@@ -24,6 +28,16 @@ const document = {
 };
 const context = vm.createContext({ document, console, fetch: async () => ({ ok: true, json: async () => ({}) }) });
 vm.runInContext(script, context);
-await element("files").listeners.change({ target: { files: files.map((f) => ({ name: f.name, text: async () => f.text })) } });
+const list = files.map((f) => ({ name: f.name, text: async () => f.text }));
+if (mode === "drop") {
+  if (!docListeners.dragover || !docListeners.drop) throw new Error("the page takes no drop");
+  let prevented = 0;
+  const ev = { dataTransfer: { files: list }, preventDefault() { prevented++; } };
+  docListeners.dragover(ev);
+  await docListeners.drop(ev);
+  if (prevented !== 2) throw new Error("the browser would open the dropped file");
+} else {
+  await element("files").listeners.change({ target: { files: list } });
+}
 const values = Object.fromEntries(Object.entries(fields).map(([n, f]) => [n, f.value]));
 console.log(JSON.stringify({ values, detected: element("detected").children.map((c) => c.textContent) }));

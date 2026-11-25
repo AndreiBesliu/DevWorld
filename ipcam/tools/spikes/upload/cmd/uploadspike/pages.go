@@ -22,19 +22,19 @@ var pages = template.Must(template.ParseFS(webFS, "web/*.html"))
 
 // labels are the pages' texts, from labels.go's constants (Task 12).
 type labels struct {
-	Title, SetupTitle, SetupHelp, SetupFiles, SetupSave, SetupSaved, SetupFailed, SetupMicrosoft, SetupID, SetupSecret     string
-	DeviceTitle, DeviceHelp, ReaderTitle, ReaderHelp, ReaderStart, ReaderDone, ReaderResumed, ReaderSignIn, StatusTitle    string
-	NoClient, VisibleWarning, ClientAndroid, ClientDesktop, ClientTV, ClientWeb, ClientUnknown, ClientDetected, AutoButton string
+	SetupTitle, SetupHelp, SetupFiles, SetupSave, SetupSaved, SetupFailed, SetupMicrosoft, SetupID, SetupSecret string
+	DeviceTitle, DeviceHelp, ReaderTitle, ReaderHelp, ReaderStart, ReaderDone, ReaderResumed, ReaderSignIn      string
+	NoClient, VisibleWarning, ClientAndroid, ClientDesktop, ClientTV, ClientWeb, ClientUnknown, ClientDetected  string
 }
 
 var pageLabels = labels{
-	Title: pageTitle, SetupTitle: pageSetupTitle, SetupHelp: pageSetupHelp, SetupFiles: pageSetupFiles, SetupSave: pageSetupSave,
+	SetupTitle: pageSetupTitle, SetupHelp: pageSetupHelp, SetupFiles: pageSetupFiles, SetupSave: pageSetupSave,
 	SetupSaved: pageSetupSaved, SetupFailed: pageSetupFailed, SetupMicrosoft: pageSetupMicrosoft, SetupID: pageSetupID,
 	SetupSecret: pageSetupSecret, DeviceTitle: pageDeviceTitle, DeviceHelp: pageDeviceHelp, ReaderTitle: pageReaderTitle,
 	ReaderHelp: pageReaderHelp, ReaderStart: pageReaderStart, ReaderDone: pageReaderDone, ReaderResumed: pageReaderResumed,
-	ReaderSignIn: pageReaderSignIn, StatusTitle: pageStatusTitle, NoClient: pageNoClient, VisibleWarning: pageVisibleWarning,
+	ReaderSignIn: pageReaderSignIn, NoClient: pageNoClient, VisibleWarning: pageVisibleWarning,
 	ClientAndroid: pageClientAndroid, ClientDesktop: pageClientDesktop, ClientTV: pageClientTV, ClientWeb: pageClientWeb,
-	ClientUnknown: pageClientUnknown, ClientDetected: pageClientDetected, AutoButton: pageSetupAutoButton,
+	ClientUnknown: pageClientUnknown, ClientDetected: pageClientDetected,
 }
 
 // readerConfig is the web reader page's settings: the web client's ID (no

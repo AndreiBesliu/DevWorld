@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"maps"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -28,7 +30,7 @@ func TestPages_RenderTheirLabels(t *testing.T) {
 		data pageData
 		want []string
 	}{
-		{"setup.html", pageData{Title: pageSetupTitle, Lines: googleTypes}, []string{pageSetupTitle, pageSetupHelp, pageSetupAutoButton, `name="desktop-secret"`, `name="tv-secret"`}},
+		{"setup.html", pageData{Title: pageSetupTitle, Lines: googleTypes}, []string{pageSetupTitle, pageSetupHelp, pageSetupSave, `name="desktop-secret"`, `name="tv-secret"`}},
 		{"device.html", pageData{Title: pageDeviceTitle, Device: hubproc.BeginResult{VerificationURL: "https://example.invalid/device", UserCode: "ABCD-EFGH"}},
 			[]string{pageDeviceHelp, "ABCD-EFGH", "https://example.invalid/device"}},
 		{"reader.html", pageData{Title: pageReaderTitle, Reader: readerConfig{WebClientID: "web-client-0001.apps.example"}},
@@ -169,19 +171,61 @@ func TestSetupPage_RecognisesEachClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(node, filepath.Join("testdata", "setup-harness.mjs"), page, string(arg)).CombinedOutput() //nolint:gosec // the test's own harness
+	// The owner selects the files in the file field, or drops them on
+	// the page (Task 12 review: a drop must not open the file instead).
+	for _, mode := range []string{"select", "drop"} {
+		out, err := exec.Command(node, filepath.Join("testdata", "setup-harness.mjs"), page, string(arg), mode).CombinedOutput() //nolint:gosec // the test's own harness
+		if err != nil {
+			t.Fatalf("%s: the harness: %v\n%s", mode, err, out)
+		}
+		var got struct {
+			Values map[string]string `json:"values"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("%s: the harness said %s (%v)", mode, out, err)
+		}
+		want := map[string]string{"android-id": "android-id", "desktop-id": "desktop-id", "desktop-secret": secret("desktop"),
+			"tv-id": "tv-id", "tv-secret": secret("tv"), "web-id": "web-id", "microsoft-id": ""}
+		if !maps.Equal(got.Values, want) {
+			t.Errorf("%s: the fields after the drop:\n%v\nwant\n%v", mode, got.Values, want)
+		}
+	}
+}
+
+// TestPages_EveryLabelShown (Task 12 review): every text of the pages'
+// labels is used by a page, so that the guide's label check cannot pass on
+// a text that no page shows.
+func TestPages_EveryLabelShown(t *testing.T) {
+	var all strings.Builder
+	entries, err := webFS.ReadDir("web")
 	if err != nil {
-		t.Fatalf("the harness: %v\n%s", err, out)
+		t.Fatal(err)
 	}
-	var got struct {
-		Values map[string]string `json:"values"`
+	for _, en := range entries {
+		b, err := webFS.ReadFile("web/" + en.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		all.Write(b)
 	}
-	if err := json.Unmarshal(out, &got); err != nil {
-		t.Fatalf("the harness said %s (%v)", out, err)
+	typ := reflect.TypeOf(labels{})
+	for i := range typ.NumField() {
+		name := typ.Field(i).Name
+		if !strings.Contains(all.String(), ".L."+name) {
+			t.Errorf("no page shows labels.%s", name)
+		}
 	}
-	want := map[string]string{"android-id": "android-id", "desktop-id": "desktop-id", "desktop-secret": secret("desktop"),
-		"tv-id": "tv-id", "tv-secret": secret("tv"), "web-id": "web-id", "microsoft-id": ""}
-	if !maps.Equal(got.Values, want) {
-		t.Errorf("the fields after the drop:\n%v\nwant\n%v", got.Values, want)
+}
+
+// TestStatusPage_HasItsTitle (Task 12 review): the holder's status page
+// carries its title, in the browser's tab and as its heading.
+func TestStatusPage_HasItsTitle(t *testing.T) {
+	e, _ := unitEnv(t)
+	h := &holder{e: e}
+	w := httptest.NewRecorder()
+	h.Status(w, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if body := w.Body.String(); w.Code != http.StatusOK || !strings.Contains(body, "<title>"+pageStatusTitle+"</title>") ||
+		!strings.Contains(body, "<h1>"+pageStatusTitle+"</h1>") {
+		t.Errorf("the status page: %d %q", w.Code, body)
 	}
 }

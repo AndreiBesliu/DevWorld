@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -187,7 +188,29 @@ func main() {
 	if err != nil {
 		os.Exit(report(err, os.Stderr))
 	}
-	os.Exit(report(run(context.Background(), e, os.Args[1:]), os.Stderr))
+	os.Exit(runMain(context.Background(), e, os.Args[1:]))
+}
+
+// relaunchMarker leads the arguments of the copy that elevate relaunches
+// through UAC. That copy runs in a console window of its own, which
+// Windows closes as soon as it exits: without a pause the owner would never
+// see its last line, a success or an error.
+const relaunchMarker = "--elevated-relaunch"
+
+// runMain runs args, reports how the run ended and returns the exit code.
+// In a relaunched elevated copy it then waits for Enter, so that the
+// owner can read the window before it closes.
+func runMain(ctx context.Context, e *env, args []string) int {
+	relaunched := len(args) > 0 && args[0] == relaunchMarker
+	if relaunched {
+		args = args[1:]
+	}
+	code := report(run(ctx, e, args), e.errOut)
+	if relaunched {
+		e.printf(msgPressEnterToClose)
+		_, _ = bufio.NewReader(e.in).ReadString('\n')
+	}
+	return code
 }
 
 // exitError is an end that has said what it had to say: its code only.

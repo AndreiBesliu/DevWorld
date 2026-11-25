@@ -50,6 +50,7 @@ Faceți acest pas pe PC, cu contul dvs. Google **personal**, nu cu cel de test.
 
 1. Deschideți <https://console.cloud.google.com>.
 2. Spuneți-ne în chat în ce limbă apare consola. Dacă nu e engleza, avem două variante: vă trimitem etichetele în limba dvs., sau treceți consola pe engleză pentru această configurare. Mai jos etichetele sunt în engleză.
+3. Deschideți și <https://entra.microsoft.com> (consola Microsoft de la pasul 4) și spuneți-ne și limba ei. Variantele sunt aceleași.
 
 ### Proiectul
 
@@ -85,6 +86,8 @@ Dacă ați pierdut un secret: deschideți clientul, apăsați „Add secret” �
 Trimiteți-ne în chat cele trei ID-uri de client (se termină cu `.apps.googleusercontent.com`) și o captură a listei „Clients”. Nu ne trimiteți secretele și nici fișierele JSON.
 
 ## 4. Verificarea Entra de 2 minute (OneDrive)
+
+Etichetele de mai jos sunt în engleză, ca la pasul 2. Dacă ați ales etichetele în limba dvs., folosiți-le pe cele trimise în chat.
 
 1. Deschideți <https://entra.microsoft.com> și autentificați-vă cu contul Microsoft personal.
 2. Opriți-vă și scrieți-ne în chat dacă vedeți oricare dintre acestea:
@@ -129,8 +132,10 @@ La autentificări, Google arată „Google hasn't verified this app” (în rom�
 1. Faceți pasul 7.1 (deblocarea arhivei).
 2. Clic dreapta pe `spike-upload-windows.zip` → „Extragere totală”. Ca folder de destinație scrieți `C:\proba-upload` și apăsați „Extragere”. Folderul conține `uploadspike.exe`, `ipcam-hub.exe`, `mediamtx.exe`, `reccontroller.exe`, folderul `media` și `THIRD_PARTY_NOTICES.txt`. Nu mutați folderul după instalare.
 3. Deschideți o fereastră de comenzi: în Start scrieți `cmd` și apăsați Enter. În fereastră scrieți `cd /d C:\proba-upload` și apăsați Enter. În acest ghid, „fereastra de comenzi” înseamnă o astfel de fereastră.
-4. Scrieți `uploadspike install` și apăsați Enter. Windows cere o dată permisiunea de administrator: răspundeți „Da”.
-5. Trebuie să apară «Pornirea automată a probei este instalată și pornită; regulile firewall-ului pentru rețeaua locală sunt adăugate.»<!--uploadspike--> De acum hub-ul pornește singur după o repornire a PC-ului.
+4. Scrieți `uploadspike install` și apăsați Enter. Programul scrie «Comanda continuă în fereastra de administrator care se deschide; rezultatul ei apare acolo.»<!--uploadspike--> Windows cere o dată permisiunea de administrator: răspundeți „Da”.
+5. Se deschide o fereastră nouă, de administrator. În ea trebuie să apară «Pornirea automată a probei este instalată și pornită; regulile firewall-ului pentru rețeaua locală sunt adăugate.»<!--uploadspike--> Apoi apare «Apăsați Enter ca să închideți această fereastră.»<!--uploadspike--> Apăsați Enter. De acum hub-ul pornește singur după o repornire a PC-ului.
+
+   La fel se întâmplă la `uploadspike mi5`, `uploadspike unblock` și `uploadspike uninstall`: rândurile lor apar în fereastra de administrator, care rămâne deschisă până apăsați Enter.
 6. Dublu clic pe `ipcam-desktop-setup.exe`. La „Windows a protejat PC-ul” urmați pasul 7.2. Instalatorul e în engleză: apăsați „Next” până la „Install”, apoi „Finish”. Dacă aplicația `ipcam-desktop` era deja instalată de la proba video, instalați peste ea.
 
 ### Pe Pi
@@ -178,6 +183,7 @@ Pe PC, în consola Google, la „Google Auth Platform” → „Clients”:
 3. La „SHA-1 certificate fingerprint” lipiți amprenta SHA-1 din notele versiunii.
 4. Deschideți „Advanced settings” și bifați „Enable custom URI scheme”. Apăsați „Create”.
 5. Trimiteți-ne ID-ul acestui client. Dacă vă trimitem mai târziu o versiune nouă a aplicației, vă spunem dacă trebuie schimbată amprenta.
+6. ID-ul vă trebuie și la pasul 8. Îl găsiți oricând în „Clients” → `ipcam android`, la „Client ID”.
 
 ### Fără actualizări în timpul probei
 
@@ -204,15 +210,17 @@ Unde faceți pasul:
 ### Pe PC
 
 1. În fereastra de comenzi: `uploadspike setup`. Se deschide în browser pagina de configurare.
-2. Deschideți folderul cu fișierele JSON. Selectați-le pe toate și trageți-le în pagină, unde scrie «Trageți aici fișierele JSON ale clienților Google»<!--uploadspike-->. Pagina recunoaște singură fiecare client.
-3. Dacă verificarea de la pasul 4 a trecut, scrieți și ID-ul clientului Microsoft.
-4. Apăsați «Salvează în hub»<!--uploadspike-->. Pagina scrie «Clienții au fost dați hub-ului. Puteți închide pagina.»<!--uploadspike-->
-5. În fereastra de comenzi apare «Clienții au fost dați hub-ului și sigilați în catalog; nimic nu a rămas pe disc.»<!--uploadspike-->
+2. Apăsați pe câmpul «Fișierele JSON ale clienților»<!--uploadspike-->. Deschideți folderul de la pasul 3, selectați toate cele trei fișiere JSON (Ctrl+A) și apăsați „Deschidere”. Puteți și să trageți fișierele oriunde în pagină. Pagina recunoaște singură fiecare client și completează câmpurile.
+3. Clientul Android nu are fișier. La «Android»<!--uploadspike-->, în câmpul «ID-ul clientului»<!--uploadspike-->, lipiți ID-ul clientului `ipcam android` de la pasul 6.
+4. Dacă verificarea de la pasul 4 a trecut, scrieți și ID-ul clientului Microsoft.
+5. Apăsați «Salvează în hub»<!--uploadspike-->. Pagina scrie «Clienții au fost dați hub-ului. Puteți închide pagina.»<!--uploadspike-->
+6. În fereastra de comenzi apare «Clienții au fost dați hub-ului și sigilați în catalog; nimic nu a rămas pe disc.»<!--uploadspike-->
 
 ### Pe Pi
 
 1. În terminal: `sudo ./uploadspike setup`.
-2. Programul întreabă, pe rând, «Clientul Google … (JSON sau ID)»<!--uploadspike-->. Pe PC, deschideți fișierul JSON al clientului cerut cu Notepad, copiați tot textul și lipiți-l în terminal (clic dreapta). Apăsați Enter.
+2. Programul întreabă, pe rând, «Clientul Google … (JSON sau ID)»<!--uploadspike-->, întâi pentru `android`. La `android`, lipiți ID-ul clientului `ipcam android` de la pasul 6 (clic dreapta) și apăsați Enter.
+   La `desktop`, `tv` și `web`: pe PC, deschideți fișierul JSON al clientului cerut cu Notepad, copiați tot textul și lipiți-l în terminal (clic dreapta). Apăsați Enter.
 3. Dacă scrieți doar ID-ul, programul cere apoi «Secretul clientului … (nu se afișează)»<!--uploadspike-->. Lipiți secretul și apăsați Enter. Textul nu apare pe ecran; e normal.
 4. La «ID-ul clientului Microsoft (Enter dacă verificarea A5 nu a trecut)»<!--uploadspike--> scrieți ID-ul, sau apăsați doar Enter.
 5. Dacă datele stau pe un card SD și nu ați confirmat încă, scrieți `DA` la «Scrieți DA și apăsați Enter»<!--uploadspike-->.
@@ -229,6 +237,8 @@ Unde faceți pasul:
 
 ### Pregătirea camerelor
 
+Dacă ne-ați răspuns D3-C, proba MI8 nu rulează: săriți peste pregătirea camerelor și peste partea „Zilele 0–1: proba MI8”.
+
 Vă trimitem în chat pașii pentru fiecare marcă. Pe scurt, pentru fiecare cameră aleasă (D3):
 
 1. Porniți ONVIF și RTSP în pagina web a camerei. La Hikvision: „Configuration” → „Network” → „Advanced Settings” → „Integration Protocol”, sau, pe firmware nou, „Maintenance” → „System Service” → „ONVIF”. De la firmware 5.5.0, ONVIF e oprit din fabrică.
@@ -243,6 +253,12 @@ Ca să verificați camerele fără să porniți proba: `uploadspike mi8 --probe-
 ### Ziua 0: autentificările MI6
 
 1. Pe dispozitivul D2, porniți proba: `uploadspike mi6` (pe Pi: `sudo ./uploadspike mi6`). Adăugați `--onedrive` doar dacă verificarea de la pasul 4 a trecut.
+   După alegerea dvs. la D1 adăugați:
+   - D1-A (sau dacă nu ne-ați răspuns): nimic;
+   - D1-B: `--drive test+personal`;
+   - D1-C: `--drive personal`. Atunci, la toate autentificările de mai jos, alegeți contul dvs. **personal** în locul contului de test.
+
+   De exemplu, cu D1-B și OneDrive: `uploadspike mi6 --drive test+personal --onedrive`. Scrieți aceeași alegere `--drive` și la pasul 11.
 2. Programul afișează «Programul probei»<!--uploadspike-->, apoi cere autentificările, pe rând. Urmați rândul afișat. Mai jos sunt pașii pentru fiecare.
 
 **Pe telefon:**
@@ -278,7 +294,7 @@ La final apare «Gata. Hub-ul trece la pornirea automată, care îl ține pornit
 
 ### Zilele 0–1: proba MI8 (72 h)
 
-1. Pe dispozitivul D2: `uploadspike mi8` (pe Pi: `sudo ./uploadspike mi8`).
+1. Pe dispozitivul D2: `uploadspike mi8` (pe Pi: `sudo ./uploadspike mi8`). Dacă ne-ați răspuns D3-B (o cameră de fiecare marcă), scrieți `uploadspike mi8 --one-per-brand` (pe Pi: `sudo ./uploadspike mi8 --one-per-brand`).
 2. La «Câte camere intră în proba MI8?»<!--uploadspike--> scrieți numărul.
 3. Pentru fiecare cameră, programul cere:
    - «Camera …: adresa (IP sau IP:port ONVIF; fără port, 80)»<!--uploadspike-->: scrieți adresa camerei. Adăugați `:<port>` dacă portul ONVIF nu e 80, de exemplu `192.168.1.50:8000`;
@@ -306,19 +322,19 @@ Rulați MI5 o singură dată, într-una din zilele 1–5, când puteți lăsa di
 - D2-A sau D2-B: pe PC;
 - D2-C: pe Pi.
 
-1. Pe PC, în fereastra de comenzi: `uploadspike mi5`. Pe Pi: `sudo ./uploadspike mi5`. Windows cere o dată permisiunea de administrator: răspundeți „Da”.
+1. Pe PC, în fereastra de comenzi: `uploadspike mi5`. Pe Pi: `sudo ./uploadspike mi5`. Adăugați aceeași alegere `--drive` ca la pasul 10 (de exemplu `uploadspike mi5 --drive test+personal`) și `--onedrive`, dacă l-ați folosit acolo. Windows cere o dată permisiunea de administrator: răspundeți „Da”. Pe PC, proba continuă în fereastra de administrator care se deschide; de acum urmăriți acea fereastră.
 2. Cu D2-B sau D1-B, programul poate cere întâi o autentificare scurtă: «Conectați contul pentru …: deschideți … pe orice dispozitiv, scrieți codul … și acceptați.»<!--uploadspike--> Deschideți adresa în orice browser, scrieți codul și acceptați contul cerut.
 3. Programul scrie «Proba MI5 a pornit: blocarea de … începe în jur de …»<!--uploadspike--> și «Lăsați fereastra deschisă până la final.»<!--uploadspike-->
 4. Lăsați fereastra deschisă circa 8 ore. Pe Pi, lăsați deschisă și fereastra `ssh`, cu PC-ul pornit, sau rulați proba de la tastatura și ecranul Pi-ului.
 5. În acest timp doar ipcam-hub și mediamtx nu au internet. Restul PC-ului merge normal.
-6. Dacă rulați atunci `uploadspike setup` sau `uploadspike mi6`, programul răspunde «Proba MI5 rulează; rulați comanda după ce se termină.»<!--uploadspike--> `uploadspike status` și `uploadspike mi8 --continue` merg normal.
-7. La final apare «Proba MI5 s-a încheiat; rezultatele au fost scrise. Hub-ul trece la pornirea automată.»<!--uploadspike-->
+6. Dacă rulați atunci, pe același dispozitiv, `uploadspike setup`, `uploadspike mi6`, `uploadspike mi6 --b1 …` sau `uploadspike mi6 reader …`, programul răspunde «Proba MI5 rulează; rulați comanda după ce se termină.»<!--uploadspike--> `uploadspike status` și `uploadspike mi8 --continue` merg normal.
+7. La final apare «Proba MI5 s-a încheiat; rezultatele au fost scrise. Hub-ul trece la pornirea automată.»<!--uploadspike--> Pe PC, apăsați apoi Enter ca să închideți fereastra de administrator. Dacă în locul acestui rând apare o eroare, faceți o captură înainte să apăsați Enter.
 
 Dacă fereastra se închide mai devreme, hub-ul de 7 zile merge mai departe singur. Rulați MI5 din nou în altă zi dintre zilele 1–5.
 
 Dacă pe Pi apare «Nu știm câte camere poate înregistra acest Pi.»<!--uploadspike-->, rulați MI5 pe PC.
 
-**Deblocarea, oricând.** Dacă internetul hub-ului rămâne blocat după probă, rulați `uploadspike unblock` (pe Pi: `sudo ./uploadspike unblock`). Trebuie să apară «Blocarea internetului hub-ului a fost scoasă.»<!--uploadspike-->
+**Deblocarea, oricând.** Dacă internetul hub-ului rămâne blocat după probă, rulați `uploadspike unblock` (pe Pi: `sudo ./uploadspike unblock`). Trebuie să apară «Blocarea internetului hub-ului a fost scoasă.»<!--uploadspike--> (pe PC, în fereastra de administrator; apoi apăsați Enter).
 
 ## 12. Două capturi din consola Google
 
@@ -346,10 +362,13 @@ Rezultatele numesc dispozitivele `pc` și `pi` și camerele `real-1`, `real-2` �
 
 După ce v-am confirmat în chat că rezultatele sunt complete:
 
-1. Pe PC, în fereastra de comenzi: `uploadspike uninstall`. Windows cere permisiunea de administrator: „Da”. Trebuie să apară «Pornirea automată, blocarea și utilizatorul probei au fost scoase; datele au rămas.»<!--uploadspike-->
+1. Pe PC, în fereastra de comenzi: `uploadspike uninstall`. Windows cere permisiunea de administrator: „Da”. În fereastra de administrator trebuie să apară «Pornirea automată, blocarea și utilizatorul probei au fost scoase; datele au rămas.»<!--uploadspike--> Apăsați Enter.
 2. Pe Pi: `sudo ./uploadspike uninstall`. Trebuie să apară același rând.
 3. Ștergeți folderele `C:\proba-upload` și, pe Pi, `~/proba-upload`.
-4. Reluați actualizările Windows și repausul PC-ului, cum erau.
+4. Ștergeți datele probei. Ele țin clienții și accesul la conturi (sigilate) și înregistrările probei MI5, câțiva GB.
+   - Pe PC: deschideți „Explorer”, lipiți `%LOCALAPPDATA%` în bara de adrese și apăsați Enter. Ștergeți folderul `ipcam-spike`.
+   - Pe Pi: `sudo rm -rf /var/lib/ipcam-spike`.
+5. Reluați actualizările Windows și repausul PC-ului, cum erau.
 
 Dacă vreți, puteți face și:
 

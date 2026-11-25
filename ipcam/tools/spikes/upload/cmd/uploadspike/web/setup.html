@@ -17,8 +17,7 @@ button { font-size: 1.2rem; padding: 0.6rem 1.4rem; }
 </head>
 <body>
 <h1>{{.L.SetupTitle}}</h1>
-<p>{{.L.SetupHelp}}</p>
-<div id="drop"><label>{{.L.SetupFiles}} <input id="files" type="file" accept=".json,application/json" multiple></label></div>
+<div id="drop"><p>{{.L.SetupHelp}}</p><label>{{.L.SetupFiles}} <input id="files" type="file" accept=".json,application/json" multiple></label></div>
 <ul id="detected"></ul>
 <form id="form">
 {{range $t := .Lines}}
@@ -31,7 +30,7 @@ button { font-size: 1.2rem; padding: 0.6rem 1.4rem; }
 <fieldset><legend>{{.L.SetupMicrosoft}}</legend>
 <label>{{.L.SetupID}} <input type="text" name="microsoft-id" autocomplete="off"></label>
 </fieldset>
-<p><button type="submit">{{.L.AutoButton}}</button></p>
+<p><button type="submit">{{.L.SetupSave}}</button></p>
 </form>
 <p id="result"></p>
 <script>
@@ -65,9 +64,11 @@ function fill(name, value) {
   if (field(name) && value) field(name).value = value;
 }
 
-document.getElementById("files").addEventListener("change", async (ev) => {
+// readFiles fills the fields from the files that the owner selected in the
+// file field or dropped anywhere on the page.
+async function readFiles(files) {
   const list = document.getElementById("detected");
-  for (const file of ev.target.files) {
+  for (const file of files) {
     const li = document.createElement("li");
     try {
       const [kind, c] = kindOf(JSON.parse(await file.text()));
@@ -80,6 +81,15 @@ document.getElementById("files").addEventListener("change", async (ev) => {
     }
     list.append(li);
   }
+}
+
+document.getElementById("files").addEventListener("change", (ev) => readFiles(ev.target.files));
+// The whole page takes a drop: without this, a file dropped next to the
+// file field would make the browser open it instead of the page.
+document.addEventListener("dragover", (ev) => ev.preventDefault());
+document.addEventListener("drop", (ev) => {
+  ev.preventDefault();
+  return readFiles(ev.dataTransfer.files);
 });
 
 document.getElementById("form").addEventListener("submit", async (ev) => {

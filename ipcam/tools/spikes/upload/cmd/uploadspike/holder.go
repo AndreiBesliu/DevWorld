@@ -857,5 +857,5 @@ func (h *holder) Status(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string][]string{"lines": lines})
 		return
 	}
-	renderPage(w, "status.html", pageData{Lines: lines})
+	renderPage(w, "status.html", pageData{Title: pageStatusTitle, Lines: lines})
 }

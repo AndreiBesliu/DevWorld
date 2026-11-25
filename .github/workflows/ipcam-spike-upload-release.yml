@@ -221,9 +221,12 @@ jobs:
 
   apk:
     # The spike APK as ipcam-mobile builds it, with the OAUTH row (Task 9a):
-    # the spike flavour, signed with the runner's debug key, never published in
-    # a store (OPN-01). Its certificate's SHA-1 goes into the release notes,
-    # for the Google "Android" client (P52); no keystore and no secret exist.
+    # the spike flavour, signed with the committed public debug key
+    # (apps/mobile/android/app/spike-debug.keystore), never published in a
+    # store (OPN-01). That key keeps the certificate's SHA-1 the same from one
+    # run to the next, so the APK installs over the video spike's. The SHA-1
+    # goes into the release notes, for the Google "Android" client (P52); no
+    # repository secret exists.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:

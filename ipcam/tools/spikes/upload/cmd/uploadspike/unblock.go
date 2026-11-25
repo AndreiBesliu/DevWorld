@@ -53,6 +53,10 @@ func (e *env) firewall() mi5.WanBlock {
 	return mi5.FirewallFor(runtime.GOOS, filepath.Dir(e.hubBin), mi5.RunCommand)
 }
 
+// elevatedArgs are the arguments of the elevated copy: args after the
+// marker that makes it wait for Enter before its window closes (runMain).
+func elevatedArgs(args []string) []string { return append([]string{relaunchMarker}, args...) }
+
 // elevate makes sure that uploadspike runs elevated: on Windows it
 // relaunches itself with args through one UAC prompt and ends with the
 // elevated run's code; on Linux it asks for sudo.
@@ -66,7 +70,8 @@ func elevate(e *env, args []string) error {
 	if runtime.GOOS != "windows" {
 		return ownerError(msgNeedsSudo)
 	}
-	code, err := relaunchElevated(args)
+	e.printf(msgElevatedWindow)
+	code, err := relaunchElevated(elevatedArgs(args))
 	if err != nil {
 		return err
 	}
