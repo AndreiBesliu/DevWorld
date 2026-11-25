@@ -11,4 +11,22 @@
          release (SpikeUpdate.kt). Android still asks the person to allow it once
          («Install unknown apps») and to confirm every install. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application>
+        <!-- SPIKE-ONLY (plan 2026-10-18-phase0c2-upload-spike, Task 9a): MI6's sign-in
+             in a Custom Tab redirects to the custom scheme ro.ipcam.spike (Google's
+             ro.ipcam.spike:/oauth2redirect, OneDrive's ro.ipcam.spike://oauth/callback).
+             The intent filter gives that URL to the running Activity (singleTask, in
+             the main manifest), where @capacitor/app's appUrlOpen hands it to the
+             page. The manifest merger adds it to the main manifest's .MainActivity.
+             TODO (Faza 1): the product's login decides its own redirect. -->
+        <activity android:name=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="ro.ipcam.spike" />
+            </intent-filter>
+        </activity>
+    </application>
 </manifest>

@@ -112,6 +112,38 @@ describe('the hub progress', () => {
     expect([...completeFor(made, { platform: 'android', os: 'Android' }, 'samsung SM-A245F')]).toEqual(['S10']);
   });
 
+  it('outsideTheTable_OAUTH_isNeitherCompleteNorRemaining', async () => {
+    // OAUTH (the upload spike's MI6 login, phase0c2 Task 9a) is started from
+    // the list, like AGE, and in no device's run: a hub answer that names it
+    // changes neither the skip nor «Rămase».
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(() =>
+        Promise.resolve(
+          Response.json({
+            ...ANSWER,
+            complete: ANSWER.complete.map((group) => ({ ...group, scenarios: [...group.scenarios, 'OAUTH'] })),
+            devices: ANSWER.devices.map((device) => ({ ...device, remaining: ['OAUTH', ...device.remaining] })),
+          }),
+        ),
+      ),
+    );
+    const read = await fetchProgress(HUB);
+    const { t } = createI18n({ lang: 'ro' });
+
+    expect(SCENARIO_IDS).toContain('OAUTH');
+    expect(read.complete.flatMap((group) => group.scenarios)).not.toContain('OAUTH');
+    expect(read.devices.flatMap((device) => device.remaining)).not.toContain('OAUTH');
+    expect([...completeFor(read, { platform: 'android', os: 'Android' }, 'samsung SM-A245F')]).toEqual(['S10']);
+    expect(remainingLines(read, t)).toEqual([
+      'Rămase pe acest PC: Edge, Firefox (S2, S3-9, S9), ipcam-desktop',
+      'Rămase pe telefon: Galaxy A24 (S3-9, S3-4, S4, S5, S6, S7, S8, S9)',
+    ]);
+    const withOAuth: ScenarioId[] = ['OAUTH', 'S1'];
+    const made = { ...read, complete: [{ key: 'chrome', platform: 'chrome', scenarios: withOAuth }] };
+    expect([...completeFor(made, { platform: 'chrome', os: 'Windows' })]).toEqual(['S1']);
+  });
+
   it('remaining_listsThePcDevicesLeftAndThePhone', async () => {
     const read = await progress();
     const { t } = createI18n({ lang: 'ro' });

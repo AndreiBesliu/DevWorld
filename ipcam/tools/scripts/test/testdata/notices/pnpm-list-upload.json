@@ -1,0 +1,76 @@
+[
+  {
+    "name": "spike-video-app",
+    "version": "0.0.0",
+    "path": "@DATA@/app",
+    "private": true,
+    "dependencies": {
+      "@ipcam/capacitor-pip": {
+        "from": "@ipcam/capacitor-pip",
+        "version": "link:../pip",
+        "path": "@DATA@/npm/pip"
+      },
+      "@tauri-apps/api": {
+        "from": "@tauri-apps/api",
+        "version": "2.12.1",
+        "path": "@DATA@/npm/tauri-api"
+      },
+      "@ipcam/core": {
+        "from": "@ipcam/core",
+        "version": "link:../core",
+        "path": "@DATA@/npm/core",
+        "dependencies": {
+          "@noble/ciphers": {
+            "from": "@noble/ciphers",
+            "version": "2.4.0",
+            "path": "@DATA@/npm/noble-ciphers"
+          }
+        }
+      },
+      "@ipcam/player": {
+        "from": "@ipcam/player",
+        "version": "link:../player",
+        "path": "@DATA@/npm/player",
+        "dependencies": {
+          "hls.js": {
+            "from": "hls.js",
+            "version": "1.7.3",
+            "path": "@DATA@/npm/hls.js"
+          }
+        }
+      },
+      "hls.js": {
+        "from": "hls.js",
+        "version": "1.7.3",
+        "path": "@DATA@/npm/hls.js"
+      },
+      "@capacitor/browser": {
+        "from": "@capacitor/browser",
+        "version": "8.0.5",
+        "path": "@DATA@/npm/capacitor-browser"
+      },
+      "@capacitor/app": {
+        "from": "@capacitor/app",
+        "version": "8.1.2",
+        "path": "@DATA@/npm/capacitor-app"
+      },
+      "@tauri-apps/plugin-opener": {
+        "from": "@tauri-apps/plugin-opener",
+        "version": "2.7.2",
+        "path": "@DATA@/npm/tauri-plugin-opener"
+      },
+      "@fabianlars/tauri-plugin-oauth": {
+        "from": "@fabianlars/tauri-plugin-oauth",
+        "version": "2.1.0",
+        "path": "@DATA@/npm/tauri-plugin-oauth"
+      }
+    },
+    "unsavedDependencies": {
+      "eslint": {
+        "from": "eslint",
+        "version": "10.12.0",
+        "path": "@DATA@/npm/nolicense"
+      }
+    }
+  }
+]

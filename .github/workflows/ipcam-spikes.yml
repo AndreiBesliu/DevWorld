@@ -26,6 +26,8 @@ on:
       - '.github/workflows/ipcam-spikes.yml'
       # The recorder spike has its own workflow (ipcam-spike-recording.yml).
       - '!ipcam/tools/spikes/recording/**'
+      # The upload spike has its own workflow (ipcam-spike-upload.yml).
+      - '!ipcam/tools/spikes/upload/**'
   pull_request:
     paths:
       - 'ipcam/tools/spikes/video/**'
@@ -47,6 +49,8 @@ on:
       - '.github/workflows/ipcam-spikes.yml'
       # The recorder spike has its own workflow (ipcam-spike-recording.yml).
       - '!ipcam/tools/spikes/recording/**'
+      # The upload spike has its own workflow (ipcam-spike-upload.yml).
+      - '!ipcam/tools/spikes/upload/**'
 
 permissions:
   contents: read

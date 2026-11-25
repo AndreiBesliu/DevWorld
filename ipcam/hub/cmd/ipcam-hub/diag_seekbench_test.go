@@ -10,6 +10,7 @@ import (
 	"filippo.io/age"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/playback"
 )
 
 // openBenchSegment opens seg's plaintext as the benches do.
@@ -50,7 +51,7 @@ func TestSeekbench_FirstIDRAtOrAfterTarget(t *testing.T) {
 	seg := writeBenchSegment(t, t.TempDir(), 4, 30, 400)
 	r, size := openBenchSegment(t, seg)
 	whole := make([]byte, size)
-	if err := readFullAt(r, whole, 0); err != nil {
+	if err := playback.ReadFullAt(r, whole, 0); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {

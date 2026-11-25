@@ -1,0 +1,503 @@
+package oauth
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/oauth2"
+
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage"
+)
+
+const (
+	// tokenTimeout bounds each call of a token or device endpoint (P27), so
+	// a WAN block ends a refresh as ErrTransient within it.
+	tokenTimeout = 5 * time.Second
+	// rotationGrace: see Store.rotationGrace.
+	rotationGrace = 2 * time.Second
+	// expiryMargin is how long before its expiry an access token is
+	// refreshed, so no request carries one that expires on its way.
+	expiryMargin = time.Minute
+	// maxAnswer bounds an endpoint's answer.
+	maxAnswer = 1 << 20
+	// grantDeviceCode is the device code grant (RFC 8628).
+	grantDeviceCode = "urn:ietf:params:oauth:grant-type:device_code"
+)
+
+// login is the plaintext of a login's sealed row (P19, P27).
+type login struct {
+	RefreshToken string       `json:"refreshToken"`
+	Provider     storage.Kind `json:"provider"`
+	Platform     Platform     `json:"platform"`
+	ClientType   ClientType   `json:"clientType"`
+	Plan         string       `json:"plan"`
+	IssuedAtMs   int64        `json:"issuedAtMs"`
+	// DailyRefreshedAtMs is the time of the login's last successful daily
+	// refresh (P53), which RunDaily writes with it, so that a day that was
+	// ok stays decided across a restart (C2-R16 (d′)); 0: none yet. Only
+	// RunDaily's refreshes write it: a day is decided where its outcome went
+	// out as an event.
+	DailyRefreshedAtMs int64 `json:"dailyRefreshedAtMs,omitempty"`
+	// PreviousRefreshTokens are the refresh tokens that this row held
+	// before its current one, oldest first, at most maxPreviousTokens: a
+	// rotation and a new login of the ref keep the token they replace, which
+	// the provider may not have revoked, so that the known-secrets scan
+	// still finds it (security review DIAG-3).
+	PreviousRefreshTokens []string `json:"previousRefreshTokens,omitempty"`
+}
+
+// maxPreviousTokens bounds a login row's superseded refresh tokens; the
+// oldest go first.
+const maxPreviousTokens = 64
+
+// sealLogin seals l under ref's label.
+func (s *Store) sealLogin(ctx context.Context, ref string, l login) ([]byte, error) {
+	plain, err := json.Marshal(l) //nolint:gosec // G117: the plaintext that Seal seals, cleared after it
+	if err != nil {
+		return nil, err
+	}
+	defer clear(plain)
+	sealed, err := s.cfg.Sealer.Seal(ctx, loginPrefix+ref, plain)
+	if err != nil {
+		return nil, fmt.Errorf("oauth: seal the login %s: %w", ref, err)
+	}
+	return sealed, nil
+}
+
+// putLogin writes l as ref's row, replacing an earlier login of ref.
+func (s *Store) putLogin(ctx context.Context, ref string, l login) error {
+	sealed, err := s.sealLogin(ctx, ref, l)
+	if err != nil {
+		return err
+	}
+	return s.cfg.Secrets.PutSecret(ctx, loginPrefix+ref, secretKind, sealed, s.cfg.Sealer.Backend())
+}
+
+// readLogin returns ref's sealed row and its login, and whether there is
+// one. A catalog that fails to read is ErrTransient; a row that this hub
+// cannot open, ErrAuthExpired: only a new login mends it; a fault of the
+// sealer's key is neither (unsealError).
+func (s *Store) readLogin(ctx context.Context, ref string) ([]byte, login, bool, error) {
+	id := loginPrefix + ref
+	sealed, backend, ok, err := s.cfg.Secrets.Secret(ctx, id)
+	switch {
+	case err != nil:
+		return nil, login{}, false, fmt.Errorf("oauth: read the login %s: %w", ref, storage.ErrTransient)
+	case !ok:
+		return nil, login{}, false, nil
+	case backend != s.cfg.Sealer.Backend():
+		return nil, login{}, false, fmt.Errorf("oauth: the login %s was sealed by %s, not this hub's %s: %w",
+			ref, backend, s.cfg.Sealer.Backend(), storage.ErrAuthExpired)
+	}
+	plain, err := s.cfg.Sealer.Unseal(ctx, id, sealed)
+	if err != nil {
+		return nil, login{}, false, unsealError("the login "+ref, err)
+	}
+	defer clear(plain)
+	var l login
+	if err := json.Unmarshal(plain, &l); err != nil || l.RefreshToken == "" {
+		return nil, login{}, false, fmt.Errorf("oauth: the row of the login %s holds no login: %w", ref, storage.ErrAuthExpired)
+	}
+	return sealed, l, true, nil
+}
+
+// tokenAnswer is a token endpoint's answer.
+type tokenAnswer struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
+	TokenType    string `json:"token_type"`
+}
+
+// deviceAnswer is a device endpoint's answer: Google names its URL
+// verification_url, Microsoft verification_uri.
+type deviceAnswer struct {
+	DeviceCode      string `json:"device_code"`
+	UserCode        string `json:"user_code"`
+	VerificationURL string `json:"verification_url"`
+	VerificationURI string `json:"verification_uri"`
+	ExpiresIn       int64  `json:"expires_in"`
+	Interval        int64  `json:"interval"`
+}
+
+func (d deviceAnswer) verification() string {
+	if d.VerificationURL != "" {
+		return d.VerificationURL
+	}
+	return d.VerificationURI
+}
+
+func (d deviceAnswer) life() time.Duration {
+	if d.ExpiresIn <= 0 {
+		return stateLife
+	}
+	return time.Duration(d.ExpiresIn) * time.Second
+}
+
+func (d deviceAnswer) interval() time.Duration {
+	if d.Interval <= 0 {
+		return 5 * time.Second
+	}
+	return time.Duration(d.Interval) * time.Second
+}
+
+// tokenCall sends form, with client's credentials, to provider p's token
+// endpoint within tokenTimeout.
+func (s *Store) tokenCall(ctx context.Context, p storage.Kind, client Client, form url.Values) (tokenAnswer, error) {
+	endpoint := s.cfg.Endpoints.GoogleToken
+	if p == storage.KindOneDrivePersonal {
+		endpoint = s.cfg.Endpoints.MicrosoftToken
+	}
+	form.Set("client_id", client.ID)
+	if client.Secret != "" {
+		form.Set("client_secret", client.Secret)
+	}
+	var tok tokenAnswer
+	if err := s.post(ctx, endpoint, form, &tok); err != nil {
+		return tokenAnswer{}, err
+	}
+	if tok.AccessToken == "" {
+		// Not the provider's own answer (a portal's or a scanner's page):
+		// it ends no login (security review STORE-4).
+		return tokenAnswer{}, fmt.Errorf("oauth: the token endpoint gave no access token: %w", storage.ErrTransient)
+	}
+	return tok, nil
+}
+
+// deviceAuthorization asks provider p's device endpoint for a user code
+// (RFC 8628), as client.
+func (s *Store) deviceAuthorization(ctx context.Context, p storage.Kind, client Client) (deviceAnswer, error) {
+	endpoint, scope := s.cfg.Endpoints.GoogleDevice, scopeGoogle
+	if p == storage.KindOneDrivePersonal {
+		endpoint, scope = s.cfg.Endpoints.MicrosoftDevice, scopeMicrosoft
+	}
+	var dev deviceAnswer
+	if err := s.post(ctx, endpoint, url.Values{"client_id": {client.ID}, "scope": {scope}}, &dev); err != nil {
+		return deviceAnswer{}, err
+	}
+	if dev.DeviceCode == "" || dev.UserCode == "" {
+		return deviceAnswer{}, fmt.Errorf("oauth: the device endpoint gave no device code: %w", storage.ErrTransient)
+	}
+	return dev, nil
+}
+
+// post sends form to endpoint within tokenTimeout and decodes a 200's JSON
+// into v. A request with no answer, and a 200 that is not JSON (a portal's
+// or a scanner's page), is ErrTransient; any other answer is a
+// ProviderError with the OAuth error code of its JSON body, codeUnknown
+// for a code that the hub does not know, or none; neither text quotes the
+// request, its URL or the answer.
+func (s *Store) post(ctx context.Context, endpoint string, form url.Values, v any) error {
+	ctx, cancel := context.WithTimeout(ctx, s.tokenTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return errors.New("oauth: a request to an endpoint that is not a URL")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	resp, err := s.cfg.HTTP.Do(req)
+	if err != nil {
+		what := "failed"
+		if ctx.Err() != nil {
+			what = "timed out"
+		}
+		return fmt.Errorf("oauth: the provider's endpoint %s: %w", what, storage.ErrTransient)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAnswer))
+	if err != nil {
+		return fmt.Errorf("oauth: the provider's answer was cut: %w", storage.ErrTransient)
+	}
+	if resp.StatusCode != http.StatusOK {
+		var e struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(body, &e) // no JSON, or no string error: no code
+		code := e.Error
+		if code != "" && !providerCodes[code] {
+			code = codeUnknown
+		}
+		return &ProviderError{Code: code, Status: resp.StatusCode}
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		return fmt.Errorf("oauth: the provider's answer is not its JSON: %w", storage.ErrTransient)
+	}
+	return nil
+}
+
+// isInvalidGrant reports a provider's invalid_grant.
+func isInvalidGrant(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe) && pe.Code == "invalid_grant"
+}
+
+// Refresh refreshes the login of ref now, whatever its access token's
+// expiry: the daily refresh (P53) and the control endpoint's.
+func (s *Store) Refresh(ctx context.Context, ref string) (RefreshResult, error) {
+	return s.refresh(ctx, ref, false)
+}
+
+// refresh refreshes ref now; daily records the success in ref's row as its
+// last daily refresh (RunDaily's).
+func (s *Store) refresh(ctx context.Context, ref string, daily bool) (RefreshResult, error) {
+	src := s.source(ref)
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	return s.refreshLocked(ctx, ref, src, daily)
+}
+
+// refreshLocked is the refresh of ref (P27), with src.mu held:
+//  0. write the rotation that src keeps from a refresh whose store failed;
+//  1. read the sealed row and unseal its refresh token;
+//  2. call the token endpoint, in no transaction, within tokenTimeout, with
+//     the client of the login that the row holds;
+//  3. when the provider rotated the token, or the refresh is daily (its
+//     time is recorded), seal the row anew and write it with SwapSecret
+//     before the access token is used.
+//
+// An invalid_grant, or a swap that another writer won, re-reads the row
+// once: a token that another process rotated meanwhile is refreshed again,
+// with the client of the login that the row now holds (security review
+// STORE-5), so no process keeps a revoked one. An invalid_grant on a row
+// that stays as it was, also rotationGrace later, is ErrAuthExpired. A row
+// written anew keeps every field it does not change, so a rotation keeps
+// the last daily refresh's time, and a daily refresh keeps the token.
+//
+// Once the provider answered, the row is written even when ctx ended: a
+// provider that rotates revokes the old token, so a rotation that is not
+// stored would leave the row with a revoked one. When the write fails, the
+// refresh is ErrTransient and src keeps the rotation, the token change
+// alone, never a daily refresh's time, until the next refresh writes it,
+// before it calls the provider (security review STORE-1, C2-R20 (c)).
+func (s *Store) refreshLocked(ctx context.Context, ref string, src *tokenSource, daily bool) (RefreshResult, error) {
+	if err := s.storeRotation(ctx, ref, src); err != nil {
+		return RefreshResult{}, err
+	}
+	row, l, ok, err := s.readLogin(ctx, ref)
+	switch {
+	case err != nil:
+		return RefreshResult{}, err
+	case !ok:
+		return RefreshResult{}, fmt.Errorf("oauth: no login for %s: %w", ref, storage.ErrAuthExpired)
+	}
+	for again := false; ; again = true {
+		client, err := s.client(ctx, l.Provider, l.ClientType)
+		if err != nil {
+			return RefreshResult{}, err
+		}
+		if s.beforeCall != nil {
+			s.beforeCall()
+		}
+		tok, err := s.tokenCall(ctx, l.Provider, client, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {l.RefreshToken}})
+		if isInvalidGrant(err) && !again {
+			if row, l, ok, err = s.rereadChanged(ctx, ref, row); err != nil || !ok {
+				return RefreshResult{}, invalidGrant(ref, err)
+			}
+			continue
+		}
+		if err != nil {
+			return RefreshResult{}, err
+		}
+		now := s.cfg.Clock()
+		rotated := tok.RefreshToken != "" && tok.RefreshToken != l.RefreshToken
+		if rotated || daily {
+			// kept is the token change alone: a refresh whose store fails
+			// keeps it for the next one, and a failed day records no daily
+			// success (C2-R20 (c), C2-R16 (d′)).
+			kept := l
+			if rotated {
+				kept.RefreshToken = tok.RefreshToken
+				kept.PreviousRefreshTokens = superseded(l.PreviousRefreshTokens, l.RefreshToken)
+			}
+			next := kept
+			if daily {
+				next.DailyRefreshedAtMs = now.UnixMilli()
+			}
+			swapped, err := s.swapLogin(context.WithoutCancel(ctx), ref, row, next)
+			switch {
+			case err != nil:
+				if rotated {
+					src.rotation = &rotation{old: row, next: kept}
+				}
+				return RefreshResult{}, fmt.Errorf("oauth: store the refreshed login %s: %v: %w", ref, err, storage.ErrTransient)
+			case !swapped && !again:
+				// Another writer changed the row: refresh with its token.
+				if row, l, ok, err = s.readLogin(ctx, ref); err != nil {
+					return RefreshResult{}, err
+				} else if !ok {
+					return RefreshResult{}, fmt.Errorf("oauth: the login %s is gone: %w", ref, storage.ErrAuthExpired)
+				}
+				continue
+			case !swapped:
+				return RefreshResult{}, fmt.Errorf("oauth: the login %s changed twice during a refresh: %w", ref, storage.ErrTransient)
+			}
+		}
+		src.set(tok, now)
+		return RefreshResult{At: now, Rotated: rotated}, nil
+	}
+}
+
+// rotation is a rotated login that a refresh could not store: the row it
+// read, and the login to write in its place, which differs from it in its
+// refresh tokens only.
+type rotation struct {
+	old  []byte
+	next login
+}
+
+// swapLogin seals next and writes it as ref's row while the row still
+// holds old.
+func (s *Store) swapLogin(ctx context.Context, ref string, old []byte, next login) (bool, error) {
+	sealed, err := s.sealLogin(ctx, ref, next)
+	if err != nil {
+		return false, err
+	}
+	return s.cfg.Secrets.SwapSecret(ctx, loginPrefix+ref, old, sealed, s.cfg.Sealer.Backend())
+}
+
+// storeRotation writes the rotation that src keeps, if any, while the row
+// still holds the token it replaced; a row that another writer changed
+// meanwhile (a new login) wins, and the rotation is dropped. A write that
+// fails again is ErrTransient, and src keeps the rotation.
+func (s *Store) storeRotation(ctx context.Context, ref string, src *tokenSource) error {
+	r := src.rotation
+	if r == nil {
+		return nil
+	}
+	if _, err := s.swapLogin(context.WithoutCancel(ctx), ref, r.old, r.next); err != nil {
+		return fmt.Errorf("oauth: store the rotated login %s: %v: %w", ref, err, storage.ErrTransient)
+	}
+	src.rotation = nil
+	return nil
+}
+
+// superseded is prev with token, the refresh token that a rotation or a
+// new login replaces, at its end, and the oldest dropped past
+// maxPreviousTokens. prev is not changed.
+func superseded(prev []string, token string) []string {
+	out := append(slices.Clone(prev), token)
+	if n := len(out) - maxPreviousTokens; n > 0 {
+		out = out[n:]
+	}
+	return out
+}
+
+// rereadChanged re-reads ref's row after an invalid_grant: a row that
+// another process rotated meanwhile is returned with ok. A row that is
+// still old is read again rotationGrace later, the time another process's
+// refresh takes from its answer to its write.
+func (s *Store) rereadChanged(ctx context.Context, ref string, old []byte) ([]byte, login, bool, error) {
+	for wait := time.Duration(0); ; wait = s.rotationGrace {
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, login{}, false, ctx.Err()
+			case <-time.After(wait):
+			}
+		}
+		row, l, ok, err := s.readLogin(ctx, ref)
+		if err != nil || !ok {
+			return nil, login{}, false, err
+		}
+		if !bytes.Equal(row, old) {
+			return row, l, true, nil
+		}
+		if wait > 0 {
+			return nil, login{}, false, nil
+		}
+	}
+}
+
+// invalidGrant is the error of a refresh token that the provider refused
+// with invalid_grant, its row unchanged (ErrAuthExpired), or of the re-read
+// that err is.
+func invalidGrant(ref string, err error) error {
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("oauth: the login %s: %w", ref, &ProviderError{Code: "invalid_grant", Status: http.StatusBadRequest})
+}
+
+// tokenSource is the access token of one ref, in RAM, shared by every
+// destination that names the ref.
+type tokenSource struct {
+	s   *Store
+	ctx context.Context // its refreshes', TokenSource's first caller's; nil: Background
+	ref string
+
+	mu     sync.Mutex // one refresh at a time; held across the call
+	access string
+	expiry time.Time
+	// rotation is a rotated login that a refresh could not store, written
+	// before the next call to the provider (security review STORE-1).
+	rotation *rotation
+}
+
+// TokenSource returns ref's token source, the same for every call: its
+// Token refreshes the access token through the sealed row when it expires
+// within a minute, within the first caller's ctx (ipcam-hub's run).
+func (s *Store) TokenSource(ctx context.Context, ref string) oauth2.TokenSource {
+	src := s.source(ref)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if src.ctx == nil {
+		src.ctx = ctx
+	}
+	return src
+}
+
+// source returns ref's tokenSource, made at its first call.
+func (s *Store) source(ref string) *tokenSource {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src := s.sources[ref]
+	if src == nil {
+		src = &tokenSource{s: s, ref: ref}
+		s.sources[ref] = src
+	}
+	return src
+}
+
+// Token returns the access token, refreshed first when it expires within
+// expiryMargin. Its errors wrap storage.ErrAuthExpired when only a new
+// login or a new setup of the clients mends them, and storage.ErrTransient
+// when a later call may succeed. A fault of the hub's sealer key wraps
+// crypto.ErrKeyUnavailable instead (unsealError, security review SEAL-2),
+// and a token endpoint that is no URL wraps none of them.
+func (t *tokenSource) Token() (*oauth2.Token, error) {
+	t.s.mu.Lock()
+	ctx := t.ctx
+	t.s.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.access == "" || !t.s.cfg.Clock().Before(t.expiry.Add(-expiryMargin)) {
+		if _, err := t.s.refreshLocked(ctx, t.ref, t, false); err != nil {
+			return nil, err
+		}
+	}
+	return &oauth2.Token{AccessToken: t.access, TokenType: "Bearer", Expiry: t.expiry}, nil
+}
+
+// set keeps tok's access token, which expires ExpiresIn after now. The
+// caller holds t.mu, or t is new to its login.
+func (t *tokenSource) set(tok tokenAnswer, now time.Time) {
+	life := time.Duration(tok.ExpiresIn) * time.Second
+	if life <= 0 {
+		life = time.Hour
+	}
+	t.access, t.expiry = tok.AccessToken, now.Add(life)
+}

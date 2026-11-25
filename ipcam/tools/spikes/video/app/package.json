@@ -13,11 +13,15 @@
     "build": "vite build"
   },
   "dependencies": {
+    "@capacitor/app": "8.1.2",
+    "@capacitor/browser": "8.0.5",
     "@capacitor/core": "8.5.2",
+    "@fabianlars/tauri-plugin-oauth": "2.1.0",
     "@ipcam/capacitor-pip": "workspace:*",
     "@ipcam/core": "workspace:*",
     "@ipcam/player": "workspace:*",
     "@tauri-apps/api": "2.12.1",
+    "@tauri-apps/plugin-opener": "2.7.2",
     "@tauri-apps/plugin-shell": "2.6.0",
     "age-encryption": "0.3.1",
     "hash-wasm": "4.12.0",

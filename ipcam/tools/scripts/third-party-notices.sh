@@ -14,14 +14,20 @@
 #       module has no license file, are named explicitly (G35, C1-R5): the
 #       report skips the first as the repository's own, the second is no Go
 #       module, and go-licenses cannot classify the third.
+#     - upload: ipcam-hub, uploadspike and reccontroller, and for ARMv6
+#       uploadspike-probe; and mediamtx, with MediaMTX, hls.js and keywrap
+#       named explicitly, as in the recording release.
 #   - npm: every package that the spike app depends on at run time (its
 #     production dependencies, as pnpm lists them), which includes every
 #     package bundled into it, and the NOTICE files of this repository's own
 #     packages among them (the player's carries video-rtc.js's MIT notice).
+#     A package whose tarball has no license file is quoted from the texts
+#     copied by hand into tools/licenses/npm/<name>@<version>/ (its README).
+#     The upload release's uploadspike also embeds the app, for its web login.
 # The Android libraries of the APK and the Rust crates of ipcam-desktop are
 # not listed; the release notes say so.
 #
-#   tools/scripts/third-party-notices.sh [--release video|recording] > THIRD_PARTY_NOTICES.txt
+#   tools/scripts/third-party-notices.sh [--release video|recording|upload] > THIRD_PARTY_NOTICES.txt
 #
 # Run it after `pnpm install` and with the Go modules downloadable. Exits 1
 # when a module or package has no license file, or a tool fails; 2 on a usage
@@ -29,12 +35,12 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 [--release video|recording] > THIRD_PARTY_NOTICES.txt" >&2
+  echo "usage: $0 [--release video|recording|upload] > THIRD_PARTY_NOTICES.txt" >&2
   exit 2
 }
 release=video
 if [[ $# -gt 0 ]]; then
-  [[ $# -eq 2 && "$1" == --release && ("$2" == video || "$2" == recording) ]] || usage
+  [[ $# -eq 2 && "$1" == --release && ("$2" == video || "$2" == recording || "$2" == upload) ]] || usage
   release="$2"
 fi
 
@@ -64,8 +70,8 @@ toolchain="$(go env GOVERSION)"
 # One line per module and license: name, version, license name, license file.
 printf '{{range .}}{{.Name}}\t{{.Version}}\t{{.LicenseName}}\t{{.LicensePath}}\n{{end}}' > "${tmp}/report.tpl"
 # The prefixes that the reports leave out: this repository's own modules,
-# and in the recording release keywrap, whose license is quoted by hand
-# below, so that the video release's notices do not depend on it.
+# and in the recording and upload releases keywrap, whose license is quoted
+# by hand below, so that the video release's notices do not depend on it.
 ignores=(--ignore "${own_module_prefix}")
 [[ "${release}" == video ]] || ignores+=(--ignore "${keywrap_package}")
 # report <target> <package>...: go-licenses' lines for the packages built for
@@ -82,10 +88,17 @@ if [[ "${release}" == video ]]; then
     report "${target}" ./tools/spikes/video/cmd/spikehub >> "${tmp}/go.tsv"
   done
 else
-  for target in "${targets[@]}"; do
-    report "${target}" ./hub/cmd/ipcam-hub ./tools/spikes/recording/cmd/recspike ./tools/spikes/recording/cmd/reccontroller >> "${tmp}/go.tsv"
-  done
-  report linux/arm/6 ./tools/spikes/recording/cmd/reccontroller ./tools/spikes/recording/cmd/recspike-probe >> "${tmp}/go.tsv"
+  if [[ "${release}" == recording ]]; then
+    for target in "${targets[@]}"; do
+      report "${target}" ./hub/cmd/ipcam-hub ./tools/spikes/recording/cmd/recspike ./tools/spikes/recording/cmd/reccontroller >> "${tmp}/go.tsv"
+    done
+    report linux/arm/6 ./tools/spikes/recording/cmd/reccontroller ./tools/spikes/recording/cmd/recspike-probe >> "${tmp}/go.tsv"
+  else
+    for target in "${targets[@]}"; do
+      report "${target}" ./hub/cmd/ipcam-hub ./tools/spikes/upload/cmd/uploadspike ./tools/spikes/recording/cmd/reccontroller >> "${tmp}/go.tsv"
+    done
+    report linux/arm/6 ./tools/spikes/upload/cmd/uploadspike-probe >> "${tmp}/go.tsv"
+  fi
   for target in "${targets[@]}"; do
     (cd "${fork}" && GOWORK=off GOTOOLCHAIN="${toolchain}" report "${target}" .) >> "${tmp}/go.tsv"
   done
@@ -136,6 +149,22 @@ npm packages that the app depends on at run time (its production dependencies,
 which include every package bundled into it), each with its license text. The
 Android libraries of the APK and the Rust crates of ipcam-desktop are not listed.
 EOF
+  elif [[ "${release}" == upload ]]; then
+    cat <<'EOF'
+Licențele componentelor terțe din programele probei de upload (Faza 0 c2) și din aplicația de test.
+Fișierul le păstrează pentru conformitate; nu trebuie să faceți nimic cu el.
+
+Third-party notices for the upload spike's programs, in their Windows and
+Linux builds: uploadspike, ipcam-hub, reccontroller, uploadspike-probe and
+mediamtx, the MediaMTX fork; and for the spike app that uploadspike serves and
+that ipcam-spike.apk and ipcam-desktop-setup.exe (the Windows installer)
+embed. They hold the Go standard library and the Go modules compiled into
+each program, MediaMTX itself, the hls.js that mediamtx embeds, and the npm
+packages that the app depends on at run time (its production dependencies,
+which include every package bundled into it), each with its license text. The
+Android libraries of the APK and the Rust crates of ipcam-desktop are not
+listed.
+EOF
   else
     cat <<'EOF'
 Licențele componentelor terțe din programele probei de înregistrare (Faza 0 c1) și din aplicația de test.
@@ -164,7 +193,7 @@ EOF
     entry "Go module: ${name} ${version}" "${names//,/, }" "${path}"
   done <<< "${go_modules}"
 
-  if [[ "${release}" == recording ]]; then
+  if [[ "${release}" != video ]]; then
     if [[ -s "${tmp}/keywrap-license" ]]; then
       entry "Go module: ${keywrap_module} ${keywrap_version}, its package aes/keywrap" BSD-2-Clause "${tmp}/keywrap-license"
     else
@@ -191,12 +220,19 @@ EOF
       [[ ${#notices[@]} -eq 0 ]] || entry "Notices of ${name} (part of this repository)" "" "${notices[@]}"
       continue
     fi
+    heading="npm package: ${name} ${version}"
     if [[ ${#files[@]} -eq 0 ]]; then
-      problems+=("${name} ${version}: no license file in ${path}")
-      continue
+      by_hand="tools/licenses/npm/${name}@${version}"
+      [[ -d "${by_hand}" ]] && mapfile -t files < <(find "${by_hand}" -maxdepth 1 -type f \
+        \( -iname 'licen[cs]e*' -o -iname 'copying*' -o -iname 'notice*' \) | LC_ALL=C sort)
+      if [[ ${#files[@]} -eq 0 ]]; then
+        problems+=("${name} ${version}: no license file in ${path}")
+        continue
+      fi
+      heading+=" (its license files quoted from ${by_hand}: the package has none)"
     fi
     license="$(jq -r '.license // ([.licenses[]?.type] | join(", ")) // ""' "${path}/package.json" 2>/dev/null || true)"
-    entry "npm package: ${name} ${version}" "${license}" "${files[@]}"
+    entry "${heading}" "${license}" "${files[@]}"
   done <<< "${npm_packages}"
 
   if [[ ${#problems[@]} -gt 0 ]]; then

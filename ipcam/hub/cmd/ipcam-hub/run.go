@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/health"
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/recorder"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/storage/oauth"
 )
 
 // statusInterval is how often each job's status goes out as an event and
@@ -44,6 +46,13 @@ type runConfig struct {
 	// without it, ipcam-hub writes nothing while rec/ is on an SD card.
 	SDCardConfirmed bool        `json:"sdCardConfirmed"`
 	Jobs            []runJobDef `json:"jobs"`
+	// Uploads are the destinations and routes of the segments' copies
+	// (uploads.go); without them, ipcam-hub uploads nothing and runs as c1's
+	// did (g2-01).
+	Uploads *uploadsConfig `json:"uploads"`
+	// OAuth is the token store's endpoints and Testing-mode life
+	// (control.go, Task 9); without it, the live providers' and 7 days.
+	OAuth *oauthSection `json:"oauth"`
 }
 
 type runJobDef struct {
@@ -63,11 +72,34 @@ type runJobDef struct {
 // reconcile and the verification could read none of the job's files. Its
 // errors quote no key.
 func loadRunConfig(path string) (runConfig, []recorder.Job, *age.X25519Identity, error) {
-	var cfg runConfig
 	b, err := os.ReadFile(path) //nolint:gosec // the configuration that the caller named
 	if err != nil {
-		return cfg, nil, nil, err
+		return runConfig{}, nil, nil, err
 	}
+	return parseRunConfig(path, b, true)
+}
+
+// maxRunConfig bounds a run.json that a root command reads.
+const maxRunConfig = 4 << 20
+
+// loadRunConfigStrict is loadRunConfig for the diag commands that root
+// runs on the Pi on the hub identity's run.json (scan-secrets,
+// visibility): it reads run.json as readRegular does, never through a link
+// or from a FIFO (security review SEAL-1), and neither its jobs nor its
+// identityFile, which those commands do not need.
+func loadRunConfigStrict(path string) (runConfig, error) {
+	b, err := readRegular(path, maxRunConfig)
+	if err != nil {
+		return runConfig{}, err
+	}
+	cfg, _, _, err := parseRunConfig(path, b, false)
+	return cfg, err
+}
+
+// parseRunConfig is the run configuration b, read from path, with its jobs
+// and its identity when withJobs is set.
+func parseRunConfig(path string, b []byte, withJobs bool) (runConfig, []recorder.Job, *age.X25519Identity, error) {
+	var cfg runConfig
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
@@ -76,8 +108,22 @@ func loadRunConfig(path string) (runConfig, []recorder.Job, *age.X25519Identity,
 	if cfg.DataDir == "" {
 		return cfg, nil, nil, fmt.Errorf("%s: no dataDir", path)
 	}
+	if cfg.Uploads != nil {
+		if err := cfg.Uploads.validate(); err != nil {
+			return cfg, nil, nil, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if cfg.OAuth != nil {
+		if err := cfg.OAuth.validate(); err != nil {
+			return cfg, nil, nil, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if !withJobs {
+		return cfg, nil, nil, nil
+	}
 	var id *age.X25519Identity
 	if cfg.IdentityFile != "" {
+		var err error
 		if id, err = loadIdentity(cfg.IdentityFile); err != nil {
 			return cfg, nil, nil, err
 		}
@@ -142,7 +188,10 @@ func loadIdentity(path string) (*age.X25519Identity, error) {
 // runCommand is "ipcam-hub run": it reconciles, records the jobs of
 // run.json and reports, until SIGTERM, Ctrl-C or Ctrl-Break, or, with
 // --stop-on-stdin-eof, until its stdin ends: a stop that needs no console,
-// which recspike uses, also from a boot task that has none (G14).
+// which recspike uses, also from a boot task that has none (G14). With
+// IPCAM_CONTROL_TOKEN in its environment it serves the control endpoint on
+// 127.0.0.1 (control.go); with an uploads section or that token, its token
+// store refreshes each login daily (Task 9).
 func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ev := &events{out: stdout}
 	fail := func(err error) int {
@@ -161,6 +210,10 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return fail(errors.New("usage: ipcam-hub run --config <run.json> [--stop-on-stdin-eof]"))
 	}
 	cfg, jobs, id, err := loadRunConfig(*configPath)
+	if err != nil {
+		return fail(err)
+	}
+	controlToken, err := readControlToken()
 	if err != nil {
 		return fail(err)
 	}
@@ -184,6 +237,25 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	for _, dir := range []string{runDir, tmpDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fail(err)
+		}
+	}
+	// The hub lock comes after the SD gate too (C2-R11, C2-R15 (a)): a run
+	// whose uploads or control endpoint's token store write the catalog
+	// beside the recording holds <dataDir>/state/hub.lock until it ends, so
+	// diag dest-probe and a second hub refuse meanwhile. c1's run, with
+	// neither, takes none.
+	if cfg.Uploads != nil || controlToken != "" {
+		release, err := lockHub(stateDir)
+		if err != nil {
+			return fail(err)
+		}
+		defer release()
+	}
+	// Then the uploads' state/hub_id and each LOCAL destination's folder.
+	var up *uploads
+	if cfg.Uploads != nil {
+		if up, err = prepareUploads(cfg.Uploads, stateDir); err != nil {
 			return fail(err)
 		}
 	}
@@ -216,7 +288,14 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		// opens a console window in the owner's session.
 		ensureConsole()
 	}
-	cat, err := catalog.Open(ctx, filepath.Join(stateDir, "catalog.db"))
+	// With uploads, each segment that turns complete enqueues its
+	// placements in its row's transaction (P03): the queue is built before
+	// recorder.New, the first writer of a segment.
+	var catOpts catalog.Options
+	if up != nil {
+		catOpts.OnSegmentComplete = up.enqueue
+	}
+	cat, err := catalog.OpenWith(ctx, filepath.Join(stateDir, "catalog.db"), catOpts)
 	if err != nil {
 		return fail(err)
 	}
@@ -231,6 +310,40 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	obs := newObserver(ev, stderr, card)
 	defer obs.close()
 	rc.Observer = obs
+	// The token store, on a client of its own beside the drivers', whose
+	// connections the control endpoint resets (Task 9; newHubClient); c1's
+	// run, with neither uploads nor control, has none.
+	var store *oauth.Store
+	var conns *connTracker
+	if up != nil || controlToken != "" {
+		// A cut first key creation's temporary file goes at the next start
+		// (C2-R16 (e)); one left changes nothing, so the run goes on.
+		if err := crypto.RemoveKeyLeftovers(cfg.DataDir); err != nil {
+			_, _ = fmt.Fprintln(stderr, "ipcam-hub:", err)
+		}
+		var client, tokens *http.Client
+		client, tokens, conns = newHubClient()
+		if store, err = newOAuthStore(cfg, cat, tokens); err != nil {
+			return fail(err)
+		}
+		if up != nil {
+			if err := up.build(cat, ev, obs, rc.RecDir, client, storeTokens(ctx, store)); err != nil {
+				return fail(err)
+			}
+		}
+	}
+	if controlToken != "" {
+		c := &control{token: controlToken, store: store, uc: cfg.Uploads, cat: cat, ev: ev, conns: conns, reported: map[string]bool{}}
+		if up != nil {
+			c.unblock = up.unblock
+		}
+		addr, stopControl, err := c.serve(ctx)
+		if err != nil {
+			return fail(err)
+		}
+		defer stopControl()
+		ev.emit("control", map[string]any{"addr": addr})
+	}
 
 	// New gives the reconcile event out (observer.Reconciled), as later updates.
 	rec, _, err := recorder.New(ctx, rc)
@@ -255,6 +368,12 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		ready = append(ready, map[string]any{"cam": j.Cam, "profile": j.Profile, "encrypted": j.Scope != nil, "padLowBitrate": j.PadLowBitrate})
 	}
 	ev.emit("ready", map[string]any{"jobs": ready})
+	if up != nil {
+		up.start(card)
+	}
+	if store != nil {
+		defer runDaily(store, ev)()
+	}
 	sampled := make(chan struct{}) // closed once the card sampler has returned
 	if card != nil {
 		go func() {
@@ -275,8 +394,11 @@ func runCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 				// The recorder stopped after SIGTERM or Ctrl-C. The card sampler
 				// returns once its goroutines have ended (cardSampler.join), so
 				// that its stop of the jobs, which writes the catalog, ends before
-				// the catalog closes.
+				// the catalog closes; so do the uploads.
 				<-sampled
+				if up != nil {
+					up.stop()
+				}
 				return exitOK
 			}
 			ev.emit("segment_closed", map[string]any{"cam": s.Cam, "profile": s.Profile, "path": s.Path,

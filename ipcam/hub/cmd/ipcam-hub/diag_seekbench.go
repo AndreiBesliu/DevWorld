@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/crypto"
+	"github.com/AndreiBesliu/DevWorld/ipcam/hub/internal/playback"
 )
 
 // seekbenchSchema names the output of diag seekbench.
@@ -137,7 +138,7 @@ func seek(rec crypto.Recording, file string, target time.Duration, wholeRAM bool
 // readWhole decrypts the whole plaintext of seg into RAM.
 func readWhole(seg *segment) (io.ReaderAt, error) {
 	buf := make([]byte, seg.size)
-	if err := readFullAt(seg.r, buf, 0); err != nil {
+	if err := playback.ReadFullAt(seg.r, buf, 0); err != nil {
 		return nil, err
 	}
 	return bytes.NewReader(buf), nil
