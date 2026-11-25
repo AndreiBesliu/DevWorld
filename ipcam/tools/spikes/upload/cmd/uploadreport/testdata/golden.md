@@ -120,9 +120,9 @@ Hub-ul primește codul de autentificare de pe fiecare platformă și își reîm
 | MI6 | Android × Google Drive: plan A, zilele 1–6 ok | plan A, sau B1 după un eșec al planului A; zilele 1–6 ok | ✓ | pc |
 | MI6 | Windows × Google Drive: plan A, zilele 1–6 ok | plan A, sau B1 după un eșec al planului A; zilele 1–6 ok | ✓ | pc |
 | MI6 | web × Google Drive: plan B1, zilele 1–6 ok | plan A, sau B1 după un eșec al planului A; zilele 1–6 ok | ✓ | pc |
-| MI6 | Android × OneDrive personal: amânat în Faza 0-bis: înregistrarea Microsoft cere un director plătit (A5) | plan A, sau B1 după un eșec al planului A; zilele 1–6 ok | – | pc |
-| MI6 | Windows × OneDrive personal: amânat în Faza 0-bis: înregistrarea Microsoft cere un director plătit (A5) | plan A, sau B1 după un eșec al planului A; zilele 1–6 ok | – | pc |
-| MI6 | web × OneDrive personal: amânat în Faza 0-bis: înregistrarea Microsoft cere un director plătit (A5) | plan A, sau B1 după un eșec al planului A; zilele 1–6 ok | – | pc |
+| MI6 | Android × OneDrive personal: amânat în Faza 0-bis: nu avem încă răspunsul verificării A5 (C2-R4) | plan A, sau B1 după un eșec al planului A; zilele 1–6 ok | – | pc |
+| MI6 | Windows × OneDrive personal: amânat în Faza 0-bis: nu avem încă răspunsul verificării A5 (C2-R4) | plan A, sau B1 după un eșec al planului A; zilele 1–6 ok | – | pc |
+| MI6 | web × OneDrive personal: amânat în Faza 0-bis: nu avem încă răspunsul verificării A5 (C2-R4) | plan A, sau B1 după un eșec al planului A; zilele 1–6 ok | – | pc |
 | MI6 | vizibilitate: 9 din 9 celule măsurate, 0 eșuate | 9 celule judecate, fiecare listată și citită | ✓ | pc |
 
 ### Perechile

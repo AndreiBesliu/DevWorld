@@ -102,6 +102,14 @@ func newReport(in *inputs, opts options) *report {
 			mi6Input[i] = e
 		}
 	}
+	g15 := mi6.Judge(mi6Input)
+	if opts.oneDrive == oneDriveUnknown {
+		g15.Rows = slices.Clone(g15.Rows)
+		for i, row := range g15.Rows {
+			g15.Rows[i].Value = strings.Replace(row.Value, string(results.Deferred(mi6.OneDriveA5)),
+				string(results.Deferred(oneDriveNoAnswer)), 1)
+		}
+	}
 	g17 := mi8.Judge(judged)
 	if opts.d3 == d3AfterPhase && !in.hasMI8() {
 		g17 = results.Judgement{Gate: "G17", Verdict: results.Incomplete, Reasons: []string{noteD3C}, Rows: []results.Row{}, Decisions: []string{}}
@@ -109,7 +117,7 @@ func newReport(in *inputs, opts options) *report {
 	r.gates = []gate{
 		{id: "G14", name: "Încărcarea în timpul unei pene de internet", measure: "MI5", j: mi5.Judge(judged),
 			keep: "outbox-ul și încărcarea rămân cele din §9.7–§9.9."},
-		{id: "G15", name: "Conectarea hub-ului la cloud, partea din Faza 0", measure: "MI6", j: mi6.Judge(mi6Input),
+		{id: "G15", name: "Conectarea hub-ului la cloud, partea din Faza 0", measure: "MI6", j: g15,
 			keep: "autentificarea rămâne cea din §3.3 și §8.7."},
 		{id: "G17", name: "Evenimentele ONVIF ale camerelor", measure: "MI8", j: g17,
 			keep: "evenimentele vin prin ONVIF PullPoint (HUB-11)."},
@@ -117,12 +125,16 @@ func newReport(in *inputs, opts options) *report {
 	return r
 }
 
-// judged are the envelopes that the Judges read: neither the lab's nor
-// the pi-probe marker.
+// oneDriveNoAnswer is the OneDrive pairs' deferral reason with
+// -onedrive unknown: the owner has not answered A5 yet (C2-R4).
+const oneDriveNoAnswer = "nu avem încă răspunsul verificării A5 (C2-R4)"
+
+// judged are the envelopes that the Judges read: not the lab's, not the
+// pi-probe marker and not one written with test seams.
 func (r *report) judged() []results.Envelope {
 	var out []results.Envelope
 	for _, e := range r.in.envs {
-		if !isLab(e) && e.Set != results.PiProbeSet {
+		if judgedEnv(e) {
 			out = append(out, e)
 		}
 	}
@@ -593,7 +605,11 @@ func (r *report) mi6(b *strings.Builder) {
 	if len(pairs) > 0 {
 		b.WriteString("### Perechile\n\n| Pereche | Plan | Zilele 1–6 | Ziua 7 | Încercări fără răspuns | Sursă |\n" +
 			"| --- | --- | --- | --- | --- | --- |\n")
-		for _, def := range append(slices.Clone(mi6.Drive), mi6.OneDrive...) {
+		defs := slices.Clone(mi6.Drive)
+		if r.opts.oneDrive == oneDriveFree {
+			defs = append(defs, mi6.OneDrive...)
+		}
+		for _, def := range defs {
 			p, ok := pairs[def.Dest]
 			if !ok {
 				continue

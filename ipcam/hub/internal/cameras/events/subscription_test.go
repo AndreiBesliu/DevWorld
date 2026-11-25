@@ -213,8 +213,10 @@ func TestEvents_HealthyFalseAfterLoss(t *testing.T) {
 	if !ok || s.Kind != SignalUnhealthy || s.Cam != cam.ID {
 		t.Fatalf("signal = %+v, %v; want %s for %s", s, ok, SignalUnhealthy, cam.ID)
 	}
-	if after := time.Since(lostAt); after > opts.UnhealthyAfter+schedulingSlack {
-		t.Errorf("events_unhealthy came %v after the loss; want within %v", after, opts.UnhealthyAfter)
+	// The signal's own time, not its receipt, so that a busy runner's
+	// delay in reading the channel does not count against the hub.
+	if after := time.UnixMilli(s.AtMs).Sub(lostAt); after > opts.UnhealthyAfter+schedulingSlack {
+		t.Errorf("events_unhealthy came %v after the loss; want within %v (+%v slack)", after, opts.UnhealthyAfter, schedulingSlack)
 	}
 	if sub.Healthy() {
 		t.Error("Healthy() = true after events_unhealthy")

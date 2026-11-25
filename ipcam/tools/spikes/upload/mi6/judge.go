@@ -10,12 +10,15 @@ import (
 	"github.com/AndreiBesliu/DevWorld/ipcam/tools/spikes/upload/results"
 )
 
+// OneDriveA5 is the reason the OneDrive pairs are deferred when A5 failed.
+const OneDriveA5 = "înregistrarea Microsoft cere un director plătit (A5)"
+
 // The G15 texts (P22, P39, §2.2), verbatim.
 const (
 	gate        = "G15"
 	planB2      = "B2 (proxy fără stare în cloud, §5.6)"
 	planF6      = "F6 folosește tipul de client al hub-ului"
-	oneDriveA5  = "înregistrarea Microsoft cere un director plătit (A5)"
+	oneDriveA5  = OneDriveA5
 	decisionB1  = "G15: %s × %s folosește B1 (device flow pe hub)."
 	decisionB2  = "G15: %s × %s trece pe B2: proxy fără stare în cloud (§5.6), construit cu cloud-ul în Faza 2; rândurile din harta datelor și din politica de confidențialitate se actualizează întâi."
 	decisionF6  = "F6 pe %s folosește tipul de client al hub-ului (creatori: %s)."

@@ -250,7 +250,13 @@ func (in *inputs) newest() time.Time {
 
 // hasMI8 reports whether an owner's MI8 envelope is among the inputs.
 func (in *inputs) hasMI8() bool {
-	return slices.ContainsFunc(in.envs, func(e results.Envelope) bool { return e.Code == "MI8" && !isLab(e) })
+	return slices.ContainsFunc(in.envs, func(e results.Envelope) bool { return e.Code == "MI8" && judgedEnv(e) })
+}
+
+// judgedEnv reports whether a gate's Judge reads e: not the lab's, not
+// the pi-probe marker and not one written with test seams.
+func judgedEnv(e results.Envelope) bool {
+	return !isLab(e) && e.Set != results.PiProbeSet && !e.TestSeams
 }
 
 // isLab reports whether e comes from the lab: TST-07's variant, never a
